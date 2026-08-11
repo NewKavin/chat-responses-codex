@@ -969,7 +969,17 @@ fn capability_profile_summary(
                     sanitize_identifier(field),
                     values
                         .iter()
-                        .map(|value| sanitize_identifier(value))
+                        .map(|value| match value {
+                            Value::String(text) => sanitize_identifier(text),
+                            other => {
+                                let text = other.to_string();
+                                if text.len() > 96 {
+                                    "redacted".into()
+                                } else {
+                                    text
+                                }
+                            }
+                        })
                         .collect::<Vec<_>>(),
                 )
             })

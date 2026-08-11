@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chat_responses_codex::capabilities::*;
@@ -436,7 +437,7 @@ fn mismatched_profile_is_ignored_for_all_route_scoped_evidence() {
     profile.token_limit_field = Some(TokenLimitField::MaxOutputTokens);
     profile.reasoning_carrier = Some(ReasoningCarrier::ResponsesReasoningItem);
     profile.reasoning_controls =
-        BTreeMap::from([("effort".to_owned(), vec!["accepted".to_owned()])]);
+        BTreeMap::from([("effort".to_owned(), vec![Value::from("accepted")])]);
     profile.extension_evidence =
         BTreeMap::from([("foreign-extension".to_owned(), EvidenceState::Supported)]);
     let extension = extension(
@@ -944,9 +945,9 @@ fn effort_map_uses_first_ordered_control_with_accepted_upstream_values() {
     profile.reasoning_controls = BTreeMap::from([
         (
             "a_control".to_owned(),
-            vec!["balanced".to_owned(), "unsupported".to_owned()],
+            vec![Value::from("balanced"), Value::from("unsupported")],
         ),
-        ("z_control".to_owned(), vec!["tiny".to_owned()]),
+        ("z_control".to_owned(), vec![Value::from("tiny")]),
     ]);
 
     let resolved = CapabilityResolver
@@ -975,7 +976,7 @@ fn effort_map_uses_first_ordered_control_with_accepted_upstream_values() {
     );
 
     profile.reasoning_controls =
-        BTreeMap::from([("control".to_owned(), vec!["not-mapped".to_owned()])]);
+        BTreeMap::from([("control".to_owned(), vec![Value::from("not-mapped")])]);
     let resolved = CapabilityResolver
         .resolve(ResolutionInput {
             profile: Some(&profile),

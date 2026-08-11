@@ -1,6 +1,7 @@
 use super::common::*;
 use chat_responses_codex::capabilities::*;
 use chat_responses_codex::state::ApiKeyModelConfig;
+use serde_json::Value;
 
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
@@ -903,7 +904,7 @@ async fn codex_catalog_unions_current_verified_route_levels() {
             }
             profile.reasoning_controls.insert(
                 "reasoning_effort".into(),
-                accepted_levels.into_iter().map(str::to_owned).collect(),
+                accepted_levels.into_iter().map(Value::from).collect(),
             );
             profile.last_probe_outcome = Some(ProbeProfileOutcome::Accepted);
         }
@@ -951,7 +952,7 @@ async fn codex_catalog_uses_the_key_with_verified_model_capabilities() {
         let api_key = api_key.to_string();
         let efforts = efforts
             .iter()
-            .map(|effort| (*effort).to_string())
+            .map(|effort| Value::from(*effort))
             .collect::<Vec<_>>();
         async move {
             let key_fingerprint =

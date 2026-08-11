@@ -134,7 +134,7 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
                 token_limit_fields: vec![TokenLimitField::MaxCompletionTokens],
                 reasoning_controls: std::collections::BTreeMap::from([(
                     "reasoning_effort".into(),
-                    vec!["high".into()],
+                    vec![json!("high")],
                 )]),
                 reasoning_carriers: vec![ReasoningCarrier::ReasoningContent],
             },
@@ -165,7 +165,7 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
     assert!(plan.cases.iter().any(|case| matches!(
         case,
         chat_responses_codex::server::CoreProbeCase::ReasoningControl { field, value }
-            if field == "reasoning_effort" && value == "high"
+            if field == "reasoning_effort" && value.as_str() == Some("high")
     )));
     assert!(plan.cases.iter().any(|case| matches!(
         case,
@@ -173,7 +173,7 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
             reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
             reasoning_trigger: Some(ReasoningTrigger { field, value }),
             ..
-        } if field == "reasoning_effort" && value == "high"
+        } if field == "reasoning_effort" && value.as_str() == Some("high")
     )));
     assert!(plan.cases.iter().any(|case| matches!(
         case,
@@ -278,7 +278,30 @@ async fn responses_reasoning_control_probe_uses_nested_reasoning_effort() {
                     payload.pointer("/reasoning/effort").and_then(Value::as_str) == Some("high");
                 requests.lock().unwrap().push(payload);
                 if nested {
-                    (StatusCode::OK, axum::Json(json!({"id": "response-probe"})))
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "response-probe",
+                            "object": "response",
+                            "created": 1,
+                            "status": "completed",
+                            "model": "probe-model",
+                            "output": [{
+                                "type": "reasoning",
+                                "id": "rs_1",
+                                "summary": [{
+                                    "type": "summary_text",
+                                    "text": "17 * 23 = 391"
+                                }]
+                            }],
+                            "usage": {
+                                "input_tokens": 1,
+                                "output_tokens": 1,
+                                "total_tokens": 2,
+                                "output_tokens_details": {"reasoning_tokens": 1}
+                            }
+                        })),
+                    )
                 } else {
                     (
                         StatusCode::BAD_REQUEST,
@@ -300,7 +323,7 @@ async fn responses_reasoning_control_probe_uses_nested_reasoning_effort() {
             cases: vec![
                 chat_responses_codex::server::CoreProbeCase::ReasoningControl {
                     field: "reasoning_effort".into(),
-                    value: "high".into(),
+                    value: json!("high"),
                 },
             ],
             output_token_cap: 16,
@@ -318,7 +341,280 @@ async fn responses_reasoning_control_probe_uses_nested_reasoning_effort() {
         ProbeOutcome::Conclusive {
             reasoning_controls,
             ..
-        } if reasoning_controls.get("reasoning_effort") == Some(&vec!["high".into()])
+        } if reasoning_controls.get("reasoning_effort") == Some(&vec![json!("high")])
+    ));
+}
+
+#[tokio::test]
+async fn responses_reasoning_control_200_without_evidence_is_ignored() {
+    // A 200 that contains no reasoning evidence must not be treated as an
+    // accepted bin: domestic gateways commonly ignore unknown fields and echo
+    // a plain completion, which previously produced fake "verified" slots.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            (
+                StatusCode::OK,
+                axum::Json(json!({
+                    "id": "response-probe",
+                    "object": "response",
+                    "created": 1,
+                    "status": "completed",
+                    "model": "probe-model",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "391"}]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                })),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        1,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_ignored"));
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Conclusive {
+            reasoning_controls,
+            ..
+        } if reasoning_controls.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn chat_reasoning_control_200_without_evidence_is_ignored() {
+    let mock = ProbeMock::chat(|_| text_response("391")).await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_ignored"));
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Conclusive {
+            reasoning_controls,
+            ..
+        } if reasoning_controls.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn chat_reasoning_control_with_reasoning_content_is_verified() {
+    let mock = ProbeMock::chat(|_| {
+        json!({
+            "id": "chatcmpl-probe",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "probe-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "391",
+                    "reasoning_content": "17 * 23 = 391"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Conclusive {
+            reasoning_controls,
+            ..
+        } if reasoning_controls.get("reasoning_effort") == Some(&vec![json!("high")])
+    ));
+}
+
+#[tokio::test]
+async fn chat_reasoning_control_usage_reasoning_tokens_is_verified() {
+    // Evidence may also arrive via usage.completion_tokens_details
+    // .reasoning_tokens when the message payload carries no reasoning channel.
+    let mock = ProbeMock::chat(|_| {
+        let mut response = text_response("391");
+        response["usage"]["completion_tokens_details"] = json!({"reasoning_tokens": 7});
+        response
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+}
+
+#[tokio::test]
+async fn chat_reasoning_control_400_is_rejected() {
+    let mock = ProbeMock::status_with_body(
+        StatusCode::BAD_REQUEST,
+        json!({"error": {"message": "unsupported parameter: reasoning_effort"}}),
+    )
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_rejected"));
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Conclusive {
+            reasoning_controls,
+            ..
+        } if reasoning_controls.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn chat_reasoning_control_probe_supports_object_thinking_values() {
+    // GLM-style thinking:{"type":"enabled"} object candidates must be sent
+    // verbatim and only verified when the response carries reasoning evidence
+    // (message.reasoning in this case).
+    let mock = ProbeMock::chat(|request| {
+        assert_eq!(
+            request["thinking"],
+            json!({"type": "enabled"}),
+            "object form must be forwarded verbatim"
+        );
+        json!({
+            "id": "chatcmpl-probe",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "probe-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "391",
+                    "reasoning": "17 * 23 = 391"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "thinking".into(),
+                    value: json!({"type": "enabled"}),
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Conclusive {
+            reasoning_controls,
+            ..
+        } if reasoning_controls.get("thinking") == Some(&vec![json!({"type": "enabled"})])
     ));
 }
 
@@ -982,7 +1278,10 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                         )
                             .into_response()
                     } else {
-                        (StatusCode::OK, axum::Json(text_response("ok"))).into_response()
+                        let mut response = text_response("ok");
+                        response["choices"][0]["message"]["reasoning_content"] =
+                            json!("thinking step");
+                        (StatusCode::OK, axum::Json(response)).into_response()
                     }
                 }
             }),
@@ -1054,7 +1353,7 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                     probe_candidates: ProbeCandidates {
                         reasoning_controls: std::collections::BTreeMap::from([(
                             "reasoning_effort".into(),
-                            vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                            vec![json!("low"), json!("medium"), json!("high"), json!("xhigh")],
                         )]),
                         ..ProbeCandidates::default()
                     },
@@ -1101,11 +1400,11 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
         let snapshot = state.capability_snapshot();
         assert_eq!(
             snapshot.profiles[&key_a].reasoning_controls["reasoning_effort"],
-            vec!["low", "medium", "high"]
+            vec![json!("low"), json!("medium"), json!("high")]
         );
         assert!(
             snapshot.profiles[&key_b].reasoning_controls["reasoning_effort"]
-                .contains(&"xhigh".to_string())
+                .contains(&json!("xhigh"))
         );
         let requests = requests.lock().unwrap();
         assert!(requests
@@ -1443,7 +1742,9 @@ async fn candidate_and_extension_probe_evidence_is_persisted_in_profile() {
         if request["service_tier"] == "auto" {
             json!({"accepted": true})
         } else {
-            text_response("ok")
+            let mut response = text_response("ok");
+            response["choices"][0]["message"]["reasoning_content"] = json!("thinking step");
+            response
         }
     })
     .await;
@@ -1468,7 +1769,7 @@ async fn candidate_and_extension_probe_evidence_is_persisted_in_profile() {
                 },
                 chat_responses_codex::server::CoreProbeCase::ReasoningControl {
                     field: "reasoning_effort".into(),
-                    value: "high".into(),
+                    value: json!("high"),
                 },
                 chat_responses_codex::server::CoreProbeCase::Declarative(extension),
             ],
@@ -1491,7 +1792,7 @@ async fn candidate_and_extension_probe_evidence_is_persisted_in_profile() {
     );
     assert_eq!(
         profile.reasoning_controls.get("reasoning_effort"),
-        Some(&vec!["high".into()])
+        Some(&vec![json!("high")])
     );
     assert_eq!(
         profile.extension_evidence.get("service-tier"),
@@ -3650,7 +3951,7 @@ fn partial_probe_outcome_merges_without_erasing_prior_reasoning_evidence() {
     profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
     profile.reasoning_controls.insert(
         "reasoning_effort".into(),
-        vec!["low".into(), "medium".into(), "high".into()],
+        vec![json!("low"), json!("medium"), json!("high")],
     );
     profile.state = chat_responses_codex::capabilities::DialectProfileState::Partial;
     profile.last_success_at = Some(40);
@@ -3675,7 +3976,7 @@ fn partial_probe_outcome_merges_without_erasing_prior_reasoning_evidence() {
         reasoning_carrier: None,
         reasoning_controls: [(
             "reasoning_effort".to_string(),
-            vec!["xhigh".into(), "max".into()],
+            vec![json!("xhigh"), json!("max")],
         )]
         .into_iter()
         .collect(),
@@ -3708,11 +4009,11 @@ fn partial_probe_outcome_merges_without_erasing_prior_reasoning_evidence() {
     assert_eq!(
         profile.reasoning_controls.get("reasoning_effort"),
         Some(&vec![
-            "low".into(),
-            "medium".into(),
-            "high".into(),
-            "xhigh".into(),
-            "max".into()
+            json!("low"),
+            json!("medium"),
+            json!("high"),
+            json!("xhigh"),
+            json!("max")
         ])
     );
     assert_eq!(
@@ -3745,7 +4046,7 @@ fn operational_failure_preserves_prior_reasoning_evidence_and_schedules_retry() 
     profile.last_success_at = Some(900);
     profile
         .reasoning_controls
-        .insert("reasoning_effort".into(), vec!["low".into(), "high".into()]);
+        .insert("reasoning_effort".into(), vec![json!("low"), json!("high")]);
     profile
         .capabilities
         .insert(Capability::ReasoningOutput, EvidenceState::Supported);
@@ -3762,7 +4063,7 @@ fn operational_failure_preserves_prior_reasoning_evidence_and_schedules_retry() 
 
     assert_eq!(
         profile.reasoning_controls["reasoning_effort"],
-        vec!["low", "high"]
+        vec![json!("low"), json!("high")]
     );
     assert_eq!(
         profile.capabilities[&Capability::ReasoningOutput],
@@ -3785,7 +4086,7 @@ fn operational_failure_preserves_prior_reasoning_evidence_and_schedules_retry() 
                 .collect(),
             token_limit_field: None,
             reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
-            reasoning_controls: [("reasoning_effort".into(), vec!["low".into(), "high".into()])]
+            reasoning_controls: [("reasoning_effort".into(), vec![json!("low"), json!("high")])]
                 .into_iter()
                 .collect(),
             correction_rules: Vec::new(),
@@ -3892,7 +4193,7 @@ fn partial_probe_outcome_without_reasoning_keeps_prior_levels() {
     });
     profile
         .reasoning_controls
-        .insert("reasoning_effort".into(), vec!["low".into(), "high".into()]);
+        .insert("reasoning_effort".into(), vec![json!("low"), json!("high")]);
     profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
 
     let partial = ProbeOutcome::Conclusive {
@@ -3914,7 +4215,7 @@ fn partial_probe_outcome_without_reasoning_keeps_prior_levels() {
 
     assert_eq!(
         profile.reasoning_controls.get("reasoning_effort"),
-        Some(&vec!["low".into(), "high".into()])
+        Some(&vec![json!("low"), json!("high")])
     );
     assert_eq!(
         profile.capabilities.get(&Capability::TextStream),

@@ -337,7 +337,11 @@ fn resolve_effort_control(
             .semantic
             .effort_map
             .iter()
-            .filter(|(_, upstream_value)| accepted_values.contains(upstream_value))
+            .filter(|(_, upstream_value)| {
+                accepted_values
+                    .iter()
+                    .any(|accepted| accepted.as_str() == Some(upstream_value.as_str()))
+            })
             .map(|(requested_value, upstream_value)| {
                 (requested_value.clone(), upstream_value.clone())
             })

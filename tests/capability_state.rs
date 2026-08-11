@@ -110,7 +110,7 @@ async fn enabled_deployment_bootstrap_replaces_only_revision_zero() {
     // append-only builtin merge: domestic entries arrive, revision bumps by
     // one, and the builtin template version is recorded.
     assert_eq!(loaded_config.revision, 89);
-    assert_eq!(loaded_config.builtin_policy_version, 1);
+    assert_eq!(loaded_config.builtin_policy_version, 2);
     assert!(
         loaded_config
             .policies
@@ -2759,7 +2759,7 @@ async fn startup_merges_builtin_domestic_entries_into_revision_zero_config_once(
     );
     assert_eq!(loaded.revision, 4, "merge must bump revision by one");
     assert_eq!(
-        loaded.builtin_policy_version, 1,
+        loaded.builtin_policy_version, 2,
         "merge must record the template builtin version"
     );
 
@@ -2771,5 +2771,5 @@ async fn startup_merges_builtin_domestic_entries_into_revision_zero_config_once(
     let reloaded_config = reloaded_snapshot.configuration.source();
     assert_eq!(reloaded_config.revision, 4);
     assert_eq!(reloaded_config.policies.len(), loaded.policies.len());
-    assert_eq!(reloaded_config.builtin_policy_version, 1);
+    assert_eq!(reloaded_config.builtin_policy_version, 2);
 }

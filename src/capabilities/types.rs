@@ -226,7 +226,7 @@ pub struct SemanticPolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct ProbeCandidates {
     pub token_limit_fields: Vec<TokenLimitField>,
-    pub reasoning_controls: BTreeMap<String, Vec<String>>,
+    pub reasoning_controls: BTreeMap<String, Vec<Value>>,
     pub reasoning_carriers: Vec<ReasoningCarrier>,
 }
 
@@ -475,7 +475,7 @@ pub struct UpstreamDialectProfile {
     pub token_limit_field: Option<TokenLimitField>,
     pub reasoning_carrier: Option<ReasoningCarrier>,
     pub correction_rules: Vec<DialectCorrectionRule>,
-    pub reasoning_controls: BTreeMap<String, Vec<String>>,
+    pub reasoning_controls: BTreeMap<String, Vec<Value>>,
     pub extension_evidence: BTreeMap<String, EvidenceState>,
     pub last_attempt_at: Option<u64>,
     pub last_success_at: Option<u64>,

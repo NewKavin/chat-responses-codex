@@ -636,13 +636,7 @@ fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_o
         "xhigh".to_owned(),
         "max".to_owned(),
     ]);
-    let expected_controls = vec![
-        "low".to_owned(),
-        "medium".to_owned(),
-        "high".to_owned(),
-        "xhigh".to_owned(),
-        "max".to_owned(),
-    ];
+    let expected_controls = ["low", "medium", "high", "xhigh", "max"];
 
     for runtime_model_slug in five_level_models.into_iter().chain(three_level_models) {
         let route = RouteIdentity {
@@ -674,9 +668,16 @@ fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_o
         assert_eq!(
             candidates.reasoning_controls.get("reasoning_effort"),
             Some(&if is_five_level {
-                expected_controls.clone()
+                expected_controls
+                    .iter()
+                    .map(|level| Value::from(*level))
+                    .collect::<Vec<_>>()
             } else {
-                vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()]
+                vec![
+                    Value::from("low"),
+                    Value::from("medium"),
+                    Value::from("high"),
+                ]
             }),
             "{runtime_model_slug} must probe only upstream wire values"
         );

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "revision": 3,
-  "builtin_policy_version": 1,
+  "builtin_policy_version": 2,
   "route_overrides": [],
   "bundles": [
     {
@@ -45,7 +45,8 @@
       },
       "probe_candidates": {
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"],
+          "thinking": [{"type": "enabled"}]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       }

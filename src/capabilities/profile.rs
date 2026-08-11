@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -56,7 +57,7 @@ pub enum ProbeOutcome {
         capabilities: BTreeMap<Capability, EvidenceState>,
         token_limit_field: Option<TokenLimitField>,
         reasoning_carrier: Option<ReasoningCarrier>,
-        reasoning_controls: BTreeMap<String, Vec<String>>,
+        reasoning_controls: BTreeMap<String, Vec<Value>>,
         correction_rules: Vec<DialectCorrectionRule>,
         extension_evidence: BTreeMap<String, EvidenceState>,
         evidence_codes: BTreeSet<String>,

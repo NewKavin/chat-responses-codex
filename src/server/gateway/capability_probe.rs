@@ -62,11 +62,11 @@ fn enqueue_probe_batch(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReasoningTrigger {
     pub field: String,
-    pub value: String,
+    pub value: Value,
 }
 
 impl ReasoningTrigger {
-    pub fn new(field: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(field: impl Into<String>, value: impl Into<Value>) -> Self {
         Self {
             field: field.into(),
             value: value.into(),
@@ -84,7 +84,7 @@ pub enum CoreProbeCase {
     },
     ReasoningControl {
         field: String,
-        value: String,
+        value: Value,
     },
     FunctionTools,
     FunctionSelection,
@@ -1191,7 +1191,7 @@ with the exact result as the nonce string.";
                         if trigger.field == "reasoning_effort" {
                             first_body["reasoning"] = json!({"effort": trigger.value});
                         } else {
-                            first_body[&trigger.field] = Value::String(trigger.value.clone());
+                            first_body[&trigger.field] = trigger.value.clone();
                         }
                     }
                     let first = self.post_responses(first_body).await?;
@@ -1301,7 +1301,7 @@ with the exact result as the nonce string.";
                     }],
                 });
                 if let Some(trigger) = reasoning_trigger {
-                    first_body[&trigger.field] = Value::String(trigger.value.clone());
+                    first_body[&trigger.field] = trigger.value.clone();
                 }
                 let first = self.post_chat(first_body).await?;
                 if first.status != StatusCode::OK {
@@ -1733,13 +1733,28 @@ with the exact result as the nonce string.";
                 if self.protocol() == WireProtocol::Responses && field == "reasoning_effort" {
                     body["reasoning"] = json!({"effort": value});
                 } else {
-                    body[field] = Value::String(value.clone());
+                    body[field] = value.clone();
                 }
                 let response = if self.protocol() == WireProtocol::Responses {
                     self.post_responses(body).await?
                 } else {
                     self.post_chat(body).await?
                 };
+                if response.status == StatusCode::OK {
+                    if reasoning_response_has_evidence(&response.body) {
+                        return Ok(ProbeCaseVerdict::Supported {
+                            evidence_code: "reasoning_control_accepted".into(),
+                        });
+                    }
+                    // Most domestic gateways silently ignore unknown fields and
+                    // return a plain 200. Without reasoning evidence that is
+                    // not an acceptance: the bin must stay unverified or the
+                    // catalog would advertise fake thinking levels.
+                    return Ok(ProbeCaseVerdict::Rejected {
+                        evidence_code: "reasoning_control_ignored".into(),
+                        http_status: Some(200),
+                    });
+                }
                 Ok(verdict_for_status(
                     response.status,
                     "reasoning_control_accepted",
@@ -2068,6 +2083,48 @@ with the exact result as the nonce string.";
     }
 }
 
+/// Returns true when a probe response carries concrete evidence that the
+/// upstream actually ran a reasoning path: a non-empty chat
+/// `reasoning_content` / GLM `message.reasoning` field, a positive
+/// `reasoning_tokens` usage counter (chat or Responses), or a Responses
+/// `output` reasoning item. A bare 200 with none of these is treated as an
+/// ignored field, not an acceptance.
+fn reasoning_response_has_evidence(body: &Value) -> bool {
+    if let Some(message) = body.pointer("/choices/0/message") {
+        if let Some(content) = message.get("reasoning_content").and_then(Value::as_str) {
+            if !content.is_empty() {
+                return true;
+            }
+        }
+        if message
+            .get("reasoning")
+            .is_some_and(|value| !value.is_null())
+        {
+            return true;
+        }
+    }
+    if body
+        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .is_some_and(|tokens| tokens > 0)
+    {
+        return true;
+    }
+    if let Some(output) = body.get("output").and_then(Value::as_array) {
+        if output.iter().any(|item| item["type"] == "reasoning") {
+            return true;
+        }
+    }
+    if body
+        .pointer("/usage/output_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .is_some_and(|tokens| tokens > 0)
+    {
+        return true;
+    }
+    false
+}
+
 fn verdict_for_status(
     status: StatusCode,
     accepted_code: &str,
@@ -2311,7 +2368,7 @@ struct ProbeEvidence {
     capabilities: BTreeMap<Capability, EvidenceState>,
     token_limit_field: Option<TokenLimitField>,
     reasoning_carrier: Option<ReasoningCarrier>,
-    reasoning_controls: BTreeMap<String, Vec<String>>,
+    reasoning_controls: BTreeMap<String, Vec<Value>>,
     evidence_codes: BTreeSet<String>,
     extension_evidence: BTreeMap<String, EvidenceState>,
     event_types: BTreeSet<String>,

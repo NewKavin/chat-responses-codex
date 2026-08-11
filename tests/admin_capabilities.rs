@@ -632,7 +632,7 @@ async fn capability_discovery_unions_successful_routes_and_keeps_failures() {
                 .insert(Capability::ReasoningOutput, EvidenceState::Supported);
             profile.reasoning_controls.insert(
                 "reasoning_effort".into(),
-                accepted_levels.into_iter().map(str::to_owned).collect(),
+                accepted_levels.into_iter().map(Value::from).collect(),
             );
             profile.last_probe_outcome = Some(ProbeProfileOutcome::Accepted);
             profile.last_success_at = Some(999);
@@ -1428,7 +1428,7 @@ async fn admin_policy_rebootstrap_merges_builtin_entries_and_requires_confirm_fo
         "merge must add builtin domestic entries, got {added:?}"
     );
     assert_eq!(body["revision"], 4);
-    assert_eq!(body["builtin_policy_version"], 1);
+    assert_eq!(body["builtin_policy_version"], 2);
 
     let export = fixture.export().await;
     let exported_policies = export["policies"].as_array().expect("policies array");
@@ -1476,7 +1476,7 @@ async fn admin_policy_rebootstrap_merges_builtin_entries_and_requires_confirm_fo
     assert_eq!(ok.status(), StatusCode::OK);
     let export = fixture.export().await;
     assert_eq!(export["revision"], 3, "template carries its own revision");
-    assert_eq!(export["builtin_policy_version"], 1);
+    assert_eq!(export["builtin_policy_version"], 2);
     let exported_policies = export["policies"].as_array().expect("policies array");
     assert!(
         exported_policies
