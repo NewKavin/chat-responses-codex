@@ -185,7 +185,7 @@
 
 **测试**：构造 revision=3、无 domestic 条目的存量配置 → 启动后 domestic 条目存在、operator 条目原样；再次启动幂等。
 
-### E2. 档位判定用响应证据，不只状态码
+### E2. 档位判定用响应证据，不只状态码 ✅ 已完成 (commit 0e57dc2)
 **改动**（`capability_probe.rs` `ReasoningControl` 分支，锚点 `:1719`）：
 - 请求体加最小推理诱导 prompt（现 `PROBE_INPUT_PROMPT` 可保留，必要时换成需一步推理的算术题）。
 - 判定三态：
