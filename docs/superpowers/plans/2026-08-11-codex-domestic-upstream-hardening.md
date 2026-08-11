@@ -213,7 +213,7 @@
 
 ## 7. Workstream A：协议转换保真与方言层（治本、终极目标）
 
-### A1. 未验证路由默认保守净化
+### A1. 未验证路由默认保守净化 ✅ 已完成 (commit 07709c1)
 **改动**：
 - `upstream.strip_nonstandard_chat_fields`（`types.rs:322`）由 bool 改三态 `NonstandardFieldPolicy { Auto, AlwaysStrip, Forward }`，**默认 Auto**（序列化兼容旧 bool：false→Auto，true→AlwaysStrip）。
 - Auto 语义（在 `upstream.rs:1804-1817` 调用处实现）：该路由存在 `resolved` 能力档案 → 按档案（现行 `normalize_chat_payload_for_capabilities_with_requested_effort`）；**无档案（未探测/探测失败）→ 按 AlwaysStrip 集合剥离**（`metadata`/`user`/`parallel_tool_calls`/`stream_options` + `compat.rs:135-147` 的 omit 集合）。`stream_options.include_usage` 例外：仅当流式且需要 usage 时保留尝试，失败样本交 A3 学习。
