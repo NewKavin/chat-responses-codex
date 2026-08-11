@@ -1,7 +1,7 @@
+use super::runtime_settings::RuntimeSettingsDocument;
 use crate::routing::UpstreamProtocol;
 use crate::state::redis_runtime::RuntimeCoordinationError;
 use crate::upstream_tls::UpstreamCaConfig;
-use super::runtime_settings::RuntimeSettingsDocument;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;

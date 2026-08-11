@@ -423,7 +423,7 @@ fn classify_nonsemantic_default(
                 "invalid_token",
                 "unauthorized",
             ])
-            || message_is_credentials(&message)
+            || message_is_credentials(message)
         {
             FailureClass::Credentials
         } else if parsed.has_code(&[
@@ -431,24 +431,24 @@ fn classify_nonsemantic_default(
             "model_unsupported",
             "unsupported_model",
             "invalid_model",
-        ]) || message_is_model_unsupported(&message)
+        ]) || message_is_model_unsupported(message)
         {
             FailureClass::ModelUnsupported
         } else if parsed.has_code(&[
             "feature_unsupported",
             "unsupported_feature",
             "capability_not_supported",
-        ]) || message_is_feature_unsupported(&message)
+        ]) || message_is_feature_unsupported(message)
         {
             FailureClass::FeatureUnsupported
         } else if parsed.has_code(&[
             "endpoint_not_found",
             "protocol_unsupported",
             "unsupported_protocol",
-        ]) || message_is_protocol_unsupported(&message)
+        ]) || message_is_protocol_unsupported(message)
         {
             FailureClass::ProtocolUnsupported
-        } else if is_explicit_request_rejection(&parsed, &message) {
+        } else if is_explicit_request_rejection(parsed, message) {
             FailureClass::RequestRejected
         } else {
             FailureClass::RateLimited
@@ -467,11 +467,11 @@ fn classify_nonsemantic_default(
         ])
     {
         FailureClass::Credentials
-    } else if is_explicit_request_rejection(&parsed, &message) {
+    } else if is_explicit_request_rejection(parsed, message) {
         FailureClass::RequestRejected
     } else if parsed.has_status(429)
         || parsed.has_code(&["rate_limit_error", "rate_limited", "too_many_requests"])
-        || message_is_rate_limited(&message)
+        || message_is_rate_limited(message)
     {
         FailureClass::RateLimited
     } else if parsed.has_code(&[
@@ -479,21 +479,21 @@ fn classify_nonsemantic_default(
         "model_unsupported",
         "unsupported_model",
         "invalid_model",
-    ]) || message_is_model_unsupported(&message)
+    ]) || message_is_model_unsupported(message)
     {
         FailureClass::ModelUnsupported
     } else if parsed.has_code(&[
         "feature_unsupported",
         "unsupported_feature",
         "capability_not_supported",
-    ]) || message_is_feature_unsupported(&message)
+    ]) || message_is_feature_unsupported(message)
     {
         FailureClass::FeatureUnsupported
     } else if parsed.has_code(&[
         "endpoint_not_found",
         "protocol_unsupported",
         "unsupported_protocol",
-    ]) || message_is_protocol_unsupported(&message)
+    ]) || message_is_protocol_unsupported(message)
     {
         FailureClass::ProtocolUnsupported
     } else if message_is_capacity_unavailable(message) {

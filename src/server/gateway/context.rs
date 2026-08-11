@@ -122,15 +122,15 @@ impl ToolEntryReferences {
     }
 
     fn require_payload(&mut self, payload: Option<&Value>) {
-        if !payload.is_some_and(|value| !value.is_null()) {
+        if payload.is_none_or(Value::is_null) {
             self.malformed = true;
         }
     }
 
     fn require_string_payload(&mut self, payload: Option<&Value>) {
-        if !payload
+        if payload
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
         {
             self.malformed = true;
         }
