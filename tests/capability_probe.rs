@@ -4375,7 +4375,7 @@ async fn run_probe_job_skips_cooling_routes_and_supersedes_stale_jobs() {
         let (sender, mut receiver) = mpsc::channel(1);
         state.set_capability_probe_sender(sender);
         let filters = std::collections::BTreeSet::new();
-        let batch = state
+        state
             .queue_manual_capability_probe_batch(&filters, &filters)
             .await
             .unwrap();
