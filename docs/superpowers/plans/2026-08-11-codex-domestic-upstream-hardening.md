@@ -69,7 +69,7 @@
 
 ---
 
-## 2. Workstream F：会话隔离与 ID 治理（正确性问题，最先做）
+## 2. Workstream F：会话隔离与 ID 治理（正确性问题，最先做）✅ 已完成 (commit c328712)
 
 ### F1. 下游 response_id 永远由网关生成
 **改动**：
