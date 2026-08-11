@@ -668,7 +668,7 @@ async fn context_overflow_503_compacts_once_without_cooling_route() {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let seen = seen_bodies.lock().unwrap();
+        let seen = seen_bodies.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         assert!(!seen[0]["messages"][2]["content"]
             .as_str()

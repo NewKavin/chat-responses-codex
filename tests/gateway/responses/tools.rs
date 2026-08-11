@@ -211,6 +211,10 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let response_id = payload["id"]
+        .as_str()
+        .expect("first response id")
+        .to_string();
     assert_eq!(payload["output"][0]["type"], "function_call");
     assert_eq!(payload["output"][0]["call_id"], "call_1");
     assert_eq!(payload["output"][0]["name"], "search");
@@ -226,7 +230,10 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
     assert!(request_body.to_string().contains("apply_patch"));
     assert!(request_body.to_string().contains(&expected_namespace_name));
 
-    let stored = state.response_history("chatcmpl-tool").await.unwrap();
+    let stored = state
+        .response_history("down-1", &response_id)
+        .await
+        .unwrap();
     assert_eq!(stored.request_state["gateway_tool_registry"]["version"], 1);
     assert_eq!(
         stored.request_state["_gateway_continuation"]["adapter_identity"]["tool_registry_version"],
@@ -247,7 +254,7 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
                 .body(Body::from(
                     json!({
                         "model": "gpt-4.1-mini",
-                        "previous_response_id": "chatcmpl-tool",
+                        "previous_response_id": response_id,
                         "input": [{
                             "type": "function_call_output",
                             "call_id": "call_1",
@@ -280,6 +287,7 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
     let mut missing_registry_state = stored.request_state.clone();
     missing_registry_state.remove("gateway_tool_registry");
     state.store_response_history(
+        "down-1",
         "chatcmpl-tool-missing-registry",
         stored.items.clone(),
         missing_registry_state,
@@ -287,6 +295,7 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
     let mut wrong_registry_state = stored.request_state.clone();
     wrong_registry_state["gateway_tool_registry"]["version"] = json!(999);
     state.store_response_history(
+        "down-1",
         "chatcmpl-tool-wrong-registry",
         stored.items,
         wrong_registry_state,

@@ -2204,7 +2204,9 @@ pub(super) async fn send_to_upstream(
                 )
                 .map_err(protocol_error_to_gateway)?
             }
-            (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
+            (EndpointKind::Responses, UpstreamProtocol::Responses) => {
+                gateway_scoped_responses_body(upstream_json)
+            }
             (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
                 chat_response_to_responses_payload_with_tool_registry(
                     &upstream_json,
@@ -2446,7 +2448,9 @@ pub(super) async fn send_to_upstream(
                     )
                     .map_err(protocol_error_to_gateway)?
                 }
-                (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
+                (EndpointKind::Responses, UpstreamProtocol::Responses) => {
+                    gateway_scoped_responses_body(upstream_json)
+                }
                 (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
                     chat_response_to_responses_payload_with_tool_registry(
                         &upstream_json,
@@ -2550,7 +2554,9 @@ pub(super) async fn send_to_upstream(
             )
             .map_err(protocol_error_to_gateway)?
         }
-        (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
+        (EndpointKind::Responses, UpstreamProtocol::Responses) => {
+            gateway_scoped_responses_body(upstream_json)
+        }
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
             chat_response_to_responses_payload_with_tool_registry(
                 &upstream_json,

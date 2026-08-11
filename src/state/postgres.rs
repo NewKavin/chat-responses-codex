@@ -4,8 +4,9 @@ use super::log_queries::{
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
     DailyStats, DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary,
-    GlobalContextProfile, ModelContextConfig, PersistedState, ResponseHistoryEntry, UpstreamConfig,
-    RuntimeSettingsDocument, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
+    GlobalContextProfile, ModelContextConfig, PersistedState, ResponseHistoryEntry,
+    RuntimeSettingsDocument, UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage,
+    UsageLogQuery,
 };
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
@@ -750,6 +751,7 @@ impl PostgresStateStore {
 
     pub async fn upsert_response_history(
         &self,
+        downstream_key_id: &str,
         response_id: &str,
         items: &[Value],
         request_state: &Map<String, Value>,
@@ -764,13 +766,15 @@ impl PostgresStateStore {
         let max_entries = super::RESPONSE_HISTORY_MAX_ENTRIES as i64;
 
         tx.execute(
-            "INSERT INTO response_history (response_id, items, state, created_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (response_id) DO UPDATE SET
+            "INSERT INTO response_history (
+                 downstream_key_id, response_id, items, state, created_at
+             ) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (downstream_key_id, response_id) DO UPDATE SET
                  items = EXCLUDED.items,
                  state = EXCLUDED.state,
                  created_at = EXCLUDED.created_at",
             &[
+                &downstream_key_id,
                 &response_id,
                 &items_json,
                 &request_state_json,
@@ -790,10 +794,10 @@ impl PostgresStateStore {
 
         tx.execute(
             "DELETE FROM response_history
-             WHERE response_id IN (
-                 SELECT response_id
+             WHERE (downstream_key_id, response_id) IN (
+                 SELECT downstream_key_id, response_id
                  FROM response_history
-                 ORDER BY created_at DESC, response_id DESC
+                 ORDER BY created_at DESC, downstream_key_id DESC, response_id DESC
                  OFFSET $1
              )",
             &[&max_entries],
@@ -806,21 +810,59 @@ impl PostgresStateStore {
 
     pub async fn response_history(
         &self,
+        downstream_key_id: &str,
         response_id: &str,
         not_before: u64,
+        allow_legacy_claim: bool,
     ) -> io::Result<Option<ResponseHistoryEntry>> {
-        let conn = self.pool.get().await.map_err(io_other)?;
+        let mut conn = self.pool.get().await.map_err(io_other)?;
+        let tx = conn.transaction().await.map_err(io_other)?;
         let not_before_db = u64_to_i64(not_before);
-        let row = conn
+        let row = tx
             .query_opt(
                 "SELECT items, state, created_at
                  FROM response_history
-                 WHERE response_id = $1
-                   AND created_at >= $2",
-                &[&response_id, &not_before_db],
+                 WHERE downstream_key_id = $1
+                   AND response_id = $2
+                   AND created_at >= $3",
+                &[&downstream_key_id, &response_id, &not_before_db],
             )
             .await
             .map_err(io_other)?;
+
+        let row = match (row, allow_legacy_claim) {
+            (Some(row), _) => Some(row),
+            (None, false) => None,
+            (None, true) => {
+                let claimed = tx
+                    .query_opt(
+                        "UPDATE response_history
+                     SET downstream_key_id = $1
+                     WHERE downstream_key_id = ''
+                       AND response_id = $2
+                       AND created_at >= $3
+                     RETURNING items, state, created_at",
+                        &[&downstream_key_id, &response_id, &not_before_db],
+                    )
+                    .await
+                    .map_err(io_other)?;
+                match claimed {
+                    Some(row) => Some(row),
+                    None => tx
+                        .query_opt(
+                            "SELECT items, state, created_at
+                             FROM response_history
+                             WHERE downstream_key_id = $1
+                               AND response_id = $2
+                               AND created_at >= $3",
+                            &[&downstream_key_id, &response_id, &not_before_db],
+                        )
+                        .await
+                        .map_err(io_other)?,
+                }
+            }
+        };
+        tx.commit().await.map_err(io_other)?;
 
         let Some(row) = row else {
             return Ok(None);
@@ -844,8 +886,62 @@ impl PostgresStateStore {
         let tx = conn.transaction().await.map_err(io_other)?;
         tx.batch_execute(SCHEMA_SQL).await.map_err(io_other)?;
         migrate_dialect_profiles_primary_key(&tx).await?;
+        migrate_response_history_primary_key(&tx).await?;
         tx.commit().await.map_err(io_other)
     }
+}
+
+async fn migrate_response_history_primary_key(tx: &Transaction<'_>) -> io::Result<()> {
+    tx.batch_execute(
+        "ALTER TABLE response_history
+         ADD COLUMN IF NOT EXISTS downstream_key_id TEXT NOT NULL DEFAULT ''",
+    )
+    .await
+    .map_err(io_other)?;
+
+    let row = tx
+        .query_opt(
+            "SELECT c.conname,
+                    array_agg(a.attname ORDER BY key_column.ordinality)
+             FROM pg_constraint AS c
+             JOIN LATERAL unnest(c.conkey) WITH ORDINALITY
+                 AS key_column(attnum, ordinality) ON TRUE
+             JOIN pg_attribute AS a
+               ON a.attrelid = c.conrelid
+              AND a.attnum = key_column.attnum
+             WHERE c.conrelid = 'response_history'::regclass
+               AND c.contype = 'p'
+             GROUP BY c.oid, c.conname",
+            &[],
+        )
+        .await
+        .map_err(io_other)?;
+    let target = ["downstream_key_id", "response_id"];
+    let Some(row) = row else {
+        tx.batch_execute(
+            "ALTER TABLE response_history
+             ADD CONSTRAINT response_history_pkey
+             PRIMARY KEY (downstream_key_id, response_id)",
+        )
+        .await
+        .map_err(io_other)?;
+        return Ok(());
+    };
+    let constraint_name: String = row.get(0);
+    let columns: Vec<String> = row.get(1);
+    if columns.iter().map(String::as_str).eq(target) {
+        return Ok(());
+    }
+
+    let quoted_name = constraint_name.replace('"', "\"\"");
+    tx.batch_execute(&format!(
+        "ALTER TABLE response_history DROP CONSTRAINT \"{quoted_name}\";
+         ALTER TABLE response_history
+         ADD CONSTRAINT response_history_pkey
+         PRIMARY KEY (downstream_key_id, response_id)"
+    ))
+    .await
+    .map_err(io_other)
 }
 
 async fn migrate_dialect_profiles_primary_key(tx: &Transaction<'_>) -> io::Result<()> {
@@ -1819,17 +1915,21 @@ CREATE TABLE IF NOT EXISTS dialect_profiles (
 );
 
 CREATE TABLE IF NOT EXISTS response_history (
-    response_id TEXT PRIMARY KEY,
+    downstream_key_id TEXT NOT NULL DEFAULT '',
+    response_id TEXT NOT NULL,
     items TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT '{}',
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (downstream_key_id, response_id)
 );
 
 ALTER TABLE response_history
     ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE response_history
+    ADD COLUMN IF NOT EXISTS downstream_key_id TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS response_history_created_at_idx
-    ON response_history (created_at DESC, response_id);
+    ON response_history (created_at DESC, downstream_key_id, response_id);
 CREATE INDEX IF NOT EXISTS dialect_profiles_upstream_idx
     ON dialect_profiles (upstream_id);
 

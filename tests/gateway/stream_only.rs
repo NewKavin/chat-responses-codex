@@ -497,7 +497,10 @@ async fn stream_only_responses_rejected_probe_aggregates_once_to_json() {
     );
     let payload: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(payload, responses_json());
+    let mut expected = responses_json();
+    expected["id"] = payload["id"].clone();
+    assert_eq!(payload, expected);
+    assert!(payload["id"].as_str().unwrap().starts_with("resp_"));
     assert_eq!(harness.hits.load(Ordering::SeqCst), 1);
     assert_eq!(harness.last_request()["stream"], true);
 }
@@ -666,14 +669,21 @@ async fn stream_only_responses_aggregate_is_stored_for_previous_response_history
     assert_eq!(first.status(), StatusCode::OK);
     let first_payload: Value =
         serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(first_payload["id"], "resp-stream-only");
+    let first_response_id = first_payload["id"]
+        .as_str()
+        .expect("gateway response id")
+        .to_string();
+    assert!(
+        first_response_id.starts_with("resp_"),
+        "{first_response_id}"
+    );
 
     let second = harness
         .send(
             "/v1/responses",
             json!({
                 "model": MODEL,
-                "previous_response_id": "resp-stream-only",
+                "previous_response_id": first_response_id,
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
                 "stream": false
             }),

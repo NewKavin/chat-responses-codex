@@ -257,44 +257,46 @@ struct StoredResponseHistory {
 
 #[derive(Default)]
 struct ResponseHistoryStore {
-    entries: HashMap<String, StoredResponseHistory>,
-    order: VecDeque<String>,
+    entries: HashMap<(String, String), StoredResponseHistory>,
+    order: VecDeque<(String, String)>,
 }
 
 impl ResponseHistoryStore {
     fn evict_expired(&mut self, now: u64) {
-        while let Some(response_id) = self.order.front().cloned() {
+        while let Some(history_key) = self.order.front().cloned() {
             let is_expired = self
                 .entries
-                .get(&response_id)
+                .get(&history_key)
                 .map(|entry| now.saturating_sub(entry.created_at) > RESPONSE_HISTORY_TTL_SECONDS)
                 .unwrap_or(true);
             if !is_expired {
                 break;
             }
             self.order.pop_front();
-            self.entries.remove(&response_id);
+            self.entries.remove(&history_key);
         }
     }
 
     fn insert(
         &mut self,
+        downstream_key_id: String,
         response_id: String,
         items: Vec<Value>,
         request_state: Map<String, Value>,
         created_at: u64,
         now: u64,
     ) {
+        let history_key = (downstream_key_id, response_id);
         self.entries.insert(
-            response_id.clone(),
+            history_key.clone(),
             StoredResponseHistory {
                 items,
                 request_state,
                 created_at,
             },
         );
-        self.order.retain(|existing| existing != &response_id);
-        self.order.push_back(response_id);
+        self.order.retain(|existing| existing != &history_key);
+        self.order.push_back(history_key);
         self.evict_expired(now);
         while self.order.len() > RESPONSE_HISTORY_MAX_ENTRIES {
             if let Some(oldest) = self.order.pop_front() {
@@ -303,10 +305,15 @@ impl ResponseHistoryStore {
         }
     }
 
-    fn get(&mut self, response_id: &str, now: u64) -> Option<ResponseHistoryEntry> {
+    fn get(
+        &mut self,
+        downstream_key_id: &str,
+        response_id: &str,
+        now: u64,
+    ) -> Option<ResponseHistoryEntry> {
         self.evict_expired(now);
         self.entries
-            .get(response_id)
+            .get(&(downstream_key_id.to_string(), response_id.to_string()))
             .map(|entry| ResponseHistoryEntry {
                 items: entry.items.clone(),
                 request_state: entry.request_state.clone(),
@@ -721,15 +728,18 @@ impl AppState {
 
     pub fn store_response_history(
         &self,
+        downstream_key_id: impl Into<String>,
         response_id: impl Into<String>,
         items: Vec<Value>,
         request_state: Map<String, Value>,
     ) {
+        let downstream_key_id = downstream_key_id.into();
         let response_id = response_id.into();
         let created_at = unix_seconds();
         {
             let mut history = self.response_history.lock().unwrap();
             history.insert(
+                downstream_key_id.clone(),
                 response_id.clone(),
                 items.clone(),
                 request_state.clone(),
@@ -744,10 +754,17 @@ impl AppState {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(error) = postgres
-                    .upsert_response_history(&response_id, &items, &request_state, created_at)
+                    .upsert_response_history(
+                        &downstream_key_id,
+                        &response_id,
+                        &items,
+                        &request_state,
+                        created_at,
+                    )
                     .await
                 {
                     tracing::warn!(
+                        downstream_key_id = %downstream_key_id,
                         response_id = %response_id,
                         error = %error,
                         "failed to persist response history"
@@ -757,20 +774,34 @@ impl AppState {
         }
     }
 
-    pub async fn response_history(&self, response_id: &str) -> Option<ResponseHistoryEntry> {
+    pub async fn response_history(
+        &self,
+        downstream_key_id: &str,
+        response_id: &str,
+    ) -> Option<ResponseHistoryEntry> {
         let now = unix_seconds();
         {
             let mut history = self.response_history.lock().unwrap();
-            if let Some(entry) = history.get(response_id, now) {
+            if let Some(entry) = history.get(downstream_key_id, response_id, now) {
                 return Some(entry);
             }
         }
 
         let postgres = self.postgres.clone()?;
+        let allow_legacy_claim = {
+            let state = self.inner.lock().await;
+            state.downstreams.len() == 1
+                && state
+                    .downstreams
+                    .first()
+                    .is_some_and(|downstream| downstream.id == downstream_key_id)
+        };
         let entry = postgres
             .response_history(
+                downstream_key_id,
                 response_id,
                 now.saturating_sub(RESPONSE_HISTORY_TTL_SECONDS),
+                allow_legacy_claim,
             )
             .await
             .ok()
@@ -778,6 +809,7 @@ impl AppState {
 
         let mut history = self.response_history.lock().unwrap();
         history.insert(
+            downstream_key_id.to_string(),
             response_id.to_string(),
             entry.items.clone(),
             entry.request_state.clone(),

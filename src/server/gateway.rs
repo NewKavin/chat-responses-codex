@@ -117,6 +117,57 @@ impl EndpointKind {
     }
 }
 
+fn gateway_response_id() -> String {
+    format!("resp_{}", Uuid::new_v4().simple())
+}
+
+fn gateway_scoped_responses_body(mut response: Value) -> Value {
+    let response_id = gateway_response_id();
+    if let Some(object) = response.as_object_mut() {
+        let upstream_response_id = object
+            .insert("id".to_string(), Value::String(response_id))
+            .and_then(|value| value.as_str().map(str::to_owned));
+        if let Some(upstream_response_id) = upstream_response_id {
+            tracing::debug!(
+                upstream_response_id,
+                "captured upstream response id for response diagnostics"
+            );
+        }
+    }
+    response
+}
+
+fn responses_event_response_id(event: &Value) -> Option<&str> {
+    event
+        .get("response_id")
+        .or_else(|| event.pointer("/response/id"))
+        .or_else(|| {
+            (event.get("object").and_then(Value::as_str) == Some("response.chunk"))
+                .then(|| event.get("id"))
+                .flatten()
+        })
+        .and_then(Value::as_str)
+}
+
+fn rewrite_responses_event_response_id(event: &mut Value, response_id: &str) -> bool {
+    let mut rewritten = false;
+    if let Some(value) = event.get_mut("response_id") {
+        *value = Value::String(response_id.to_string());
+        rewritten = true;
+    }
+    if let Some(value) = event.pointer_mut("/response/id") {
+        *value = Value::String(response_id.to_string());
+        rewritten = true;
+    }
+    if event.get("object").and_then(Value::as_str) == Some("response.chunk") {
+        if let Some(value) = event.get_mut("id") {
+            *value = Value::String(response_id.to_string());
+            rewritten = true;
+        }
+    }
+    rewritten
+}
+
 #[derive(Clone, Debug)]
 struct RouteCapabilityEvaluation {
     eligible: bool,
@@ -618,6 +669,7 @@ async fn finish_route_health_permit(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_cooled_route_attempt(
     route_attempts: &RequestRouteAttempts,
     upstream: &UpstreamConfig,
@@ -2955,6 +3007,7 @@ async fn wait_on_pre_header_preparation_test_gate(gated: bool) {
 #[derive(Clone)]
 struct ResponseHistoryContext {
     state: AppState,
+    downstream_key_id: String,
     history_input_items: Vec<Value>,
     history_request_state: Map<String, Value>,
     tool_registry: Option<ToolAdapterRegistry>,
@@ -2969,6 +3022,7 @@ impl ResponseHistoryContext {
         );
         Self {
             state: self.state.clone(),
+            downstream_key_id: self.downstream_key_id.clone(),
             history_input_items: self.history_input_items.clone(),
             history_request_state,
             tool_registry: self.tool_registry.clone(),
@@ -2996,6 +3050,7 @@ impl ResponseHistoryContext {
         }
         Ok(Self {
             state: self.state.clone(),
+            downstream_key_id: self.downstream_key_id.clone(),
             history_input_items: self.history_input_items.clone(),
             history_request_state,
             tool_registry: self.tool_registry.clone(),
@@ -3148,8 +3203,12 @@ impl ResponseHistoryContext {
                 request_state.insert("gateway_tool_registry".to_string(), value);
             }
         }
-        self.state
-            .store_response_history(response_id.to_string(), items, request_state);
+        self.state.store_response_history(
+            self.downstream_key_id.clone(),
+            response_id.to_string(),
+            items,
+            request_state,
+        );
         true
     }
 }
@@ -3273,13 +3332,15 @@ fn apply_response_history_state(object: &mut Map<String, Value>, state: &Map<Str
 
 async fn prepare_response_history_context(
     state: &AppState,
+    downstream_key_id: &str,
     body: &mut Value,
 ) -> Result<ResponseHistoryContext, GatewayError> {
-    prepare_response_history_context_with_replay(state, body, true).await
+    prepare_response_history_context_with_replay(state, downstream_key_id, body, true).await
 }
 
 async fn prepare_response_history_context_with_replay(
     state: &AppState,
+    downstream_key_id: &str,
     body: &mut Value,
     replay_prior_history: bool,
 ) -> Result<ResponseHistoryContext, GatewayError> {
@@ -3305,7 +3366,7 @@ async fn prepare_response_history_context_with_replay(
     let effective_input_items = if let Some(previous_response_id) = previous_response_id.as_deref()
     {
         let prior_history = state
-            .response_history(previous_response_id)
+            .response_history(downstream_key_id, previous_response_id)
             .await
             .ok_or_else(|| {
                 GatewayError::classified(
@@ -3341,6 +3402,7 @@ async fn prepare_response_history_context_with_replay(
 
     Ok(ResponseHistoryContext {
         state: state.clone(),
+        downstream_key_id: downstream_key_id.to_string(),
         history_input_items: effective_input_items,
         history_request_state,
         tool_registry,
@@ -3384,6 +3446,7 @@ fn apply_chat_fallback_stage(body: &mut Value, stage: ChatFallbackStage) {
 
 async fn prepare_responses_chat_fallback_request(
     state: &AppState,
+    downstream_key_id: &str,
     source_body: &Value,
     stage: ChatFallbackStage,
 ) -> Result<(Value, ResponseHistoryContext), GatewayError> {
@@ -3395,6 +3458,7 @@ async fn prepare_responses_chat_fallback_request(
         .transpose()?;
     let mut response_history_context = prepare_response_history_context_with_replay(
         state,
+        downstream_key_id,
         &mut body,
         matches!(stage, ChatFallbackStage::HighFidelity),
     )
@@ -3956,6 +4020,7 @@ async fn process_gateway_request_with_runtime_settings(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_gateway_request_with_pre_header_cancellation(
     state: AppState,
     headers: HeaderMap,
@@ -4273,7 +4338,7 @@ async fn process_gateway_request_inner(
 
     let original_responses_body = (endpoint == EndpointKind::Responses).then(|| body.clone());
     let mut response_history_context = if endpoint == EndpointKind::Responses {
-        match prepare_response_history_context(&state, &mut body).await {
+        match prepare_response_history_context(&state, &downstream.id, &mut body).await {
             Ok(context) => Some(context),
             Err(error) => {
                 let _ = append_gateway_usage_log(
@@ -5647,6 +5712,7 @@ async fn process_gateway_request_inner(
                                 );
                                 match prepare_responses_chat_fallback_request(
                                     &state,
+                                    &downstream.id,
                                     original_responses_body
                                         .as_ref()
                                         .expect("responses requests should retain original body"),

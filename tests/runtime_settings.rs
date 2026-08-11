@@ -9,10 +9,12 @@ use tempfile::tempdir;
 
 #[test]
 fn runtime_settings_round_trip_managed_config_without_touching_secrets() {
-    let mut config = AppConfig::default();
-    config.admin_password = "admin-secret".into();
-    config.jwt_secret = "jwt-secret".into();
-    config.redis_url = "redis://secret-host".into();
+    let mut config = AppConfig {
+        admin_password: "admin-secret".into(),
+        jwt_secret: "jwt-secret".into(),
+        redis_url: "redis://secret-host".into(),
+        ..Default::default()
+    };
 
     let mut settings = RuntimeSettings::from_app_config(&config);
     settings.app_name = "  Internal Gateway  ".into();
@@ -183,9 +185,11 @@ fn persisted_state_without_runtime_settings_still_deserializes() {
 async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_state() {
     let tempdir = tempfile::tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
-    let mut legacy = AppConfig::default();
-    legacy.app_name = "Legacy env".into();
-    legacy.upstream_route_exhaustion_retry_max_rounds = 3;
+    let mut legacy = AppConfig {
+        app_name: "Legacy env".into(),
+        upstream_route_exhaustion_retry_max_rounds: 3,
+        ..Default::default()
+    };
 
     let mut document = RuntimeSettingsDocument::startup(&legacy);
     document.revision = 4;

@@ -32,6 +32,11 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                         let chunks = vec![
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(
                                 concat!(
+                                    "event: response.created\r\n",
+                                    "data: {\"type\":\"response.created\",\"response\":{",
+                                    "\"id\":\"resp-stream\",\"object\":\"response\",",
+                                    "\"created_at\":1,\"status\":\"in_progress\",",
+                                    "\"model\":\"gpt-4.1-mini\",\"output\":[]}}\r\n\r\n",
                                     ": upstream-comment\r\nevent: custom-response-event\r\n",
                                     "id: event-42\r\nretry: 1500\r\n",
                                     "data: {\"id\":\"resp-stream\",\r\n",
@@ -154,14 +159,40 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
+    let events = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .collect::<Vec<_>>();
+    let response_id = events
+        .iter()
+        .find(|event| event["type"] == "response.created")
+        .and_then(|event| event.pointer("/response/id"))
+        .and_then(Value::as_str)
+        .expect("gateway response id");
+    assert!(response_id.starts_with("resp_"));
+    uuid::Uuid::parse_str(response_id.trim_start_matches("resp_")).unwrap();
+    for event in events.iter().filter(|event| {
+        matches!(
+            event["type"].as_str(),
+            Some("response.created" | "response.output_text.delta" | "response.completed")
+        )
+    }) {
+        let event_response_id = event
+            .get("response_id")
+            .or_else(|| event.pointer("/response/id"))
+            .and_then(Value::as_str)
+            .expect("response event id");
+        assert_eq!(event_response_id, response_id, "{}", event["type"]);
+    }
+    assert!(!text.contains("resp-stream"));
     assert!(text.contains(
-        ": upstream-comment\r\nevent: custom-response-event\r\nid: event-42\r\nretry: 1500\r\ndata: {\"id\":\"resp-stream\",\r\ndata: \"object\":\"response.chunk\"}"
+        ": upstream-comment\r\nevent: custom-response-event\r\nid: event-42\r\nretry: 1500"
     ));
     assert!(text.contains("event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n"));
-    assert!(text.contains(
-        "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\""
-    ));
-    assert!(text.contains("event: response.completed\r\ndata: {\"type\":\"response.completed\""));
+    assert!(text.contains("event: response.output_text.delta\r\n"));
+    assert!(text.contains("event: response.completed\r\n"));
     assert!(text.contains(
         ": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]"
     ));
@@ -282,7 +313,16 @@ async fn downstream_responses_stream_canonicalizes_domestic_chat_provider_eof_va
     assert!(!body.contains("response.failed"), "{body}");
     assert!(!body.contains("upstream_stream_error_event"), "{body}");
     assert!(body.contains("\"type\":\"response.created\""), "{body}");
-    assert!(body.contains("\"id\":\"first-id\""), "{body}");
+    let response_id = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .find(|event| event["type"] == "response.created")
+        .and_then(|event| event["response"]["id"].as_str().map(str::to_owned))
+        .expect("gateway response id");
+    assert!(response_id.starts_with("resp_"), "{body}");
+    assert!(!body.contains("\"id\":\"first-id\""), "{body}");
     assert!(body.contains("\"model\":\"gpt-4.1-mini\""), "{body}");
     assert!(body.contains("\"created_at\":10"), "{body}");
     assert!(body.contains("\"delta\":\"OK\""), "{body}");
@@ -669,6 +709,30 @@ async fn downstream_responses_stream_preserves_multiple_output_items_when_upstre
     assert!(text.contains("\"text\":\"Hi\""));
     assert!(text.contains("\"text\":\"Bye\""));
     assert!(text.contains("data: [DONE]"));
+    let events = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+        .collect::<Vec<_>>();
+    let response_id = events
+        .iter()
+        .find(|event| event["type"] == "response.created")
+        .and_then(|event| event.pointer("/response/id"))
+        .and_then(Value::as_str)
+        .expect("gateway response id");
+    assert!(response_id.starts_with("resp_"));
+    assert_ne!(response_id, "resp-json");
+    uuid::Uuid::parse_str(response_id.trim_start_matches("resp_")).unwrap();
+    for event in &events {
+        if let Some(event_response_id) = event
+            .get("response_id")
+            .or_else(|| event.pointer("/response/id"))
+            .and_then(Value::as_str)
+        {
+            assert_eq!(event_response_id, response_id, "{}", event["type"]);
+        }
+    }
 
     let captured = capture.lock().unwrap().clone();
     let request_body = captured.request_body.unwrap();

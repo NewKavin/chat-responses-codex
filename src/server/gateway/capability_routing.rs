@@ -282,6 +282,7 @@ fn continuation_provider_group(
     Ok(format!("{:x}", sha2::Sha256::digest(material.as_bytes())))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn continuation_contract_for_route(
     upstream: &UpstreamConfig,
     runtime_model_slug: &str,

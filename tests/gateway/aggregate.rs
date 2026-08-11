@@ -438,7 +438,7 @@ impl AggregateHarness {
             .unwrap();
         assert!(
             self.state
-                .response_history(PARTIAL_RESPONSE_ID)
+                .response_history(DOWNSTREAM_ID, PARTIAL_RESPONSE_ID)
                 .await
                 .is_none(),
             "nonterminal aggregate output must not be stored"
@@ -572,7 +572,10 @@ async fn assert_cancelled_request_cleanup(
     for lease in leases {
         state.release_downstream_concurrency(lease).await.unwrap();
     }
-    assert!(state.response_history(PARTIAL_RESPONSE_ID).await.is_none());
+    assert!(state
+        .response_history(DOWNSTREAM_ID, PARTIAL_RESPONSE_ID)
+        .await
+        .is_none());
 }
 
 async fn preset_and_capture_upstream_health(state: &AppState) -> u64 {
@@ -1277,7 +1280,7 @@ async fn aggregate_cancellation_arms_after_json_to_sse_recovery() {
     assert!(
         harness
             .state
-            .response_history(PARTIAL_RESPONSE_ID)
+            .response_history(DOWNSTREAM_ID, PARTIAL_RESPONSE_ID)
             .await
             .is_none(),
         "nonterminal aggregate output must not be stored"
@@ -1285,7 +1288,7 @@ async fn aggregate_cancellation_arms_after_json_to_sse_recovery() {
     assert!(
         harness
             .state
-            .response_history("resp-empty-recovery")
+            .response_history(DOWNSTREAM_ID, "resp-empty-recovery")
             .await
             .is_none(),
         "failed empty-response recovery must not be stored"

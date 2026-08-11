@@ -2739,6 +2739,7 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
     }
 
     state.store_response_history(
+        "down-1",
         "resp-prev",
         vec![],
         serde_json::Map::from_iter([
@@ -2786,8 +2787,15 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(first_hits.load(Ordering::SeqCst), 0);
     assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_payload: Value = serde_json::from_slice(&response_body).unwrap();
+    let response_id = response_payload["id"]
+        .as_str()
+        .expect("gateway response id")
+        .to_string();
+    assert!(response_id.starts_with("resp_"), "{response_id}");
     let upgraded = state_for_assertions
-        .response_history("resp-next")
+        .response_history("down-1", &response_id)
         .await
         .expect("successful legacy continuation should be stored");
     assert_eq!(

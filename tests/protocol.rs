@@ -10,7 +10,8 @@ use chat_responses_codex::protocol::{
     ConversionContext, StreamAggregateResult, StreamResponseAggregator, StreamTranslator,
 };
 use chat_responses_codex::routing::UpstreamProtocol;
-use serde_json::json;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 #[test]
 fn chat_request_converts_to_responses_payload() {
@@ -1507,7 +1508,9 @@ fn chat_response_converts_tool_calls_to_responses_output() {
     let converted =
         chat_response_to_responses_payload(&chat_response).expect("conversion should work");
 
-    assert_eq!(converted["id"], "chatcmpl-1");
+    assert!(converted["id"]
+        .as_str()
+        .is_some_and(|response_id| response_id.starts_with("resp_")));
     assert_eq!(converted["object"], "response");
     assert_eq!(converted["status"], "completed");
     assert_eq!(converted["output"][0]["type"], "function_call");
@@ -1529,6 +1532,55 @@ fn chat_response_converts_tool_calls_to_responses_output() {
         converted["usage"]["output_tokens_details"]["reasoning_tokens"],
         0
     );
+}
+
+#[test]
+fn chat_response_generates_unique_gateway_id_for_repeated_upstream_id() {
+    let chat_response = json!({
+        "id": "chatcmpl-same",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop"
+        }]
+    });
+
+    let first = chat_response_to_responses_payload(&chat_response).unwrap();
+    let second = chat_response_to_responses_payload(&chat_response).unwrap();
+    let first_id = first["id"].as_str().expect("first response id");
+    let second_id = second["id"].as_str().expect("second response id");
+
+    assert!(first_id.starts_with("resp_"));
+    assert!(second_id.starts_with("resp_"));
+    assert_ne!(first_id, second_id);
+    assert_ne!(first_id, "chatcmpl-same");
+    assert_ne!(second_id, "chatcmpl-same");
+}
+
+#[test]
+fn chat_response_without_upstream_id_generates_unique_gateway_id() {
+    let chat_response = json!({
+        "object": "chat.completion",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop"
+        }]
+    });
+
+    let first = chat_response_to_responses_payload(&chat_response).unwrap();
+    let second = chat_response_to_responses_payload(&chat_response).unwrap();
+    let first_id = first["id"].as_str().expect("first response id");
+    let second_id = second["id"].as_str().expect("second response id");
+
+    assert!(first_id.starts_with("resp_"));
+    assert!(second_id.starts_with("resp_"));
+    assert_ne!(first_id, second_id);
 }
 
 #[test]
@@ -1882,6 +1934,116 @@ fn chat_stream_include_usage_tail_completes_with_usage() {
     assert_eq!(completed["response"]["usage"]["input_tokens"], 10);
     assert_eq!(completed["response"]["usage"]["output_tokens"], 2);
     assert_eq!(completed["response"]["usage"]["total_tokens"], 12);
+}
+
+#[test]
+fn chat_stream_generates_unique_gateway_ids_for_repeated_upstream_id() {
+    let chunk = json!({
+        "id": "chatcmpl-same",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "OK"},
+            "finish_reason": "stop"
+        }]
+    });
+
+    let mut response_ids = Vec::new();
+    for _ in 0..2 {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::ChatCompletions,
+            UpstreamProtocol::Responses,
+        )
+        .expect("translator should exist");
+        let mut events = translator.translate_event(&chunk).unwrap();
+        events.extend(translator.finish().unwrap());
+
+        let response_id = events
+            .iter()
+            .find(|event| event["type"] == "response.created")
+            .and_then(|event| event["response"]["id"].as_str())
+            .expect("response.created id")
+            .to_string();
+        assert!(response_id.starts_with("resp_"));
+        assert_ne!(response_id, "chatcmpl-same");
+        for event in &events {
+            if let Some(event_response_id) = event["response_id"].as_str() {
+                assert_eq!(event_response_id, response_id);
+            }
+            if matches!(
+                event["type"].as_str(),
+                Some("response.completed" | "response.incomplete")
+            ) {
+                assert_eq!(event["response"]["id"], response_id);
+            }
+        }
+        response_ids.push(response_id);
+    }
+
+    assert_ne!(response_ids[0], response_ids[1]);
+}
+
+#[test]
+fn chat_stream_without_upstream_ids_generates_unique_consistent_gateway_ids() {
+    let chunks = [
+        json!({
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "O"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "K"},
+                "finish_reason": "stop"
+            }]
+        }),
+    ];
+    assert!(chunks.iter().all(|chunk| chunk.get("id").is_none()));
+
+    let mut response_ids = Vec::new();
+    for _ in 0..2 {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::ChatCompletions,
+            UpstreamProtocol::Responses,
+        )
+        .expect("translator should exist");
+        let mut events = chunks
+            .iter()
+            .flat_map(|chunk| translator.translate_event(chunk).unwrap())
+            .collect::<Vec<_>>();
+        events.extend(translator.finish().unwrap());
+
+        let response_id = events
+            .iter()
+            .find_map(|event| event.pointer("/response/id").and_then(Value::as_str))
+            .expect("response envelope id")
+            .to_owned();
+        let uuid = response_id
+            .strip_prefix("resp_")
+            .expect("gateway response id prefix");
+        assert_eq!(uuid.len(), 32);
+        Uuid::parse_str(uuid).expect("gateway response id UUID");
+
+        for event in &events {
+            let event_response_id = event
+                .get("response_id")
+                .or_else(|| event.pointer("/response/id"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing response id on {}", event["type"]));
+            assert_eq!(event_response_id, response_id, "event {}", event["type"]);
+        }
+        response_ids.push(response_id);
+    }
+
+    assert_ne!(response_ids[0], response_ids[1]);
 }
 
 #[test]

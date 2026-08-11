@@ -455,7 +455,11 @@ async fn stream_only_learning_responses_explicit_zero_recovers_and_learns() {
 
     let first = harness.send_body("/v1/responses", request.clone()).await;
     assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(response_json(first).await, recovered_responses_json());
+    let first_payload = response_json(first).await;
+    let mut expected = recovered_responses_json();
+    expected["id"] = first_payload["id"].clone();
+    assert_eq!(first_payload, expected);
+    assert!(first_payload["id"].as_str().unwrap().starts_with("resp_"));
     assert_eq!(harness.stream_flags(), vec![false, true]);
 
     let key = DialectProfileKey {
@@ -774,9 +778,12 @@ async fn stream_only_learning_responses_state_never_retries() {
     }
 
     let harness = LearningHarness::new(EmptyJsonUsage::ExplicitZero, Duration::ZERO).await;
-    harness
-        .state
-        .store_response_history("resp-prev", Vec::new(), serde_json::Map::new());
+    harness.state.store_response_history(
+        "down-cold-stream-only",
+        "resp-prev",
+        Vec::new(),
+        serde_json::Map::new(),
+    );
     let response = harness
         .send_body(
             "/v1/responses",

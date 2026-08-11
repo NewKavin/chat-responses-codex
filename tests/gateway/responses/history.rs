@@ -104,6 +104,7 @@ async fn run_versioned_v1_continuation_case(duplicate_exact_route: bool) -> (Sta
     stamp_current_dialect_profile(&state, model, &mut profile).await;
     state.upsert_dialect_profile(profile.clone()).await.unwrap();
     state.store_response_history(
+        "down-v1-continuation",
         "v1-derived-history",
         vec![json!({
             "type": "message",
@@ -280,6 +281,7 @@ async fn legacy_continuation_rejects_ambiguous_multi_protocol_upstream_before_di
         AppConfig::default(),
     );
     state.store_response_history(
+        "down-1",
         "legacy-ambiguous",
         vec![],
         serde_json::Map::from_iter([(
@@ -388,6 +390,7 @@ async fn legacy_continuation_does_not_downgrade_reasoning_tool_history() {
     stamp_current_dialect_profile(&state, model, &mut profile).await;
     state.upsert_dialect_profile(profile).await.unwrap();
     state.store_response_history(
+        "down-1",
         "legacy-reasoning",
         vec![
             json!({
@@ -972,7 +975,7 @@ async fn codex_responses_overflow_compacts_once_for_chat_upstream() {
             "unexpected response: {}",
             String::from_utf8_lossy(&response_body)
         );
-        let seen = seen_bodies.lock().unwrap();
+        let seen = seen_bodies.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         for (attempt, body) in seen.iter().enumerate() {
             let messages = body["messages"].as_array().unwrap();
@@ -1185,6 +1188,10 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
         dispatched_models.lock().unwrap().as_slice(),
         [exposed_model]
     );
+    let first: Value =
+        serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let response_id = first["id"].as_str().unwrap().to_string();
+    assert!(response_id.starts_with("resp_"));
 
     let continuation = app
         .oneshot(
@@ -1199,7 +1206,7 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
                 .body(Body::from(
                     json!({
                         "model": exposed_model,
-                        "previous_response_id": "resp-context-exact",
+                        "previous_response_id": response_id,
                         "input": "next",
                         "instructions": "I".repeat(2_000),
                         "tools": [{
@@ -1226,7 +1233,10 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
         .unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "gateway_response_history_invalid");
-    let stored = state.response_history("resp-context-exact").await.unwrap();
+    let stored = state
+        .response_history("down-context", &response_id)
+        .await
+        .unwrap();
     assert_eq!(
         stored.request_state["_gateway_continuation"]["preferred_profile"]["runtime_model_slug"],
         exposed_model
@@ -1464,7 +1474,15 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
         .unwrap();
     let first_text = String::from_utf8(first_body.to_vec()).unwrap();
     assert!(first_text.contains("response.completed"));
-    assert!(first_text.contains("\"id\":\"chatcmpl-prev\""));
+    let response_id = first_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .find(|event| event["type"] == "response.created")
+        .and_then(|event| event["response"]["id"].as_str().map(str::to_owned))
+        .expect("gateway response id");
+    assert!(response_id.starts_with("resp_"));
 
     let second_response = app
         .clone()
@@ -1480,7 +1498,7 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
                 .body(Body::from(
                     json!({
                         "model": "gpt-4.1-mini",
-                        "previous_response_id": "chatcmpl-prev",
+                        "previous_response_id": response_id,
                         "input": [
                             {
                                 "type": "function_call_output",
@@ -1643,6 +1661,538 @@ async fn downstream_responses_unknown_previous_response_id_is_safe_and_categoriz
 }
 
 #[tokio::test]
+async fn response_history_is_isolated_by_downstream_key() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_for_server = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_request: Request<Body>| {
+            let hits = hits_for_server.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-shared",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "opaque",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "private"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let key_a = generate_downstream_key("gw-a");
+    let key_b = generate_downstream_key("gw-b");
+    let downstream = |id: &str, name: &str, key: &GeneratedDownstreamKey| DownstreamConfig {
+        id: id.into(),
+        name: name.into(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        plaintext_key_prefix: None,
+        model_allowlist: vec!["opaque".into()],
+        per_minute_limit: 60,
+        rate_limit_enabled: false,
+        max_concurrency: 10,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+        billing_mode: "request".into(),
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![UpstreamConfig {
+                id: "up-history-isolation".into(),
+                name: "history isolation".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["opaque".into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: Arc::new(vec![
+                downstream("down-a", "team a", &key_a),
+                downstream("down-b", "team b", &key_b),
+            ]),
+            ..PersistedState::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: "up-history-isolation".into(),
+        runtime_model_slug: "opaque".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [Capability::TextInput, Capability::NonStreamingResponse] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, "opaque", &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+    let app = build_router(state);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, format!("Bearer {}", key_a.plaintext))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "opaque", "input": "first", "stream": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let response_id = first_payload["id"].as_str().expect("response id");
+
+    let cross_key = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, format!("Bearer {}", key_b.plaintext))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "opaque",
+                        "previous_response_id": response_id,
+                        "input": "continue",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(cross_key.status(), StatusCode::BAD_REQUEST);
+    let cross_key_body = to_bytes(cross_key.into_body(), usize::MAX).await.unwrap();
+    let cross_key_payload: Value = serde_json::from_slice(&cross_key_body).unwrap();
+    assert_eq!(
+        cross_key_payload["error"]["code"],
+        "gateway_response_history_invalid"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn concurrent_windows_with_repeated_upstream_id_keep_separate_history() {
+    let captures = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captures_for_server = captures.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let captures = captures_for_server.clone();
+            async move {
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                let payload_text = payload.to_string();
+                captures.lock().unwrap().push(payload);
+                let content = if payload_text.contains("window-a") {
+                    "reply-a"
+                } else if payload_text.contains("window-b") {
+                    "reply-b"
+                } else {
+                    "reply"
+                };
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-repeated",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "opaque",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![UpstreamConfig {
+                id: "up-window-isolation".into(),
+                name: "window isolation".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["opaque".into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: Arc::new(vec![DownstreamConfig {
+                id: "down-window-isolation".into(),
+                name: "window isolation client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["opaque".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: false,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: "up-window-isolation".into(),
+        runtime_model_slug: "opaque".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [Capability::TextInput, Capability::NonStreamingResponse] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, "opaque", &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+    let app = build_router(state);
+    let request = |input: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"model": "opaque", "input": input, "stream": false}).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (first_a, first_b) = tokio::join!(
+        app.clone().oneshot(request("window-a")),
+        app.clone().oneshot(request("window-b")),
+    );
+    let first_a = first_a.unwrap();
+    let first_b = first_b.unwrap();
+    assert_eq!(first_a.status(), StatusCode::OK);
+    assert_eq!(first_b.status(), StatusCode::OK);
+    let first_a: Value =
+        serde_json::from_slice(&to_bytes(first_a.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let first_b: Value =
+        serde_json::from_slice(&to_bytes(first_b.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let response_a = first_a["id"].as_str().unwrap();
+    let response_b = first_b["id"].as_str().unwrap();
+    assert_ne!(response_a, response_b);
+
+    let continuation = |previous_response_id: &str, input: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "opaque",
+                    "previous_response_id": previous_response_id,
+                    "input": input,
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (continued_a, continued_b) = tokio::join!(
+        app.clone().oneshot(continuation(response_a, "continue-a")),
+        app.oneshot(continuation(response_b, "continue-b")),
+    );
+    assert_eq!(continued_a.unwrap().status(), StatusCode::OK);
+    assert_eq!(continued_b.unwrap().status(), StatusCode::OK);
+
+    let captures = captures.lock().unwrap();
+    let continuation_a = captures
+        .iter()
+        .find(|payload| payload.to_string().contains("continue-a"))
+        .expect("window A continuation payload");
+    let continuation_b = captures
+        .iter()
+        .find(|payload| payload.to_string().contains("continue-b"))
+        .expect("window B continuation payload");
+    let continuation_a = continuation_a.to_string();
+    let continuation_b = continuation_b.to_string();
+    assert!(continuation_a.contains("window-a"));
+    assert!(continuation_a.contains("reply-a"));
+    assert!(!continuation_a.contains("window-b"));
+    assert!(!continuation_a.contains("reply-b"));
+    assert!(continuation_b.contains("window-b"));
+    assert!(continuation_b.contains("reply-b"));
+    assert!(!continuation_b.contains("window-a"));
+    assert!(!continuation_b.contains("reply-a"));
+}
+
+#[tokio::test]
+async fn native_responses_repeated_upstream_id_keeps_concurrent_windows_separate() {
+    let captures = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captures_for_server = captures.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let captures = captures_for_server.clone();
+            async move {
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                let payload_text = payload.to_string();
+                captures.lock().unwrap().push(payload);
+                let (content, item_id) = if payload_text.contains("window-a") {
+                    ("reply-a", "message-a")
+                } else if payload_text.contains("window-b") {
+                    ("reply-b", "message-b")
+                } else {
+                    ("reply", "message-default")
+                };
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "resp_upstream_repeated",
+                        "object": "response",
+                        "created_at": 1,
+                        "status": "completed",
+                        "model": "opaque",
+                        "output": [{
+                            "id": item_id,
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": content,
+                                "annotations": []
+                            }]
+                        }],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![UpstreamConfig {
+                id: "up-native-window-isolation".into(),
+                name: "native window isolation".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["opaque".into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: Arc::new(vec![DownstreamConfig {
+                id: "down-native-window-isolation".into(),
+                name: "native window isolation client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["opaque".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: false,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: "up-native-window-isolation".into(),
+        runtime_model_slug: "opaque".into(),
+        protocol: WireProtocol::Responses,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [Capability::TextInput, Capability::NonStreamingResponse] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, "opaque", &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+    let app = build_router(state);
+    let request = |input: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"model": "opaque", "input": input, "stream": false}).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (first_a, first_b) = tokio::join!(
+        app.clone().oneshot(request("window-a")),
+        app.clone().oneshot(request("window-b")),
+    );
+    let first_a = first_a.unwrap();
+    let first_b = first_b.unwrap();
+    assert_eq!(first_a.status(), StatusCode::OK);
+    assert_eq!(first_b.status(), StatusCode::OK);
+    let first_a: Value =
+        serde_json::from_slice(&to_bytes(first_a.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let first_b: Value =
+        serde_json::from_slice(&to_bytes(first_b.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let response_a = first_a["id"].as_str().unwrap();
+    let response_b = first_b["id"].as_str().unwrap();
+    assert_ne!(response_a, "resp_upstream_repeated");
+    assert_ne!(response_b, "resp_upstream_repeated");
+    assert!(response_a.starts_with("resp_"));
+    assert!(response_b.starts_with("resp_"));
+    uuid::Uuid::parse_str(response_a.trim_start_matches("resp_")).unwrap();
+    uuid::Uuid::parse_str(response_b.trim_start_matches("resp_")).unwrap();
+    assert_ne!(response_a, response_b);
+
+    let continuation = |previous_response_id: &str, input: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "opaque",
+                    "previous_response_id": previous_response_id,
+                    "input": input,
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (continued_a, continued_b) = tokio::join!(
+        app.clone().oneshot(continuation(response_a, "continue-a")),
+        app.oneshot(continuation(response_b, "continue-b")),
+    );
+    assert_eq!(continued_a.unwrap().status(), StatusCode::OK);
+    assert_eq!(continued_b.unwrap().status(), StatusCode::OK);
+
+    let captures = captures.lock().unwrap();
+    let continuation_a = captures
+        .iter()
+        .find(|payload| payload.to_string().contains("continue-a"))
+        .expect("window A continuation payload");
+    let continuation_b = captures
+        .iter()
+        .find(|payload| payload.to_string().contains("continue-b"))
+        .expect("window B continuation payload");
+    assert!(continuation_a.get("previous_response_id").is_none());
+    assert!(continuation_b.get("previous_response_id").is_none());
+    let continuation_a = continuation_a.to_string();
+    let continuation_b = continuation_b.to_string();
+    assert!(continuation_a.contains("window-a"));
+    assert!(continuation_a.contains("reply-a"));
+    assert!(!continuation_a.contains("window-b"));
+    assert!(!continuation_a.contains("reply-b"));
+    assert!(continuation_b.contains("window-b"));
+    assert!(continuation_b.contains("reply-b"));
+    assert!(!continuation_b.contains("window-a"));
+    assert!(!continuation_b.contains("reply-a"));
+}
+
+#[tokio::test]
 async fn chat_only_high_fidelity_stage_is_skipped_after_three_identical_failures() {
     let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
     let tempdir = tempdir().unwrap();
@@ -1768,6 +2318,7 @@ async fn chat_only_high_fidelity_stage_is_skipped_after_three_identical_failures
     );
 
     state.store_response_history(
+        "down-1",
         "chatcmpl-prev",
         vec![
             json!({

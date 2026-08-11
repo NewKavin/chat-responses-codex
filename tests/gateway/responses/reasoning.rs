@@ -246,6 +246,15 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     let first_text = String::from_utf8(first_body.to_vec()).unwrap();
     assert!(first_text.contains("response.output_item.added"));
     assert!(first_text.contains("exact-thought"));
+    let response_id = first_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .find(|event| event["type"] == "response.completed")
+        .and_then(|event| event["response"]["id"].as_str().map(str::to_owned))
+        .expect("gateway response id");
+    assert!(response_id.starts_with("resp_"));
 
     let first_captures = capture.lock().unwrap().clone();
     assert_eq!(first_captures.len(), 1);
@@ -254,7 +263,7 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     assert_eq!(request_state["messages"][0]["content"], "hello");
 
     let stored_history = state_for_assertions
-        .response_history("chatcmpl-prev")
+        .response_history("down-1", &response_id)
         .await
         .unwrap();
     assert_eq!(stored_history.items[1]["type"], "reasoning");
@@ -291,7 +300,7 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
                 .body(Body::from(
                     json!({
                         "model": "gpt-4.1-mini",
-                        "previous_response_id": "chatcmpl-prev",
+                        "previous_response_id": response_id,
                         "input": [{
                             "type": "function_call_output",
                             "call_id": "call_1",
@@ -652,8 +661,20 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
     assert_eq!(first_response.status(), StatusCode::OK);
     assert_eq!(exact_hits.load(Ordering::SeqCst), 1);
     assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
+    let first_response_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_response_payload: Value = serde_json::from_slice(&first_response_body).unwrap();
+    let first_response_id = first_response_payload["id"]
+        .as_str()
+        .expect("gateway response id")
+        .to_string();
+    assert!(
+        first_response_id.starts_with("resp_"),
+        "{first_response_id}"
+    );
     let original_history = state
-        .response_history("resp-exact-profile")
+        .response_history("down-1", &first_response_id)
         .await
         .expect("initial response must store continuation history");
     let original_continuation = &original_history.request_state["_gateway_continuation"];
@@ -669,7 +690,8 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
     let expected_configuration_fingerprint = alternative_profile.configuration_fingerprint.clone();
 
     if matches!(case, CompatibleContinuationCase::ContractMismatches) {
-        let mutations: [(&str, fn(&mut Value)); 9] = [
+        type ContractMutation = (&'static str, fn(&mut Value));
+        let mutations: [ContractMutation; 9] = [
             ("provider_group", |contract| {
                 contract["provider_group"] = json!("mismatched-provider-group");
             }),
@@ -720,6 +742,7 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
                 .expect("V2 continuation must contain a compatibility contract");
             mutate(contract);
             state.store_response_history(
+                "down-1",
                 response_id.clone(),
                 original_history.items.clone(),
                 request_state,
@@ -781,7 +804,7 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
                     .body(Body::from(
                         json!({
                             "model": model,
-                            "previous_response_id": "resp-exact-profile",
+                            "previous_response_id": first_response_id,
                             "stream": true,
                             "input": [{
                                 "type": "function_call_output",
@@ -841,7 +864,7 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
                 .body(Body::from(
                     json!({
                         "model": model,
-                        "previous_response_id": "resp-exact-profile",
+                        "previous_response_id": first_response_id,
                         "input": [{
                             "type": "function_call_output",
                             "call_id": "call_1",
@@ -871,8 +894,21 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
         return;
     }
 
+    let continuation_response_body = to_bytes(continuation_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let continuation_response_payload: Value =
+        serde_json::from_slice(&continuation_response_body).unwrap();
+    let continuation_response_id = continuation_response_payload["id"]
+        .as_str()
+        .expect("gateway response id")
+        .to_string();
+    assert!(
+        continuation_response_id.starts_with("resp_"),
+        "{continuation_response_id}"
+    );
     let stored = state
-        .response_history("resp-compatible-profile")
+        .response_history("down-1", &continuation_response_id)
         .await
         .expect("successful failover must store continuation history");
     let continuation = &stored.request_state["_gateway_continuation"];
@@ -901,7 +937,7 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
                 .body(Body::from(
                     json!({
                         "model": model,
-                        "previous_response_id": "resp-compatible-profile",
+                        "previous_response_id": continuation_response_id,
                         "input": "continue again"
                     })
                     .to_string(),
@@ -1089,6 +1125,7 @@ async fn responses_continuation_local_saturation_uses_compatible_account() {
     }
     let exact_profile = exact_profile.unwrap();
     state.store_response_history(
+        "down-saturation-continuation",
         "resp-saturation-history",
         vec![],
         serde_json::Map::from_iter([(
@@ -1385,6 +1422,14 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
     assert_eq!(first_response.status(), StatusCode::OK);
     assert_eq!(chat_hits.load(Ordering::SeqCst), 1);
     assert_eq!(responses_hits.load(Ordering::SeqCst), 0);
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let response_id = first_payload["id"]
+        .as_str()
+        .expect("first response id")
+        .to_string();
 
     for capability in [
         Capability::TextInput,
@@ -1417,7 +1462,7 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
                 .body(Body::from(
                     json!({
                         "model": model,
-                        "previous_response_id": "chatcmpl-chat-profile",
+                        "previous_response_id": response_id,
                         "input": [{
                             "type": "function_call_output",
                             "call_id": "call_chat_1",
@@ -2007,8 +2052,16 @@ async fn responses_continuation_rejects_deleted_exact_profile_before_dispatch() 
         .unwrap();
     assert_eq!(first_response.status(), StatusCode::OK);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let first_response_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_response_payload: Value = serde_json::from_slice(&first_response_body).unwrap();
+    let first_response_id = first_response_payload["id"]
+        .as_str()
+        .expect("gateway response id")
+        .to_string();
     let stored = state
-        .response_history("resp-profile-deleted")
+        .response_history("down-1", &first_response_id)
         .await
         .expect("first response history");
     assert_eq!(

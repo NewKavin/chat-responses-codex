@@ -146,8 +146,10 @@ async fn runtime_settings_round_trip_through_postgres() {
         env::set_var("PGPASSWORD", password);
     }
 
-    let mut legacy = AppConfig::default();
-    legacy.app_name = "Legacy PostgreSQL env".into();
+    let legacy = AppConfig {
+        app_name: "Legacy PostgreSQL env".into(),
+        ..Default::default()
+    };
     AppState::load_from_database_url(&database_url, legacy.clone())
         .await
         .expect("should initialize the PostgreSQL schema");
@@ -1058,6 +1060,225 @@ async fn postgres_profile_primary_key_migration_rolls_back_atomically() {
 }
 
 #[tokio::test]
+async fn postgres_migrates_and_claims_legacy_response_history() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping response history migration test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let _ = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should initialize postgres schema");
+    reset_test_database_async(&database_url).await;
+    insert_test_downstreams(&database_url, &["down-a"]).await;
+    recreate_legacy_response_history_table(&database_url, "resp-legacy-history").await;
+
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("legacy response history table should migrate");
+    assert_eq!(
+        query_primary_key_columns_for_table(&database_url, "response_history").await,
+        vec!["downstream_key_id".to_string(), "response_id".to_string()]
+    );
+
+    let claimed = state
+        .response_history("down-a", "resp-legacy-history")
+        .await
+        .expect("first downstream should claim the legacy row");
+    assert_eq!(claimed.items[0]["content"], "legacy");
+    assert_eq!(claimed.request_state["instructions"], "legacy-state");
+    assert!(state
+        .response_history("down-b", "resp-legacy-history")
+        .await
+        .is_none());
+
+    state.store_response_history(
+        "down-b",
+        "resp-legacy-history",
+        vec![json!({"type": "message", "content": "new"})],
+        Map::new(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let reloaded = AppState::load_from_database_url(&database_url, config.clone())
+            .await
+            .expect("response history migration should be idempotent");
+        let first = reloaded
+            .response_history("down-a", "resp-legacy-history")
+            .await;
+        let second = reloaded
+            .response_history("down-b", "resp-legacy-history")
+            .await;
+        if first
+            .as_ref()
+            .and_then(|entry| entry.items[0]["content"].as_str())
+            == Some("legacy")
+            && second
+                .as_ref()
+                .and_then(|entry| entry.items[0]["content"].as_str())
+                == Some("new")
+        {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for two scoped response history rows");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_legacy_response_history_fails_closed_with_multiple_downstreams() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!(
+            "skipping legacy response history isolation test: PG_TEST_DATABASE_URL is not set"
+        );
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let _ = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should initialize postgres schema");
+    reset_test_database_async(&database_url).await;
+    insert_test_downstreams(&database_url, &["down-a", "down-b"]).await;
+    recreate_legacy_response_history_table(&database_url, "resp-legacy-multi").await;
+
+    let state = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("legacy response history table should migrate");
+    for downstream_id in ["down-a", "down-b", "forged-downstream"] {
+        assert!(
+            state
+                .response_history(downstream_id, "resp-legacy-multi")
+                .await
+                .is_none(),
+            "{downstream_id} must not claim an ownerless legacy row in a multi-key deployment"
+        );
+    }
+
+    let client = postgres_client(&database_url).await;
+    let row = client
+        .query_one(
+            "SELECT downstream_key_id FROM response_history WHERE response_id = $1",
+            &[&"resp-legacy-multi"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "");
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_concurrent_legacy_response_history_reads_succeed_for_unique_downstream() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping concurrent legacy history test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let _ = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should initialize postgres schema");
+    reset_test_database_async(&database_url).await;
+    insert_test_downstreams(&database_url, &["down-only"]).await;
+    recreate_legacy_response_history_table(&database_url, "resp-legacy-concurrent").await;
+
+    let first_state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("first state should load migrated schema");
+    let second_state = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("second state should load migrated schema");
+
+    let mut locker = postgres_client(&database_url).await;
+    let locker_tx = locker.transaction().await.unwrap();
+    locker_tx
+        .query_one(
+            "SELECT response_id FROM response_history WHERE response_id = $1 FOR UPDATE",
+            &[&"resp-legacy-concurrent"],
+        )
+        .await
+        .unwrap();
+
+    let first = tokio::spawn(async move {
+        first_state
+            .response_history("down-only", "resp-legacy-concurrent")
+            .await
+    });
+    let second = tokio::spawn(async move {
+        second_state
+            .response_history("down-only", "resp-legacy-concurrent")
+            .await
+    });
+
+    let observer = postgres_client(&database_url).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let waiting: i64 = observer
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND state = 'active'
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%UPDATE response_history%'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting >= 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both legacy claims should reach the guarded UPDATE"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    locker_tx.commit().await.unwrap();
+
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+    assert_eq!(
+        first.as_ref().map(|entry| &entry.items),
+        second.as_ref().map(|entry| &entry.items)
+    );
+    assert!(
+        first.is_some(),
+        "first concurrent legacy read should succeed"
+    );
+    assert!(
+        second.is_some(),
+        "second concurrent legacy read should succeed"
+    );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
 async fn postgres_roundtrip_preserves_response_history() {
     let _guard = env_lock().lock().await;
     let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
@@ -1114,14 +1335,22 @@ async fn postgres_roundtrip_preserves_response_history() {
         ),
     ]);
 
-    state.store_response_history(response_id.clone(), items.clone(), request_state.clone());
+    state.store_response_history(
+        "down-postgres",
+        response_id.clone(),
+        items.clone(),
+        request_state.clone(),
+    );
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let persisted_entry = loop {
         let reloaded = AppState::load_from_database_url(&database_url, config.clone())
             .await
             .expect("should reload state from PostgreSQL");
-        if let Some(entry) = reloaded.response_history(&response_id).await {
+        if let Some(entry) = reloaded
+            .response_history("down-postgres", &response_id)
+            .await
+        {
             break entry;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1647,12 +1876,59 @@ async fn execute_pg_sql(database_url: &str, sql: &str) {
 async fn reset_test_database_async(database_url: &str) {
     execute_pg_sql(
         database_url,
-        "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
+        "TRUNCATE TABLE response_history, usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
     )
     .await;
 }
 
+async fn insert_test_downstreams(database_url: &str, downstream_ids: &[&str]) {
+    let client = postgres_client(database_url).await;
+    for downstream_id in downstream_ids {
+        client
+            .execute(
+                "INSERT INTO downstreams (id, name, hash, per_minute_limit, active)
+                 VALUES ($1, $1, $1, 60, TRUE)",
+                &[downstream_id],
+            )
+            .await
+            .unwrap();
+    }
+}
+
+async fn recreate_legacy_response_history_table(database_url: &str, response_id: &str) {
+    let client = postgres_client(database_url).await;
+    client
+        .batch_execute(
+            "DROP TABLE response_history;
+             CREATE TABLE response_history (
+                 response_id TEXT PRIMARY KEY,
+                 items TEXT NOT NULL,
+                 state TEXT NOT NULL DEFAULT '{}',
+                 created_at BIGINT NOT NULL
+             );",
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO response_history (response_id, items, state, created_at)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &response_id,
+                &r#"[{"type":"message","content":"legacy"}]"#,
+                &r#"{"instructions":"legacy-state"}"#,
+                &9_999_999_999_i64,
+            ],
+        )
+        .await
+        .unwrap();
+}
+
 async fn query_primary_key_columns_async(database_url: &str) -> Vec<String> {
+    query_primary_key_columns_for_table(database_url, "dialect_profiles").await
+}
+
+async fn query_primary_key_columns_for_table(database_url: &str, table_name: &str) -> Vec<String> {
     let client = postgres_client(database_url).await;
     client
         .query(
@@ -1663,10 +1939,10 @@ async fn query_primary_key_columns_async(database_url: &str) -> Vec<String> {
              JOIN pg_attribute AS a
                ON a.attrelid = c.conrelid
               AND a.attnum = k.attnum
-             WHERE c.conrelid = 'dialect_profiles'::regclass
+             WHERE c.conrelid = to_regclass($1)
                AND c.contype = 'p'
              ORDER BY k.ordinality",
-            &[],
+            &[&table_name],
         )
         .await
         .unwrap()

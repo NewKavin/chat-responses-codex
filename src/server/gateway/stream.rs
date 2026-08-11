@@ -681,12 +681,15 @@ pub(super) fn proxied_stream_body(
             unix_seconds(),
         )
     });
+    let rewrite_responses_events = endpoint == EndpointKind::Responses;
     let state = ProxiedStreamState {
         reader,
         buffer: Vec::new(),
         pending: VecDeque::new(),
         canonicalizer,
-        rewrite_responses_events: endpoint == EndpointKind::Responses,
+        rewrite_responses_events,
+        downstream_response_id: rewrite_responses_events.then(gateway_response_id),
+        upstream_response_id: None,
         next_responses_sequence_number: 1,
         usage: None,
         body_read_diagnostic_context,
@@ -877,6 +880,8 @@ struct ProxiedStreamState {
     pending: VecDeque<Bytes>,
     canonicalizer: Option<ChatStreamCanonicalizer>,
     rewrite_responses_events: bool,
+    downstream_response_id: Option<String>,
+    upstream_response_id: Option<String>,
     next_responses_sequence_number: u64,
     usage: Option<(u64, u64, u64)>,
     body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
@@ -1022,6 +1027,21 @@ impl ProxiedStreamState {
                 return Err(err);
             }
             let responses_usage_normalized = normalize_responses_event_usage(&mut event);
+            if self.upstream_response_id.is_none() {
+                self.upstream_response_id = responses_event_response_id(&event).map(str::to_owned);
+                if let Some(upstream_response_id) = self.upstream_response_id.as_deref() {
+                    tracing::debug!(
+                        upstream_response_id,
+                        "captured upstream response id for stream diagnostics"
+                    );
+                }
+            }
+            let responses_id_rewritten =
+                self.downstream_response_id
+                    .as_deref()
+                    .is_some_and(|response_id| {
+                        rewrite_responses_event_response_id(&mut event, response_id)
+                    });
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
@@ -1077,7 +1097,7 @@ impl ProxiedStreamState {
                 if self.canonicalizer.is_some() {
                     self.pending.push_back(serialize_sse_data(&event));
                 } else if self.rewrite_responses_events {
-                    let frame = if responses_usage_normalized {
+                    let frame = if responses_usage_normalized || responses_id_rewritten {
                         match rewrite_sse_data_payload(&frame, delimiter_len, &event)
                             .map_err(|_| upstream_sse_decode_error())
                         {

@@ -191,8 +191,16 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
         .await
         .unwrap();
     assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let response_id = first_payload["id"]
+        .as_str()
+        .expect("first response id")
+        .to_string();
     let stored_history = state_for_history
-        .response_history("chatcmpl-fallback-tools")
+        .response_history("down-1", &response_id)
         .await
         .expect("first response history should be stored");
     assert!(
@@ -213,7 +221,7 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
                 .body(Body::from(
                     json!({
                         "model": model,
-                        "previous_response_id": "chatcmpl-fallback-tools",
+                        "previous_response_id": response_id,
                         "input": [
                             {"type":"custom_tool_call_output","call_id":"call-b","output":"applied"}
                         ],
@@ -497,8 +505,16 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
     );
     assert_eq!(exact_hits.load(Ordering::SeqCst), 1);
     assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let response_id = first_payload["id"]
+        .as_str()
+        .expect("first response id")
+        .to_string();
     let first_history = state_for_assertions
-        .response_history("chatcmpl-fallback-exact")
+        .response_history("down-1", &response_id)
         .await
         .expect("fallback response history");
     assert_eq!(
@@ -519,7 +535,7 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
                 .body(Body::from(
                     json!({
                         "model": model,
-                        "previous_response_id": "chatcmpl-fallback-exact",
+                        "previous_response_id": response_id,
                         "input": [{
                             "type": "function_call_output",
                             "call_id": "call_fallback",

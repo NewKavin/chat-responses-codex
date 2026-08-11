@@ -665,12 +665,16 @@ fn responses_incomplete_reason(finish_reason: Option<&str>) -> Option<&'static s
     (finish_reason == Some("length")).then_some("max_output_tokens")
 }
 
+fn gateway_response_id() -> String {
+    format!("resp_{}", Uuid::new_v4().simple())
+}
+
 pub fn chat_response_to_responses_payload_with_context(
     input: &Value,
     context: &ConversionContext,
 ) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
-    let response_id = input.get("id").and_then(Value::as_str).unwrap_or("resp");
+    let response_id = gateway_response_id();
     let choices = array_field(input, "choices")?;
     if choices.len() > 1 {
         return Err(ProtocolError::InvalidPayload(
@@ -730,7 +734,7 @@ pub fn chat_response_to_responses_payload_with_context(
     }
 
     let mut output = Map::new();
-    output.insert("id".into(), Value::String(response_id.to_string()));
+    output.insert("id".into(), Value::String(response_id));
     output.insert("object".into(), Value::String("response".into()));
     output.insert(
         "status".into(),
@@ -2314,6 +2318,7 @@ impl StreamTranslator {
 #[derive(Debug)]
 struct ChatToResponsesState {
     response_id: Option<String>,
+    upstream_response_id: Option<String>,
     model: Option<String>,
     created_at: Option<u64>,
     created_emitted: bool,
@@ -2357,6 +2362,7 @@ impl ChatToResponsesState {
     fn new(tool_registry: Option<tool_adapter::ToolAdapterRegistry>) -> Self {
         Self {
             response_id: None,
+            upstream_response_id: None,
             model: None,
             created_at: None,
             created_emitted: false,
@@ -2546,11 +2552,17 @@ impl ChatToResponsesState {
 
     fn initialize_metadata(&mut self, event: &Value) {
         if self.response_id.is_none() {
-            self.response_id = event
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string())
-                .or_else(|| Some(format!("resp-{}", Uuid::new_v4())));
+            self.response_id = Some(gateway_response_id());
+        }
+
+        if self.upstream_response_id.is_none() {
+            self.upstream_response_id = event.get("id").and_then(Value::as_str).map(str::to_owned);
+            if let Some(upstream_response_id) = self.upstream_response_id.as_deref() {
+                tracing::debug!(
+                    upstream_response_id,
+                    "captured upstream response id for stream diagnostics"
+                );
+            }
         }
 
         if self.model.is_none() {
@@ -2573,7 +2585,7 @@ impl ChatToResponsesState {
             return response_id.clone();
         }
 
-        let response_id = format!("resp-{}", Uuid::new_v4());
+        let response_id = gateway_response_id();
         self.response_id = Some(response_id.clone());
         response_id
     }
