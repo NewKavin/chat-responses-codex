@@ -163,7 +163,7 @@ fn app_config_defaults_upstream_route_retry_policy() {
     let config = AppConfig::default();
 
     assert!(config.upstream_route_exhaustion_retry_enabled);
-    assert_eq!(config.upstream_route_exhaustion_retry_max_wait_ms, 10_000);
+    assert_eq!(config.upstream_route_exhaustion_retry_max_wait_ms, 30_000);
     assert_eq!(config.upstream_route_exhaustion_retry_max_rounds, 3);
 }
 

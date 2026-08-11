@@ -1905,6 +1905,62 @@ async fn runtime_settings_enable_route_exhaustion_retry_for_next_request() {
 }
 
 #[tokio::test]
+async fn default_route_exhaustion_budget_waits_out_a_transient_cooldown() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), 2, StatusCode::INTERNAL_SERVER_ERROR, None).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        // Default wait budget (30s) on purpose: the ~10s transient cooldown
+        // must be absorbed inside the gateway so the client never sees a 503.
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("default retry budget must absorb the transient cooldown")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["choices"][0]["message"]["content"],
+        "second-round-ok"
+    );
+    // Hit one fails, hit two fails the in-place same-route retry, hit three is
+    // the second routing round succeeding after the cooldown wait.
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    assert!(
+        elapsed >= std::time::Duration::from_secs(7)
+            && elapsed <= std::time::Duration::from_secs(25),
+        "request must wait out the ~10s cooldown inside the gateway, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
 async fn long_retry_after_returns_immediately_without_second_round() {
     let hits = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();

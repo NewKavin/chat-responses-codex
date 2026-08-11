@@ -93,7 +93,11 @@ pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: u64 = 10;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
-pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 10_000;
+/// Intra-gateway retry wait budget for route exhaustion (B3): the gateway
+/// sleeps until the earliest route cooldown expires (up to this budget)
+/// instead of failing fast, so a 10s transient cooldown recovers inside the
+/// gateway and Codex never sees a 503.
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 /// Consecutive identical (class, upstream status) failures across different
 /// routes within one request that trip the common-mode breaker. 0 disables

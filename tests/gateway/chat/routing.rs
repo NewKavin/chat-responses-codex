@@ -989,7 +989,17 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
                 ..Default::default()
             },
             tempdir.path().join("state.json"),
-            AppConfig::default(),
+            // Small wait budget on purpose: this test verifies one route-set
+            // observation per physically attempted key route. The 12-18s
+            // capacity cooldown exceeds the 5s budget, so exactly one
+            // physical round runs (key-a, key-b) and the observation count
+            // stays deterministic; the default 30s budget's wait-and-retry
+            // behavior is covered by
+            // default_route_exhaustion_budget_waits_out_a_transient_cooldown.
+            AppConfig {
+                upstream_route_exhaustion_retry_max_wait_ms: 5_000,
+                ..AppConfig::default()
+            },
         );
 
         let response = build_router(state.clone())

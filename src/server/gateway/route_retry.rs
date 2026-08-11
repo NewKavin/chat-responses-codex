@@ -95,6 +95,7 @@ impl RouteRetryPolicy {
         budget: &RouteRetryBudget,
         terminal: TerminalFailure,
         health_recovery: Option<RouteRecovery>,
+        client_retryable_rate_limit: bool,
         request_id: &str,
     ) -> Option<RouteRetryWait> {
         if !self.enabled {
@@ -103,6 +104,13 @@ impl RouteRetryPolicy {
         let TerminalFailure::Temporary { retry_after } = terminal else {
             return None;
         };
+        if client_retryable_rate_limit {
+            // A pure upstream rate-limit / key-quota exhaustion (429 family)
+            // is a client-side retry signal: codex honors Retry-After and
+            // keeps the task alive, so the gateway must not absorb the
+            // cooldown in-process (B3).
+            return None;
+        }
         let concurrency_recovery = health_recovery.is_some_and(|recovery| {
             recovery.class == crate::state::RouteFailureClass::ConcurrencySaturated
         });
@@ -187,6 +195,7 @@ mod tests {
                     retry_after: Duration::from_secs(1),
                 },
                 None,
+                false,
                 "request-a",
             )
             .expect("short temporary exhaustion should retry");
@@ -197,6 +206,7 @@ mod tests {
                     retry_after: Duration::from_secs(1),
                 },
                 None,
+                false,
                 "request-a",
             )
             .expect("same decision should remain eligible");
@@ -221,10 +231,16 @@ mod tests {
         };
 
         assert!(RouteRetryPolicy::new(false, Duration::from_secs(10), 3)
-            .decide(&budget, temporary, None, "disabled")
+            .decide(&budget, temporary, None, false, "disabled")
             .is_none());
         assert!(RouteRetryPolicy::new(true, Duration::from_secs(10), 3)
-            .decide(&budget, TerminalFailure::Credentials, None, "permanent")
+            .decide(
+                &budget,
+                TerminalFailure::Credentials,
+                None,
+                false,
+                "permanent"
+            )
             .is_none());
         assert!(RouteRetryPolicy::new(true, Duration::from_secs(10), 3)
             .decide(
@@ -233,11 +249,12 @@ mod tests {
                     retry_after: Duration::from_secs(11),
                 },
                 None,
+                false,
                 "over-budget",
             )
             .is_none());
         assert!(RouteRetryPolicy::new(true, Duration::ZERO, 3)
-            .decide(&budget, temporary, None, "zero-budget")
+            .decide(&budget, temporary, None, false, "zero-budget")
             .is_none());
     }
 
@@ -250,18 +267,18 @@ mod tests {
         let mut budget = RouteRetryBudget::default();
 
         let round_two = policy
-            .decide(&budget, temporary, None, "round-limited")
+            .decide(&budget, temporary, None, false, "round-limited")
             .expect("round two should be allowed");
         budget.record_wait(round_two);
         let round_three = policy
-            .decide(&budget, temporary, None, "round-limited")
+            .decide(&budget, temporary, None, false, "round-limited")
             .expect("round three should be allowed");
         budget.record_wait(round_three);
 
         assert_eq!(budget.current_round(), 3);
         assert!(budget.waited() <= Duration::from_secs(10));
         assert!(policy
-            .decide(&budget, temporary, None, "round-limited")
+            .decide(&budget, temporary, None, false, "round-limited")
             .is_none());
     }
 
@@ -281,6 +298,7 @@ mod tests {
                     retry_after: Duration::from_secs(1),
                 },
                 Some(recovery),
+                false,
                 "health-wins",
             )
             .expect("actual health recovery fits the wait budget");
@@ -315,16 +333,55 @@ mod tests {
 
         for _ in 0..2 {
             let wait = policy
-                .decide(&budget, terminal, Some(concurrency), "concurrency-budget")
+                .decide(
+                    &budget,
+                    terminal,
+                    Some(concurrency),
+                    false,
+                    "concurrency-budget",
+                )
                 .expect("concurrency recovery should advance to round three");
             budget.record_wait(wait);
         }
         assert_eq!(budget.current_round(), 3);
         assert!(policy
-            .decide(&budget, terminal, Some(ordinary), "ordinary-budget")
+            .decide(&budget, terminal, Some(ordinary), false, "ordinary-budget")
             .is_none());
         assert!(policy
-            .decide(&budget, terminal, Some(concurrency), "concurrency-budget")
+            .decide(
+                &budget,
+                terminal,
+                Some(concurrency),
+                false,
+                "concurrency-budget"
+            )
             .is_some());
+    }
+
+    #[test]
+    fn pure_client_rate_limit_never_schedules_an_in_gateway_wait() {
+        // A 429 rate-limit exhaustion (RateLimited/KeyQuota family) is a
+        // client-side retry signal: codex honors Retry-After, so the gateway
+        // must not absorb the cooldown in-process even when the recovery fits
+        // the wait budget (B3).
+        let policy = RouteRetryPolicy::new(true, Duration::from_secs(30), 3);
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(1),
+        };
+        let recovery = RouteRecovery {
+            class: RouteFailureClass::RateLimited,
+            retry_after: Duration::from_secs(25),
+            half_open_remaining: None,
+        };
+
+        assert!(policy
+            .decide(
+                &RouteRetryBudget::default(),
+                terminal,
+                Some(recovery),
+                true,
+                "client-rate-limited",
+            )
+            .is_none());
     }
 }

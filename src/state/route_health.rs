@@ -1372,6 +1372,11 @@ pub(super) fn key_failure_has_cooldown(class: RouteFailureClass) -> bool {
     )
 }
 
+/// Maximum failure step a route can reach through failing half-open probes.
+/// Without this cap, a route that keeps failing its probes escalates its
+/// cooldown to the 5-minute maximum and stays pinned there (B3).
+const ROUTE_HALF_OPEN_FAILURE_STEP_CAP: u32 = 5;
+
 fn failure_step(state: &HealthState, class: RouteFailureClass, now: Instant) -> u32 {
     if class == RouteFailureClass::EdgeProxyError {
         // Edge proxy pages describe the gateway, not the route: they must
@@ -1385,7 +1390,18 @@ fn failure_step(state: &HealthState, class: RouteFailureClass, now: Instant) -> 
     {
         1
     } else {
-        state.consecutive_failures.saturating_add(1).max(1)
+        let escalated = state.consecutive_failures.saturating_add(1).max(1);
+        if state.half_open_generation.is_some() && class != RouteFailureClass::ConcurrencySaturated
+        {
+            // This failure comes from a half-open probe (the cooldown had
+            // expired and the route was re-verified).  Cap the step so the
+            // exponential cooldown cannot pin at the maximum forever.
+            // ConcurrencySaturated is exempt: it follows its own bounded
+            // probe schedule and never escalates to the max.
+            escalated.min(ROUTE_HALF_OPEN_FAILURE_STEP_CAP)
+        } else {
+            escalated
+        }
     }
 }
 

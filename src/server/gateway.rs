@@ -6845,7 +6845,13 @@ async fn process_gateway_request_inner(
         }
 
         if let Some(wait) = round_terminal.and_then(|failure| {
-            route_retry_policy.decide(&route_retry_budget, failure, round_recovery, &request_id)
+            route_retry_policy.decide(
+                &route_retry_budget,
+                failure,
+                round_recovery,
+                round_ledger.is_pure_client_rate_limit(),
+                &request_id,
+            )
         }) {
             log_route_retry_wait(
                 &request_id,

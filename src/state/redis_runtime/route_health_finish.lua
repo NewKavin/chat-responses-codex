@@ -144,7 +144,8 @@ local function observe(
   schedule_count,
   exact_retry,
   model_slug,
-  protocol
+  protocol,
+  half_open_probe
 )
   if not ensure_capacity(state_key, upstream_index, global_index) then
     return false
@@ -155,6 +156,14 @@ local function observe(
   local step = 1
   if previous_class == failure_class and now_ms - previous_at <= streak_reset_ms then
     step = math.max(1, previous_count + 1)
+    if half_open_probe and failure_class ~= 'concurrency_saturated' then
+      -- A half-open probe failure must not escalate the streak without
+      -- bound (B3): cap the step so the cooldown cannot pin at the
+      -- 5-minute maximum while the route keeps failing probes.
+      -- ConcurrencySaturated is exempt: it follows its own bounded probe
+      -- schedule and never escalates to the max.
+      step = math.min(step, 5)
+    end
   end
   local cooldown_ms = schedule_value(schedule, schedule_count, step)
   if explicit_retry_ms >= 0 then
@@ -249,7 +258,7 @@ elseif outcome == 'route_failure' or outcome == 'route_failure_with_retry' then
       KEYS[2], KEYS[4], KEYS[6], class,
       route_schedule, route_schedule_count,
       class == 'concurrency_saturated' and explicit_retry_ms >= 0,
-      ARGV[14], ARGV[15]
+      ARGV[14], ARGV[15], route_generation ~= ''
     ) then
       return -1
     end
@@ -263,7 +272,7 @@ elseif outcome == 'key_failure' or outcome == 'key_failure_with_retry' then
       clear_state(KEYS[1], KEYS[3], KEYS[5])
     elseif not observe(
       KEYS[1], KEYS[3], KEYS[5], class,
-      key_schedule, key_schedule_count, false, '', ''
+      key_schedule, key_schedule_count, false, '', '', key_generation ~= ''
     ) then
       return -1
     end
@@ -278,7 +287,7 @@ elseif outcome == 'uncertain_route_failure' then
     elseif not observe(
         KEYS[2], KEYS[4], KEYS[6], class,
         route_schedule, route_schedule_count, false,
-        ARGV[14], ARGV[15]
+        ARGV[14], ARGV[15], route_generation ~= ''
     ) then
       return -1
     end

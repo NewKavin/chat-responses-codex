@@ -602,7 +602,17 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
                 ..Default::default()
             },
             tempdir.path().join("state.json"),
-            AppConfig::default(),
+            // Small wait budget on purpose: this test verifies the terminal
+            // error uses live recovery (not the ledger's stale Retry-After)
+            // and stays secret-safe. The 12-18s capacity cooldown exceeds the
+            // 5s budget, so the request fails fast and the cooldowns remain
+            // fresh enough for a deterministic Retry-After. The default 30s
+            // budget's wait-and-retry behavior is covered by
+            // default_route_exhaustion_budget_waits_out_a_transient_cooldown.
+            AppConfig {
+                upstream_route_exhaustion_retry_max_wait_ms: 5_000,
+                ..AppConfig::default()
+            },
         );
 
         let response = build_router(state)

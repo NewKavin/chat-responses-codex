@@ -116,6 +116,43 @@ async fn route_cooldown_has_one_half_open_lease_and_resets_after_success() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() {
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let route = route("half-open-step-cap", "glm-5.2");
+    let key = key("half-open-step-cap");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let mut streak = 1;
+    for _ in 0..12 {
+        let cooldown = registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .cooldown_remaining;
+        tokio::time::advance(cooldown + Duration::from_millis(1)).await;
+        let lease = match registry.reserve(&route, &key) {
+            RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+            other => panic!("expected half-open permit, got {other:?}"),
+        };
+        registry.finish(
+            lease,
+            RouteOutcome::RouteFailure {
+                class: RouteFailureClass::TransientServer,
+                upstream_status: Some(500),
+            },
+        );
+        streak = registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .consecutive_failures;
+    }
+    assert_eq!(
+        streak, 5,
+        "half-open probe failures must cap the failure step at 5"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn transient_route_cooldown_uses_configured_base_and_cap() {
     for class in [
         RouteFailureClass::TransientServer,

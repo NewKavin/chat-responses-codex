@@ -370,6 +370,25 @@ impl AttemptLedger {
                 })
     }
 
+    /// Whether every exhausted route is a plain upstream rate-limit or
+    /// key-quota rejection (the 429 family). Concurrency is deliberately
+    /// excluded: concurrency-saturated routes recover on their own in-gateway
+    /// probe schedule, so the client must not see a bare 429 while a probe
+    /// could still succeed.
+    pub fn is_pure_client_rate_limit(&self) -> bool {
+        !self.is_empty()
+            && self
+                .failures
+                .iter()
+                .chain(self.cooled_candidates.iter())
+                .all(|failure| {
+                    matches!(
+                        failure.class,
+                        FailureClass::RateLimited | FailureClass::KeyQuota
+                    )
+                })
+    }
+
     pub fn is_pure_concurrency_exhaustion(&self) -> bool {
         !self.is_empty()
             && self
