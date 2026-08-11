@@ -349,7 +349,7 @@ impl Default for ProbeConfiguration {
         Self {
             enabled: true,
             refresh_interval_seconds: 7 * 24 * 60 * 60,
-            max_global_concurrency: 2,
+            max_global_concurrency: 4,
             max_per_upstream_concurrency: 1,
             output_token_cap: 64,
             https_image_fixture: None,

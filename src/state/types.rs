@@ -141,6 +141,8 @@ pub struct AppConfig {
     /// accepted batch are expanded and deduplicated by `ProbeQueueState`.
     pub capability_probe_queue_capacity: usize,
     pub capability_probe_request_timeout_seconds: u64,
+    #[serde(default = "default_capability_probe_concurrency")]
+    pub capability_probe_concurrency: u32,
     pub automatic_capability_probes_enabled: bool,
     #[serde(default)]
     pub capability_policy_bootstrap_on_zero: bool,
@@ -235,6 +237,7 @@ impl Default for AppConfig {
             redis_key_prefix: "chat2responses".into(),
             capability_probe_queue_capacity: 256,
             capability_probe_request_timeout_seconds: 20,
+            capability_probe_concurrency: 4,
             automatic_capability_probes_enabled: false,
             capability_policy_bootstrap_on_zero: true,
             admin_logs_page_size_max: 200,
@@ -753,6 +756,10 @@ pub fn default_upstream_requests_per_minute() -> u32 {
 }
 
 pub fn default_upstream_max_concurrency() -> u32 {
+    4
+}
+
+pub fn default_capability_probe_concurrency() -> u32 {
     4
 }
 

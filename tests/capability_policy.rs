@@ -175,7 +175,7 @@ fn configuration_defaults_round_trip_and_reject_unknown_fields() {
     assert_eq!(configuration.revision, 0);
     assert!(configuration.probe.enabled);
     assert_eq!(configuration.probe.refresh_interval_seconds, 604_800);
-    assert_eq!(configuration.probe.max_global_concurrency, 2);
+    assert_eq!(configuration.probe.max_global_concurrency, 4);
     assert_eq!(configuration.probe.max_per_upstream_concurrency, 1);
     assert_eq!(configuration.probe.output_token_cap, 64);
     assert_eq!(

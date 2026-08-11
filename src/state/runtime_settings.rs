@@ -1,5 +1,6 @@
 use super::types::{
-    default_upstream_common_mode_breaker_threshold, default_upstream_max_concurrency, AppConfig,
+    default_capability_probe_concurrency, default_upstream_common_mode_breaker_threshold,
+    default_upstream_max_concurrency, AppConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -15,6 +16,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "troubleshooting_check_timeout_seconds",
     "model_probe_refresh_interval_seconds",
     "capability_probe_request_timeout_seconds",
+    "capability_probe_concurrency",
     "automatic_capability_probes_enabled",
     "upstream_rate_limit_default_retry_seconds",
     "routing_affinity_enabled",
@@ -68,6 +70,8 @@ pub struct RuntimeSettings {
     pub upstream_model_key_sync_interval_seconds: u64,
     pub capability_probe_queue_capacity: usize,
     pub capability_probe_request_timeout_seconds: u64,
+    #[serde(default = "default_capability_probe_concurrency")]
+    pub capability_probe_concurrency: u32,
     pub automatic_capability_probes_enabled: bool,
     pub upstream_rate_limit_default_retry_seconds: u64,
     pub routing_affinity_enabled: bool,
@@ -196,6 +200,7 @@ impl RuntimeSettings {
             capability_probe_queue_capacity: config.capability_probe_queue_capacity,
             capability_probe_request_timeout_seconds: config
                 .capability_probe_request_timeout_seconds,
+            capability_probe_concurrency: config.capability_probe_concurrency,
             automatic_capability_probes_enabled: config.automatic_capability_probes_enabled,
             upstream_rate_limit_default_retry_seconds: config
                 .upstream_rate_limit_default_retry_seconds,
@@ -256,6 +261,7 @@ impl RuntimeSettings {
         config.capability_probe_queue_capacity = self.capability_probe_queue_capacity;
         config.capability_probe_request_timeout_seconds =
             self.capability_probe_request_timeout_seconds;
+        config.capability_probe_concurrency = self.capability_probe_concurrency;
         config.automatic_capability_probes_enabled = self.automatic_capability_probes_enabled;
         config.upstream_rate_limit_default_retry_seconds =
             self.upstream_rate_limit_default_retry_seconds;
@@ -336,6 +342,10 @@ impl RuntimeSettings {
         require_positive(
             self.capability_probe_request_timeout_seconds,
             "capability_probe_request_timeout_seconds",
+        )?;
+        require_positive_u32(
+            self.capability_probe_concurrency,
+            "capability_probe_concurrency",
         )?;
         require_positive(
             self.upstream_rate_limit_default_retry_seconds,

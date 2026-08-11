@@ -464,8 +464,10 @@ impl CapabilityProbeService {
             loop {
                 let capability_snapshot = state.capability_snapshot();
                 let probe = &capability_snapshot.configuration.source().probe;
+                let runtime_settings = state.runtime_settings();
                 queue.set_limits(
-                    probe.max_global_concurrency,
+                    (runtime_settings.capability_probe_concurrency as usize)
+                        .min(probe.max_global_concurrency),
                     probe.max_per_upstream_concurrency,
                 );
                 if probe.enabled {

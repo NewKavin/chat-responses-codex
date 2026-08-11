@@ -140,6 +140,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             20,
         )
         .max(1),
+        capability_probe_concurrency: env_u32("CAPABILITY_PROBE_CONCURRENCY", 4).max(1),
         automatic_capability_probes_enabled: env_bool("AUTOMATIC_CAPABILITY_PROBES_ENABLED", false),
         capability_policy_bootstrap_on_zero: env_bool("CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO", true),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),

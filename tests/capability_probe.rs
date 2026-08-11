@@ -1144,6 +1144,125 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
 }
 
 #[tokio::test]
+async fn probe_service_runtime_concurrency_setting_bounds_global_concurrency() {
+    with_proxy_env_cleared(|| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let active = active.clone();
+                let max_active = max_active.clone();
+                let request_count = request_count.clone();
+                move || {
+                    let active = active.clone();
+                    let max_active = max_active.clone();
+                    let request_count = request_count.clone();
+                    async move {
+                        request_count.fetch_add(1, Ordering::SeqCst);
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        (
+                            StatusCode::FORBIDDEN,
+                            axum::Json(json!({"error": {"message": "denied"}})),
+                        )
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{address}");
+        let upstream = |id: &str, model: &str| UpstreamConfig {
+            id: id.into(),
+            name: id.into(),
+            base_url: base_url.clone(),
+            api_key: "probe-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![model.into()],
+            active: true,
+            ..Default::default()
+        };
+        let tempdir = tempdir().unwrap();
+        let config = AppConfig {
+            capability_probe_request_timeout_seconds: 2,
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![
+                    upstream("up-1", "model-a"),
+                    upstream("up-2", "model-b"),
+                ]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "probe-consumer".into(),
+                    hash: "unused".into(),
+                    plaintext_key: None,
+                    plaintext_key_prefix: None,
+                    model_allowlist: Vec::new(),
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    input_token_price_per_million_cents: None,
+                    output_token_price_per_million_cents: None,
+                    daily_cost_limit_cents: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: Vec::new(),
+                    expires_at: None,
+                    active: true,
+                    billing_mode: "request".into(),
+                }]),
+                ..PersistedState::default()
+            },
+            tempdir.path().join("state.json"),
+            config,
+        );
+        // The capability policy allows up to 4 concurrent probes by default;
+        // the runtime setting must cap the effective global concurrency at 1.
+        let mut settings = state.runtime_settings().as_ref().clone();
+        settings.capability_probe_concurrency = 1;
+        state.update_runtime_settings(0, settings).await.unwrap();
+        state
+            .replace_capability_configuration(CapabilityConfiguration::default())
+            .await
+            .unwrap();
+
+        let _service = CapabilityProbeService::spawn(state);
+        let wait = tokio::time::timeout(Duration::from_secs(5), async {
+            while request_count.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if wait.is_err() {
+            eprintln!(
+                "DEBUG: request_count={} max_active={}",
+                request_count.load(Ordering::SeqCst),
+                max_active.load(Ordering::SeqCst)
+            );
+        }
+        wait.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn probe_service_periodically_reconciles_expired_verified_profiles() {
     with_proxy_env_cleared(|| async move {
         let mock = ProbeMock::chat(|_| json!({"choices": [{"message": {"content": "ok"}}]})).await;

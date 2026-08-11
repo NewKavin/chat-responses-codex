@@ -189,7 +189,7 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     assert_eq!(body["source"], "startup");
     assert_eq!(body["settings"]["app_name"], "Startup Gateway");
     assert_eq!(body["settings"]["default_upstream_max_concurrency"], 4);
-    assert_eq!(body["settings"].as_object().unwrap().len(), 41);
+    assert_eq!(body["settings"].as_object().unwrap().len(), 42);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

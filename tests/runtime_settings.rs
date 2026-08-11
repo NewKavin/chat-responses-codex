@@ -113,7 +113,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 40);
+    assert_eq!(all.len(), 41);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -281,4 +281,47 @@ fn troubleshooting_checks_use_the_run_runtime_timeout() {
 
     assert!(check.contains("check_timeout: Duration"));
     assert!(!check.contains("runtime_settings()"));
+}
+
+#[test]
+fn runtime_settings_without_probe_concurrency_use_canonical_default() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("capability_probe_concurrency");
+
+    let loaded: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let reserialized = serde_json::to_value(loaded).unwrap();
+
+    assert_eq!(reserialized["capability_probe_concurrency"], 4);
+}
+
+#[test]
+fn runtime_settings_reject_zero_capability_probe_concurrency() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized["capability_probe_concurrency"] = serde_json::json!(0);
+
+    let settings: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let error = settings.validate_and_normalize().unwrap_err();
+
+    assert_eq!(error.field(), "capability_probe_concurrency");
+}
+
+#[test]
+fn runtime_settings_round_trip_capability_probe_concurrency() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    assert_eq!(settings.capability_probe_concurrency, 4);
+    settings.capability_probe_concurrency = 6;
+    let normalized = settings.validate_and_normalize().unwrap();
+
+    let mut config = AppConfig::default();
+    normalized.apply_to_app_config(&mut config);
+    assert_eq!(config.capability_probe_concurrency, 6);
+    assert_eq!(
+        RuntimeSettings::from_app_config(&config).capability_probe_concurrency,
+        6
+    );
 }
