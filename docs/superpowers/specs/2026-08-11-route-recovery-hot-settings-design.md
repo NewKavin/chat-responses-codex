@@ -86,4 +86,3 @@ duplicate tool calls or model output.
   temporary state and preserves credential isolation.
 - Admin API and frontend tests cover targeted reset, confirmation, error
   handling and refreshed route-health counts.
-

@@ -102,4 +102,3 @@ profile alongside the current batch state.
 - Frontend tests cover stale-result separation, `queued`/`reused` rendering,
   batch polling beyond 90 seconds, deadline messaging, and superseding a local
   batch without issuing duplicate probes.
-
