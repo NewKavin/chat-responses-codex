@@ -862,7 +862,7 @@ pub(super) fn proxied_stream_body(
         }
     });
 
-    Ok(Body::from_stream(stream))
+    Ok(Body::from_stream(Box::pin(stream)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1575,7 +1575,7 @@ pub(super) fn translated_stream_body(
         }
     });
 
-    Ok(Body::from_stream(stream))
+    Ok(Body::from_stream(Box::pin(stream)))
 }
 
 struct TranslatedPendingFrame {
