@@ -237,6 +237,7 @@ import type {
   QualifyModelsResponse
 } from '@/types'
 import {
+  CAPABILITY_PROBE_WAIT_TIMEOUT_MS,
   pollCapabilityDiscovery,
   routeStatusLabel,
   routeStatusTagType
@@ -310,6 +311,7 @@ const waitForProbesToSettle = async (
     initial: capabilityDiscovery.value,
     fetchDiscovery: fetchCapabilityDiscovery,
     cancelled: () => isUnmounted,
+    timeoutMs: CAPABILITY_PROBE_WAIT_TIMEOUT_MS,
     onProgress: progress => {
       if (isUnmounted) return
       capabilityProbeCompleted.value = progress.completed

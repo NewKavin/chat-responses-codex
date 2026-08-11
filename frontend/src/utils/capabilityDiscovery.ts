@@ -44,6 +44,12 @@ export interface PollCapabilityDiscoveryResult {
   cancelled: boolean
 }
 
+// One full probe round can take 30-60+ minutes with 130 routes at
+// concurrency 2 and up to request-timeout seconds per route. The poll must
+// not give up mid-round: keep waiting until the batch settles, with a 2h
+// hard cap as a safety net (the backend worker keeps running regardless).
+export const CAPABILITY_PROBE_WAIT_TIMEOUT_MS = 2 * 60 * 60 * 1000
+
 export const indexDiscovery = (
   response: CapabilityDiscoveryResponse
 ): CapabilityDiscoveryIndex => {
@@ -142,7 +148,7 @@ export const pollCapabilityDiscovery = async ({
   cancelled = () => false,
   onProgress,
   intervalMs = 2_500,
-  timeoutMs = 90_000
+  timeoutMs = CAPABILITY_PROBE_WAIT_TIMEOUT_MS
 }: PollCapabilityDiscoveryOptions): Promise<PollCapabilityDiscoveryResult> => {
   const deadline = now() + timeoutMs
   let discovery = initial

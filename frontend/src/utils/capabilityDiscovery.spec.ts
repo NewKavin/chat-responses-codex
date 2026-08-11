@@ -129,6 +129,32 @@ describe('capability discovery', () => {
     expect(result.timedOut).toBe(false)
   })
 
+  it('keeps polling well beyond the legacy 90s window until the round settles', async () => {
+    let now = 0
+    let attempts = 0
+
+    const result = await pollCapabilityDiscovery({
+      receipt,
+      initial: { models: [] },
+      fetchDiscovery: async () => {
+        attempts += 1
+        if (attempts < 80) return { models: [] }
+        const settled = discovery()
+        settled.models[0].routes.forEach(route => { route.last_attempt_at = receipt.started_at })
+        return settled
+      },
+      now: () => now,
+      sleep: async delay => { now += delay },
+      intervalMs: 2_500
+    })
+
+    // ~197.5s simulated runtime exceeds the old hardcoded 90s poll deadline.
+    expect(attempts).toBe(80)
+    expect(now).toBe(79 * 2_500)
+    expect(result.timedOut).toBe(false)
+    expect(result.progress.settled).toBe(true)
+  })
+
   it('caps request and sleep timing at the hard deadline', async () => {
     const stale = discovery()
     stale.models[0].routes.forEach(route => { route.last_attempt_at = 999 })
