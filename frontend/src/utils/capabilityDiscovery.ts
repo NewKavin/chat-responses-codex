@@ -190,11 +190,18 @@ export const pollCapabilityDiscovery = async ({
 }
 
 
+const TERMINAL_PROBE_BATCH_STATES = new Set<CapabilityProbeCandidateState>([
+  'completed',
+  'failed',
+  'cooldown_skipped',
+  'superseded'
+])
+
 export const capabilityProbeBatchProgress = (
   status: CapabilityProbeBatchStatus
 ): DiscoveryBatchProgress => {
   const completed = status.candidates.filter(
-    candidate => candidate.state === 'completed'
+    candidate => TERMINAL_PROBE_BATCH_STATES.has(candidate.state)
   ).length
   const total = status.candidates.length
   return {
@@ -218,6 +225,10 @@ export const probeBatchStateLabel = (
       return '已完成'
     case 'failed':
       return '本轮失败'
+    case 'cooldown_skipped':
+      return '冷却跳过'
+    case 'superseded':
+      return '已被替代'
   }
 }
 
@@ -230,9 +241,11 @@ export const probeBatchStateTagType = (
     case 'failed':
       return 'danger'
     case 'running':
+    case 'cooldown_skipped':
       return 'warning'
     case 'queued':
     case 'reused':
+    case 'superseded':
       return 'info'
   }
 }
@@ -304,4 +317,14 @@ export const pollCapabilityProbeBatch = async ({
   }
 
   return result(false, true)
+}
+
+export const formatProbeEta = (seconds: number | null): string | null => {
+  if (seconds === null) return null
+  if (seconds <= 0) return '即将完成'
+  const minutes = Math.max(1, Math.ceil(seconds / 60))
+  if (minutes < 60) return `约 ${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0 ? `约 ${hours} 小时` : `约 ${hours} 小时 ${rest} 分钟`
 }

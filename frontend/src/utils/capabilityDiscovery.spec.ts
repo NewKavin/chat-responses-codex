@@ -11,6 +11,8 @@ import {
   pollCapabilityProbeBatch,
   pollCapabilityDiscovery,
   probeBatchStateLabel,
+  probeBatchStateTagType,
+  formatProbeEta,
   routeStatusLabel,
   routeStatusTagType
 } from './capabilityDiscovery'
@@ -56,6 +58,7 @@ const receipt: ProbeAllCapabilitiesResponse = {
   started_at: 1_000,
   queued_routes: 2,
   reused_routes: 0,
+  models: ['deepseek-v4-flash'],
   candidates: [
     {
       upstream_id: 'deepseek',
@@ -113,6 +116,7 @@ describe('capability discovery', () => {
     const status: CapabilityProbeBatchStatus = {
       ...receipt,
       terminal_at: null,
+      estimated_remaining_seconds: null,
       candidates: [
         { ...receipt.candidates[0], state: 'completed' },
         { ...receipt.candidates[1], state: 'running' }
@@ -128,10 +132,60 @@ describe('capability discovery', () => {
     expect(probeBatchStateLabel('failed')).toBe('本轮失败')
   })
 
+  it('labels cooldown-skipped and superseded batch states distinctly', () => {
+    expect(probeBatchStateLabel('cooldown_skipped')).toBe('冷却跳过')
+    expect(probeBatchStateLabel('superseded')).toBe('已被替代')
+    expect(probeBatchStateTagType('cooldown_skipped')).toBe('warning')
+    expect(probeBatchStateTagType('superseded')).toBe('info')
+  })
+
+  it('counts failed, cooldown-skipped and superseded candidates as settled', () => {
+    const status: CapabilityProbeBatchStatus = {
+      ...receipt,
+      terminal_at: null,
+      estimated_remaining_seconds: 120,
+      candidates: [
+        { ...receipt.candidates[0], state: 'failed' },
+        { ...receipt.candidates[1], state: 'cooldown_skipped' }
+      ]
+    }
+
+    expect(capabilityProbeBatchProgress(status)).toEqual({
+      completed: 2,
+      total: 2,
+      settled: true
+    })
+
+    const superseded: CapabilityProbeBatchStatus = {
+      ...status,
+      candidates: [
+        { ...receipt.candidates[0], state: 'superseded' },
+        { ...receipt.candidates[1], state: 'completed' }
+      ]
+    }
+    expect(capabilityProbeBatchProgress(superseded)).toEqual({
+      completed: 2,
+      total: 2,
+      settled: true
+    })
+  })
+
+  it('formats batch ETA estimates for display', () => {
+    expect(formatProbeEta(null)).toBeNull()
+    expect(formatProbeEta(0)).toBe('即将完成')
+    expect(formatProbeEta(30)).toBe('约 1 分钟')
+    expect(formatProbeEta(125)).toBe('约 3 分钟')
+    expect(formatProbeEta(3_900)).toBe('约 1 小时 5 分钟')
+  })
+
   it('polls the batch endpoint until the backend marks the round terminal', async () => {
     let now = 0
     let attempts = 0
-    const initial: CapabilityProbeBatchStatus = { ...receipt, terminal_at: null }
+    const initial: CapabilityProbeBatchStatus = {
+      ...receipt,
+      terminal_at: null,
+      estimated_remaining_seconds: null
+    }
 
     const result = await pollCapabilityProbeBatch({
       initial,

@@ -377,7 +377,8 @@ export const adminApi = {
   }) => adminHttp.get<LogsResponse>('/admin/logs', { params }),
 
   // Models
-  getModels: () => adminHttp.get<{ models: string[] }>('/admin/models'),
+  getModels: (params?: { scope?: 'visible' }) =>
+    adminHttp.get<{ models: string[] }>('/admin/models', { params }),
 
   // Troubleshooting
   runTroubleshooting: (data: TroubleshootingRunRequest) =>

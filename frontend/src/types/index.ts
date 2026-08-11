@@ -631,6 +631,8 @@ export type CapabilityProbeCandidateState =
   | 'running'
   | 'completed'
   | 'failed'
+  | 'cooldown_skipped'
+  | 'superseded'
 
 export interface CapabilityProbeCandidateSummary {
   upstream_id: string
@@ -648,10 +650,12 @@ export interface ProbeAllCapabilitiesResponse {
   started_at: number
   queued_routes: number
   reused_routes: number
+  models: string[]
   candidates: CapabilityProbeCandidateSummary[]
 }
 
 export interface CapabilityProbeBatchStatus extends ProbeAllCapabilitiesResponse {
+  estimated_remaining_seconds: number | null
   terminal_at: number | null
 }
 

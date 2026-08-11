@@ -35,6 +35,24 @@
           一键探测思考档位
         </el-button>
       </el-tooltip>
+      <el-select
+        v-if="probeScopeModels.length > 0"
+        v-model="selectedProbeModels"
+        multiple
+        collapse-tags
+        collapse-tags-tooltip
+        :max-collapse-tags="2"
+        :loading="loadingProbeModels"
+        placeholder="选择探测模型（默认下游可见）"
+        class="probe-model-scope-select"
+      >
+        <el-option
+          v-for="model in probeScopeModels"
+          :key="model"
+          :label="model"
+          :value="model"
+        />
+      </el-select>
     </div>
 
     <el-tabs v-model="activeProbeTab" class="model-probe-tabs">
@@ -132,6 +150,24 @@
                 复用 {{ capabilityProbeBatchReused }} 条等价路由
               </el-tag>
               <span>{{ capabilityProbeBatchRows.length }} 个候选</span>
+            </div>
+            <div
+              v-if="capabilityProbeBatchModels.length > 0"
+              class="capability-probe-batch__scope"
+            >
+              <span class="capability-probe-batch__scope-label">本轮模型</span>
+              <el-tag
+                v-for="model in capabilityProbeBatchModels"
+                :key="model"
+                size="small"
+                effect="plain"
+                class="capability-probe-batch__scope-tag"
+              >
+                {{ model }}
+              </el-tag>
+            </div>
+            <div v-if="capabilityProbeBatchEta" class="capability-probe-batch__eta">
+              预计剩余 {{ capabilityProbeBatchEta }}
             </div>
             <div class="crc-table-shell">
               <el-table
@@ -280,6 +316,7 @@ import type {
 } from '@/types'
 import {
   CAPABILITY_PROBE_WAIT_TIMEOUT_MS,
+  formatProbeEta,
   pollCapabilityDiscovery,
   pollCapabilityProbeBatch,
   probeBatchStateLabel,
@@ -319,12 +356,23 @@ const capabilityProbeProgress = ref(0)
 const capabilityProbeCompleted = ref(0)
 const capabilityProbeTotal = ref(0)
 const capabilityProbeBatch = ref<CapabilityProbeBatchStatus | null>(null)
+const probeScopeModels = ref<string[]>([])
+const selectedProbeModels = ref<string[]>([])
+const loadingProbeModels = ref(false)
 const capabilityProbeBatchRows = computed(() =>
   capabilityProbeBatch.value?.candidates ?? []
 )
 const capabilityProbeBatchReused = computed(() =>
   capabilityProbeBatch.value?.reused_routes ?? 0
 )
+const capabilityProbeBatchModels = computed(() =>
+  capabilityProbeBatch.value?.models ?? []
+)
+const capabilityProbeBatchEta = computed(() => {
+  const status = capabilityProbeBatch.value
+  if (!status || status.terminal_at !== null) return null
+  return formatProbeEta(status.estimated_remaining_seconds)
+})
 const capabilityModelResults = computed(() =>
   capabilityDiscovery.value.models.map(model => ({
     exposed_model_slug: model.exposed_model_slug,
@@ -345,6 +393,27 @@ const fetchCapabilityDiscovery = async (
 ): Promise<CapabilityDiscoveryResponse> => {
   const { data } = await adminApi.getCapabilityDiscovery(timeoutMs)
   return data
+}
+
+const loadProbeModelScope = async () => {
+  if (isUnmounted) return
+  loadingProbeModels.value = true
+  try {
+    const { data: visible } = await adminApi.getModels({ scope: 'visible' })
+    let models = visible.models
+    if (models.length === 0) {
+      // 无下游可见模型时回退全量，保持旧行为（空集合 = 后端全量探测）
+      const { data: full } = await adminApi.getModels()
+      models = full.models
+    }
+    if (isUnmounted) return
+    probeScopeModels.value = models
+    selectedProbeModels.value = [...models]
+  } catch {
+    // 范围加载失败不阻塞探测：保持空集合，后端按全量处理
+  } finally {
+    loadingProbeModels.value = false
+  }
 }
 
 const refreshCapabilityDiscovery = async (): Promise<CapabilityDiscoveryResponse> => {
@@ -395,14 +464,16 @@ const runCapabilityProbe = async () => {
   capabilityProbeTotal.value = 0
   capabilityProbeBatch.value = null
   try {
-    const { data: receipt } = await adminApi.probeAllCapabilities()
+    const { data: receipt } = await adminApi.probeAllCapabilities({
+      models: selectedProbeModels.value
+    })
     if (isUnmounted) return
     capabilityProbeTotal.value = receipt.queued_routes
-    capabilityProbeBatch.value = { ...receipt, terminal_at: null }
+    capabilityProbeBatch.value = { ...receipt, terminal_at: null, estimated_remaining_seconds: null }
     ElMessage.success(`已排队 ${receipt.queued_routes} 条精确路由，正在等待探测完成`)
     let batchPollCancelled = false
     void pollCapabilityProbeBatch({
-      initial: { ...receipt, terminal_at: null },
+      initial: { ...receipt, terminal_at: null, estimated_remaining_seconds: null },
       fetchBatch: async (timeoutMs) => {
         const { data } = await adminApi.getCapabilityProbeBatch(
           receipt.batch_id,
@@ -565,6 +636,7 @@ const runQualification = async () => {
 
 onMounted(() => {
   void loadData()
+  void loadProbeModelScope()
   void refreshCapabilityDiscovery().catch(() => undefined)
 })
 
@@ -617,6 +689,33 @@ onUnmounted(() => {
 .model-probe-tabs,
 .model-probe-tab-panel {
   min-width: 0;
+}
+
+.probe-model-scope-select {
+  width: 320px;
+}
+
+.capability-probe-batch__scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.capability-probe-batch__scope-label {
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.capability-probe-batch__scope-tag {
+  margin-right: 0;
+}
+
+.capability-probe-batch__eta {
+  margin-top: 6px;
+  color: var(--crc-text-muted);
+  font-size: 12px;
 }
 
 .model-probe-tabs :deep(.el-tabs__header) {
