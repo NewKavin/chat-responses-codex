@@ -237,6 +237,52 @@ async fn key_credentials_cool_all_routes_for_that_key_but_not_another_key() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn same_base_url_upstreams_keep_route_health_fully_isolated() {
+    let shared_base_url = "https://shared-provider.example/v1";
+    let upstream_a = UpstreamConfig {
+        id: "up-account-a".into(),
+        base_url: shared_base_url.into(),
+        api_key: "key-a".into(),
+        ..snapshot_upstream(true)
+    };
+    let upstream_b = UpstreamConfig {
+        id: "up-account-b".into(),
+        base_url: shared_base_url.into(),
+        api_key: "key-b".into(),
+        ..snapshot_upstream(true)
+    };
+    let route_for = |upstream: &UpstreamConfig| RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    };
+    let key_for = |route: &RouteHealthKey| KeyHealthKey {
+        upstream_id: route.upstream_id.clone(),
+        key_fingerprint: route.key_fingerprint.clone(),
+    };
+    let route_a = route_for(&upstream_a);
+    let route_b = route_for(&upstream_b);
+    let key_a = key_for(&route_a);
+    let key_b = key_for(&route_b);
+    let mut registry = RouteHealthRegistry::new(16, 16);
+
+    registry.observe_route_failure(&route_a, RouteFailureClass::TransientServer, None);
+
+    assert!(matches!(
+        registry.reserve(&route_a, &key_a),
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::TransientServer,
+            ..
+        }
+    ));
+    assert!(matches!(
+        registry.reserve(&route_b, &key_b),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn route_failure_isolated_from_another_model_on_the_same_key() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let key = key("fingerprint-a");

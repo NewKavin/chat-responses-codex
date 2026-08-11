@@ -236,6 +236,22 @@ async fn different_keys_are_independent_and_retry_after_is_not_shortened() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn different_upstream_ids_keep_account_recovery_independent() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let first = AccountConcurrencyKey::new("up-account-a", "same-key-material");
+    let second = AccountConcurrencyKey::new("up-account-b", "same-key-material");
+
+    coordinator.reject(&first, Some(Duration::from_secs(60)), Instant::now());
+
+    assert!(coordinator.snapshot(&first, Instant::now()).saturated);
+    assert!(!coordinator.snapshot(&second, Instant::now()).saturated);
+    assert_eq!(
+        coordinator.snapshot(&second, Instant::now()).retry_after,
+        Duration::ZERO
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn stale_owner_cannot_complete_replacement_generation() {
     let coordinator = AccountConcurrencyRegistry::new(test_tuning());
     let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
