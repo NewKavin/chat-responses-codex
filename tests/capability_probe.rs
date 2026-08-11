@@ -4417,3 +4417,154 @@ async fn run_probe_job_skips_cooling_routes_and_supersedes_stale_jobs() {
     })
     .await;
 }
+
+async fn chat_probe_stream_mock() -> ProbeMock {
+    let sse_body = concat!(
+        "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chunk-2\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_owned();
+    ProbeMock::responding(move |_| {
+        let sse_body = sse_body.clone();
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            sse_body,
+        )
+            .into_response()
+    })
+    .await
+}
+
+fn probe_upstream(mock: &ProbeMock, strip: bool) -> UpstreamConfig {
+    UpstreamConfig {
+        id: "probe-strip".into(),
+        name: "probe-strip".into(),
+        base_url: mock.base_url.clone(),
+        api_key: "probe-secret".into(),
+        supported_models: vec!["probe-model".into()],
+        strip_nonstandard_chat_fields: strip,
+        active: true,
+        ..UpstreamConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn chat_probe_stream_body_strips_nonstandard_fields_when_configured() {
+    let mock = chat_probe_stream_mock().await;
+    let (outcome, _) = run_probe_plan_with_coordination_for_test(
+        &mock.base_url,
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::MinimalText { stream: true }],
+            output_token_cap: 16,
+        },
+        5,
+        None,
+        Some(probe_upstream(&mock, true)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.capability(Capability::TextStream),
+        EvidenceState::Supported
+    );
+
+    let captured = mock.capture.lock().unwrap();
+    let body = captured.last().expect("probe stream body captured");
+    for field in ["stream_options", "metadata", "user", "parallel_tool_calls"] {
+        assert!(
+            body.get(field).is_none(),
+            "strip=true must drop {field} from probe body: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn chat_probe_stream_body_keeps_stream_options_when_upstream_forwards() {
+    let mock = chat_probe_stream_mock().await;
+    let (outcome, _) = run_probe_plan_with_coordination_for_test(
+        &mock.base_url,
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::MinimalText { stream: true }],
+            output_token_cap: 16,
+        },
+        5,
+        None,
+        Some(probe_upstream(&mock, false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.capability(Capability::TextStream),
+        EvidenceState::Supported
+    );
+
+    let captured = mock.capture.lock().unwrap();
+    let body = captured.last().expect("probe stream body captured");
+    assert_eq!(
+        body["stream_options"],
+        json!({"include_usage": false}),
+        "forwarding upstream must keep the probe stream_options: {body}"
+    );
+}
+
+#[tokio::test]
+async fn chat_probe_sends_reasoning_effort_candidate_verbatim() {
+    let mock = ProbeMock::chat(|_| {
+        json!({
+            "id": "chatcmpl-probe",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "probe-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "391",
+                    "reasoning_content": "17 * 23 = 391"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+    })
+    .await;
+    let (outcome, _) = run_probe_plan_with_coordination_for_test(
+        &mock.base_url,
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                field: "reasoning_effort".into(),
+                value: json!("xhigh"),
+            }],
+            output_token_cap: 16,
+        },
+        5,
+        None,
+        Some(probe_upstream(&mock, false)),
+    )
+    .await
+    .unwrap();
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+
+    let captured = mock.capture.lock().unwrap();
+    let body = captured.last().expect("probe body captured");
+    assert_eq!(
+        body["reasoning_effort"],
+        json!("xhigh"),
+        "probe body must send the candidate verbatim, not the capped value: {body}"
+    );
+}

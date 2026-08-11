@@ -18,6 +18,7 @@ use crate::capabilities::{
     ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
+use super::compat::normalize_chat_payload_for_upstream_compatibility;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
 use crate::protocol::{
     ProtocolError, StreamAggregateResult, StreamResponseAggregator, UpstreamStreamErrorKind,
@@ -1808,7 +1809,7 @@ with the exact result as the nonce string.";
                 let response = if self.protocol() == WireProtocol::Responses {
                     self.post_responses(body).await?
                 } else {
-                    self.post_chat(body).await?
+                    self.post_chat_unmodified(body).await?
                 };
                 if response.status != StatusCode::OK {
                     return Ok(verdict_for_status(
@@ -1832,8 +1833,58 @@ with the exact result as the nonce string.";
         }
     }
 
+    /// Route every chat-protocol probe body through the same upstream
+    /// compatibility normalization as real requests, so a probe that passes
+    /// implies the same request shape in production (WS-E4).
+    ///
+    /// The reasoning-effort candidate is restored verbatim afterwards: real
+    /// requests cap xhigh/max down to high, but a probe must send the exact
+    /// candidate value or it could never distinguish an upstream that rejects
+    /// xhigh from one that silently downgrades it.
+    fn normalize_probe_chat_body(&self, body: Value) -> Value {
+        let mut body = body;
+        let original_reasoning_effort = body
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let strip = self
+            .upstream
+            .as_ref()
+            .is_some_and(|upstream| upstream.strip_nonstandard_chat_fields);
+        normalize_chat_payload_for_upstream_compatibility(
+            &mut body,
+            &self.runtime_model_slug,
+            &self.base_url,
+            strip,
+        );
+        if let Some(effort) = original_reasoning_effort {
+            body["reasoning_effort"] = Value::String(effort);
+        }
+        body
+    }
+
     async fn post_chat(&self, body: Value) -> io::Result<ProbeHttpResponse> {
+        self.post_chat_inner(body, true).await
+    }
+
+    /// Declarative extension probes send their request patch verbatim: the
+    /// whole point is to observe whether the upstream accepts the patched
+    /// field, so it must not be stripped by the compatibility pass.
+    async fn post_chat_unmodified(&self, body: Value) -> io::Result<ProbeHttpResponse> {
+        self.post_chat_inner(body, false).await
+    }
+
+    async fn post_chat_inner(
+        &self,
+        body: Value,
+        normalize: bool,
+    ) -> io::Result<ProbeHttpResponse> {
         let _held = self.reserve_upstream_request().await?;
+        let body = if normalize {
+            self.normalize_probe_chat_body(body)
+        } else {
+            body
+        };
         let url = join_upstream_url(&self.base_url, "/v1/chat/completions");
         let response = self
             .client
@@ -1956,6 +2007,7 @@ with the exact result as the nonce string.";
     }
 
     async fn post_chat_stream(&self, body: Value) -> io::Result<ProbeSseResponse> {
+        let body = self.normalize_probe_chat_body(body);
         self.post_stream(
             body,
             "/v1/chat/completions",
