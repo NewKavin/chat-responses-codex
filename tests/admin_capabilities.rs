@@ -288,6 +288,66 @@ async fn manual_probe_only_enqueues_and_returns_accepted() {
 }
 
 #[tokio::test]
+async fn capability_probe_all_models_filter_limits_batch_scope() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    fixture.import_revision(1).await;
+    let (sender, mut receiver) = mpsc::channel(1);
+    fixture.state.set_capability_probe_sender(sender);
+
+    // A models filter restricts the batch to the requested scope and the
+    // response marks the probed model list.
+    let scoped = fixture
+        .post_json(
+            "/api/admin/capabilities/probe-all",
+            json!({"models": ["opaque"]}),
+        )
+        .await;
+    assert_eq!(scoped.status(), StatusCode::OK);
+    let scoped = response_json(scoped).await;
+    assert_eq!(scoped["queued_routes"], 1);
+    assert_eq!(scoped["models"], json!(["opaque"]));
+    let scoped_job = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_jobs();
+    assert_eq!(scoped_job.len(), 1);
+    assert_eq!(
+        scoped_job[0].exposed_model_slugs.iter().collect::<Vec<_>>(),
+        vec!["opaque"]
+    );
+    fixture.state.finish_capability_probe_job(
+        &scoped_job[0].key,
+        &scoped_job[0].configuration,
+        &chat_responses_codex::state::ProbeJobExecution::Completed,
+    );
+
+    // An unmatched model filter leaves no eligible routes.
+    let unmatched = fixture
+        .post_json(
+            "/api/admin/capabilities/probe-all",
+            json!({"models": ["not-configured"]}),
+        )
+        .await;
+    assert_eq!(unmatched.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response_json(unmatched).await["error"]["code"],
+        "capability_probe_no_eligible_routes"
+    );
+
+    // An empty filter keeps the old full-scope behavior and still reports
+    // the model list.
+    let full = fixture
+        .post_json("/api/admin/capabilities/probe-all", json!({}))
+        .await;
+    assert_eq!(full.status(), StatusCode::OK);
+    let full = response_json(full).await;
+    assert_eq!(full["queued_routes"], 1);
+    assert_eq!(full["models"], json!(["opaque"]));
+}
+
+#[tokio::test]
 async fn capability_probe_all_rejects_revision_zero_policy() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;

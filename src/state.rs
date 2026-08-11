@@ -469,9 +469,7 @@ pub enum ManualProbeBatchCandidateState {
 pub enum ProbeJobExecution {
     Completed,
     Failed(io::Error),
-    CooldownSkipped {
-        cooldown_remaining: Duration,
-    },
+    CooldownSkipped { cooldown_remaining: Duration },
     Superseded,
 }
 
@@ -494,6 +492,11 @@ pub struct CapabilityProbeBatchStatus {
     pub started_at: u64,
     pub queued_routes: usize,
     pub reused_routes: usize,
+    /// The exposed model slugs covered by this batch (sorted, deduplicated).
+    pub models: Vec<String>,
+    /// Live estimate of the remaining wall-clock time, computed from the
+    /// settled candidate ratio; `None` before any candidate settles.
+    pub estimated_remaining_seconds: Option<u64>,
     pub candidates: Vec<ProbeCandidateSummary>,
     pub terminal_at: Option<u64>,
 }
@@ -504,6 +507,7 @@ pub struct ManualProbeBatchReceipt {
     pub started_at: u64,
     pub queued_routes: usize,
     pub reused_routes: usize,
+    pub models: Vec<String>,
     pub candidates: Vec<ProbeCandidateSummary>,
 }
 
@@ -1975,6 +1979,11 @@ impl AppState {
 
         let batch_id = Uuid::new_v4().to_string();
         let started_at = unix_seconds();
+        let mut batch_models = BTreeSet::new();
+        for job in &prepared_jobs {
+            batch_models.extend(job.exposed_model_slugs.iter().cloned());
+        }
+        let batch_models = batch_models.into_iter().collect::<Vec<_>>();
         let mut queued_jobs = Vec::new();
         let mut queued_routes = 0;
         let mut reused_routes = 0;
@@ -2050,6 +2059,8 @@ impl AppState {
             started_at,
             queued_routes,
             reused_routes,
+            models: batch_models.clone(),
+            estimated_remaining_seconds: None,
             candidates: candidates
                 .iter()
                 .map(|candidate| candidate.summary.clone())
@@ -2073,6 +2084,7 @@ impl AppState {
             started_at,
             queued_routes,
             reused_routes,
+            models: batch_models,
             candidates: receipt_candidates,
         })
     }
@@ -2087,7 +2099,34 @@ impl AppState {
             .lock()
             .expect("probe batch lock poisoned");
         prune_capability_probe_batches(&mut batches, now);
-        batches.get(batch_id).map(|record| record.status.clone())
+        batches.get(batch_id).map(|record| {
+            let mut status = record.status.clone();
+            let settled = status
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    matches!(
+                        candidate.state,
+                        ManualProbeBatchCandidateState::Completed
+                            | ManualProbeBatchCandidateState::Failed
+                            | ManualProbeBatchCandidateState::CooldownSkipped
+                            | ManualProbeBatchCandidateState::Superseded
+                    )
+                })
+                .count();
+            let total = status.candidates.len();
+            if settled == 0 {
+                status.estimated_remaining_seconds = None;
+            } else if settled >= total {
+                status.estimated_remaining_seconds = Some(0);
+            } else {
+                let elapsed = now.saturating_sub(status.started_at);
+                let remaining = total - settled;
+                status.estimated_remaining_seconds =
+                    Some((elapsed * remaining as u64 / settled as u64).max(1));
+            }
+            status
+        })
     }
 
     pub fn mark_capability_probe_running(
@@ -2202,7 +2241,11 @@ impl AppState {
         // A discarded job was superseded by a newer configuration or by the
         // probe feature being disabled; record it instead of silently
         // dropping it from the batch terminal state.
-        self.finish_capability_probe_job(&job.key, &job.configuration, &ProbeJobExecution::Superseded);
+        self.finish_capability_probe_job(
+            &job.key,
+            &job.configuration,
+            &ProbeJobExecution::Superseded,
+        );
     }
 
     fn remove_capability_probe_submission(
@@ -4817,6 +4860,29 @@ impl AppState {
             }
         }
 
+        let mut models = models.into_iter().collect::<Vec<_>>();
+        models.sort();
+        models
+    }
+
+    /// Union of models visible to at least one active downstream: every
+    /// route model that falls inside a downstream allowlist (downstreams
+    /// with an empty allowlist see every route model). Matches the
+    /// per-downstream semantics of `available_models_for_downstream`.
+    pub async fn downstream_visible_models(&self) -> Vec<String> {
+        let snapshot = self.routing_snapshot().await;
+        let mut models = HashSet::new();
+        for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
+            for model in upstream.route_models() {
+                if snapshot.downstreams.iter().any(|downstream| {
+                    downstream.active
+                        && (downstream.model_allowlist.is_empty()
+                            || portal_model_is_allowed(&downstream.model_allowlist, &model))
+                }) {
+                    models.insert(model);
+                }
+            }
+        }
         let mut models = models.into_iter().collect::<Vec<_>>();
         models.sort();
         models

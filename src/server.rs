@@ -2,6 +2,7 @@ mod admin;
 mod gateway;
 mod portal;
 
+pub use crate::state::ProbeJobExecution;
 pub use gateway::compatibility_semantics::{
     validate_client_json, validate_client_stream, SemanticCheckResult, SemanticExpectation,
     SemanticValidation,
@@ -13,4 +14,3 @@ pub use gateway::{
     run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply, CapabilityProbePlan,
     CapabilityProbeService, CoreProbeCase, ProbePlanCompleteness, ReasoningTrigger,
 };
-pub use crate::state::ProbeJobExecution;

@@ -630,22 +630,30 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
     Json(upstreams_with_runtime).into_response()
 }
 
-/// List all available models from all upstreams
-pub(super) async fn admin_list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let snapshot = state.snapshot().await;
-
-    let mut models: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for upstream in snapshot.upstreams.iter() {
-        if upstream.active {
-            for model in upstream.route_models() {
-                models.insert(model);
+/// List all available models from all upstreams. With `scope=visible` the
+/// list is narrowed to the models actually visible to at least one active
+/// downstream (per-downstream allowlists), which is the default scope used
+/// by the one-click capability probe.
+pub(super) async fn admin_list_models(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let models_list = if params.get("scope").map(String::as_str) == Some("visible") {
+        state.downstream_visible_models().await
+    } else {
+        let snapshot = state.snapshot().await;
+        let mut models: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for upstream in snapshot.upstreams.iter() {
+            if upstream.active {
+                for model in upstream.route_models() {
+                    models.insert(model);
+                }
             }
         }
-    }
-
-    let mut models_list: Vec<String> = models.into_iter().collect();
-    models_list.sort();
+        let mut models_list: Vec<String> = models.into_iter().collect();
+        models_list.sort();
+        models_list
+    };
 
     Json(json!({
         "models": models_list

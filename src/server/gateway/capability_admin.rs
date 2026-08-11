@@ -474,6 +474,7 @@ pub(super) async fn admin_capability_probe_all(
             "started_at": receipt.started_at,
             "queued_routes": receipt.queued_routes,
             "reused_routes": receipt.reused_routes,
+            "models": receipt.models,
             "candidates": receipt.candidates,
         }))
         .into_response(),

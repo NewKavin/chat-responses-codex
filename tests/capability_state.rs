@@ -571,6 +571,70 @@ async fn manual_probe_batches_have_identity_and_reuse_equivalent_routes() {
 }
 
 #[tokio::test]
+async fn manual_probe_batch_status_reports_model_scope_and_eta() {
+    let dir = tempdir().unwrap();
+    let upstream_a = learning_upstream("up-models-a", "Lab/ModelsA");
+    let upstream_b = learning_upstream("up-models-b", "Lab/ModelsB");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream_a, upstream_b]),
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(4);
+    state.set_capability_probe_sender(sender);
+    let filters = std::collections::BTreeSet::new();
+
+    let batch = state
+        .queue_manual_capability_probe_batch(&filters, &filters)
+        .await
+        .unwrap();
+    assert_eq!(batch.models, vec!["Lab/ModelsA", "Lab/ModelsB"]);
+    let status = state
+        .capability_probe_batch_status(&batch.batch_id)
+        .unwrap();
+    assert_eq!(status.models, vec!["Lab/ModelsA", "Lab/ModelsB"]);
+    assert_eq!(status.estimated_remaining_seconds, None);
+
+    // Terminating one candidate yields an estimated remaining time.
+    let job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+    state.finish_capability_probe_job(&job.key, &job.configuration, &ProbeJobExecution::Completed);
+    let status = state
+        .capability_probe_batch_status(&batch.batch_id)
+        .unwrap();
+    assert!(
+        status.estimated_remaining_seconds.is_some(),
+        "a partially completed batch must report an ETA"
+    );
+
+    // A models-filtered batch reports exactly the requested scope.
+    let scoped = state
+        .queue_manual_capability_probe_batch(
+            &filters,
+            &std::collections::BTreeSet::from(["Lab/ModelsB".to_string()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped.models, vec!["Lab/ModelsB"]);
+    assert_eq!(
+        state
+            .capability_probe_batch_status(&scoped.batch_id)
+            .unwrap()
+            .models,
+        vec!["Lab/ModelsB"]
+    );
+}
+
+#[tokio::test]
 async fn manual_probe_batch_tracks_cooldown_skipped_and_superseded_terminal_states() {
     let dir = tempdir().unwrap();
     let upstream = learning_upstream("up-batch-states", "Lab/BatchStates");
@@ -672,7 +736,9 @@ async fn discarded_probe_submission_is_marked_superseded_in_batches() {
         .unwrap();
     let job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
     state.discard_capability_probe_submission(&job);
-    let status = state.capability_probe_batch_status(&batch.batch_id).unwrap();
+    let status = state
+        .capability_probe_batch_status(&batch.batch_id)
+        .unwrap();
     assert_eq!(
         status.candidates[0].state,
         ManualProbeBatchCandidateState::Superseded
