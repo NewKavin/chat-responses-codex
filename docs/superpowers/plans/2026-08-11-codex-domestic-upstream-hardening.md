@@ -144,7 +144,7 @@
 
 ---
 
-## 4. Workstream C：会话不重启恢复（问题 3）
+## 4. Workstream C：会话不重启恢复（问题 3） ✅ 已完成 (commit 5df3e4b)
 
 ### C1. 存量继续会话 required 集合按当前策略消毒
 **改动**（`src/server/gateway/capability_routing.rs`）：
@@ -166,7 +166,7 @@
 
 ---
 
-## 5. Workstream D：ParallelToolCalls 残留清理（问题 5）
+## 5. Workstream D：ParallelToolCalls 残留清理（问题 5） ✅ 已完成 (commit 5df3e4b)
 
 - D1 = C1（消毒），D2 = C3（命名），已覆盖。
 - D3. 确认发送路径全部剥离：`strip_unsupported_parallel_tool_calls`（`compat.rs:204-214`）在**所有**构建上游请求的路径被调用，包括继续会话回放与失败重试路径（检索 `upstream.rs` 全部 body 组装点）；对 `resolved` 缺失（未探测）的路由按"不支持"处理（保守剥离，配合 A1）。
