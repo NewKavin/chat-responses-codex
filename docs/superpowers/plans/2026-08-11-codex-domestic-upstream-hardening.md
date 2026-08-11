@@ -120,7 +120,7 @@
 - 502 + `{"error":{"message":"invalid parameter: stream_options"}}` → RequestRejected（不冷却）。
 - 500 + `{"error":{"message":"internal server error"}}` → TransientServer（维持）。
 
-### B2. 请求内共模失败熔断（防"一个请求打瘫整池"，本 Workstream 核心）
+### B2. 请求内共模失败熔断（防"一个请求打瘫整池"，本 Workstream 核心）✅ 已完成 (commit 65f8005)
 **改动**（`src/server/gateway.rs` 路由循环，锚点 `'key_candidates` `:5313`）：
 - 在单个下游请求的作用域内维护 `common_mode_tracker: (FailureClass, Option<u16>, 计数)`。
 - 当**连续 K=2 条不同路由**以相同 (class, upstream_status) 失败且 class ∈ {TransientServer, EdgeProxyError, RequestRejected 疑似}：
@@ -134,7 +134,7 @@
 - 模拟 8 条路由全部对同一请求回 502+HTML：断言只物理尝试 2 条、无任何路由进入冷却、下游收到带上游摘要的 502；随后另一个正常请求立即可用（路由未被污染）。
 - 模拟仅 key1 故障（502），key2 正常：断言 key1 冷却、key2 成功——**保持问题 4 要求的 key 级隔离**（已有测试 `fe1c160` 锁定，勿回归）。
 
-### B3. 冷却/半开与重试提示对齐
+### B3. 冷却/半开与重试提示对齐 ✅ 已完成 (commit 15372a0)
 **改动**：
 - 半开探测失败不无限加深：`failure_step`（`route_health.rs:1369`）当 `state.last_failure_class` 相同且处于半开验证时，step 封顶（如 max 5），防止 5min 顶格常驻。
 - `errors.rs:134` 的 `please try again in {n}s` 改为取**所有被记录冷却路由的最小剩余到期时间**（`record_cooled_route_attempt` 已带 `retry_after`，聚合取 min），并在 503 响应头附 `Retry-After: <同值>`。
