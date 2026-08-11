@@ -31,10 +31,10 @@
 - Test: `tests/account_concurrency.rs`
 - Test: `tests/gateway/chat/routing.rs`
 
-- [ ] Add a characterization test with two upstream IDs, different Keys and the same Base URL.
-- [ ] Assert a transient failure on upstream A leaves upstream B ready.
-- [ ] Assert account concurrency rejection on A leaves B independently probeable.
-- [ ] Run the three focused suites and commit the isolation contract.
+- [x] Add a characterization test with two upstream IDs, different Keys and the same Base URL.
+- [x] Assert a transient failure on upstream A leaves upstream B ready.
+- [x] Assert account concurrency rejection on A leaves B independently probeable.
+- [x] Run the three focused suites and commit the isolation contract.
 
 ### Task 3: Hot Recovery Tuning
 
@@ -51,13 +51,13 @@
 - Test: `tests/redis_runtime.rs`
 - Test: `frontend/src/utils/runtimeSettings.spec.ts`
 
-- [ ] Write failing field-classification tests for the five recovery settings.
-- [ ] Write failing local registry tests for updated delay/TTL/cooldown behavior.
-- [ ] Add mutable recovery tuning snapshots to local and Redis coordinators.
-- [ ] Apply recovery tuning after settings persistence and before publishing the new runtime snapshot.
-- [ ] Clamp existing local transient cooldowns when the maximum is lowered.
-- [ ] Update frontend apply modes and run backend/frontend focused tests.
-- [ ] Commit the hot-apply change.
+- [x] Write failing field-classification tests for the five recovery settings.
+- [x] Write failing local registry tests for updated delay/TTL/cooldown behavior.
+- [x] Add mutable recovery tuning snapshots to local and Redis coordinators.
+- [x] Apply recovery tuning after settings persistence and before publishing the new runtime snapshot.
+- [x] Clamp existing local transient cooldowns when the maximum is lowered.
+- [x] Update frontend apply modes and run backend/frontend focused tests.
+- [x] Commit the hot-apply change.
 
 ### Task 4: Targeted Route Cooldown Reset
 
@@ -71,10 +71,10 @@
 - Test: `frontend/tests/api/admin.spec.ts`
 - Test: `frontend/tests/views/admin-ui.spec.ts`
 
-- [ ] Write a failing API test that cools one upstream and resets only its configured exact routes.
-- [ ] Add `POST /api/admin/upstreams/{id}/route-health/reset` with stable success/error envelopes.
-- [ ] Add the upstream-page reset command with confirmation and refreshed health counts.
-- [ ] Run admin API and frontend tests, then commit.
+- [x] Write a failing API test that cools one upstream and resets only its configured exact routes.
+- [x] Add `POST /api/admin/upstreams/{id}/route-health/reset` with stable success/error envelopes.
+- [x] Add the upstream-page reset command with confirmation and refreshed health counts.
+- [x] Run admin API and frontend tests, then commit.
 
 ### Task 5: Capability Probe Batch Tracking
 
@@ -92,19 +92,19 @@
 - Test: `tests/admin_capabilities.rs`
 - Test: `frontend/src/utils/capabilityDiscovery.spec.ts`
 
-- [ ] Write failing tests for batch identity, queued/reused candidates and terminal progress.
-- [ ] Add bounded in-memory batch state and attach batches to equivalent in-flight jobs.
-- [ ] Add `GET /api/admin/capabilities/probe-batches/{batch_id}`.
-- [ ] Poll batch state in the frontend and show current state separately from the last profile result.
-- [ ] Run capability and frontend tests, then commit.
+- [x] Write failing tests for batch identity, queued/reused candidates and terminal progress.
+- [x] Add bounded in-memory batch state and attach batches to equivalent in-flight jobs.
+- [x] Add `GET /api/admin/capabilities/probe-batches/{batch_id}`.
+- [x] Poll batch state in the frontend and show current state separately from the last profile result.
+- [x] Run capability and frontend tests, then commit.
 
 ### Task 6: Full Verification and Delivery
 
 **Files:**
 - Verify all changed files and deployment artifacts.
 
-- [ ] Run `rtk cargo test`.
-- [ ] Run frontend type-check, Vitest and production build.
-- [ ] Run `rtk git diff --check` and inspect commits/worktree status.
+- [x] Run `rtk cargo test`.
+- [x] Run frontend type-check, Vitest and production build.
+- [x] Run `rtk git diff --check` and inspect commits/worktree status.
 - [ ] Merge the isolated branch into `main` without touching other worktrees.
 - [ ] Push `origin/main`, verify remote SHA, deploy the production Compose customization, and run health checks.
