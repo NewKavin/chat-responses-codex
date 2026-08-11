@@ -118,6 +118,7 @@ fn resolve(
             route_overrides: &[],
             policy_extensions: &[],
             profile: profile.as_ref(),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: policy,
         })
         .unwrap()

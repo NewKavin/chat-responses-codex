@@ -3,10 +3,11 @@ use std::error::Error;
 use std::fmt;
 
 use super::types::{
-    Capability, CapabilitySource, DeclarativeProbeCase, DialectCorrectionRule, DialectProfileKey,
-    DialectProfileState, EvidenceState, ReasoningCarrier, ReasoningMode, RequestedFeatures,
-    ResolvedCapabilities, ResolvedCapability, ResolvedRequestExtension, RouteCapabilityOverride,
-    RouteIdentity, SemanticPolicy, TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    baseline_capabilities, compile_dialect_preset, Capability, CapabilitySource,
+    DeclarativeProbeCase, DialectCorrectionRule, DialectProfileKey, DialectProfileState,
+    EvidenceState, ReasoningCarrier, ReasoningMode, RequestedFeatures, ResolvedCapabilities,
+    ResolvedCapability, ResolvedRequestExtension, RouteCapabilityOverride, RouteIdentity,
+    SemanticPolicy, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 
 static EMPTY_SEMANTIC_POLICY: SemanticPolicy = SemanticPolicy {
@@ -49,6 +50,7 @@ pub struct ResolutionInput<'a> {
     pub route_overrides: &'a [&'a RouteCapabilityOverride],
     pub policy_extensions: &'a [&'a DeclarativeProbeCase],
     pub profile: Option<&'a UpstreamDialectProfile>,
+    pub dialect_preset: Option<&'a str>,
     pub strip_nonstandard_chat_fields: crate::state::NonstandardFieldPolicy,
 }
 
@@ -61,6 +63,7 @@ impl<'a> ResolutionInput<'a> {
             route_overrides: &[],
             policy_extensions: &[],
             profile: None,
+            dialect_preset: None,
             strip_nonstandard_chat_fields: crate::state::NonstandardFieldPolicy::Auto,
         }
     }
@@ -77,6 +80,10 @@ impl CapabilityResolver {
         let profile_key = DialectProfileKey::from_route(input.route);
         let profile = input.profile.filter(|profile| profile.key == profile_key);
         let input = ResolutionInput { profile, ..input };
+        // A static dialect preset is a fallback below probe evidence: it only
+        // applies when the route has no usable probe profile.
+        let preset = input.dialect_preset.and_then(compile_dialect_preset);
+        let uses_preset = profile.is_none() && preset.is_some();
         let mut values = baseline_capabilities();
         let continuation_carrier = matching_continuation_carrier(&input);
 
@@ -104,6 +111,12 @@ impl CapabilityResolver {
                     );
                 }
             }
+        } else if let Some(preset) = preset.as_ref() {
+            for (&capability, resolved) in &preset.values {
+                if resolved.state != EvidenceState::Unobserved {
+                    values.insert(capability, *resolved);
+                }
+            }
         }
 
         for route_override in input.route_overrides {
@@ -121,24 +134,45 @@ impl CapabilityResolver {
         }
 
         let (reasoning_carrier, reasoning_carrier_source) =
-            resolve_reasoning_carrier(&input, continuation_carrier);
+            resolve_reasoning_carrier(&input, continuation_carrier, preset.as_ref());
         validate_required_capabilities(&input, &values, reasoning_carrier)?;
 
-        let (token_limit_field, token_limit_source) = resolve_token_limit_field(&input);
+        let (token_limit_field, token_limit_source) =
+            resolve_token_limit_field(&input, preset.as_ref());
         let correction_rules = resolve_correction_rules(&input);
-        let (reasoning_control_field, effort_map) = resolve_effort_control(&input);
+        let (reasoning_control_field, effort_map) = resolve_effort_control(&input, preset.as_ref());
         let effort_source = if effort_map.is_empty() {
             CapabilitySource::Baseline
+        } else if uses_preset {
+            CapabilitySource::Policy
         } else {
             CapabilitySource::Probe
         };
-        let (request_extensions, request_extension_source) = resolve_extensions(&input);
+        let (request_extensions, request_extension_source) =
+            resolve_extensions(&input, preset.as_ref());
 
         let reasoning_mode = input.semantic.reasoning_mode.unwrap_or(ReasoningMode::Off);
-        let profile_state = input
-            .profile
-            .map(|profile| profile.state)
-            .unwrap_or(DialectProfileState::Unknown);
+        let profile_state = if let Some(profile) = input.profile {
+            profile.state
+        } else if uses_preset {
+            DialectProfileState::Partial
+        } else {
+            DialectProfileState::Unknown
+        };
+        let omit_optional_extensions = if uses_preset {
+            preset
+                .as_ref()
+                .map(|preset| preset.omit_optional_extensions)
+                .unwrap_or(false)
+        } else {
+            match input.strip_nonstandard_chat_fields {
+                crate::state::NonstandardFieldPolicy::AlwaysStrip => true,
+                crate::state::NonstandardFieldPolicy::Forward => false,
+                crate::state::NonstandardFieldPolicy::Auto => {
+                    profile_state == DialectProfileState::Unknown
+                }
+            }
+        };
         let field_sources = BTreeMap::from([
             ("token_limit_field".to_owned(), token_limit_source),
             ("reasoning_carrier".to_owned(), reasoning_carrier_source),
@@ -174,16 +208,17 @@ impl CapabilityResolver {
             correction_rules,
             reasoning_control_field,
             effort_map,
-            omit_sampling_fields: input.semantic.omit_sampling_fields.clone(),
+            omit_sampling_fields: if uses_preset {
+                preset
+                    .as_ref()
+                    .map(|preset| preset.omit_sampling_fields.clone())
+                    .unwrap_or_default()
+            } else {
+                input.semantic.omit_sampling_fields.clone()
+            },
             context_window: input.semantic.context_window,
             max_output_tokens: input.semantic.max_output_tokens,
-            omit_optional_extensions: match input.strip_nonstandard_chat_fields {
-                crate::state::NonstandardFieldPolicy::AlwaysStrip => true,
-                crate::state::NonstandardFieldPolicy::Forward => false,
-                crate::state::NonstandardFieldPolicy::Auto => {
-                    profile_state == DialectProfileState::Unknown
-                }
-            },
+            omit_optional_extensions,
             profile_state,
             provisional: profile_state == DialectProfileState::Unknown,
             native_preferred: match profile_state {
@@ -211,34 +246,6 @@ fn resolve_correction_rules(input: &ResolutionInput<'_>) -> Vec<DialectCorrectio
         }
     }
     rules
-}
-
-fn baseline_capabilities() -> BTreeMap<Capability, ResolvedCapability> {
-    Capability::ALL
-        .into_iter()
-        .map(|capability| {
-            let state = if matches!(
-                capability,
-                Capability::TextInput
-                    | Capability::NonStreamingResponse
-                    | Capability::TextStream
-                    | Capability::FunctionTools
-                    | Capability::ForcedToolChoice
-                    | Capability::ToolContinuation
-            ) {
-                EvidenceState::Supported
-            } else {
-                EvidenceState::Unobserved
-            };
-            (
-                capability,
-                ResolvedCapability {
-                    state,
-                    source: CapabilitySource::Baseline,
-                },
-            )
-        })
-        .collect()
 }
 
 fn matching_continuation_carrier(input: &ResolutionInput<'_>) -> Option<ReasoningCarrier> {
@@ -292,13 +299,19 @@ fn reasoning_carrier_matches_protocol(carrier: ReasoningCarrier, protocol: WireP
     )
 }
 
-fn resolve_token_limit_field(input: &ResolutionInput<'_>) -> (TokenLimitField, CapabilitySource) {
+fn resolve_token_limit_field(
+    input: &ResolutionInput<'_>,
+    preset: Option<&ResolvedCapabilities>,
+) -> (TokenLimitField, CapabilitySource) {
     let mut value = TokenLimitField::Omit;
     let mut source = CapabilitySource::Baseline;
 
     if let Some(profile_value) = input.profile.and_then(|profile| profile.token_limit_field) {
         value = profile_value;
         source = CapabilitySource::Probe;
+    } else if let Some(preset) = preset {
+        value = preset.token_limit_field;
+        source = CapabilitySource::Policy;
     }
     for route_override in input.route_overrides {
         if let Some(override_value) = route_override.token_limit_field {
@@ -313,6 +326,7 @@ fn resolve_token_limit_field(input: &ResolutionInput<'_>) -> (TokenLimitField, C
 fn resolve_reasoning_carrier(
     input: &ResolutionInput<'_>,
     continuation_carrier: Option<ReasoningCarrier>,
+    preset: Option<&ResolvedCapabilities>,
 ) -> (ReasoningCarrier, CapabilitySource) {
     let mut value = continuation_carrier.unwrap_or(ReasoningCarrier::None);
     let mut source = CapabilitySource::Baseline;
@@ -320,6 +334,9 @@ fn resolve_reasoning_carrier(
     if let Some(profile_value) = input.profile.and_then(|profile| profile.reasoning_carrier) {
         value = profile_value;
         source = CapabilitySource::Probe;
+    } else if let Some(preset) = preset {
+        value = preset.reasoning_carrier;
+        source = CapabilitySource::Policy;
     }
     for route_override in input.route_overrides {
         if let Some(override_value) = route_override.reasoning_carrier {
@@ -333,8 +350,15 @@ fn resolve_reasoning_carrier(
 
 fn resolve_effort_control(
     input: &ResolutionInput<'_>,
-) -> (Option<String>, BTreeMap<String, String>) {
+    preset: Option<&ResolvedCapabilities>,
+) -> (Option<String>, BTreeMap<String, serde_json::Value>) {
     let Some(profile) = input.profile else {
+        if let Some(preset) = preset {
+            return (
+                preset.reasoning_control_field.clone(),
+                preset.effort_map.clone(),
+            );
+        }
         return (None, BTreeMap::new());
     };
 
@@ -349,7 +373,10 @@ fn resolve_effort_control(
                     .any(|accepted| accepted.as_str() == Some(upstream_value.as_str()))
             })
             .map(|(requested_value, upstream_value)| {
-                (requested_value.clone(), upstream_value.clone())
+                (
+                    requested_value.clone(),
+                    serde_json::Value::String(upstream_value.clone()),
+                )
             })
             .collect::<BTreeMap<_, _>>();
         if !filtered.is_empty() {
@@ -362,7 +389,11 @@ fn resolve_effort_control(
 
 fn resolve_extensions(
     input: &ResolutionInput<'_>,
+    preset: Option<&ResolvedCapabilities>,
 ) -> (Vec<ResolvedRequestExtension>, CapabilitySource) {
+    if let Some(preset) = preset {
+        return (preset.request_extensions.clone(), CapabilitySource::Policy);
+    }
     let extensions_are_eligible = match input.strip_nonstandard_chat_fields {
         crate::state::NonstandardFieldPolicy::AlwaysStrip => false,
         crate::state::NonstandardFieldPolicy::Forward => true,

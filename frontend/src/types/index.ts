@@ -105,6 +105,7 @@ export interface UpstreamConfig {
   managed_source?: string | null
   last_synced_at?: number
   strip_nonstandard_chat_fields: NonstandardFieldPolicy
+  dialect_preset?: string | null
   runtime_state?: UpstreamRuntimeState
   _replace_api_keys?: boolean
 }

@@ -705,6 +705,14 @@ impl AppState {
                         upstream.strip_nonstandard_chat_fields = strip_nonstandard_chat_fields;
                     }
 
+                    if let Some(dialect_preset) =
+                        updates.get("dialect_preset").and_then(|v| v.as_str())
+                    {
+                        upstream.dialect_preset = Some(dialect_preset.to_string());
+                    } else if updates.get("dialect_preset").is_some() {
+                        upstream.dialect_preset = None;
+                    }
+
                     upstream.normalize_for_storage();
                     if let Err(error) = upstream.validate_configuration() {
                         return Err(UpstreamMutationError::InvalidInput(error));

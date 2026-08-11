@@ -48,6 +48,7 @@ export interface BatchCreateUpstreamPayload {
   max_concurrency?: number
   active?: boolean
   strip_nonstandard_chat_fields?: NonstandardFieldPolicy
+  dialect_preset?: string | null
 }
 
 export interface BatchCreateUpstreamResult {

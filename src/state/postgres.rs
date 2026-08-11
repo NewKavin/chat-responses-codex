@@ -73,7 +73,7 @@ impl PostgresStateStore {
                  protect_premium_quota, active, failure_count, \
                  auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
                  strip_nonstandard_chat_fields, nonstandard_field_policy, \
-                 COALESCE(remark, ''), continuation_provider_group \
+                 COALESCE(remark, ''), continuation_provider_group, dialect_preset \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -122,6 +122,7 @@ impl PostgresStateStore {
                 ),
                 remark: row.get::<_, String>(24),
                 continuation_provider_group: row.get::<_, Option<String>>(25),
+                dialect_preset: row.get::<_, Option<String>>(26),
             });
         }
 
@@ -1150,6 +1151,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &upstream.strip_nonstandard_chat_fields.as_db_str(),
             &upstream.remark,
             &upstream.continuation_provider_group,
+            &upstream.dialect_preset,
         ];
         tx.execute(
             "INSERT INTO upstreams (
@@ -1158,12 +1160,12 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 requests_per_minute, max_concurrency, priority, premium_only,
                 protect_premium_quota, active, failure_count,
                 auto_managed, managed_source, last_synced_at, api_keys, api_key_models,
-                strip_nonstandard_chat_fields, nonstandard_field_policy, remark, continuation_provider_group
+                strip_nonstandard_chat_fields, nonstandard_field_policy, remark, continuation_provider_group, dialect_preset
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1191,7 +1193,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 strip_nonstandard_chat_fields = EXCLUDED.nonstandard_field_policy <> 'forward',
                 nonstandard_field_policy = EXCLUDED.nonstandard_field_policy,
                 remark = EXCLUDED.remark,
-                continuation_provider_group = EXCLUDED.continuation_provider_group",
+                continuation_provider_group = EXCLUDED.continuation_provider_group,
+                dialect_preset = EXCLUDED.dialect_preset",
             params,
         )
         .await
@@ -1768,6 +1771,9 @@ ALTER TABLE upstreams
 -- kept as a fallback for deployments that only wrote the old column.
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS nonstandard_field_policy TEXT NOT NULL DEFAULT 'auto';
+-- WS-A2: static dialect preset fallback for unprobed routes.
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS dialect_preset TEXT NULL;
 ALTER TABLE upstreams
     DROP COLUMN IF EXISTS concurrency_status_enabled;
 ALTER TABLE upstreams

@@ -1166,7 +1166,7 @@ struct DispatchResult {
 struct AppliedEffortControl {
     requested: String,
     field: String,
-    value: String,
+    value: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -6290,10 +6290,14 @@ async fn process_gateway_request_inner(
                                 if capture_route_metadata {
                                     let applied_effort_control =
                                         result.applied_effort_control.as_ref().map(|evidence| {
+                                            let value = match &evidence.value {
+                                                serde_json::Value::String(text) => text.clone(),
+                                                other => other.to_string(),
+                                            };
                                             (
-                                                evidence.requested.as_str(),
-                                                evidence.field.as_str(),
-                                                evidence.value.as_str(),
+                                                evidence.requested.clone(),
+                                                evidence.field.clone(),
+                                                value,
                                             )
                                         });
                                     append_troubleshooting_route_headers(
@@ -6307,7 +6311,11 @@ async fn process_gateway_request_inner(
                                             selected_upstream_protocol,
                                         ),
                                         chat_fallback_stage.map(ChatFallbackStage::as_str),
-                                        applied_effort_control,
+                                        applied_effort_control.as_ref().map(
+                                            |(requested, field, value)| {
+                                                (requested.as_str(), field.as_str(), value.as_str())
+                                            },
+                                        ),
                                         result
                                             .compatibility
                                             .as_ref()

@@ -485,7 +485,7 @@ fn apply_resolved_claude_effort_control(
             object.remove("reasoning");
         }
     }
-    object.insert(field.to_string(), Value::String(mapped.clone()));
+    object.insert(field.to_string(), mapped.clone());
     Ok(())
 }
 
@@ -498,12 +498,10 @@ fn applied_claude_effort_control_evidence(
     let requested = requested?;
     let field = resolved.reasoning_control_field.as_deref()?;
     let mapped = resolved.effort_map.get(requested)?;
-    (body.get(field).and_then(Value::as_str) == Some(mapped.as_str())).then(|| {
-        AppliedEffortControl {
-            requested: requested.to_string(),
-            field: field.to_string(),
-            value: mapped.clone(),
-        }
+    (body.get(field) == Some(mapped)).then(|| AppliedEffortControl {
+        requested: requested.to_string(),
+        field: field.to_string(),
+        value: mapped.clone(),
     })
 }
 

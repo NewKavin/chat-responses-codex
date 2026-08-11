@@ -99,6 +99,7 @@
             <el-tag v-else-if="normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields) === 'forward'" type="warning" size="small">透传</el-tag>
             <el-tag v-else-if="normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields) === 'auto' && isAutoChatCompatibility(row)" type="info" size="small">自动</el-tag>
             <span v-else>-</span>
+            <el-tag v-if="row.dialect_preset" type="primary" size="small" style="margin-left: 4px">{{ row.dialect_preset }}</el-tag>
           </template>
         </el-table-column>
         
@@ -228,6 +229,16 @@
             <el-option label="透传" value="forward" />
           </el-select>
           <span class="form-hint">自动：有探测档案时按档案处理，无档案时保守清理扩展字段；强制：始终清理；透传：原样转发</span>
+        </el-form-item>
+        <el-form-item label="方言预设">
+          <el-select v-model="form.dialect_preset" clearable placeholder="无（按探测/Auto 兜底）" style="width: 220px">
+            <el-option label="OpenAI 兼容" value="openai" />
+            <el-option label="DeepSeek" value="deepseek" />
+            <el-option label="GLM" value="glm" />
+            <el-option label="MiniMax" value="minimax" />
+            <el-option label="严格模式" value="generic-strict" />
+          </el-select>
+          <span class="form-hint">无探测档案时按预设静态兜底各字段处理（deepseek：reasoning_effort 直传；glm：thinking 对象值；严格模式：全剥离）</span>
         </el-form-item>
 
         <!-- 模型配置 -->
@@ -427,6 +438,7 @@ const form = ref<Partial<UpstreamConfig>>({
   premium_models: [],
   protect_premium_quota: false,
   strip_nonstandard_chat_fields: 'auto',
+  dialect_preset: null,
   failure_count: 0
 })
 
@@ -651,6 +663,7 @@ const handleCreate = async () => {
     premium_models: [],
     protect_premium_quota: false,
     strip_nonstandard_chat_fields: 'auto',
+    dialect_preset: null,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -683,6 +696,7 @@ const handleCopy = (row: UpstreamConfig) => {
     premium_models: [...(row.premium_models || [])],
     protect_premium_quota: row.protect_premium_quota,
     strip_nonstandard_chat_fields: normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields),
+    dialect_preset: row.dialect_preset || null,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -713,6 +727,7 @@ const handleEdit = (row: UpstreamConfig) => {
     protocols,
     max_concurrency: row.max_concurrency,
     strip_nonstandard_chat_fields: normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields),
+    dialect_preset: row.dialect_preset || null,
     default_model_context: row.default_model_context
       ? {
           ...row.default_model_context
@@ -781,6 +796,7 @@ const handleSubmit = async () => {
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
     submitData.strip_nonstandard_chat_fields = normalizeNonstandardPolicy(submitData.strip_nonstandard_chat_fields)
+    submitData.dialect_preset = form.value.dialect_preset || null
 
     const submittedKeys = (form.value.api_key || '')
       .split('\n')
@@ -830,7 +846,8 @@ const handleSubmit = async () => {
           protocols: protocols.map(p => String(p)),
           max_concurrency: Number(form.value.max_concurrency),
           active: submitData.active,
-          strip_nonstandard_chat_fields: normalizeNonstandardPolicy(submitData.strip_nonstandard_chat_fields)
+          strip_nonstandard_chat_fields: normalizeNonstandardPolicy(submitData.strip_nonstandard_chat_fields),
+          dialect_preset: form.value.dialect_preset || null
         }
 
         const response = await adminApi.createUpstreamsBatch(batchPayload)

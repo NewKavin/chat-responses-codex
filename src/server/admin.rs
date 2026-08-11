@@ -1056,6 +1056,8 @@ pub(super) struct BatchCreateUpstreamPayload {
     active: bool,
     #[serde(default)]
     strip_nonstandard_chat_fields: crate::state::NonstandardFieldPolicy,
+    #[serde(default)]
+    dialect_preset: Option<String>,
 }
 
 fn default_batch_requests_per_minute() -> u32 {
@@ -1524,6 +1526,7 @@ pub(super) async fn admin_create_upstreams_batch(
         managed_source: automatic_discovery.then(|| "batch".to_string()),
         last_synced_at: if automatic_discovery { now } else { 0 },
         strip_nonstandard_chat_fields: payload.strip_nonstandard_chat_fields,
+        dialect_preset: payload.dialect_preset.clone(),
         default_model_context: Some(DefaultModelContextConfig {
             context_limit: 200_000,
             output_reserve: 4096,

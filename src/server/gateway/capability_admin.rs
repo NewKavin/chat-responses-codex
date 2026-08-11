@@ -305,6 +305,7 @@ pub(super) async fn admin_capabilities_resolved(
         route_overrides: &route_overrides,
         policy_extensions: &policy_extensions,
         profile,
+        dialect_preset: upstream.dialect_preset.as_deref(),
         strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
     }) {
         Ok(resolved) => resolved,

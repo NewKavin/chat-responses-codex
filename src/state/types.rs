@@ -425,6 +425,11 @@ pub struct UpstreamConfig {
     /// profiles otherwise.
     #[serde(default)]
     pub strip_nonstandard_chat_fields: NonstandardFieldPolicy,
+    /// Static dialect preset used when the route has no probe profile yet
+    /// (`openai`/`deepseek`/`glm`/`minimax`/`generic-strict`). A verified
+    /// probe profile always wins over the preset.
+    #[serde(default)]
+    pub dialect_preset: Option<String>,
 }
 
 impl UpstreamConfig {
@@ -471,6 +476,7 @@ impl Default for UpstreamConfig {
             managed_source: None,
             last_synced_at: 0,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,
+            dialect_preset: None,
         }
     }
 }

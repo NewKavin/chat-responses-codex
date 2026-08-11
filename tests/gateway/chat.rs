@@ -4,7 +4,10 @@ use serde_json::json;
 #[path = "chat/support.rs"]
 mod support;
 
-use support::{capture_single_chat_request, capture_single_chat_request_with_profile};
+use support::{
+    capture_single_chat_request, capture_single_chat_request_with_options,
+    capture_single_chat_request_with_profile,
+};
 
 #[path = "chat/compatibility.rs"]
 mod compatibility;

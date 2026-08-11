@@ -27,6 +27,25 @@ pub(super) async fn capture_single_chat_request_with_profile(
     with_profile: bool,
     declare_parallel_tools: bool,
 ) -> Value {
+    capture_single_chat_request_with_options(
+        model,
+        strip_nonstandard_chat_fields,
+        None,
+        request_body,
+        with_profile,
+        declare_parallel_tools,
+    )
+    .await
+}
+
+pub(super) async fn capture_single_chat_request_with_options(
+    model: &str,
+    strip_nonstandard_chat_fields: NonstandardFieldPolicy,
+    dialect_preset: Option<&str>,
+    request_body: Value,
+    with_profile: bool,
+    declare_parallel_tools: bool,
+) -> Value {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -87,6 +106,7 @@ pub(super) async fn capture_single_chat_request_with_profile(
         active: true,
         failure_count: 0,
         strip_nonstandard_chat_fields,
+        dialect_preset: dialect_preset.map(str::to_string),
         ..Default::default()
     };
     let state = AppState::new(

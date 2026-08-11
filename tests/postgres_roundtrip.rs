@@ -66,7 +66,8 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "auto_managed": false,
                 "managed_source": null,
                 "last_synced_at": 0,
-                "strip_nonstandard_chat_fields": "always_strip"
+                "strip_nonstandard_chat_fields": "always_strip",
+                "dialect_preset": null
             }
         ],
         "downstreams": [],

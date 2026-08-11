@@ -58,7 +58,7 @@ pub(super) struct ContinuationCompatibilityContract {
     pub(super) protocol_transition: ProtocolTransitionIdentity,
     pub(super) required_capabilities: BTreeSet<Capability>,
     pub(super) reasoning_carrier: Option<ReasoningCarrier>,
-    pub(super) effort_map: BTreeMap<String, String>,
+    pub(super) effort_map: BTreeMap<String, serde_json::Value>,
     pub(super) correction_rules: Vec<crate::capabilities::DialectCorrectionRule>,
     pub(super) tool_registry_version: Option<u32>,
     pub(super) probe_schema_version: u32,
@@ -736,6 +736,7 @@ pub(super) fn evaluate_route_capabilities_with_runtime_hints(
         route_overrides: &route_overrides,
         policy_extensions: &policy_extensions,
         profile: effective_profile,
+        dialect_preset: upstream.dialect_preset.as_deref(),
         strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
     }) {
         Ok(resolved) => resolved,

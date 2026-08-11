@@ -515,3 +515,104 @@ async fn auto_policy_keeps_parallel_tool_calls_when_verified_profile_declares_su
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn dialect_preset_deepseek_passes_effort_verbatim_and_keeps_optional_fields() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request_with_options(
+            "opaque/deepseek-model",
+            NonstandardFieldPolicy::Auto,
+            Some("deepseek"),
+            json!({
+                "model": "opaque/deepseek-model",
+                "messages": [{"role": "user", "content": "think hard"}],
+                "reasoning_effort": "xhigh",
+                "parallel_tool_calls": true,
+                "metadata": {"trace": "abc"},
+                "user": "downstream-user",
+                "stream": false
+            }),
+            false,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            captured["reasoning_effort"], "xhigh",
+            "deepseek preset must pass reasoning_effort through verbatim: {captured}"
+        );
+        assert_eq!(captured["parallel_tool_calls"], json!(true));
+        assert_eq!(captured["metadata"], json!({"trace": "abc"}));
+        assert_eq!(captured["user"], "downstream-user");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dialect_preset_glm_sends_thinking_object_and_strips_stream_options() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request_with_options(
+            "opaque/glm-model",
+            NonstandardFieldPolicy::Auto,
+            Some("glm"),
+            json!({
+                "model": "opaque/glm-model",
+                "messages": [{"role": "user", "content": "think"}],
+                "reasoning_effort": "high",
+                "stream": true,
+                "stream_options": {"include_usage": true},
+                "metadata": {"trace": "abc"}
+            }),
+            false,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            captured["thinking"],
+            json!({"type": "enabled"}),
+            "glm preset must send the object-valued thinking control: {captured}"
+        );
+        assert!(
+            captured.get("reasoning_effort").is_none(),
+            "glm preset must translate reasoning_effort into thinking: {captured}"
+        );
+        assert!(
+            captured.get("stream_options").is_none(),
+            "glm preset must strip stream_options: {captured}"
+        );
+        assert_eq!(captured["metadata"], json!({"trace": "abc"}));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dialect_preset_generic_strict_strips_conservative_set() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request_with_options(
+            "opaque/generic-model",
+            NonstandardFieldPolicy::Auto,
+            Some("generic-strict"),
+            json!({
+                "model": "opaque/generic-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "parallel_tool_calls": true,
+                "stream_options": {"include_usage": true},
+                "metadata": {"trace": "abc"},
+                "user": "downstream-user",
+                "stream": false
+            }),
+            false,
+            false,
+        )
+        .await;
+
+        for key in ["parallel_tool_calls", "stream_options", "metadata", "user"] {
+            assert!(
+                captured.get(key).is_none(),
+                "generic-strict preset must strip {key}: {captured}"
+            );
+        }
+    })
+    .await;
+}

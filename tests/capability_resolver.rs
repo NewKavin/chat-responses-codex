@@ -40,6 +40,7 @@ fn explicit_override_beats_probe_and_probe_beats_baseline() {
             route_overrides: &route_overrides,
             policy_extensions: &[],
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -114,6 +115,7 @@ fn legacy_strip_flag_cannot_remove_required_continuation_state() {
             route_overrides: &[],
             policy_extensions: &[],
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::AlwaysStrip,
         })
         .unwrap();
@@ -313,6 +315,7 @@ fn semantic_reasoning_requirements_fail_closed_without_wire_evidence() {
         .resolve(ResolutionInput {
             semantic: &replay_required,
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .unwrap_err();
@@ -333,6 +336,7 @@ fn unobserved_probe_does_not_erase_baseline_but_rejection_does() {
     let resolved = CapabilityResolver
         .resolve(ResolutionInput {
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .unwrap();
@@ -348,6 +352,7 @@ fn unobserved_probe_does_not_erase_baseline_but_rejection_does() {
     let resolved = CapabilityResolver
         .resolve(ResolutionInput {
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .unwrap();
@@ -392,6 +397,7 @@ fn later_capability_override_wins_and_required_rejection_fails_closed() {
             route_overrides: &overrides,
             policy_extensions: &[],
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -416,6 +422,7 @@ fn later_capability_override_wins_and_required_rejection_fails_closed() {
             route_overrides: &overrides,
             policy_extensions: &[],
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap_err();
@@ -460,6 +467,7 @@ fn mismatched_profile_is_ignored_for_all_route_scoped_evidence() {
             route_overrides: &[],
             policy_extensions: &extensions,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap_err();
@@ -478,6 +486,7 @@ fn mismatched_profile_is_ignored_for_all_route_scoped_evidence() {
             route_overrides: &[],
             policy_extensions: &extensions,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -587,6 +596,7 @@ fn extensions_require_protocol_prerequisites_and_positive_final_evidence() {
             route_overrides: &overrides,
             policy_extensions: &case_refs,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -617,6 +627,7 @@ fn extensions_require_protocol_prerequisites_and_positive_final_evidence() {
             route_overrides: &overrides,
             policy_extensions: &case_refs,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::AlwaysStrip,
         })
         .unwrap();
@@ -665,6 +676,7 @@ fn rejected_override_evidence_sources_a_nonempty_extension_resolution() {
             route_overrides: &overrides,
             policy_extensions: &case_refs,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -706,6 +718,7 @@ fn rejected_only_extension_evidence_preserves_the_effective_source() {
             route_overrides: &[],
             policy_extensions: &case_refs,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -726,6 +739,7 @@ fn rejected_only_extension_evidence_preserves_the_effective_source() {
             route_overrides: &[],
             policy_extensions: &case_refs,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -753,6 +767,7 @@ fn rejected_only_extension_evidence_preserves_the_effective_source() {
             route_overrides: &overrides,
             policy_extensions: &case_refs,
             profile: None,
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -770,6 +785,7 @@ fn rejected_only_extension_evidence_preserves_the_effective_source() {
             route_overrides: &overrides,
             policy_extensions: &case_refs,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -820,6 +836,7 @@ fn scalar_resolution_uses_last_override_then_probe_then_continuation() {
             route_overrides: &overrides,
             policy_extensions: &[],
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -869,6 +886,7 @@ fn scalar_resolution_uses_last_override_then_probe_then_continuation() {
                 route_overrides: &[],
                 policy_extensions: &[],
                 profile: Some(&profile),
+                dialect_preset: None,
                 strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
             }
         })
@@ -959,6 +977,7 @@ fn effort_map_uses_first_ordered_control_with_accepted_upstream_values() {
             route_overrides: &[],
             policy_extensions: &[],
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -969,7 +988,7 @@ fn effort_map_uses_first_ordered_control_with_accepted_upstream_values() {
     );
     assert_eq!(
         resolved.effort_map,
-        BTreeMap::from([("medium".to_owned(), "balanced".to_owned())])
+        BTreeMap::from([("medium".to_owned(), serde_json::json!("balanced"))])
     );
     assert_eq!(
         resolved.field_sources.get("effort_map"),
@@ -981,6 +1000,7 @@ fn effort_map_uses_first_ordered_control_with_accepted_upstream_values() {
     let resolved = CapabilityResolver
         .resolve(ResolutionInput {
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .unwrap();
@@ -1065,6 +1085,7 @@ fn required_reasoning_needs_a_protocol_compatible_carrier() {
                     route_overrides: &[],
                     policy_extensions: &[],
                     profile: Some(&profile),
+                    dialect_preset: None,
                     strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
                 })
                 .unwrap_err();
@@ -1086,6 +1107,7 @@ fn required_reasoning_needs_a_protocol_compatible_carrier() {
                     route_overrides: &[],
                     policy_extensions: &[],
                     profile: Some(&profile),
+                    dialect_preset: None,
                     strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
                 })
                 .unwrap_err();
@@ -1103,6 +1125,7 @@ fn required_reasoning_needs_a_protocol_compatible_carrier() {
                     route_overrides: &[],
                     policy_extensions: &[],
                     profile: Some(&profile),
+                    dialect_preset: None,
                     strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
                 })
                 .unwrap_or_else(|error| panic!("{protocol:?}/{case_name}: {error}"));
@@ -1121,6 +1144,7 @@ fn required_reasoning_needs_a_protocol_compatible_carrier() {
     let optional = CapabilityResolver
         .resolve(ResolutionInput {
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .expect("optional reasoning retains downgrade semantics without a carrier");
@@ -1159,6 +1183,7 @@ fn only_exact_chat_continuation_can_supply_a_required_reasoning_carrier() {
     let error = CapabilityResolver
         .resolve(ResolutionInput {
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &foreign)
         })
         .unwrap_err();
@@ -1198,6 +1223,7 @@ fn profile_fidelity_controls_provisional_and_native_preference() {
             let resolved = CapabilityResolver
                 .resolve(ResolutionInput {
                     profile: Some(&profile),
+                    dialect_preset: None,
                     ..ResolutionInput::baseline(&route, &requested)
                 })
                 .unwrap();
@@ -1272,6 +1298,7 @@ fn unobserved_capability_evidence_does_not_erase_conclusive_evidence() {
         .resolve(ResolutionInput {
             route_overrides: &profile_then_unobserved,
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .unwrap();
@@ -1291,6 +1318,7 @@ fn unobserved_capability_evidence_does_not_erase_conclusive_evidence() {
         .resolve(ResolutionInput {
             route_overrides: &profile_then_unobserved,
             profile: Some(&profile),
+            dialect_preset: None,
             ..ResolutionInput::baseline(&route, &requested)
         })
         .unwrap();
@@ -1374,6 +1402,7 @@ fn unobserved_extension_evidence_does_not_erase_conclusive_evidence() {
             route_overrides: &profile_then_unobserved,
             policy_extensions: &cases,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -1394,6 +1423,7 @@ fn unobserved_extension_evidence_does_not_erase_conclusive_evidence() {
             route_overrides: &profile_then_unobserved,
             policy_extensions: &cases,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();
@@ -1413,6 +1443,7 @@ fn unobserved_extension_evidence_does_not_erase_conclusive_evidence() {
                 route_overrides: &overrides,
                 policy_extensions: &cases,
                 profile: None,
+                dialect_preset: None,
                 strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
             })
             .unwrap();
@@ -1435,6 +1466,7 @@ fn unobserved_extension_evidence_does_not_erase_conclusive_evidence() {
             route_overrides: &only_unobserved,
             policy_extensions: &cases,
             profile: Some(&profile),
+            dialect_preset: None,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
         })
         .unwrap();

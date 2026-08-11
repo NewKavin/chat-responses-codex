@@ -610,7 +610,7 @@ pub struct ResolvedCapabilities {
     pub reasoning_carrier: ReasoningCarrier,
     pub correction_rules: Vec<DialectCorrectionRule>,
     pub reasoning_control_field: Option<String>,
-    pub effort_map: BTreeMap<String, String>,
+    pub effort_map: BTreeMap<String, Value>,
     pub omit_sampling_fields: BTreeSet<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
@@ -621,6 +621,165 @@ pub struct ResolvedCapabilities {
     pub adapters: BTreeSet<String>,
     pub request_extensions: Vec<ResolvedRequestExtension>,
     pub field_sources: BTreeMap<String, CapabilitySource>,
+}
+
+pub(crate) fn baseline_capabilities() -> BTreeMap<Capability, ResolvedCapability> {
+    Capability::ALL
+        .into_iter()
+        .map(|capability| {
+            let state = if matches!(
+                capability,
+                Capability::TextInput
+                    | Capability::NonStreamingResponse
+                    | Capability::TextStream
+                    | Capability::FunctionTools
+                    | Capability::ForcedToolChoice
+                    | Capability::ToolContinuation
+            ) {
+                EvidenceState::Supported
+            } else {
+                EvidenceState::Unobserved
+            };
+            (
+                capability,
+                ResolvedCapability {
+                    state,
+                    source: CapabilitySource::Baseline,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Static dialect presets used when a route has no probe profile yet.
+///
+/// - `openai` / `minimax`: OpenAI-compatible neutral baseline (no stripping).
+/// - `deepseek`: reasoning via `reasoning_content`, `reasoning_effort` passed
+///   through verbatim on the native field.
+/// - `glm`: reasoning via the object-valued `thinking` control; `stream_options`
+///   is stripped (GLM rejects it).
+/// - `generic-strict`: strip every optional non-standard field.
+///
+/// Presets are a static fallback below probe evidence: a verified profile
+/// always wins. The resolved shape uses `DialectProfileState::Partial` so the
+/// Auto conservative strip is not applied on top of the preset's own decisions.
+pub fn compile_dialect_preset(preset: &str) -> Option<ResolvedCapabilities> {
+    let mut values = baseline_capabilities();
+    let mut reasoning_carrier = ReasoningCarrier::None;
+    let mut reasoning_control_field = None;
+    let mut effort_map: BTreeMap<String, Value> = BTreeMap::new();
+    let mut omit_sampling_fields = BTreeSet::new();
+    let mut omit_optional_extensions = false;
+
+    let parallel_tool_support = |values: &mut BTreeMap<Capability, ResolvedCapability>| {
+        values.insert(
+            Capability::ParallelToolCalls,
+            ResolvedCapability {
+                state: EvidenceState::Supported,
+                source: CapabilitySource::Policy,
+            },
+        );
+    };
+    match preset {
+        "openai" | "minimax" => {
+            parallel_tool_support(&mut values);
+        }
+        "deepseek" => {
+            for capability in [Capability::ReasoningOutput, Capability::ReasoningReplay] {
+                values.insert(
+                    capability,
+                    ResolvedCapability {
+                        state: EvidenceState::Supported,
+                        source: CapabilitySource::Policy,
+                    },
+                );
+            }
+            parallel_tool_support(&mut values);
+            reasoning_carrier = ReasoningCarrier::ReasoningContent;
+            reasoning_control_field = Some("reasoning_effort".to_string());
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                effort_map.insert(effort.to_string(), Value::String(effort.to_string()));
+            }
+        }
+        "glm" => {
+            for capability in [Capability::ReasoningOutput, Capability::ReasoningReplay] {
+                values.insert(
+                    capability,
+                    ResolvedCapability {
+                        state: EvidenceState::Supported,
+                        source: CapabilitySource::Policy,
+                    },
+                );
+            }
+            parallel_tool_support(&mut values);
+            reasoning_carrier = ReasoningCarrier::ReasoningContent;
+            reasoning_control_field = Some("thinking".to_string());
+            effort_map.insert("low".to_string(), serde_json::json!({ "type": "disabled" }));
+            for effort in ["medium", "high", "xhigh", "max"] {
+                effort_map.insert(effort.to_string(), serde_json::json!({ "type": "enabled" }));
+            }
+            omit_sampling_fields.insert("stream_options".to_string());
+        }
+        "generic-strict" => {
+            omit_optional_extensions = true;
+            omit_sampling_fields.insert("stream_options".to_string());
+        }
+        _ => return None,
+    }
+
+    let mut field_sources = BTreeMap::from([
+        ("token_limit_field".to_owned(), CapabilitySource::Policy),
+        (
+            "reasoning_carrier".to_owned(),
+            if reasoning_carrier == ReasoningCarrier::None {
+                CapabilitySource::Baseline
+            } else {
+                CapabilitySource::Policy
+            },
+        ),
+        (
+            "effort_map".to_owned(),
+            if effort_map.is_empty() {
+                CapabilitySource::Baseline
+            } else {
+                CapabilitySource::Policy
+            },
+        ),
+        (
+            "omit_sampling_fields".to_owned(),
+            if omit_sampling_fields.is_empty() {
+                CapabilitySource::Baseline
+            } else {
+                CapabilitySource::Policy
+            },
+        ),
+    ]);
+    if omit_optional_extensions {
+        field_sources.insert(
+            "omit_optional_extensions".to_owned(),
+            CapabilitySource::Policy,
+        );
+    }
+
+    Some(ResolvedCapabilities {
+        values,
+        token_limit_field: TokenLimitField::MaxTokens,
+        reasoning_mode: ReasoningMode::Optional,
+        reasoning_carrier,
+        correction_rules: Vec::new(),
+        reasoning_control_field,
+        effort_map,
+        omit_sampling_fields,
+        context_window: None,
+        max_output_tokens: None,
+        omit_optional_extensions,
+        profile_state: DialectProfileState::Partial,
+        provisional: false,
+        native_preferred: true,
+        adapters: BTreeSet::new(),
+        request_extensions: Vec::new(),
+        field_sources,
+    })
 }
 
 impl ResolvedCapabilities {

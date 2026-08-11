@@ -203,7 +203,7 @@ pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
                 })
             })
         {
-            object.insert(field.into(), Value::String(mapped.clone()));
+            object.insert(field.into(), mapped.clone());
         }
     } else if let Some(normalized_effort) = normalized_effort {
         // No verified control field: the generic normalization already
@@ -539,7 +539,10 @@ mod tests {
     fn resolved_with_effort_control(field: &str, effort_map: &[&str]) -> ResolvedCapabilities {
         let mut map = BTreeMap::new();
         for key in effort_map {
-            map.insert((*key).to_string(), (*key).to_string());
+            map.insert(
+                (*key).to_string(),
+                serde_json::Value::String((*key).to_string()),
+            );
         }
         ResolvedCapabilities {
             values: BTreeMap::new(),
