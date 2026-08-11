@@ -156,7 +156,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn policy_uses_runtime_rounds_but_startup_concurrency_wait() {
+    fn policy_uses_runtime_rounds_and_concurrency_tuning() {
         let config = AppConfig {
             upstream_concurrency_recovery_max_wait_ms: 111,
             ..AppConfig::default()
@@ -171,7 +171,7 @@ mod tests {
 
         assert_eq!(policy.max_wait, Duration::from_millis(222));
         assert_eq!(policy.max_rounds, 5);
-        assert_eq!(policy.concurrency_max_wait, Duration::from_millis(111));
+        assert_eq!(policy.concurrency_max_wait, Duration::from_millis(999));
         assert_eq!(policy.concurrency_max_rounds, 7);
     }
 
