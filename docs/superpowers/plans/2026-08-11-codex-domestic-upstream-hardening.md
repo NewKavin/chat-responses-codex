@@ -221,7 +221,7 @@
 
 **测试**：无档案路由的出站 body 不含上述字段；有档案且声明支持的路由保留 `parallel_tool_calls`。
 
-### A2. 上游方言预设（探测缺失时的静态兜底）
+### A2. 上游方言预设（探测缺失时的静态兜底） ✅ 已完成 (commit f44dfc7)
 **改动**：
 - `UpstreamConfig` 增加 `dialect_preset: Option<String>`（`openai`/`deepseek`/`glm`/`minimax`/`generic-strict`），前端下拉。
 - 预设编译为一个静态 `ResolvedCapabilities` 底座（`src/capabilities/types.rs:470` 区域增构造器）：如 `glm` → `reasoning_control_field=Some("thinking")` + 对象值 effort_map、剥离 `stream_options`；`deepseek` → `reasoning_content` carrier、`reasoning_effort` 直传；`generic-strict` → 全剥离。
