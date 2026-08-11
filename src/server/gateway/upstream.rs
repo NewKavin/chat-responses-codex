@@ -1,7 +1,7 @@
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityRuntimeSnapshot, DialectProfileKey, DialectProfileState,
-    RequestedFeatures, ResolvedCapabilities, RouteIdentity, WireProtocol,
+    Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, DialectProfileKey,
+    DialectProfileState, RequestedFeatures, ResolvedCapabilities, RouteIdentity, WireProtocol,
     DIALECT_PROBE_SCHEMA_VERSION,
 };
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
@@ -1240,6 +1240,60 @@ async fn prefetch_stream_with_hedges(
     }
 }
 
+/// A3: persist a dialect-field rejection learned from a successful same-route
+/// downgrade retry. The runtime hint is inserted synchronously so the very
+/// next request omits the field; the profile persist is spawned (async disk
+/// write) and validated by the route configuration fingerprint.
+#[allow(clippy::too_many_arguments)]
+async fn learn_dialect_field_rejection(
+    state: &AppState,
+    active_capability_snapshot: &CapabilityRuntimeSnapshot,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    request_model: &str,
+    final_upstream_model: &str,
+    upstream_protocol: UpstreamProtocol,
+    field: &str,
+) {
+    let Some(capability) = super::capability_probe::dialect_field_capability(field) else {
+        return;
+    };
+    let profile_key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.to_string(),
+        final_upstream_model.to_string(),
+        WireProtocol::from(upstream_protocol),
+    );
+    let Ok(fingerprint) = AppState::route_configuration_fingerprint_with_snapshot(
+        active_capability_snapshot,
+        upstream,
+        key_fingerprint,
+        request_model,
+        final_upstream_model,
+        upstream_protocol,
+    ) else {
+        return;
+    };
+    state.insert_runtime_capability_hint(
+        CapabilityHintKey::feature(profile_key.clone(), capability, None),
+        fingerprint.clone(),
+    );
+    let spawn_state = state.clone();
+    let spawn_key = profile_key;
+    let spawn_exposed = request_model.to_string();
+    let spawn_fingerprint = fingerprint;
+    tokio::spawn(async move {
+        let _ = spawn_state
+            .learn_dialect_field_rejected(
+                &spawn_key,
+                &spawn_exposed,
+                &spawn_fingerprint,
+                capability,
+            )
+            .await;
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_to_upstream(
     state: &AppState,
@@ -1290,6 +1344,7 @@ pub(super) async fn send_to_upstream(
     let mut attempt_mode = attempt_mode;
     let mut downgrade_codes = BTreeSet::new();
     let mut dialect_retry_count = 0u8;
+    let mut dialect_retry_field: Option<String> = None;
     let request_model = body
         .get("model")
         .and_then(Value::as_str)
@@ -1973,6 +2028,13 @@ pub(super) async fn send_to_upstream(
         let error_text = String::from_utf8_lossy(&error_body).to_string();
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
+        let classified_feedback = classify_upstream_response(UpstreamFeedbackInput {
+            status: status.as_u16(),
+            headers: &headers,
+            body: Some(&error_text),
+            target_model: Some(&final_upstream_model),
+        });
+
         if !stream_only_recovery.consumed && !dialect_retry_attempted {
             if let Some(rule) = super::dialect_retry::correction_for_response(
                 status,
@@ -1994,14 +2056,45 @@ pub(super) async fn send_to_upstream(
                     continue;
                 }
             }
+            // A3: generic dialect-field downgrade. When the error text names a
+            // dialect field and the failure is a request-shape rejection (400
+            // or 5xx with request evidence per B1), retry once on the same
+            // route with exactly that field stripped. Unlike the rule-driven
+            // correction above, this needs no probe profile.
+            let request_shape_rejected = matches!(
+                classified_feedback.class,
+                FailureClass::RequestRejected | FailureClass::FeatureUnsupported
+            );
+            if request_shape_rejected || status == StatusCode::BAD_REQUEST {
+                if let Some(field) = super::dialect_retry::generic_strip_field_for_response(
+                    status,
+                    &error_text,
+                    request_shape_rejected,
+                ) {
+                    let mut stripped_body = dialect_retry_source_body.clone();
+                    if super::dialect_retry::strip_field_from_body(&mut stripped_body, field) {
+                        dialect_retry_field = Some(field.to_string());
+                        upstream_body = stripped_body;
+                        dialect_retry_attempted = true;
+                        dialect_retry_count = 1;
+                        tracing::info!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream_key_id,
+                            path = %endpoint.path(),
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_name = %upstream.name,
+                            status = status.as_u16(),
+                            stripped_field = field,
+                            "dialect field rejected by upstream; retrying once on the same route without the field"
+                        );
+                        upstream_request_guard
+                            .reserve_next(state, upstream, &key_fingerprint, model)
+                            .await?;
+                        continue;
+                    }
+                }
+            }
         }
-
-        let classified_feedback = classify_upstream_response(UpstreamFeedbackInput {
-            status: status.as_u16(),
-            headers: &headers,
-            body: Some(&error_text),
-            target_model: Some(&final_upstream_model),
-        });
         // Retain the legacy summary label for log compatibility while routing
         // decisions use the precise Key-route classification above.
         let feedback = classified_feedback.summary_classification();
@@ -2038,7 +2131,12 @@ pub(super) async fn send_to_upstream(
         // intermediate proxy or the upstream rejected a field. Keep this
         // diagnostic structural only; prompts, tool arguments, and tool results
         // must not be written to runtime logs.
-        if status.is_client_error() {
+        if status.is_client_error()
+            || matches!(
+                classified_feedback.class,
+                FailureClass::RequestRejected | FailureClass::FeatureUnsupported
+            )
+        {
             let diagnostics = safe_upstream_body_diagnostics(&upstream_body);
             tracing::warn!(
                 request_id = %request_id,
@@ -2076,6 +2174,7 @@ pub(super) async fn send_to_upstream(
                     runtime_model_slug: &final_upstream_model,
                     protocol: upstream_protocol,
                     status,
+                    class: classified_feedback.class,
                     error_text: &error_text,
                 },
             )
@@ -2243,6 +2342,19 @@ pub(super) async fn send_to_upstream(
         }
         if let Some(context) = response_history_context.as_ref() {
             context.store_from_response_body(&body);
+        }
+        if let Some(field) = dialect_retry_field.as_deref() {
+            learn_dialect_field_rejection(
+                state,
+                &active_capability_snapshot,
+                upstream,
+                &key_fingerprint,
+                request_model,
+                &final_upstream_model,
+                upstream_protocol,
+                field,
+            )
+            .await;
         }
         let usage = usage_from_body(&body);
         let compatibility = resolved_capabilities.as_ref().map(|resolved| {
@@ -2490,6 +2602,20 @@ pub(super) async fn send_to_upstream(
                 context.store_from_response_body(&final_body);
             }
 
+            if let Some(field) = dialect_retry_field.as_deref() {
+                learn_dialect_field_rejection(
+                    state,
+                    &active_capability_snapshot,
+                    upstream,
+                    &key_fingerprint,
+                    request_model,
+                    &final_upstream_model,
+                    upstream_protocol,
+                    field,
+                )
+                .await;
+            }
+
             usage_body = Some(final_body.clone());
             synthesize_stream_body(endpoint, &final_body)?
         };
@@ -2597,6 +2723,20 @@ pub(super) async fn send_to_upstream(
 
     if let Some(context) = response_history_context.as_ref() {
         context.store_from_response_body(&body);
+    }
+
+    if let Some(field) = dialect_retry_field.as_deref() {
+        learn_dialect_field_rejection(
+            state,
+            &active_capability_snapshot,
+            upstream,
+            &key_fingerprint,
+            request_model,
+            &final_upstream_model,
+            upstream_protocol,
+            field,
+        )
+        .await;
     }
 
     let compatibility = resolved_capabilities.as_ref().map(|resolved| {

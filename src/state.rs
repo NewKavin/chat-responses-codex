@@ -3051,6 +3051,104 @@ impl AppState {
         Ok(true)
     }
 
+    /// Persist a dialect-field rejection learned from a successful same-route
+    /// downgrade retry (A3): the capability backing the rejected field is
+    /// marked Rejected on the route profile so later requests omit the field
+    /// on the first attempt instead of probing the upstream again.
+    pub async fn learn_dialect_field_rejected(
+        &self,
+        key: &DialectProfileKey,
+        exposed_model_slug: &str,
+        configuration_fingerprint: &str,
+        capability: Capability,
+    ) -> io::Result<bool> {
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let _capability_guard = self.capability_update_lock.lock().await;
+        let latest = self.config_store.load_capability_state().await?;
+        let compiled = Arc::new(
+            latest
+                .configuration
+                .compile()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        );
+        let latest_snapshot = CapabilityRuntimeSnapshot {
+            configuration: compiled.clone(),
+            profiles: latest.profiles.clone(),
+        };
+        let routing = self.routing_snapshot().await;
+        let Some(upstream) = routing
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == key.upstream_id)
+        else {
+            return Ok(false);
+        };
+        let protocol = match key.protocol {
+            WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+            WireProtocol::Responses => UpstreamProtocol::Responses,
+            WireProtocol::Messages => return Ok(false),
+        };
+        if !upstream.supports_model(exposed_model_slug)
+            || !upstream.supports_model(&key.runtime_model_slug)
+        {
+            return Ok(false);
+        }
+        if !upstream.supports_protocol(protocol) {
+            return Ok(false);
+        }
+        let effective_key_fingerprint = if key.key_fingerprint.is_empty() {
+            first_model_key_fingerprint(upstream, &key.runtime_model_slug).unwrap_or_default()
+        } else {
+            key.key_fingerprint.clone()
+        };
+        if !upstream
+            .keys_for_model(&key.runtime_model_slug)
+            .iter()
+            .any(|api_key| {
+                upstream_key_fingerprint(&upstream.id, api_key) == effective_key_fingerprint
+            })
+        {
+            return Ok(false);
+        }
+        let latest_fingerprint = Self::route_configuration_fingerprint_with_snapshot(
+            &latest_snapshot,
+            upstream,
+            &effective_key_fingerprint,
+            exposed_model_slug,
+            &key.runtime_model_slug,
+            protocol,
+        )?;
+        if latest_fingerprint != configuration_fingerprint {
+            return Ok(false);
+        }
+        let mut profile = if let Some(current_profile) = latest.profiles.get(key) {
+            if current_profile.key != *key
+                || current_profile.configuration_fingerprint != configuration_fingerprint
+                || current_profile.probe_schema_version != DIALECT_PROBE_SCHEMA_VERSION
+            {
+                return Ok(false);
+            }
+            current_profile.clone()
+        } else {
+            let mut profile = UpstreamDialectProfile::unknown(key.clone());
+            profile.configuration_fingerprint = configuration_fingerprint.to_string();
+            profile
+        };
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Rejected);
+        self.config_store.upsert_dialect_profile(&profile).await?;
+
+        let mut profiles = latest.profiles;
+        profiles.insert(key.clone(), profile);
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: compiled,
+                profiles,
+            }));
+        Ok(true)
+    }
+
     pub async fn delete_dialect_profiles_for_upstream(&self, upstream_id: &str) -> io::Result<()> {
         let _guard = self.capability_update_lock.lock().await;
         self.config_store

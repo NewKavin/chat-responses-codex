@@ -63,3 +63,35 @@ fn switch_token_limit(
     object.insert(replacement_field.to_string(), value);
     true
 }
+
+/// A3 generic downgrade: when the upstream rejects a request because of a
+/// dialect field named in the error text, return that field so the caller can
+/// strip it and retry once on the same route. Only 400s and 5xx responses
+/// classified as request-shape rejections qualify; edge proxy errors without
+/// request evidence never do.
+pub fn generic_strip_field_for_response(
+    status: StatusCode,
+    error_text: &str,
+    request_shape_rejected: bool,
+) -> Option<&'static str> {
+    if status == StatusCode::BAD_REQUEST {
+        // 400s are always request-shape rejections; the classifier normally
+        // confirms this, but keep the explicit branch for robustness.
+    } else if !(status.is_server_error() && request_shape_rejected) {
+        return None;
+    }
+    if error_text.len() > 65_536 {
+        return None;
+    }
+    let field = super::capability_probe::dialect_field_error_hint(error_text)?;
+    if !super::capability_probe::is_safe_dialect_strip_field(field) {
+        return None;
+    }
+    Some(field)
+}
+
+pub fn strip_field_from_body(body: &mut Value, field: &str) -> bool {
+    body.as_object_mut()
+        .and_then(|object| object.remove(field))
+        .is_some()
+}

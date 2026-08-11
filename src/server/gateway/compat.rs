@@ -1,4 +1,4 @@
-use crate::capabilities::{Capability, ResolvedCapabilities, TokenLimitField};
+use crate::capabilities::{Capability, EvidenceState, ResolvedCapabilities, TokenLimitField};
 use crate::protocol::image_adapter::ImageDialect;
 use serde_json::{Map, Value};
 
@@ -147,6 +147,17 @@ pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
 
     for field in &resolved.omit_sampling_fields {
         object.remove(field);
+    }
+
+    // A3: a route that rejected `stream_options` on a prior request learns the
+    // rejection in its profile; strip the field up front so non-streaming
+    // requests (which never carry include_usage anyway) do not resend it.
+    if resolved
+        .values
+        .get(&Capability::UsageStream)
+        .is_some_and(|c| c.state == EvidenceState::Rejected)
+    {
+        object.remove("stream_options");
     }
 
     if resolved.omit_optional_extensions {

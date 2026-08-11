@@ -558,7 +558,73 @@ pub(super) struct DialectErrorProbe<'a> {
     pub(super) runtime_model_slug: &'a str,
     pub(super) protocol: UpstreamProtocol,
     pub(super) status: StatusCode,
+    pub(super) class: crate::state::RouteFailureClass,
     pub(super) error_text: &'a str,
+}
+
+/// Dialect fields that mention of an error text as rejected by the upstream.
+/// The first match is returned so callers can strip exactly that field.
+pub(super) fn dialect_field_error_hint(error_text: &str) -> Option<&'static str> {
+    let error_lower = error_text.to_ascii_lowercase();
+    let indicates_field_error = [
+        "unsupported",
+        "not supported",
+        "unrecognized",
+        "unknown field",
+        "invalid field",
+        "invalid parameter",
+        "unexpected field",
+    ]
+    .iter()
+    .any(|pattern| error_lower.contains(pattern));
+    if !indicates_field_error {
+        return None;
+    }
+    [
+        "parallel_tool_calls",
+        "service_tier",
+        "reasoning_effort",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "stream_options",
+        "reasoning_content",
+        "tool_choice",
+        "verbosity",
+        "prompt_cache_key",
+    ]
+    .iter()
+    .copied()
+    .find(|field| error_lower.contains(field))
+}
+
+/// Fields that are safe to strip for a same-route downgrade retry: they are
+/// optional sampling/extensions, never semantic state. `tool_choice` and
+/// `reasoning_content` are excluded because removing them changes behavior.
+pub(super) fn is_safe_dialect_strip_field(field: &str) -> bool {
+    matches!(
+        field,
+        "parallel_tool_calls"
+            | "service_tier"
+            | "reasoning_effort"
+            | "max_output_tokens"
+            | "max_completion_tokens"
+            | "stream_options"
+            | "verbosity"
+            | "prompt_cache_key"
+    )
+}
+
+/// Map a stripped dialect field to the capability a runtime hint should
+/// reject once the downgrade retry succeeds. Fields without a capability
+/// mapping (token limit fields, service_tier, ...) are still stripped for the
+/// request but do not produce a learned hint.
+pub(super) fn dialect_field_capability(field: &str) -> Option<Capability> {
+    match field {
+        "parallel_tool_calls" => Some(Capability::ParallelToolCalls),
+        "stream_options" => Some(Capability::UsageStream),
+        "reasoning_effort" => Some(Capability::ReasoningOutput),
+        _ => None,
+    }
 }
 
 pub(super) async fn maybe_queue_dialect_error_probe(
@@ -572,40 +638,22 @@ pub(super) async fn maybe_queue_dialect_error_probe(
         runtime_model_slug,
         protocol,
         status,
+        class,
         error_text,
     } = input;
-    if status != StatusCode::BAD_REQUEST {
+    // 400s are always request-shape rejections; 5xx with request-shape
+    // evidence are classified RequestRejected/FeatureUnsupported by B1 and
+    // equally represent a dialect field problem rather than a service fault.
+    if status != StatusCode::BAD_REQUEST
+        && !matches!(
+            class,
+            crate::state::RouteFailureClass::RequestRejected
+                | crate::state::RouteFailureClass::FeatureUnsupported
+        )
+    {
         return false;
     }
-    let error_lower = error_text.to_ascii_lowercase();
-    let indicates_field_error = [
-        "unsupported",
-        "not supported",
-        "unrecognized",
-        "unknown field",
-        "invalid field",
-        "unexpected field",
-    ]
-    .iter()
-    .any(|pattern| error_lower.contains(pattern));
-    if !indicates_field_error {
-        return false;
-    }
-    let mentions_dialect_field = [
-        "parallel_tool_calls",
-        "service_tier",
-        "reasoning_effort",
-        "max_output_tokens",
-        "max_completion_tokens",
-        "stream_options",
-        "reasoning_content",
-        "tool_choice",
-        "verbosity",
-        "prompt_cache_key",
-    ]
-    .iter()
-    .any(|field| error_lower.contains(field));
-    if !mentions_dialect_field {
+    if dialect_field_error_hint(error_text).is_none() {
         return false;
     }
     state

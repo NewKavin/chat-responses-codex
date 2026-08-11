@@ -4,6 +4,7 @@ use chat_responses_codex::capabilities::{
     Capability, DialectCorrectionRule, DialectProfileKey, DialectProfileState, EvidenceState,
     TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
+use std::time::Duration;
 
 #[derive(Clone)]
 enum ScriptedReply {
@@ -381,6 +382,60 @@ impl DialectRetryFixture {
             .unwrap()
     }
 
+    async fn with_usage_stream_supported(self) -> Self {
+        let key = DialectProfileKey {
+            key_fingerprint: String::new(),
+            upstream_id: "up-1".into(),
+            runtime_model_slug: "opaque/model".into(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let mut profile = UpstreamDialectProfile::unknown(key);
+        profile.state = DialectProfileState::Verified;
+        profile
+            .capabilities
+            .insert(Capability::TextInput, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::TextStream, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::NonStreamingResponse, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::UsageStream, EvidenceState::Supported);
+        profile.token_limit_field = Some(TokenLimitField::MaxTokens);
+        stamp_current_dialect_profile(&self.state, "opaque/model", &mut profile).await;
+        self.state.upsert_dialect_profile(profile).await.unwrap();
+        self
+    }
+
+    async fn send_with_stream_options(&self) -> Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        HeaderValue::from_str(&format!("Bearer {}", self.downstream_key)).unwrap(),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "opaque/model",
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "max_tokens": 64,
+                            "stream_options": {"include_usage": true}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     fn upstream_hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
     }
@@ -547,4 +602,104 @@ async fn responses_to_chat_auth_and_quota_errors_never_drop_tools_or_retry() {
         assert!(requests[0].get("tools").is_some());
         assert!(requests[0].get("tool_choice").is_some());
     }
+}
+
+#[tokio::test]
+async fn stream_options_400_gets_same_route_generic_strip_retry_and_learns() {
+    let fixture = DialectRetryFixture::scripted(vec![
+        reply_400(json!({"error":{"message":"unsupported parameter: stream_options"}})),
+        reply_ok("stripped"),
+    ])
+    .await
+    .with_usage_stream_supported()
+    .await;
+
+    let response = fixture.send_with_stream_options().await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.upstream_hits(), 2);
+    assert!(fixture.requests()[0].get("stream_options").is_some());
+    assert!(fixture.requests()[1].get("stream_options").is_none());
+    assert_eq!(response.headers()["x-chat2responses-dialect-retry"], "1");
+
+    // The persisted profile key carries the real key fingerprint, not the
+    // empty placeholder.
+    let routing = fixture.state.snapshot().await;
+    let upstream = routing
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-1")
+        .expect("fixture upstream should exist");
+    let key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(upstream, "opaque/model"),
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "opaque/model".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    // The A3 learn persists asynchronously; poll the snapshot until the
+    // rejection lands (with a generous timeout so a failing learn fails the
+    // test instead of hanging it).
+    let profile = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = fixture.state.capability_snapshot();
+            if let Some(profile) = snapshot.profiles.get(&key) {
+                if profile.capabilities.get(&Capability::UsageStream)
+                    == Some(&EvidenceState::Rejected)
+                {
+                    return profile.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dialect profile should exist with UsageStream rejected");
+    assert_eq!(
+        profile.capabilities.get(&Capability::UsageStream),
+        Some(&EvidenceState::Rejected)
+    );
+}
+
+#[tokio::test]
+async fn stream_options_502_with_request_evidence_gets_same_route_generic_strip() {
+    let fixture = DialectRetryFixture::scripted(vec![
+        ScriptedReply::Json {
+            status: StatusCode::BAD_GATEWAY,
+            body: json!({"error":{"message":"invalid parameter: stream_options"}}),
+            retry_after_seconds: None,
+        },
+        reply_ok("stripped"),
+    ])
+    .await
+    .with_usage_stream_supported()
+    .await;
+
+    let response = fixture.send_with_stream_options().await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.upstream_hits(), 2);
+    assert!(fixture.requests()[0].get("stream_options").is_some());
+    assert!(fixture.requests()[1].get("stream_options").is_none());
+    assert_eq!(response.headers()["x-chat2responses-dialect-retry"], "1");
+}
+
+#[tokio::test]
+async fn learned_stream_options_rejection_is_omitted_on_next_request_without_retry() {
+    let fixture = DialectRetryFixture::scripted(vec![
+        reply_400(json!({"error":{"message":"unsupported parameter: stream_options"}})),
+        reply_ok("stripped"),
+        reply_ok("second"),
+    ])
+    .await
+    .with_usage_stream_supported()
+    .await;
+
+    let first = fixture.send_with_stream_options().await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(fixture.upstream_hits(), 2);
+
+    let second = fixture.send_with_stream_options().await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(fixture.upstream_hits(), 3);
+    assert!(fixture.requests()[2].get("stream_options").is_none());
 }

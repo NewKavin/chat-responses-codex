@@ -3599,6 +3599,106 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
 }
 
 #[tokio::test]
+async fn recognized_field_level_5xx_with_request_evidence_queues_future_probe() {
+    with_proxy_env_cleared(|| async move {
+        let mock = ProbeMock::status_with_body(
+            StatusCode::BAD_GATEWAY,
+            json!({"error": {"message": "invalid parameter: stream_options"}}),
+        )
+        .await;
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: mock.base_url.clone(),
+                    api_key: "probe-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    active: true,
+                    ..Default::default()
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    input_token_price_per_million_cents: None,
+                    output_token_price_per_million_cents: None,
+                    daily_cost_limit_cents: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                    billing_mode: "request".into(),
+                }]),
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+                runtime_settings: None,
+            },
+            state_path,
+            AppConfig {
+                automatic_capability_probes_enabled: true,
+                ..AppConfig::default()
+            },
+        );
+        let (sender, mut receiver) = mpsc::channel(8);
+        state.set_capability_probe_sender(sender);
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-4.1-mini",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "stream_options": {"include_usage": true},
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_client_error() || response.status().is_server_error());
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut jobs = batch.into_jobs();
+        assert_eq!(jobs.len(), 1);
+        let job = jobs.remove(0);
+        assert_eq!(job.key.upstream_id, "up-1");
+        assert_eq!(job.key.runtime_model_slug, "gpt-4.1-mini");
+        assert_eq!(job.key.protocol, WireProtocol::ChatCompletions);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn stream_probe_requires_meaningful_delta_and_done() {
     let mock = ProbeMock::scripted(vec![CapabilityProbeMockReply::ChatSse(vec![
         "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n".to_string(),
