@@ -1793,6 +1793,12 @@ pub(super) async fn send_to_upstream(
         normalize_chat_tool_required_arrays(&mut upstream_body);
     }
 
+    if resolved_capabilities.as_ref().is_some_and(|resolved| {
+        strip_unsupported_parallel_tool_calls(&mut upstream_body, resolved)
+    }) {
+        downgrade_codes.insert("optional_parallel_tool_calls".into());
+    }
+
     if upstream_protocol == UpstreamProtocol::ChatCompletions {
         normalize_chat_payload_for_upstream_compatibility(
             &mut upstream_body,

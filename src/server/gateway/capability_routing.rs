@@ -411,7 +411,7 @@ pub(super) fn requested_features_for_request(
             .and_then(Value::as_array)
             .is_some_and(|tools| !tools.is_empty())
     {
-        required.insert(Capability::ParallelToolCalls);
+        optional.insert(Capability::ParallelToolCalls);
     }
     RequestedFeatures {
         required,
@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_tool_calls_true_requires_parallel_capability() {
+    fn parallel_tool_calls_true_prefers_parallel_capability_without_requiring_it() {
         for endpoint in [EndpointKind::ChatCompletions, EndpointKind::Responses] {
             let requested = requested_features_for_request(
                 endpoint,
@@ -1425,7 +1425,11 @@ mod tests {
             );
             assert_eq!(
                 requested.required,
-                BTreeSet::from([Capability::FunctionTools, Capability::ParallelToolCalls])
+                BTreeSet::from([Capability::FunctionTools])
+            );
+            assert_eq!(
+                requested.optional,
+                BTreeSet::from([Capability::ParallelToolCalls])
             );
         }
     }

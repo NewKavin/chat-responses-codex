@@ -1741,6 +1741,12 @@ async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_p
             json!({
                 "model": "claude-haiku-4-5-20251001",
                 "input": "Hello",
+                "tools": [{
+                    "type": "function",
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"}
+                }],
                 "parallel_tool_calls": true
             })
             .to_string(),

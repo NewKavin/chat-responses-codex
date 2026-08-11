@@ -149,10 +149,6 @@ pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
         }
     }
 
-    if !resolved.supports(Capability::ParallelToolCalls) {
-        object.remove("parallel_tool_calls");
-    }
-
     if resolved.token_limit_field != TokenLimitField::Omit {
         let requested_limit = object
             .remove("max_output_tokens")
@@ -203,6 +199,18 @@ pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
             merge_optional_object(object, patch);
         }
     }
+}
+
+pub(super) fn strip_unsupported_parallel_tool_calls(
+    body: &mut Value,
+    resolved: &ResolvedCapabilities,
+) -> bool {
+    if resolved.supports(Capability::ParallelToolCalls) {
+        return false;
+    }
+    body.as_object_mut()
+        .and_then(|object| object.remove("parallel_tool_calls"))
+        .is_some()
 }
 
 pub(super) fn strip_unsupported_chat_reasoning_history(
@@ -399,6 +407,19 @@ mod tests {
             body["messages"][0]["content"][0]["image_url"]["detail"],
             "high"
         );
+    }
+
+    #[test]
+    fn unsupported_parallel_tool_calls_are_downgraded_for_any_upstream_protocol() {
+        let mut body = json!({
+            "tools": [{"type": "function", "name": "read_file"}],
+            "parallel_tool_calls": true
+        });
+        let resolved = resolved_without_image_detail();
+
+        assert!(strip_unsupported_parallel_tool_calls(&mut body, &resolved));
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert_eq!(body["tools"][0]["name"], "read_file");
     }
 
     #[test]
