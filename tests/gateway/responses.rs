@@ -34,6 +34,8 @@ mod core;
 mod fallback;
 #[path = "responses/history.rs"]
 mod history;
+#[path = "responses/session_recovery.rs"]
+mod session_recovery;
 #[path = "responses/stream_lifecycle.rs"]
 mod stream_lifecycle;
 #[path = "responses/streaming.rs"]

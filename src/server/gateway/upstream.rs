@@ -1793,10 +1793,14 @@ pub(super) async fn send_to_upstream(
         normalize_chat_tool_required_arrays(&mut upstream_body);
     }
 
-    if resolved_capabilities
-        .as_ref()
-        .is_some_and(|resolved| strip_unsupported_parallel_tool_calls(&mut upstream_body, resolved))
-    {
+    // A missing capability resolution (unprobed route) is treated
+    // conservatively as "does not support parallel tool calls" so the field
+    // never reaches an upstream that might reject it.
+    let stripped_parallel_tool_calls = match resolved_capabilities.as_ref() {
+        Some(resolved) => strip_unsupported_parallel_tool_calls(&mut upstream_body, resolved),
+        None => strip_parallel_tool_calls_unconditionally(&mut upstream_body),
+    };
+    if stripped_parallel_tool_calls {
         downgrade_codes.insert("optional_parallel_tool_calls".into());
     }
 

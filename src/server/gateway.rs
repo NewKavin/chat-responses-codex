@@ -591,6 +591,42 @@ fn route_health_keys(
     )
 }
 
+/// Names the capability that actually blocks the request: a failed
+/// capability that intersects this request's required set when one exists
+/// (never an arbitrary route's failure), otherwise the required set itself.
+fn capability_name_for_failure(
+    constrained_failure: Option<Capability>,
+    route_profile_constraint_active: bool,
+    claude_replay_route: &ClaudeThinkingReplayRoute,
+    cache: &BTreeMap<(WireProtocol, String, String), RouteCapabilityEvaluation>,
+    required_capabilities: &BTreeSet<Capability>,
+) -> String {
+    constrained_failure
+        .or_else(|| {
+            (!route_profile_constraint_active
+                && matches!(claude_replay_route, ClaudeThinkingReplayRoute::NoReplay))
+            .then(|| {
+                cache
+                    .values()
+                    .filter_map(|route| route.failed_capability)
+                    .find(|capability| required_capabilities.contains(capability))
+            })
+            .flatten()
+        })
+        .map(|capability| format!("{capability:?}"))
+        .unwrap_or_else(|| {
+            if required_capabilities.is_empty() {
+                "Unknown".to_string()
+            } else {
+                required_capabilities
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        })
+}
+
 fn duration_seconds_ceil(duration: Duration) -> u64 {
     duration
         .as_secs()
@@ -4477,6 +4513,7 @@ async fn process_gateway_request_inner(
     let loaded_continuation_state = loaded_exact_continuation
         .as_ref()
         .map(LoadedContinuation::state);
+    let has_loaded_continuation = loaded_continuation_state.is_some();
     if loaded_continuation_state.is_some_and(|continuation| {
         !continuation.has_protocol_transition(
             WireProtocol::from(endpoint.native_protocol()),
@@ -4507,7 +4544,14 @@ async fn process_gateway_request_inner(
         requested_features.allow_reasoning_history_downgrade = false;
     }
     if let Some(continuation) = loaded_continuation_state {
-        continuation.apply_to_requested(&mut requested_features);
+        let downgraded = continuation.apply_to_requested(&mut requested_features);
+        if !downgraded.is_empty() {
+            tracing::debug!(
+                request_id = %request_id,
+                downgraded = ?downgraded,
+                "downgraded stale stored continuation required capabilities (V2)"
+            );
+        }
     }
     let required_capabilities = requested_features.required.clone();
     let capability_snapshot = state.capability_snapshot();
@@ -4596,12 +4640,14 @@ async fn process_gateway_request_inner(
                         {
                             continue;
                         }
+                        let mut stored_required = continuation.required_capabilities().clone();
+                        sanitize_stored_required(&mut stored_required);
                         if let Some(contract) = continuation_contract_for_route(
                             upstream,
                             &runtime_model_slug,
                             WireProtocol::from(endpoint.native_protocol()),
                             WireProtocol::from(protocol),
-                            continuation.required_capabilities(),
+                            &stored_required,
                             resolved,
                             profile,
                             continuation.tool_registry_version(),
@@ -4710,18 +4756,39 @@ async fn process_gateway_request_inner(
                 if profile.configuration_fingerprint != configuration_fingerprint {
                     return false;
                 }
+                // Both sides of the equality are sanitized: a stored
+                // contract created when `DOWNGRADEABLE_STORED_CAPABILITIES`
+                // were required still matches a route that now only supports
+                // the downgraded set, while routes that support the full set
+                // keep matching exactly as before.
+                let mut derived_required = continuation.required_capabilities().clone();
+                let downgraded = sanitize_stored_required(&mut derived_required);
+                let mut stored_contract = contract.clone();
+                sanitize_stored_required(&mut stored_contract.required_capabilities);
+                if !downgraded.is_empty() {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        downgraded = ?downgraded,
+                        upstream_id = %upstream.id,
+                        "downgraded stale stored continuation required capabilities"
+                    );
+                }
                 return continuation_contract_for_route(
                     upstream,
                     &runtime_model_slug,
                     WireProtocol::from(endpoint.native_protocol()),
                     WireProtocol::from(protocol),
-                    continuation.required_capabilities(),
+                    &derived_required,
                     resolved,
                     profile,
                     continuation.tool_registry_version(),
                 )
                 .as_ref()
-                    == Some(contract);
+                .is_some_and(|derived| {
+                    let mut derived_contract = derived.clone();
+                    sanitize_stored_required(&mut derived_contract.required_capabilities);
+                    derived_contract == stored_contract
+                });
             }
 
             let Some(profile_key) = continuation_profile_key.as_ref() else {
@@ -4862,30 +4929,98 @@ async fn process_gateway_request_inner(
                 ClaudeThinkingReplayRoute::NoReplay
                 | ClaudeThinkingReplayRoute::InvalidOrUnavailable => None,
             });
-        let capability_name = constrained_failure
-            .or_else(|| {
-                (!route_profile_constraint_active
-                    && matches!(claude_replay_route, ClaudeThinkingReplayRoute::NoReplay))
-                .then(|| {
-                    route_capability_cache
-                        .values()
-                        .filter_map(|route| route.failed_capability)
-                        .next()
-                })
-                .flatten()
-            })
-            .or_else(|| required_capabilities.iter().next().copied())
-            .map(|capability| format!("{capability:?}"))
-            .unwrap_or_else(|| "Unknown".to_string());
-        let error = GatewayError::classified(
-            StatusCode::BAD_REQUEST,
-            format!("selected routes cannot preserve required capability {capability_name}"),
-            "invalid_request_error",
-            "gateway_protocol_capability_unsupported",
-            "gateway_protocol_capability_unsupported",
-            None,
-            Some(json!({ "scope": "gateway" })),
+        let capability_name = capability_name_for_failure(
+            constrained_failure,
+            route_profile_constraint_active,
+            &claude_replay_route,
+            &route_capability_cache,
+            &required_capabilities,
         );
+        // A continuation whose pinned routes are temporarily unavailable
+        // (cooling / half-open) must not be killed with a terminal 400: the
+        // client retries after the advertised wait and keeps the session.
+        let temporary_recovery = if has_loaded_continuation {
+            // The continuation pins an exact route identity; query the health
+            // of that route (and any key sharing the pinned fingerprint)
+            // directly so a cooling/half-open route counts as temporary even
+            // when the capability contract can no longer be re-derived.
+            let mut candidate_route_health = Vec::new();
+            if let Some(profile_key) = continuation_profile_key.as_ref() {
+                for upstream in routing_snapshot
+                    .upstreams
+                    .iter()
+                    .filter(|upstream| upstream.active && upstream.supports_model(model))
+                {
+                    let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                        continue;
+                    };
+                    if runtime_model_slug != profile_key.runtime_model_slug {
+                        continue;
+                    }
+                    for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                        let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                        if key_fingerprint != profile_key.key_fingerprint {
+                            continue;
+                        }
+                        for protocol in upstream.supported_protocols() {
+                            if WireProtocol::from(protocol) != profile_key.protocol {
+                                continue;
+                            }
+                            let (route_health_key, _) = route_health_keys(
+                                upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                            );
+                            candidate_route_health.push(route_health_key);
+                        }
+                    }
+                }
+            }
+            if candidate_route_health.is_empty() {
+                None
+            } else {
+                state
+                    .earliest_temporary_route_recovery(&candidate_route_health)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+        } else {
+            None
+        };
+        let error = if let Some(recovery) = temporary_recovery {
+            let retry_after_seconds =
+                duration_seconds_ceil(recovery.half_open_remaining.unwrap_or(recovery.retry_after));
+            GatewayError::classified(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    concat!(
+                        "selected routes cannot preserve required capability {}; ",
+                        "routes are temporarily unavailable; please try again in {}s"
+                    ),
+                    capability_name, retry_after_seconds
+                ),
+                "upstream_error",
+                "upstream_routes_temporarily_unavailable",
+                "upstream_routes_temporarily_unavailable",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            )
+        } else {
+            GatewayError::classified(
+                StatusCode::BAD_REQUEST,
+                format!("selected routes cannot preserve required capability {capability_name}"),
+                "invalid_request_error",
+                "gateway_protocol_capability_unsupported",
+                "gateway_protocol_capability_unsupported",
+                None,
+                Some(json!({ "scope": "gateway" })),
+            )
+        };
         let _ = append_gateway_usage_log(
             &state,
             &request_id,

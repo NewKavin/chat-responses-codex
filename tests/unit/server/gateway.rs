@@ -2854,3 +2854,84 @@ fn upstream_stream_timeout_is_gateway_timeout() {
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(category, "stream_upstream_timeout");
 }
+
+#[test]
+fn capability_name_prefers_failed_capability_intersecting_required_set() {
+    let mut cache = BTreeMap::new();
+    cache.insert(
+        (WireProtocol::Responses, "up-a".into(), "key-a".into()),
+        RouteCapabilityEvaluation {
+            eligible: false,
+            optional_misses: 0,
+            failed_capability: Some(Capability::HostedTools),
+            resolved: None,
+        },
+    );
+    cache.insert(
+        (WireProtocol::Responses, "up-b".into(), "key-b".into()),
+        RouteCapabilityEvaluation {
+            eligible: false,
+            optional_misses: 0,
+            failed_capability: Some(Capability::ParallelToolCalls),
+            resolved: None,
+        },
+    );
+    let required = BTreeSet::from([Capability::FunctionTools, Capability::ParallelToolCalls]);
+
+    let name = capability_name_for_failure(
+        None,
+        false,
+        &ClaudeThinkingReplayRoute::NoReplay,
+        &cache,
+        &required,
+    );
+    assert_eq!(name, "ParallelToolCalls");
+}
+
+#[test]
+fn capability_name_lists_required_set_when_no_route_failure_intersects() {
+    let mut cache = BTreeMap::new();
+    cache.insert(
+        (WireProtocol::Responses, "up-a".into(), "key-a".into()),
+        RouteCapabilityEvaluation {
+            eligible: false,
+            optional_misses: 0,
+            failed_capability: Some(Capability::HostedTools),
+            resolved: None,
+        },
+    );
+    let required = BTreeSet::from([Capability::FunctionTools, Capability::TextStream]);
+
+    let name = capability_name_for_failure(
+        None,
+        false,
+        &ClaudeThinkingReplayRoute::NoReplay,
+        &cache,
+        &required,
+    );
+    assert_eq!(name, "FunctionTools, TextStream");
+}
+
+#[test]
+fn capability_name_keeps_unknown_for_empty_required_set() {
+    let name = capability_name_for_failure(
+        None,
+        false,
+        &ClaudeThinkingReplayRoute::NoReplay,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(name, "Unknown");
+}
+
+#[test]
+fn capability_name_prefers_constrained_route_failure() {
+    let name = capability_name_for_failure(
+        Some(Capability::ReasoningOutput),
+        true,
+        &ClaudeThinkingReplayRoute::NoReplay,
+        &BTreeMap::new(),
+        &BTreeSet::from([Capability::FunctionTools]),
+    );
+    assert_eq!(name, "ReasoningOutput");
+}

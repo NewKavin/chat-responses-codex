@@ -170,12 +170,20 @@ impl GatewayContinuationState {
         self.probe_schema_version
     }
 
-    pub(super) fn apply_to_requested(&self, requested: &mut RequestedFeatures) {
+    /// Applies the stored requirement set to `requested`, returning any
+    /// capabilities that were moved from required to optional by
+    /// read-time sanitization (empty when nothing was downgraded).
+    pub(super) fn apply_to_requested(
+        &self,
+        requested: &mut RequestedFeatures,
+    ) -> BTreeSet<Capability> {
         requested.continuation_profile = Some(self.preferred_profile.clone());
         requested.continuation_reasoning_carrier = self.reasoning_carrier;
-        requested
-            .required
-            .extend(self.required_capabilities.iter().copied());
+        let mut stored_required = self.required_capabilities.clone();
+        let downgraded = sanitize_stored_required(&mut stored_required);
+        requested.required.extend(stored_required);
+        requested.optional.extend(downgraded.clone());
+        downgraded
     }
 
     pub(super) fn observe_reasoning_carrier(&mut self) {
@@ -265,6 +273,28 @@ impl GatewayContinuationState {
                         == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
             })
     }
+}
+
+/// Capabilities that may have been persisted as required by older gateway
+/// versions but are now safely optional. Sessions created before the
+/// downgrade must not be terminal-400'd at the capability gate; the stored
+/// requirement is sanitized on read (see `sanitize_stored_required`).
+pub(super) const DOWNGRADEABLE_STORED_CAPABILITIES: &[Capability] =
+    &[Capability::ParallelToolCalls];
+
+/// Removes every downgradeable capability from `required` and returns the
+/// removed set so callers can move them into the optional set. Purely a
+/// read-time behavior: the persisted continuation state is never rewritten.
+pub(super) fn sanitize_stored_required(
+    required: &mut BTreeSet<Capability>,
+) -> BTreeSet<Capability> {
+    let mut downgraded = BTreeSet::new();
+    for capability in DOWNGRADEABLE_STORED_CAPABILITIES {
+        if required.remove(capability) {
+            downgraded.insert(*capability);
+        }
+    }
+    downgraded
 }
 
 fn continuation_provider_group(

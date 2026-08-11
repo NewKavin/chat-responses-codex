@@ -208,6 +208,12 @@ pub(super) fn strip_unsupported_parallel_tool_calls(
     if resolved.supports(Capability::ParallelToolCalls) {
         return false;
     }
+    strip_parallel_tool_calls_unconditionally(body)
+}
+
+/// Conservative fallback for routes whose capabilities were never resolved:
+/// remove the field as if the capability were unsupported.
+pub(super) fn strip_parallel_tool_calls_unconditionally(body: &mut Value) -> bool {
     body.as_object_mut()
         .and_then(|object| object.remove("parallel_tool_calls"))
         .is_some()
@@ -420,6 +426,23 @@ mod tests {
         assert!(strip_unsupported_parallel_tool_calls(&mut body, &resolved));
         assert!(body.get("parallel_tool_calls").is_none());
         assert_eq!(body["tools"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn missing_resolution_strips_parallel_tool_calls_conservatively() {
+        let mut body = json!({
+            "tools": [{"type": "function", "name": "read_file"}],
+            "parallel_tool_calls": true,
+            "stream_options": {"include_usage": true}
+        });
+
+        assert!(strip_parallel_tool_calls_unconditionally(&mut body));
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert!(body.get("stream_options").is_some());
+
+        let mut no_field = json!({"tools": []});
+        assert!(!strip_parallel_tool_calls_unconditionally(&mut no_field));
     }
 
     #[test]
