@@ -473,7 +473,8 @@ impl AccountConcurrencyRegistry {
             live_cooldown
                 || !state.tickets.is_empty()
                 || state.probe.is_some()
-                || now.saturating_duration_since(state.last_access) <= self.tuning_snapshot().idle_retention
+                || now.saturating_duration_since(state.last_access)
+                    <= self.tuning_snapshot().idle_retention
         });
         before.saturating_sub(registry.accounts.len())
     }
@@ -565,7 +566,8 @@ impl AccountConcurrencyRegistry {
     }
 
     fn jitter(&self, key: &AccountConcurrencyKey, generation: u64) -> Duration {
-        let max_ms = u64::try_from(self.tuning_snapshot().jitter_max.as_millis()).unwrap_or(u64::MAX);
+        let max_ms =
+            u64::try_from(self.tuning_snapshot().jitter_max.as_millis()).unwrap_or(u64::MAX);
         if max_ms == 0 {
             return Duration::ZERO;
         }

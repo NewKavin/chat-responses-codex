@@ -442,23 +442,33 @@ impl RouteHealthRegistry {
         let max_cooldown_until = now + max;
         let max_half_open_until = now + half_open_ttl;
 
-        self.concurrency_probe_delays = normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
+        self.concurrency_probe_delays =
+            normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         self.transient_route_cooldown_base = base;
         self.transient_route_cooldown_max = max;
         self.half_open_ttl = half_open_ttl;
 
         for state in self.routes.values_mut() {
             if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
-                if state.cooldown_until.is_some_and(|until| until > max_cooldown_until) {
+                if state
+                    .cooldown_until
+                    .is_some_and(|until| until > max_cooldown_until)
+                {
                     state.cooldown_until = Some(max_cooldown_until);
                 }
             }
-            if state.half_open_expires_at.is_some_and(|until| until > max_half_open_until) {
+            if state
+                .half_open_expires_at
+                .is_some_and(|until| until > max_half_open_until)
+            {
                 state.half_open_expires_at = Some(max_half_open_until);
             }
         }
         for state in self.keys.values_mut() {
-            if state.half_open_expires_at.is_some_and(|until| until > max_half_open_until) {
+            if state
+                .half_open_expires_at
+                .is_some_and(|until| until > max_half_open_until)
+            {
                 state.half_open_expires_at = Some(max_half_open_until);
             }
         }
@@ -1325,9 +1335,7 @@ fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecov
         Some(RouteRecovery {
             class,
             retry_after: HALF_OPEN_BUSY_RETRY,
-            half_open_remaining: Some(
-                state.half_open_remaining(now).max(HALF_OPEN_BUSY_RETRY),
-            ),
+            half_open_remaining: Some(state.half_open_remaining(now).max(HALF_OPEN_BUSY_RETRY)),
         })
     } else {
         Some(RouteRecovery {

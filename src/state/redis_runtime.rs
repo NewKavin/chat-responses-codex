@@ -172,9 +172,9 @@ impl RuntimeCoordinationBackend {
                         .upstream_response_header_timeout_seconds
                         .saturating_add(60)
                         .saturating_mul(1_000),
-                    route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
-                        config.upstream_transient_route_cooldown_max_seconds,
-                    )),
+                    route_health_ttl_seconds: route_health_retention_ttl_seconds(
+                        Duration::from_secs(config.upstream_transient_route_cooldown_max_seconds),
+                    ),
                     route_health_half_open_ttl_ms: config
                         .upstream_route_health_half_open_ttl_seconds
                         .max(1)
@@ -262,9 +262,11 @@ impl RedisRuntimeCoordinator {
         let mut tuning = self.tuning.write().expect("redis tuning lock poisoned");
         tuning.account_waiter_budget_ms = recovery_max_wait_ms.max(1);
         tuning.account_waiter_ttl_ms = tuning.account_waiter_budget_ms.saturating_add(60_000);
-        tuning.route_health_ttl_seconds = route_health_retention_ttl_seconds(Duration::from_secs(max_seconds));
+        tuning.route_health_ttl_seconds =
+            route_health_retention_ttl_seconds(Duration::from_secs(max_seconds));
         tuning.route_health_half_open_ttl_ms = half_open_ttl_seconds.max(1).saturating_mul(1_000);
-        tuning.concurrency_probe_delays = normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
+        tuning.concurrency_probe_delays =
+            normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         tuning.transient_route_cooldown_base = Duration::from_secs(base_seconds);
         tuning.transient_route_cooldown_max = Duration::from_secs(max_seconds);
     }
@@ -601,7 +603,8 @@ impl RedisRuntimeCoordinator {
         let identity = stable_identity(downstream_id);
         let lease_key = self.key(&identity, "leases");
         let waiting_key = self.key(&identity, "waiting");
-        let expires_at_ms = unix_millis().saturating_add(self.tuning_snapshot().account_waiter_ttl_ms);
+        let expires_at_ms =
+            unix_millis().saturating_add(self.tuning_snapshot().account_waiter_ttl_ms);
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -1419,7 +1422,8 @@ impl RedisRuntimeCoordinator {
             .filter(|class| key_failure_has_cooldown(*class))
             .map(|class| key_cooldown_schedule_ms(&lease.key, class))
             .unwrap_or_default();
-        let probe_schedule = concurrency_probe_schedule_ms(&self.tuning_snapshot().concurrency_probe_delays);
+        let probe_schedule =
+            concurrency_probe_schedule_ms(&self.tuning_snapshot().concurrency_probe_delays);
         let ttl_seconds = self.retention_ttl_seconds_for(
             retry_after,
             &[&route_schedule, &key_schedule, &probe_schedule],
@@ -1815,12 +1819,14 @@ impl RedisRuntimeCoordinator {
         let records = self.indexed_health_state_records("routes").await?;
         let existing_routes = records
             .into_iter()
-            .map(|record| Ok(RouteHealthKey {
-                upstream_id: record.upstream_id,
-                key_fingerprint: record.key_fingerprint,
-                runtime_model_slug: record.model_slug,
-                protocol: record.protocol.ok_or(RuntimeCoordinationError)?,
-            }))
+            .map(|record| {
+                Ok(RouteHealthKey {
+                    upstream_id: record.upstream_id,
+                    key_fingerprint: record.key_fingerprint,
+                    runtime_model_slug: record.model_slug,
+                    protocol: record.protocol.ok_or(RuntimeCoordinationError)?,
+                })
+            })
             .collect::<Result<HashSet<_>, _>>()?;
         Ok(enumerable_route_health_routes(upstream, &existing_routes))
     }
@@ -2102,7 +2108,8 @@ impl RedisRuntimeCoordinator {
             .map(Duration::from_millis)
             .unwrap_or_default();
         let cooldown = retry_after.unwrap_or_default().max(scheduled_cooldown);
-        self.tuning_snapshot().route_health_ttl_seconds
+        self.tuning_snapshot()
+            .route_health_ttl_seconds
             .max(route_health_retention_ttl_seconds(cooldown))
     }
 

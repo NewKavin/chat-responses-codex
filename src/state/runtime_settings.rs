@@ -184,11 +184,9 @@ impl RuntimeSettings {
             usage_log_retention_days: config.usage_log_retention_days,
             admin_logs_page_size_max: config.admin_logs_page_size_max,
             admin_upstream_timeout_seconds: config.admin_upstream_timeout_seconds,
-            troubleshooting_check_timeout_seconds: config
-                .troubleshooting_check_timeout_seconds,
+            troubleshooting_check_timeout_seconds: config.troubleshooting_check_timeout_seconds,
             model_probe_refresh_interval_seconds: config.model_probe_refresh_interval_seconds,
-            upstream_model_auto_discovery_enabled: config
-                .upstream_model_auto_discovery_enabled,
+            upstream_model_auto_discovery_enabled: config.upstream_model_auto_discovery_enabled,
             upstream_model_key_sync_interval_seconds: config
                 .upstream_model_key_sync_interval_seconds,
             capability_probe_queue_capacity: config.capability_probe_queue_capacity,
@@ -211,8 +209,7 @@ impl RuntimeSettings {
                 .upstream_transient_route_cooldown_max_seconds,
             upstream_route_health_half_open_ttl_seconds: config
                 .upstream_route_health_half_open_ttl_seconds,
-            upstream_route_exhaustion_retry_enabled: config
-                .upstream_route_exhaustion_retry_enabled,
+            upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
             upstream_route_exhaustion_retry_max_wait_ms: config
                 .upstream_route_exhaustion_retry_max_wait_ms,
             upstream_route_exhaustion_retry_max_rounds: config
@@ -246,11 +243,9 @@ impl RuntimeSettings {
         config.usage_log_retention_days = self.usage_log_retention_days;
         config.admin_logs_page_size_max = self.admin_logs_page_size_max;
         config.admin_upstream_timeout_seconds = self.admin_upstream_timeout_seconds;
-        config.troubleshooting_check_timeout_seconds =
-            self.troubleshooting_check_timeout_seconds;
+        config.troubleshooting_check_timeout_seconds = self.troubleshooting_check_timeout_seconds;
         config.model_probe_refresh_interval_seconds = self.model_probe_refresh_interval_seconds;
-        config.upstream_model_auto_discovery_enabled =
-            self.upstream_model_auto_discovery_enabled;
+        config.upstream_model_auto_discovery_enabled = self.upstream_model_auto_discovery_enabled;
         config.upstream_model_key_sync_interval_seconds =
             self.upstream_model_key_sync_interval_seconds;
         config.capability_probe_queue_capacity = self.capability_probe_queue_capacity;
@@ -299,9 +294,7 @@ impl RuntimeSettings {
             self.upstream_first_semantic_output_timeout_seconds;
     }
 
-    pub fn validate_and_normalize(
-        mut self,
-    ) -> Result<Self, RuntimeSettingsValidationError> {
+    pub fn validate_and_normalize(mut self) -> Result<Self, RuntimeSettingsValidationError> {
         self.app_name = normalize_nonempty_string(self.app_name, "app_name", 120)?;
         self.upstream_user_agent =
             normalize_nonempty_string(self.upstream_user_agent, "upstream_user_agent", 512)?;
@@ -312,7 +305,11 @@ impl RuntimeSettings {
             "usage_log_archive_max_files",
         )?;
         require_positive(self.usage_log_retention_days, "usage_log_retention_days")?;
-        require_min_usize(self.admin_logs_page_size_max, 200, "admin_logs_page_size_max")?;
+        require_min_usize(
+            self.admin_logs_page_size_max,
+            200,
+            "admin_logs_page_size_max",
+        )?;
         require_positive(
             self.admin_upstream_timeout_seconds,
             "admin_upstream_timeout_seconds",
@@ -439,9 +436,7 @@ impl RuntimeSettings {
                 "must be shorter than the stream idle timeout",
             ));
         }
-        if self.upstream_stream_idle_timeout_seconds
-            > self.upstream_stream_max_duration_seconds
-        {
+        if self.upstream_stream_idle_timeout_seconds > self.upstream_stream_max_duration_seconds {
             return Err(invalid(
                 "upstream_stream_idle_timeout_seconds",
                 "must not exceed the stream maximum duration",
@@ -553,9 +548,7 @@ fn require_min_usize(
     }
 }
 
-fn normalize_probe_delays(
-    values: &mut Vec<u64>,
-) -> Result<(), RuntimeSettingsValidationError> {
+fn normalize_probe_delays(values: &mut Vec<u64>) -> Result<(), RuntimeSettingsValidationError> {
     if values.is_empty()
         || values
             .iter()
