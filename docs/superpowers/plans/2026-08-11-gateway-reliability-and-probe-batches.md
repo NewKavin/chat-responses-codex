@@ -106,5 +106,5 @@
 - [x] Run `rtk cargo test`.
 - [x] Run frontend type-check, Vitest and production build.
 - [x] Run `rtk git diff --check` and inspect commits/worktree status.
-- [ ] Merge the isolated branch into `main` without touching other worktrees.
-- [ ] Push `origin/main`, verify remote SHA, deploy the production Compose customization, and run health checks.
+- [x] Merge the isolated branch into `main` without touching other worktrees.
+- [x] Push `origin/main`, verify remote SHA, deploy the production Compose customization, and run health checks.
