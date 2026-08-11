@@ -7,8 +7,8 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, AppState,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
-    ModelContextConfig, PersistedState, RuntimeSettingsDocument, UpstreamConfig, UsageLog,
-    UsageLogQuery,
+    ModelContextConfig, NonstandardFieldPolicy, PersistedState, RuntimeSettingsDocument,
+    UpstreamConfig, UsageLog, UsageLogQuery,
 };
 use serde_json::json;
 use serde_json::Map;
@@ -66,7 +66,7 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "auto_managed": false,
                 "managed_source": null,
                 "last_synced_at": 0,
-                "strip_nonstandard_chat_fields": true
+                "strip_nonstandard_chat_fields": "always_strip"
             }
         ],
         "downstreams": [],
@@ -317,7 +317,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         protect_premium_quota: false,
         active: true,
         failure_count: 0,
-        strip_nonstandard_chat_fields: true,
+        strip_nonstandard_chat_fields: NonstandardFieldPolicy::AlwaysStrip,
         ..Default::default()
     };
     let downstream = DownstreamConfig {

@@ -281,6 +281,92 @@ impl Default for AppConfig {
     }
 }
 
+/// How the gateway treats non-standard ChatCompletions fields
+/// (`parallel_tool_calls`, `stream_options`, `metadata`, `user`, ...) when
+/// sending to an upstream.
+///
+/// - `Auto` (default): a route with a resolved capability profile is trusted
+///   to declare what it supports and the profile normalization decides; an
+///   unprobed route is treated conservatively and the optional non-standard
+///   fields are stripped (same set as `AlwaysStrip`).
+/// - `AlwaysStrip`: always remove the optional non-standard fields, even when
+///   a verified profile declares support.
+/// - `Forward`: never strip purely because of this policy; the resolved
+///   profile (or the request itself) decides.
+///
+/// Deserialization is backward compatible with the legacy boolean form:
+/// `false` -> `Auto`, `true` -> `AlwaysStrip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonstandardFieldPolicy {
+    Auto,
+    AlwaysStrip,
+    Forward,
+}
+
+impl Default for NonstandardFieldPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl NonstandardFieldPolicy {
+    /// Whether an unprobed route should conservatively strip the optional
+    /// non-standard fields. `Auto` and `AlwaysStrip` both strip; `Forward`
+    /// never strips purely because of the policy.
+    pub fn strips_on_unprobed_route(self) -> bool {
+        !matches!(self, Self::Forward)
+    }
+
+    /// The PostgreSQL representation of the policy.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AlwaysStrip => "always_strip",
+            Self::Forward => "forward",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NonstandardFieldPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PolicyVisitor;
+        impl<'de> serde::de::Visitor<'de> for PolicyVisitor {
+            type Value = NonstandardFieldPolicy;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a boolean or one of \"auto\", \"always_strip\", \"forward\"")
+            }
+            fn visit_bool<E>(self, legacy: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(if legacy {
+                    NonstandardFieldPolicy::AlwaysStrip
+                } else {
+                    NonstandardFieldPolicy::Auto
+                })
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "auto" => Ok(NonstandardFieldPolicy::Auto),
+                    "always_strip" => Ok(NonstandardFieldPolicy::AlwaysStrip),
+                    "forward" => Ok(NonstandardFieldPolicy::Forward),
+                    other => Err(E::custom(format!(
+                        "unknown nonstandard field policy: {other}"
+                    ))),
+                }
+            }
+        }
+        deserializer.deserialize_any(PolicyVisitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     #[serde(default)]
@@ -333,13 +419,12 @@ pub struct UpstreamConfig {
     pub managed_source: Option<String>,
     #[serde(default)]
     pub last_synced_at: u64,
-    /// When true, the gateway strips non-standard ChatCompletions fields
-    /// (e.g. `service_tier`, `safety_identifier`, `prompt_cache_key`,
-    /// `reasoning_effort`, `store`, `verbosity`) before sending to this
-    /// upstream. Helps with upstreams/proxies that corrupt the JSON body
-    /// when they encounter unrecognized fields.
+    /// Policy for non-standard ChatCompletions fields (legacy boolean form
+    /// `false`/`true` deserializes to `auto`/`always_strip`). `Auto` strips
+    /// conservatively on unprobed routes and trusts verified capability
+    /// profiles otherwise.
     #[serde(default)]
-    pub strip_nonstandard_chat_fields: bool,
+    pub strip_nonstandard_chat_fields: NonstandardFieldPolicy,
 }
 
 impl UpstreamConfig {
@@ -385,7 +470,7 @@ impl Default for UpstreamConfig {
             auto_managed: false,
             managed_source: None,
             last_synced_at: 0,
-            strip_nonstandard_chat_fields: false,
+            strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,
         }
     }
 }

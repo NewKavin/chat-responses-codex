@@ -1,4 +1,5 @@
 use super::*;
+use chat_responses_codex::state::NonstandardFieldPolicy;
 
 struct ResponsesFeedbackHarness {
     state: AppState,
@@ -2015,7 +2016,7 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-                strip_nonstandard_chat_fields: false,
+                strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,
                 api_keys: vec![],
                 api_key_models: vec![],
                 auto_managed: false,

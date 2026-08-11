@@ -23,7 +23,7 @@ use chat_responses_codex::server::{
     CapabilityProbePlan, CapabilityProbeService, ProbeJobExecution, ProbePlanCompleteness,
     ReasoningTrigger,
 };
-use chat_responses_codex::state::{RouteFailureClass, RouteHealthKey};
+use chat_responses_codex::state::{NonstandardFieldPolicy, RouteFailureClass, RouteHealthKey};
 
 #[test]
 fn matching_expectation_adds_https_image_case_to_probe_plan() {
@@ -4439,14 +4439,14 @@ async fn chat_probe_stream_mock() -> ProbeMock {
     .await
 }
 
-fn probe_upstream(mock: &ProbeMock, strip: bool) -> UpstreamConfig {
+fn probe_upstream(mock: &ProbeMock, policy: NonstandardFieldPolicy) -> UpstreamConfig {
     UpstreamConfig {
         id: "probe-strip".into(),
         name: "probe-strip".into(),
         base_url: mock.base_url.clone(),
         api_key: "probe-secret".into(),
         supported_models: vec!["probe-model".into()],
-        strip_nonstandard_chat_fields: strip,
+        strip_nonstandard_chat_fields: policy,
         active: true,
         ..UpstreamConfig::default()
     }
@@ -4466,7 +4466,7 @@ async fn chat_probe_stream_body_strips_nonstandard_fields_when_configured() {
         },
         5,
         None,
-        Some(probe_upstream(&mock, true)),
+        Some(probe_upstream(&mock, NonstandardFieldPolicy::AlwaysStrip)),
     )
     .await
     .unwrap();
@@ -4499,7 +4499,7 @@ async fn chat_probe_stream_body_keeps_stream_options_when_upstream_forwards() {
         },
         5,
         None,
-        Some(probe_upstream(&mock, false)),
+        Some(probe_upstream(&mock, NonstandardFieldPolicy::Forward)),
     )
     .await
     .unwrap();
@@ -4544,15 +4544,17 @@ async fn chat_probe_sends_reasoning_effort_candidate_verbatim() {
         "probe-model",
         CapabilityProbePlan {
             protocol: WireProtocol::ChatCompletions,
-            cases: vec![chat_responses_codex::server::CoreProbeCase::ReasoningControl {
-                field: "reasoning_effort".into(),
-                value: json!("xhigh"),
-            }],
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("xhigh"),
+                },
+            ],
             output_token_cap: 16,
         },
         5,
         None,
-        Some(probe_upstream(&mock, false)),
+        Some(probe_upstream(&mock, NonstandardFieldPolicy::Forward)),
     )
     .await
     .unwrap();

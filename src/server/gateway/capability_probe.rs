@@ -11,6 +11,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use super::compat::normalize_chat_payload_for_upstream_compatibility;
 use crate::capabilities::{
     apply_probe_outcome, apply_probe_outcome_partial, Capability, CompiledCapabilityConfiguration,
     DeclarativeProbeCase, DialectProfileKey, EvidenceState, PredicateOperator, ProbeJob,
@@ -18,7 +19,6 @@ use crate::capabilities::{
     ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
-use super::compat::normalize_chat_payload_for_upstream_compatibility;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
 use crate::protocol::{
     ProtocolError, StreamAggregateResult, StreamResponseAggregator, UpstreamStreamErrorKind,
@@ -1850,7 +1850,12 @@ with the exact result as the nonce string.";
         let strip = self
             .upstream
             .as_ref()
-            .is_some_and(|upstream| upstream.strip_nonstandard_chat_fields);
+            .map(|upstream| {
+                upstream
+                    .strip_nonstandard_chat_fields
+                    .strips_on_unprobed_route()
+            })
+            .unwrap_or(false);
         normalize_chat_payload_for_upstream_compatibility(
             &mut body,
             &self.runtime_model_slug,
@@ -1874,11 +1879,7 @@ with the exact result as the nonce string.";
         self.post_chat_inner(body, false).await
     }
 
-    async fn post_chat_inner(
-        &self,
-        body: Value,
-        normalize: bool,
-    ) -> io::Result<ProbeHttpResponse> {
+    async fn post_chat_inner(&self, body: Value, normalize: bool) -> io::Result<ProbeHttpResponse> {
         let _held = self.reserve_upstream_request().await?;
         let body = if normalize {
             self.normalize_probe_chat_body(body)

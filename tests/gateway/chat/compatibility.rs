@@ -1,4 +1,5 @@
 use super::*;
+use chat_responses_codex::state::NonstandardFieldPolicy;
 
 #[tokio::test(flavor = "current_thread")]
 async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
@@ -259,7 +260,7 @@ async fn strict_chat_compatibility_strips_optional_fields_but_preserves_tools() 
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "opaque/tool-model",
-            true,
+            NonstandardFieldPolicy::AlwaysStrip,
             json!({
                 "model": "opaque/tool-model",
                 "messages": [{"role": "user", "content": "use the tool"}],
@@ -330,7 +331,7 @@ async fn non_strict_chat_compatibility_keeps_metadata_and_user() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "opaque/non-strict-model",
-            false,
+            NonstandardFieldPolicy::Forward,
             json!({
                 "model": "opaque/non-strict-model",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -361,7 +362,7 @@ async fn chat_tool_continuation_drops_only_unverified_plain_reasoning_history() 
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "opaque/tool-continuation-model",
-            false,
+            NonstandardFieldPolicy::Forward,
             json!({
                 "model": "opaque/tool-continuation-model",
                 "messages": [
@@ -407,7 +408,7 @@ async fn chat_compatibility_preserves_explicit_max_tokens_over_max_output_tokens
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "opaque/max-tokens-model",
-            false,
+            NonstandardFieldPolicy::Forward,
             json!({
                 "model": "opaque/max-tokens-model",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -430,7 +431,7 @@ async fn chat_compatibility_preserves_explicit_max_completion_tokens_over_max_ou
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "opaque/max-completion-model",
-            false,
+            NonstandardFieldPolicy::Forward,
             json!({
                 "model": "opaque/max-completion-model",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -444,6 +445,73 @@ async fn chat_compatibility_preserves_explicit_max_completion_tokens_over_max_ou
         assert_eq!(captured["max_completion_tokens"].as_u64(), Some(1000));
         assert!(captured.get("max_output_tokens").is_none());
         assert!(captured.get("max_tokens").is_none());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_policy_conservatively_strips_on_unprobed_routes() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request_with_profile(
+            "opaque/unprobed-model",
+            NonstandardFieldPolicy::Auto,
+            json!({
+                "model": "opaque/unprobed-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "parallel_tool_calls": true,
+                "stream_options": {"include_usage": true},
+                "metadata": {"trace": "abc"},
+                "user": "downstream-user",
+                "stream": false
+            }),
+            false,
+            false,
+        )
+        .await;
+
+        for key in ["parallel_tool_calls", "stream_options", "metadata", "user"] {
+            assert!(
+                captured.get(key).is_none(),
+                "Auto + unprobed route must strip {key}: {captured}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_policy_keeps_parallel_tool_calls_when_verified_profile_declares_support() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request_with_profile(
+            "opaque/tool-model",
+            NonstandardFieldPolicy::Auto,
+            json!({
+                "model": "opaque/tool-model",
+                "messages": [{"role": "user", "content": "call tools"}],
+                "parallel_tool_calls": true,
+                "stream": false,
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "Lookup a value",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}}
+                        }
+                    }
+                }]
+            }),
+            true,
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            captured["parallel_tool_calls"],
+            json!(true),
+            "Auto + verified parallel-tool profile must keep the field: {captured}"
+        );
     })
     .await;
 }

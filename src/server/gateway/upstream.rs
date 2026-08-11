@@ -1805,11 +1805,25 @@ pub(super) async fn send_to_upstream(
     }
 
     if upstream_protocol == UpstreamProtocol::ChatCompletions {
+        // Auto: a route with a resolved capability profile is normalized by
+        // the profile pass below; an unprobed route is stripped
+        // conservatively (same set as AlwaysStrip) so unsupported optional
+        // fields never reach the upstream.
+        let strip_unknown_nonstandard_fields = match upstream.strip_nonstandard_chat_fields {
+            crate::state::NonstandardFieldPolicy::AlwaysStrip => true,
+            crate::state::NonstandardFieldPolicy::Forward => false,
+            crate::state::NonstandardFieldPolicy::Auto => resolved_capabilities
+                .as_ref()
+                .map(|resolved| {
+                    resolved.profile_state == crate::capabilities::DialectProfileState::Unknown
+                })
+                .unwrap_or(true),
+        };
         normalize_chat_payload_for_upstream_compatibility(
             &mut upstream_body,
             &final_upstream_model,
             &upstream.base_url,
-            upstream.strip_nonstandard_chat_fields,
+            strip_unknown_nonstandard_fields,
         );
         tracing::debug!(
             request_id = %request_id,
@@ -1818,7 +1832,8 @@ pub(super) async fn send_to_upstream(
             selected_upstream_id = %upstream.id,
             selected_upstream_name = %upstream.name,
             final_upstream_model = %final_upstream_model,
-            strip_unknown_nonstandard_fields = upstream.strip_nonstandard_chat_fields,
+            nonstandard_field_policy = ?upstream.strip_nonstandard_chat_fields,
+            strip_unknown_nonstandard_fields,
             "normalized chat payload for upstream compatibility"
         );
         if let Some(resolved) = resolved_capabilities.as_ref() {

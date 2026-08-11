@@ -3,11 +3,29 @@ use chat_responses_codex::capabilities::{
     Capability, DialectProfileKey, DialectProfileState, EvidenceState, ReasoningCarrier,
     UpstreamDialectProfile, WireProtocol,
 };
+use chat_responses_codex::state::NonstandardFieldPolicy;
 
 pub(super) async fn capture_single_chat_request(
     model: &str,
-    strip_nonstandard_chat_fields: bool,
+    strip_nonstandard_chat_fields: NonstandardFieldPolicy,
     request_body: Value,
+) -> Value {
+    capture_single_chat_request_with_profile(
+        model,
+        strip_nonstandard_chat_fields,
+        request_body,
+        true,
+        false,
+    )
+    .await
+}
+
+pub(super) async fn capture_single_chat_request_with_profile(
+    model: &str,
+    strip_nonstandard_chat_fields: NonstandardFieldPolicy,
+    request_body: Value,
+    with_profile: bool,
+    declare_parallel_tools: bool,
 ) -> Value {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
@@ -58,21 +76,22 @@ pub(super) async fn capture_single_chat_request(
     });
 
     let downstream_key = generate_downstream_key("gw");
+    let upstream = UpstreamConfig {
+        id: "up-1".into(),
+        name: "primary".into(),
+        base_url: format!("http://{}", address),
+        api_key: "upstream-secret".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec![model.to_string()],
+        active: true,
+        failure_count: 0,
+        strip_nonstandard_chat_fields,
+        ..Default::default()
+    };
     let state = AppState::new(
         PersistedState {
-            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
-                id: "up-1".into(),
-                name: "primary".into(),
-                base_url: format!("http://{}", address),
-                api_key: "upstream-secret".into(),
-                protocol: UpstreamProtocol::ChatCompletions,
-                protocols: vec![UpstreamProtocol::ChatCompletions],
-                supported_models: vec![model.to_string()],
-                active: true,
-                failure_count: 0,
-                strip_nonstandard_chat_fields,
-                ..Default::default()
-            }]),
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
@@ -104,43 +123,71 @@ pub(super) async fn capture_single_chat_request(
         AppConfig::default(),
     );
 
-    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-        key_fingerprint: String::new(),
-        upstream_id: "up-1".into(),
-        runtime_model_slug: model.to_string(),
-        protocol: WireProtocol::ChatCompletions,
-    });
-    profile.state = DialectProfileState::Verified;
-    profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
-    profile
-        .capabilities
-        .insert(Capability::TextInput, EvidenceState::Supported);
-    profile
-        .capabilities
-        .insert(Capability::TextStream, EvidenceState::Supported);
-    profile
-        .capabilities
-        .insert(Capability::NonStreamingResponse, EvidenceState::Supported);
-    if request_body.get("reasoning_effort").is_some() {
+    if with_profile {
+        let key_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint("up-1", "upstream-secret");
+        let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+            &state.capability_snapshot(),
+            &upstream,
+            &key_fingerprint,
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .ok();
+        let mut profile = UpstreamDialectProfile {
+            key: DialectProfileKey::for_key(
+                "up-1",
+                &key_fingerprint,
+                model,
+                WireProtocol::ChatCompletions,
+            ),
+            configuration_fingerprint: configuration_fingerprint.unwrap_or_default(),
+            probe_schema_version: chat_responses_codex::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
+            ..UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+                "up-1",
+                &key_fingerprint,
+                model,
+                WireProtocol::ChatCompletions,
+            ))
+        };
+        profile.state = DialectProfileState::Verified;
+        profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
         profile
             .capabilities
-            .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+            .insert(Capability::TextInput, EvidenceState::Supported);
         profile
             .capabilities
-            .insert(Capability::ReasoningReplay, EvidenceState::Supported);
+            .insert(Capability::TextStream, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::NonStreamingResponse, EvidenceState::Supported);
+        if declare_parallel_tools {
+            profile
+                .capabilities
+                .insert(Capability::ParallelToolCalls, EvidenceState::Supported);
+        }
+        if request_body.get("reasoning_effort").is_some() {
+            profile
+                .capabilities
+                .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ReasoningReplay, EvidenceState::Supported);
+        }
+        if request_body.get("tools").is_some() {
+            profile
+                .capabilities
+                .insert(Capability::FunctionTools, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ForcedToolChoice, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ToolContinuation, EvidenceState::Supported);
+        }
+        state.upsert_dialect_profile(profile).await.unwrap();
     }
-    if request_body.get("tools").is_some() {
-        profile
-            .capabilities
-            .insert(Capability::FunctionTools, EvidenceState::Supported);
-        profile
-            .capabilities
-            .insert(Capability::ForcedToolChoice, EvidenceState::Supported);
-        profile
-            .capabilities
-            .insert(Capability::ToolContinuation, EvidenceState::Supported);
-    }
-    state.upsert_dialect_profile(profile).await.unwrap();
 
     let app = build_router(state);
     let response = app

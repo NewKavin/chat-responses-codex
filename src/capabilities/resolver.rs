@@ -49,7 +49,7 @@ pub struct ResolutionInput<'a> {
     pub route_overrides: &'a [&'a RouteCapabilityOverride],
     pub policy_extensions: &'a [&'a DeclarativeProbeCase],
     pub profile: Option<&'a UpstreamDialectProfile>,
-    pub strip_nonstandard_chat_fields: bool,
+    pub strip_nonstandard_chat_fields: crate::state::NonstandardFieldPolicy,
 }
 
 impl<'a> ResolutionInput<'a> {
@@ -61,7 +61,7 @@ impl<'a> ResolutionInput<'a> {
             route_overrides: &[],
             policy_extensions: &[],
             profile: None,
-            strip_nonstandard_chat_fields: false,
+            strip_nonstandard_chat_fields: crate::state::NonstandardFieldPolicy::Auto,
         }
     }
 }
@@ -177,7 +177,13 @@ impl CapabilityResolver {
             omit_sampling_fields: input.semantic.omit_sampling_fields.clone(),
             context_window: input.semantic.context_window,
             max_output_tokens: input.semantic.max_output_tokens,
-            omit_optional_extensions: input.strip_nonstandard_chat_fields,
+            omit_optional_extensions: match input.strip_nonstandard_chat_fields {
+                crate::state::NonstandardFieldPolicy::AlwaysStrip => true,
+                crate::state::NonstandardFieldPolicy::Forward => false,
+                crate::state::NonstandardFieldPolicy::Auto => {
+                    profile_state == DialectProfileState::Unknown
+                }
+            },
             profile_state,
             provisional: profile_state == DialectProfileState::Unknown,
             native_preferred: match profile_state {
@@ -357,7 +363,12 @@ fn resolve_effort_control(
 fn resolve_extensions(
     input: &ResolutionInput<'_>,
 ) -> (Vec<ResolvedRequestExtension>, CapabilitySource) {
-    if input.strip_nonstandard_chat_fields {
+    let extensions_are_eligible = match input.strip_nonstandard_chat_fields {
+        crate::state::NonstandardFieldPolicy::AlwaysStrip => false,
+        crate::state::NonstandardFieldPolicy::Forward => true,
+        crate::state::NonstandardFieldPolicy::Auto => input.profile.is_some(),
+    };
+    if !extensions_are_eligible {
         return (Vec::new(), CapabilitySource::Baseline);
     }
 

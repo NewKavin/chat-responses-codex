@@ -30,7 +30,8 @@ import type {
   ApiKeyModelConfig,
   KeyModelDiscoveryResult,
   UpstreamConfig,
-  DownstreamRuntimeResponse
+  DownstreamRuntimeResponse,
+  NonstandardFieldPolicy
 } from '@/types'
 
 
@@ -46,7 +47,7 @@ export interface BatchCreateUpstreamPayload {
   protocols?: string[]
   max_concurrency?: number
   active?: boolean
-  strip_nonstandard_chat_fields?: boolean
+  strip_nonstandard_chat_fields?: NonstandardFieldPolicy
 }
 
 export interface BatchCreateUpstreamResult {

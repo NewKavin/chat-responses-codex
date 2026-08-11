@@ -1055,7 +1055,7 @@ pub(super) struct BatchCreateUpstreamPayload {
     #[serde(default = "default_batch_active")]
     active: bool,
     #[serde(default)]
-    strip_nonstandard_chat_fields: bool,
+    strip_nonstandard_chat_fields: crate::state::NonstandardFieldPolicy,
 }
 
 fn default_batch_requests_per_minute() -> u32 {

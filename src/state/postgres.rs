@@ -4,9 +4,9 @@ use super::log_queries::{
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
     DailyStats, DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary,
-    GlobalContextProfile, ModelContextConfig, PersistedState, ResponseHistoryEntry,
-    RuntimeSettingsDocument, UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage,
-    UsageLogQuery,
+    GlobalContextProfile, ModelContextConfig, NonstandardFieldPolicy, PersistedState,
+    ResponseHistoryEntry, RuntimeSettingsDocument, UpstreamConfig, UpstreamProtocol, UsageLog,
+    UsageLogPage, UsageLogQuery,
 };
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
@@ -72,7 +72,8 @@ impl PostgresStateStore {
                  requests_per_minute, max_concurrency, priority, premium_only, \
                  protect_premium_quota, active, failure_count, \
                  auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
-                 strip_nonstandard_chat_fields, COALESCE(remark, ''), continuation_provider_group \
+                 strip_nonstandard_chat_fields, nonstandard_field_policy, \
+                 COALESCE(remark, ''), continuation_provider_group \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -115,9 +116,12 @@ impl PostgresStateStore {
                 auto_managed: row.get::<_, bool>(17),
                 managed_source: row.get::<_, Option<String>>(18),
                 last_synced_at: row.get::<_, i64>(19) as u64,
-                strip_nonstandard_chat_fields: row.get::<_, bool>(22),
-                remark: row.get::<_, String>(23),
-                continuation_provider_group: row.get::<_, Option<String>>(24),
+                strip_nonstandard_chat_fields: decode_nonstandard_field_policy(
+                    row.get::<_, String>(23),
+                    row.get::<_, bool>(22),
+                ),
+                remark: row.get::<_, String>(24),
+                continuation_provider_group: row.get::<_, Option<String>>(25),
             });
         }
 
@@ -1142,7 +1146,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &(upstream.last_synced_at as i64),
             &api_keys_json,
             &api_key_models_json,
-            &upstream.strip_nonstandard_chat_fields,
+            &upstream.strip_nonstandard_chat_fields.as_db_str(),
+            &upstream.strip_nonstandard_chat_fields.as_db_str(),
             &upstream.remark,
             &upstream.continuation_provider_group,
         ];
@@ -1153,12 +1158,12 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 requests_per_minute, max_concurrency, priority, premium_only,
                 protect_premium_quota, active, failure_count,
                 auto_managed, managed_source, last_synced_at, api_keys, api_key_models,
-                strip_nonstandard_chat_fields, remark, continuation_provider_group
+                strip_nonstandard_chat_fields, nonstandard_field_policy, remark, continuation_provider_group
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1183,7 +1188,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 last_synced_at = EXCLUDED.last_synced_at,
                 api_keys = EXCLUDED.api_keys,
                 api_key_models = EXCLUDED.api_key_models,
-                strip_nonstandard_chat_fields = EXCLUDED.strip_nonstandard_chat_fields,
+                strip_nonstandard_chat_fields = EXCLUDED.nonstandard_field_policy <> 'forward',
+                nonstandard_field_policy = EXCLUDED.nonstandard_field_policy,
                 remark = EXCLUDED.remark,
                 continuation_provider_group = EXCLUDED.continuation_provider_group",
             params,
@@ -1758,6 +1764,10 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS api_key_models TEXT NULL;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS strip_nonstandard_chat_fields BOOLEAN NOT NULL DEFAULT FALSE;
+-- WS-A1: three-state non-standard field policy; the legacy boolean column is
+-- kept as a fallback for deployments that only wrote the old column.
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS nonstandard_field_policy TEXT NOT NULL DEFAULT 'auto';
 ALTER TABLE upstreams
     DROP COLUMN IF EXISTS concurrency_status_enabled;
 ALTER TABLE upstreams
@@ -1944,3 +1954,20 @@ CREATE INDEX IF NOT EXISTS usage_logs_downstream_idx
 CREATE INDEX IF NOT EXISTS usage_logs_upstream_idx
     ON usage_logs (upstream_key_id, created_at DESC);
 "#;
+
+/// Reads the three-state non-standard field policy, preferring the newer
+/// `nonstandard_field_policy` text column and falling back to the legacy
+/// boolean `strip_nonstandard_chat_fields` column.
+fn decode_nonstandard_field_policy(policy: String, legacy: bool) -> NonstandardFieldPolicy {
+    match policy.as_str() {
+        "always_strip" => NonstandardFieldPolicy::AlwaysStrip,
+        "forward" => NonstandardFieldPolicy::Forward,
+        _ => {
+            if legacy {
+                NonstandardFieldPolicy::AlwaysStrip
+            } else {
+                NonstandardFieldPolicy::Auto
+            }
+        }
+    }
+}

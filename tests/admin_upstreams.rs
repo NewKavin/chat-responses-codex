@@ -1703,7 +1703,10 @@ async fn test_upstreams_update_modifies_existing_upstream() {
     assert_eq!(upstream.name, "Updated Upstream 1");
     assert_eq!(upstream.base_url, "https://api.updated.com");
     assert_eq!(upstream.supported_models.len(), 2);
-    assert!(upstream.strip_nonstandard_chat_fields);
+    assert_eq!(
+        upstream.strip_nonstandard_chat_fields,
+        chat_responses_codex::state::NonstandardFieldPolicy::AlwaysStrip
+    );
 }
 
 #[tokio::test]

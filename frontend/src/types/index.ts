@@ -76,6 +76,8 @@ export interface KeyModelDiscoveryResult {
   http_status?: number
 }
 
+export type NonstandardFieldPolicy = 'auto' | 'always_strip' | 'forward'
+
 export interface UpstreamConfig {
   id: string
   name: string
@@ -102,7 +104,7 @@ export interface UpstreamConfig {
   auto_managed?: boolean
   managed_source?: string | null
   last_synced_at?: number
-  strip_nonstandard_chat_fields: boolean
+  strip_nonstandard_chat_fields: NonstandardFieldPolicy
   runtime_state?: UpstreamRuntimeState
   _replace_api_keys?: boolean
 }

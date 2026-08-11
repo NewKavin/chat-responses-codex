@@ -90,8 +90,26 @@ pub(super) fn normalize_chat_payload_for_upstream_compatibility(
     }
 
     if strip_unknown_nonstandard_fields {
-        for key in ["metadata", "user", "parallel_tool_calls", "stream_options"] {
+        for key in ["metadata", "user", "parallel_tool_calls"] {
             object.remove(key);
+        }
+        // A1: stream_options.include_usage 例外——仅当流式且显式需要 usage 时保留
+        // include_usage（其余 stream_options 内容仍剥离），失败样本交 A3 学习。
+        let streaming = object
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let needs_usage = object
+            .get("stream_options")
+            .and_then(|options| options.get("include_usage"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if streaming && needs_usage {
+            if let Some(stream_options) = object.get_mut("stream_options") {
+                *stream_options = serde_json::json!({ "include_usage": true });
+            }
+        } else {
+            object.remove("stream_options");
         }
     }
 
@@ -443,6 +461,47 @@ mod tests {
 
         let mut no_field = json!({"tools": []});
         assert!(!strip_parallel_tool_calls_unconditionally(&mut no_field));
+    }
+
+    #[test]
+    fn conservative_strip_keeps_stream_options_include_usage_for_streaming_requests() {
+        // A1: stream_options.include_usage 例外——流式且需要 usage 时保留尝试，
+        // 其余字段仍按保守集合剥离（失败样本交 A3 学习）。
+        let mut streaming = json!({
+            "stream": true,
+            "stream_options": {"include_usage": true, "include_obfuscation": true},
+            "metadata": {"trace": "abc"},
+            "user": "u-1",
+            "parallel_tool_calls": true
+        });
+        normalize_chat_payload_for_upstream_compatibility(&mut streaming, "m", "", true);
+        assert_eq!(streaming["stream_options"], json!({"include_usage": true}));
+        for key in ["metadata", "user", "parallel_tool_calls"] {
+            assert!(streaming.get(key).is_none(), "{key} should be stripped");
+        }
+
+        // 非流式请求即使带上 include_usage 也整体剥离。
+        let mut non_streaming = json!({
+            "stream": false,
+            "stream_options": {"include_usage": true}
+        });
+        normalize_chat_payload_for_upstream_compatibility(&mut non_streaming, "m", "", true);
+        assert!(non_streaming.get("stream_options").is_none());
+
+        // 流式但不需要 usage（include_usage=false/missing）→ 整体剥离。
+        let mut no_usage = json!({
+            "stream": true,
+            "stream_options": {"include_usage": false}
+        });
+        normalize_chat_payload_for_upstream_compatibility(&mut no_usage, "m", "", true);
+        assert!(no_usage.get("stream_options").is_none());
+
+        let mut missing_usage = json!({
+            "stream": true,
+            "stream_options": {"include_obfuscation": true}
+        });
+        normalize_chat_payload_for_upstream_compatibility(&mut missing_usage, "m", "", true);
+        assert!(missing_usage.get("stream_options").is_none());
     }
 
     #[test]

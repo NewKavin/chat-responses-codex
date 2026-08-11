@@ -1,6 +1,6 @@
 use super::normalize::{parse_u64_flexible, parse_upstream_protocol, parse_upstream_protocols};
 use super::types::*;
-use crate::state::{AppState, RuntimeCoordinationError};
+use crate::state::{AppState, NonstandardFieldPolicy, RuntimeCoordinationError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -700,7 +700,7 @@ impl AppState {
                     }
                     if let Some(strip_nonstandard_chat_fields) = updates
                         .get("strip_nonstandard_chat_fields")
-                        .and_then(|v| v.as_bool())
+                        .and_then(|v| serde_json::from_value::<NonstandardFieldPolicy>(v.clone()).ok())
                     {
                         upstream.strip_nonstandard_chat_fields = strip_nonstandard_chat_fields;
                     }
