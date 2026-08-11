@@ -457,6 +457,22 @@ pub enum ManualProbeBatchCandidateState {
     Running,
     Completed,
     Failed,
+    CooldownSkipped,
+    Superseded,
+}
+
+/// The terminal outcome of executing a single capability probe job.
+/// `finish_capability_probe_job` maps each variant onto a batch candidate
+/// state and a diagnostic evidence code so skipped, superseded and failed
+/// probes are visible in the batch terminal state instead of vanishing.
+#[derive(Debug)]
+pub enum ProbeJobExecution {
+    Completed,
+    Failed(io::Error),
+    CooldownSkipped {
+        cooldown_remaining: Duration,
+    },
+    Superseded,
 }
 
 #[derive(Clone, Serialize)]
@@ -2108,15 +2124,22 @@ impl AppState {
         &self,
         key: &DialectProfileKey,
         binding: &ProbeConfigurationBinding,
-        result: &io::Result<()>,
+        execution: &ProbeJobExecution,
     ) {
-        let (state, diagnostic_code) = if result.is_ok() {
-            (ManualProbeBatchCandidateState::Completed, None)
-        } else {
-            (
+        let (state, diagnostic_code) = match execution {
+            ProbeJobExecution::Completed => (ManualProbeBatchCandidateState::Completed, None),
+            ProbeJobExecution::Failed(_) => (
                 ManualProbeBatchCandidateState::Failed,
                 Some("probe_execution_failed".to_string()),
-            )
+            ),
+            ProbeJobExecution::CooldownSkipped { .. } => (
+                ManualProbeBatchCandidateState::CooldownSkipped,
+                Some("skipped_route_cooling".to_string()),
+            ),
+            ProbeJobExecution::Superseded => (
+                ManualProbeBatchCandidateState::Superseded,
+                Some("probe_superseded".to_string()),
+            ),
         };
         let now = unix_seconds();
         let mut batches = self
@@ -2143,6 +2166,8 @@ impl AppState {
                         candidate.summary.state,
                         ManualProbeBatchCandidateState::Completed
                             | ManualProbeBatchCandidateState::Failed
+                            | ManualProbeBatchCandidateState::CooldownSkipped
+                            | ManualProbeBatchCandidateState::Superseded
                     )
                 }) {
                     record.status.terminal_at.get_or_insert(now);
@@ -2174,12 +2199,10 @@ impl AppState {
     }
 
     pub fn discard_capability_probe_submission(&self, job: &ProbeJob) {
-        self.finish_capability_probe_job(
-            &job.key,
-            &job.configuration,
-            &Err(io::Error::new(io::ErrorKind::Other, "probe replaced")),
-        );
-        self.remove_capability_probe_submission(&job.key, &job.configuration);
+        // A discarded job was superseded by a newer configuration or by the
+        // probe feature being disabled; record it instead of silently
+        // dropping it from the batch terminal state.
+        self.finish_capability_probe_job(&job.key, &job.configuration, &ProbeJobExecution::Superseded);
     }
 
     fn remove_capability_probe_submission(

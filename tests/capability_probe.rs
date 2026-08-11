@@ -18,11 +18,12 @@ use chat_responses_codex::capabilities::{
 };
 use chat_responses_codex::protocol::stream_aggregate::MAX_STREAM_AGGREGATE_TOTAL_BYTES;
 use chat_responses_codex::server::{
-    probe_plan_for_job, probe_plan_for_route, run_probe_plan_for_model_for_test,
+    probe_plan_for_job, probe_plan_for_route, run_probe_job, run_probe_plan_for_model_for_test,
     run_probe_plan_for_test, run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply,
-    CapabilityProbePlan, CapabilityProbeService, ProbePlanCompleteness, ReasoningTrigger,
+    CapabilityProbePlan, CapabilityProbeService, ProbeJobExecution, ProbePlanCompleteness,
+    ReasoningTrigger,
 };
-use chat_responses_codex::state::RouteHealthKey;
+use chat_responses_codex::state::{RouteFailureClass, RouteHealthKey};
 
 #[test]
 fn matching_expectation_adds_https_image_case_to_probe_plan() {
@@ -4340,4 +4341,79 @@ fn partial_probe_outcome_without_reasoning_keeps_prior_levels() {
         profile.capabilities.get(&Capability::TextStream),
         Some(&EvidenceState::Supported)
     );
+}
+
+#[tokio::test]
+async fn run_probe_job_skips_cooling_routes_and_supersedes_stale_jobs() {
+    with_proxy_env_cleared(|| async move {
+        let upstream = UpstreamConfig {
+            id: "up-probe-exec".into(),
+            name: "up-probe-exec".into(),
+            base_url: "https://probe-exec.example/v1".into(),
+            api_key: "probe-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["Lab/ProbeExec".into()],
+            active: true,
+            ..Default::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                revision: 1,
+                ..CapabilityConfiguration::default()
+            })
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        state.set_capability_probe_sender(sender);
+        let filters = std::collections::BTreeSet::new();
+        let batch = state
+            .queue_manual_capability_probe_batch(&filters, &filters)
+            .await
+            .unwrap();
+        let job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+
+        // A route in cooldown must be skipped before any probe request is
+        // issued, and the skip must be observable as ProbeJobExecution.
+        let route = RouteHealthKey {
+            upstream_id: job.key.upstream_id.clone(),
+            key_fingerprint: job.key.key_fingerprint.clone(),
+            runtime_model_slug: job.key.runtime_model_slug.clone(),
+            protocol: job.key.protocol,
+        };
+        state
+            .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+            .await
+            .unwrap();
+        let execution = run_probe_job(&state, &job).await;
+        assert!(
+            matches!(execution, ProbeJobExecution::CooldownSkipped { .. }),
+            "a cooling route must be skipped, not probed"
+        );
+
+        // A job whose configuration fingerprint no longer matches is
+        // superseded by the newer configuration instead of silently dropping.
+        let mut stale = job.clone();
+        stale.configuration.configuration_fingerprint = "stale-fingerprint".into();
+        let execution = run_probe_job(&state, &stale).await;
+        assert!(
+            matches!(execution, ProbeJobExecution::Superseded),
+            "a stale fingerprint must be recorded as superseded"
+        );
+
+        // An upstream that disappeared is also superseded.
+        let mut vanished = job.clone();
+        vanished.key.upstream_id = "up-gone".into();
+        let execution = run_probe_job(&state, &vanished).await;
+        assert!(matches!(execution, ProbeJobExecution::Superseded));
+    })
+    .await;
 }

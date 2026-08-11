@@ -3,7 +3,7 @@ use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::server::{probe_plan_for_job, CoreProbeCase};
 use chat_responses_codex::state::{
     AppConfig, AppState, FreekeySyncItem, ManualProbeBatchCandidateState, ManualProbeBatchError,
-    PersistedState,
+    PersistedState, ProbeJobExecution,
 };
 use chat_responses_codex::state::{DownstreamConfig, UpstreamConfig};
 use serde_json::json;
@@ -553,7 +553,11 @@ async fn manual_probe_batches_have_identity_and_reuse_equivalent_routes() {
         first_status.candidates[0].state,
         ManualProbeBatchCandidateState::Running
     );
-    state.finish_capability_probe_job(&first_job.key, &first_job.configuration, &Ok(()));
+    state.finish_capability_probe_job(
+        &first_job.key,
+        &first_job.configuration,
+        &ProbeJobExecution::Completed,
+    );
     assert!(state
         .capability_probe_batch_status(&first.batch_id)
         .unwrap()
@@ -564,6 +568,120 @@ async fn manual_probe_batches_have_identity_and_reuse_equivalent_routes() {
         .unwrap()
         .terminal_at
         .is_some());
+}
+
+#[tokio::test]
+async fn manual_probe_batch_tracks_cooldown_skipped_and_superseded_terminal_states() {
+    let dir = tempdir().unwrap();
+    let upstream = learning_upstream("up-batch-states", "Lab/BatchStates");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(4);
+    state.set_capability_probe_sender(sender);
+    let filters = std::collections::BTreeSet::new();
+
+    let cooldown_batch = state
+        .queue_manual_capability_probe_batch(&filters, &filters)
+        .await
+        .unwrap();
+    let cooldown_job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+    state.mark_capability_probe_running(&cooldown_job.key, &cooldown_job.configuration);
+    state.finish_capability_probe_job(
+        &cooldown_job.key,
+        &cooldown_job.configuration,
+        &ProbeJobExecution::CooldownSkipped {
+            cooldown_remaining: std::time::Duration::from_secs(9),
+        },
+    );
+    let status = state
+        .capability_probe_batch_status(&cooldown_batch.batch_id)
+        .unwrap();
+    assert_eq!(
+        status.candidates[0].state,
+        ManualProbeBatchCandidateState::CooldownSkipped
+    );
+    assert_eq!(
+        status.candidates[0].diagnostic_code.as_deref(),
+        Some("skipped_route_cooling")
+    );
+    assert!(status.terminal_at.is_some());
+
+    let superseded_batch = state
+        .queue_manual_capability_probe_batch(&filters, &filters)
+        .await
+        .unwrap();
+    let superseded_job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+    state.finish_capability_probe_job(
+        &superseded_job.key,
+        &superseded_job.configuration,
+        &ProbeJobExecution::Superseded,
+    );
+    let status = state
+        .capability_probe_batch_status(&superseded_batch.batch_id)
+        .unwrap();
+    assert_eq!(
+        status.candidates[0].state,
+        ManualProbeBatchCandidateState::Superseded
+    );
+    assert_eq!(
+        status.candidates[0].diagnostic_code.as_deref(),
+        Some("probe_superseded")
+    );
+    assert!(status.terminal_at.is_some());
+}
+
+#[tokio::test]
+async fn discarded_probe_submission_is_marked_superseded_in_batches() {
+    let dir = tempdir().unwrap();
+    let upstream = learning_upstream("up-batch-discard", "Lab/BatchDiscard");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(4);
+    state.set_capability_probe_sender(sender);
+    let filters = std::collections::BTreeSet::new();
+
+    let batch = state
+        .queue_manual_capability_probe_batch(&filters, &filters)
+        .await
+        .unwrap();
+    let job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+    state.discard_capability_probe_submission(&job);
+    let status = state.capability_probe_batch_status(&batch.batch_id).unwrap();
+    assert_eq!(
+        status.candidates[0].state,
+        ManualProbeBatchCandidateState::Superseded
+    );
+    assert_eq!(
+        status.candidates[0].diagnostic_code.as_deref(),
+        Some("probe_superseded")
+    );
+    assert!(status.terminal_at.is_some());
 }
 
 #[tokio::test]

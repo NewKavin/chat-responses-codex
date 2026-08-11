@@ -24,8 +24,8 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_seconds, AppState, RuntimeCoordinationError, UpstreamConfig,
-    UpstreamRequestLease,
+    join_upstream_url, unix_seconds, AppState, ProbeJobExecution, RouteHealthKey,
+    RuntimeCoordinationError, UpstreamConfig, UpstreamRequestLease,
 };
 
 /// User-turn prompt sent by core capability probes (minimal text, token
@@ -483,8 +483,8 @@ impl CapabilityProbeService {
                             let key = next.key.clone();
                             let binding = next.configuration.clone();
                             state.mark_capability_probe_running(&key, &binding);
-                            let result = run_probe_job(&state, &next).await;
-                            (key, binding, result)
+                            let execution = run_probe_job(&state, &next).await;
+                            (key, binding, execution)
                         });
                     }
                 } else {
@@ -513,9 +513,9 @@ impl CapabilityProbeService {
                         }
                     }
                     completed = active.next(), if !active.is_empty() => {
-                        if let Some((key, binding, result)) = completed {
+                        if let Some((key, binding, execution)) = completed {
                             queue.finish(&key);
-                            state.finish_capability_probe_job(&key, &binding, &result);
+                            state.finish_capability_probe_job(&key, &binding, &execution);
                         }
                     }
                     received = receiver.recv(), if receiver_open && deferred_batch.is_none() => {
@@ -622,7 +622,7 @@ pub(super) async fn maybe_queue_dialect_error_probe(
         .is_some_and(|job| state.queue_capability_probe(job))
 }
 
-async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
+pub async fn run_probe_job(state: &AppState, job: &ProbeJob) -> ProbeJobExecution {
     let routing = state.routing_snapshot().await;
     let Some(upstream) = routing
         .upstreams
@@ -630,12 +630,29 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         .find(|upstream| upstream.id == job.key.upstream_id && upstream.active)
         .cloned()
     else {
-        return Ok(());
+        // The upstream was deactivated or removed after the job was queued;
+        // the newer configuration supersedes this job.
+        return ProbeJobExecution::Superseded;
     };
 
     let capability_snapshot = state.capability_snapshot();
     if !AppState::capability_probe_job_is_current(&capability_snapshot, &upstream, job) {
-        return Ok(());
+        // The configuration fingerprint changed since the job was queued;
+        // record the superseded outcome instead of silently discarding it.
+        return ProbeJobExecution::Superseded;
+    }
+    let route_key = RouteHealthKey {
+        upstream_id: job.key.upstream_id.clone(),
+        key_fingerprint: job.key.key_fingerprint.clone(),
+        runtime_model_slug: job.key.runtime_model_slug.clone(),
+        protocol: job.key.protocol,
+    };
+    if let Ok(Some(health)) = state.route_health_snapshot(&route_key).await {
+        if health.cooldown_remaining > Duration::ZERO {
+            return ProbeJobExecution::CooldownSkipped {
+                cooldown_remaining: health.cooldown_remaining,
+            };
+        }
     }
     let plan = probe_plan_for_job(job);
     let mapped_keys = upstream.keys_for_model(&job.key.runtime_model_slug);
@@ -648,11 +665,13 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         })
         .collect::<Vec<_>>();
     let [api_key] = matching_keys.as_slice() else {
-        return Ok(());
+        // The key mapping that produced this job no longer matches; the
+        // current configuration supersedes it.
+        return ProbeJobExecution::Superseded;
     };
     let api_key = api_key.clone();
     let runtime_settings = state.runtime_settings();
-    let outcome = ProbeExecutor {
+    let result = ProbeExecutor {
         client: state.client_for_url(&upstream.base_url),
         base_url: upstream.base_url.clone(),
         api_key,
@@ -667,8 +686,11 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         ),
     }
     .run_plan(&job.key, plan)
-    .await?;
-    let (outcome, completeness) = outcome;
+    .await;
+    let (outcome, completeness) = match result {
+        Ok(pair) => pair,
+        Err(error) => return ProbeJobExecution::Failed(error),
+    };
 
     let mut profile = state
         .capability_snapshot()
@@ -746,9 +768,13 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             }
         }
     }
-    let applied = state
+    let applied = match state
         .upsert_dialect_profile_if_probe_current(profile, &job.configuration)
-        .await?;
+        .await
+    {
+        Ok(applied) => applied,
+        Err(error) => return ProbeJobExecution::Failed(error),
+    };
     if applied {
         if let Some(capabilities) = conclusive_capabilities {
             state.clear_runtime_capability_hints_after_probe(
@@ -758,7 +784,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             );
         }
     }
-    Ok(())
+    ProbeJobExecution::Completed
 }
 
 struct ProbeExecutor {

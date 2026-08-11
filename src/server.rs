@@ -8,8 +8,9 @@ pub use gateway::compatibility_semantics::{
 };
 pub use gateway::thinking_signature::{sign_thinking, verify_thinking, ThinkingSignatureInput};
 pub use gateway::{
-    build_router, probe_plan_for_job, probe_plan_for_route, run_probe_plan_for_model_for_test,
-    run_probe_plan_for_test, run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply,
-    CapabilityProbePlan, CapabilityProbeService, CoreProbeCase, ProbePlanCompleteness,
-    ReasoningTrigger,
+    build_router, probe_plan_for_job, probe_plan_for_route, run_probe_job,
+    run_probe_plan_for_model_for_test, run_probe_plan_for_test,
+    run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply, CapabilityProbePlan,
+    CapabilityProbeService, CoreProbeCase, ProbePlanCompleteness, ReasoningTrigger,
 };
+pub use crate::state::ProbeJobExecution;
