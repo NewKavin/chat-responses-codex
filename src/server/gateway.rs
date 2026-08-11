@@ -693,6 +693,59 @@ fn record_cooled_route_attempt(
     });
 }
 
+/// Failure classes whose identical repetition across different routes of
+/// the same pool within one request indicates a request-shape problem shared
+/// by the whole pool (B2 common-mode breaker).
+fn is_common_mode_breaker_class(class: FailureClass) -> bool {
+    matches!(
+        class,
+        FailureClass::TransientServer
+            | FailureClass::EdgeProxyError
+            | FailureClass::RequestRejected
+    )
+}
+
+/// Request-level error for a common-mode breaker trip: the upstream pool
+/// rejected this request shape on multiple routes, so the gateway stops
+/// replaying it and reports the first upstream error instead of burning all
+/// routes into cooldown (HTTP 502/400 depending on the failure class, never
+/// the all-routes-unavailable 503).
+fn common_mode_breaker_error(
+    class: FailureClass,
+    upstream_status: Option<u16>,
+    first_upstream_message: &str,
+) -> GatewayError {
+    let upstream_status = upstream_status.filter(|status| *status != 0);
+    let status_summary = upstream_status
+        .map(|status| format!(" (upstream HTTP {status})"))
+        .unwrap_or_default();
+    let message = format!(
+        "upstream rejected this request on multiple routes with the same failure ({} consecutive similar failures{status_summary}); the request was not replayed across the remaining routes. First upstream error: {first_upstream_message}",
+        class.as_str(),
+    );
+    let (status, code) = match class {
+        FailureClass::RequestRejected => (StatusCode::BAD_REQUEST, "upstream_request_rejected"),
+        FailureClass::EdgeProxyError => (StatusCode::BAD_GATEWAY, "upstream_edge_proxy_error"),
+        _ => (StatusCode::BAD_GATEWAY, "upstream_request_shape_rejected"),
+    };
+    let mut details = Map::from_iter([
+        ("scope".to_string(), json!("upstream")),
+        ("common_mode".to_string(), json!(true)),
+    ]);
+    if let Some(status) = upstream_status {
+        details.insert("upstream_status".to_string(), json!(status));
+    }
+    GatewayError::classified(
+        status,
+        message,
+        "upstream_error",
+        code,
+        code,
+        None,
+        Some(Value::Object(details)),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ChatFallbackStage {
     HighFidelity,
@@ -4991,6 +5044,19 @@ async fn process_gateway_request_inner(
         None
     };
     let mut any_same_route_retry = false;
+    // B2 common-mode breaker state, scoped to this downstream request. When
+    // K consecutive different routes fail with the exact same (class, status)
+    // the request shape is the likely culprit: stop replaying, revert the
+    // cooldowns this request wrote, and return a request-level error instead
+    // of burning the whole pool.
+    // (class, upstream_status, last failed route, streak length).  The streak
+    // only grows when a *different* route fails with the identical signature;
+    // the same route failing again (e.g. across routing rounds) is a route-
+    // level fault, not pool-wide request-shape evidence.
+    let mut common_mode: Option<(FailureClass, Option<u16>, RouteHealthKey, u32)> = None;
+    let mut common_mode_first_message: Option<String> = None;
+    let mut common_mode_failed_routes: Vec<RouteHealthKey> = Vec::new();
+    let mut common_mode_tripped = false;
 
     'routing_rounds: loop {
         let upstream_runtime_snapshots = state
@@ -5467,6 +5533,7 @@ async fn process_gateway_request_inner(
                     let Some(route_health_permit) = route_health_permit else {
                         break 'candidate_passes;
                     };
+                    let mut route_failed: Option<(FailureClass, Option<u16>, String)> = None;
                     let mut same_route_retry_attempted = false;
                     let candidate_capability_snapshot = (*capability_snapshot).clone();
                     let resolved_route = route_capability(&upstream, &key_fingerprint, protocol)
@@ -6274,6 +6341,9 @@ async fn process_gateway_request_inner(
                                 )
                                 .await?;
                                 record_route_attempt(route_attempt_context, &error).await?;
+                                route_failed = error.route_failure_class().map(|class| {
+                                    (class, error.upstream_status(), error.to_string())
+                                });
                                 tracing::warn!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -6615,6 +6685,8 @@ async fn process_gateway_request_inner(
                                     &GatewayError::TemporaryUpstreamUnavailable(message.clone()),
                                 )
                                 .await?;
+                                route_failed =
+                                    Some((FailureClass::TransientServer, None, message.clone()));
                                 last_error =
                                     Some(GatewayError::TemporaryUpstreamUnavailable(message));
                                 last_failure_upstream =
@@ -6640,11 +6712,89 @@ async fn process_gateway_request_inner(
                                 )
                                 .await?;
                                 record_route_attempt(route_attempt_context, &error).await?;
+                                route_failed = error.route_failure_class().map(|class| {
+                                    (class, error.upstream_status(), error.to_string())
+                                });
                                 last_error = Some(error);
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
                                 break;
                             }
+                        }
+                    }
+                    if let Some((class, upstream_status, message)) = route_failed {
+                        let threshold = runtime_settings.upstream_common_mode_breaker_threshold;
+                        if threshold > 0 && is_common_mode_breaker_class(class) {
+                            match common_mode {
+                                Some((c, s, last_route, _count))
+                                    if c == class
+                                        && s == upstream_status
+                                        && last_route == route_health_key =>
+                                {
+                                    // Identical failure on the *same* route as
+                                    // the previous one: route-local fault, not a
+                                    // pool-wide request-shape signature.  Restart
+                                    // the streak from this route.
+                                    common_mode =
+                                        Some((class, upstream_status, route_health_key.clone(), 1));
+                                    common_mode_first_message = Some(message);
+                                    common_mode_failed_routes = vec![route_health_key.clone()];
+                                }
+                                Some((c, s, _, count)) if c == class && s == upstream_status => {
+                                    let count = count + 1;
+                                    common_mode = Some((
+                                        class,
+                                        upstream_status,
+                                        route_health_key.clone(),
+                                        count,
+                                    ));
+                                    common_mode_failed_routes.push(route_health_key.clone());
+                                    if count >= threshold {
+                                        common_mode_tripped = true;
+                                        for failed_route in common_mode_failed_routes.drain(..) {
+                                            state.clear_route_health(&failed_route).await.map_err(
+                                                |_| {
+                                                    runtime_coordination_unavailable_gateway_error()
+                                                },
+                                            )?;
+                                        }
+                                        let first_message = common_mode_first_message
+                                            .clone()
+                                            .unwrap_or_else(|| message.clone());
+                                        tracing::warn!(
+                                            request_id = %request_id,
+                                            downstream_key_id = %downstream.id,
+                                            path = %request_path,
+                                            original_model = %model,
+                                            normalized_model = %normalized_model,
+                                            selected_upstream_id = %upstream.id,
+                                            selected_upstream_name = %upstream.name,
+                                            selected_upstream_protocol = ?protocol,
+                                            route_id = %route_id,
+                                            failure_class = class.as_str(),
+                                            upstream_status,
+                                            common_mode_threshold = threshold,
+                                            "common-mode failure detected: stopping route replay and reverting cooldowns"
+                                        );
+                                        last_error = Some(common_mode_breaker_error(
+                                            class,
+                                            upstream_status,
+                                            &first_message,
+                                        ));
+                                        break 'routing_rounds;
+                                    }
+                                }
+                                _ => {
+                                    common_mode =
+                                        Some((class, upstream_status, route_health_key.clone(), 1));
+                                    common_mode_first_message = Some(message);
+                                    common_mode_failed_routes = vec![route_health_key.clone()];
+                                }
+                            }
+                        } else {
+                            common_mode = None;
+                            common_mode_first_message = None;
+                            common_mode_failed_routes.clear();
                         }
                     }
                     if stream_only_recovery.consumed {
@@ -6716,7 +6866,8 @@ async fn process_gateway_request_inner(
         let attempt_ledger = request_route_attempts.ledger_snapshot();
         let fallback_upstream_status = last_route_error.upstream_status();
         let fallback_failure_class = last_route_error.route_failure_class();
-        let should_aggregate = !attempt_ledger.is_empty()
+        let should_aggregate = !common_mode_tripped
+            && !attempt_ledger.is_empty()
             && (attempt_ledger.distinct_route_count() > 1
                 || matches!(
                     last_route_error.route_failure_class(),

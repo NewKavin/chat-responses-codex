@@ -1,4 +1,6 @@
-use super::types::{default_upstream_max_concurrency, AppConfig};
+use super::types::{
+    default_upstream_common_mode_breaker_threshold, default_upstream_max_concurrency, AppConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::io;
 use thiserror::Error;
@@ -82,6 +84,8 @@ pub struct RuntimeSettings {
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
+    #[serde(default = "default_upstream_common_mode_breaker_threshold")]
+    pub upstream_common_mode_breaker_threshold: u32,
     #[serde(default = "default_upstream_max_concurrency")]
     pub default_upstream_max_concurrency: u32,
     pub downstream_lease_ttl_seconds: u64,
@@ -214,6 +218,7 @@ impl RuntimeSettings {
                 .upstream_route_exhaustion_retry_max_wait_ms,
             upstream_route_exhaustion_retry_max_rounds: config
                 .upstream_route_exhaustion_retry_max_rounds,
+            upstream_common_mode_breaker_threshold: config.upstream_common_mode_breaker_threshold,
             default_upstream_max_concurrency: default_upstream_max_concurrency(),
             downstream_lease_ttl_seconds: config.downstream_lease_ttl_seconds,
             upstream_concurrency_recovery_max_wait_ms: config
@@ -274,6 +279,7 @@ impl RuntimeSettings {
             self.upstream_route_exhaustion_retry_max_wait_ms;
         config.upstream_route_exhaustion_retry_max_rounds =
             self.upstream_route_exhaustion_retry_max_rounds;
+        config.upstream_common_mode_breaker_threshold = self.upstream_common_mode_breaker_threshold;
         config.downstream_lease_ttl_seconds = self.downstream_lease_ttl_seconds;
         config.upstream_concurrency_recovery_max_wait_ms =
             self.upstream_concurrency_recovery_max_wait_ms;
@@ -384,6 +390,12 @@ impl RuntimeSettings {
             self.default_upstream_max_concurrency,
             "default_upstream_max_concurrency",
         )?;
+        if self.upstream_common_mode_breaker_threshold > 64 {
+            return Err(invalid(
+                "upstream_common_mode_breaker_threshold",
+                "must be at most 64 (0 disables the breaker)",
+            ));
+        }
         if self.downstream_lease_ttl_seconds < 60 {
             return Err(invalid(
                 "downstream_lease_ttl_seconds",

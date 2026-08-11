@@ -95,6 +95,10 @@ pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 10_000;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+/// Consecutive identical (class, upstream status) failures across different
+/// routes within one request that trip the common-mode breaker. 0 disables
+/// the breaker.
+pub const DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD: u32 = 2;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
@@ -171,6 +175,7 @@ pub struct AppConfig {
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
+    pub upstream_common_mode_breaker_threshold: u32,
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
@@ -256,6 +261,7 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
             upstream_route_exhaustion_retry_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+            upstream_common_mode_breaker_threshold: DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
             upstream_concurrency_recovery_max_wait_ms:
                 DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
             upstream_concurrency_recovery_max_rounds:
@@ -744,6 +750,10 @@ pub fn default_upstream_requests_per_minute() -> u32 {
 
 pub fn default_upstream_max_concurrency() -> u32 {
     4
+}
+
+pub fn default_upstream_common_mode_breaker_threshold() -> u32 {
+    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

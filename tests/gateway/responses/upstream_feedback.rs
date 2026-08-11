@@ -2087,3 +2087,408 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
         "network error message should include upstream name, got: {message}"
     );
 }
+
+#[tokio::test]
+async fn common_mode_edge_proxy_html_502_breaks_after_two_routes_and_keeps_pool_ready() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::upstream_key_fingerprint;
+    use chat_responses_codex::state::{ApiKeyModelConfig, RouteHealthKey};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hits_for_server = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, _body: String| {
+            let hits = hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                hits.lock().unwrap().push(authorization);
+                let mut response_headers = HeaderMap::new();
+                response_headers
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+                (
+                    StatusCode::BAD_GATEWAY,
+                    response_headers,
+                    "<html><body><h1>502 Bad Gateway</h1></body></html>",
+                )
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let account_keys = (1..=8)
+        .map(|index| format!("pool-{index}"))
+        .collect::<Vec<_>>();
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "common-mode-upstream".into(),
+                name: "common mode upstream".into(),
+                base_url: format!("http://{address}"),
+                api_key: account_keys[0].clone(),
+                api_keys: account_keys[1..].to_vec(),
+                api_key_models: account_keys
+                    .iter()
+                    .map(|api_key| ApiKeyModelConfig {
+                        api_key: api_key.clone(),
+                        supported_models: vec!["gpt-4".into()],
+                    })
+                    .collect(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                requests_per_minute: 100,
+                request_quota_requests: 1_000,
+                max_concurrency: 10,
+                active: true,
+                ..UpstreamConfig::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-common-mode".into(),
+                name: "common mode test".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_same_route_retry_enabled: false,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+
+    let request = || async {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model": "gpt-4", "input": "Hello", "stream": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    let response = request().await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let response_body = response_body_text(response).await;
+    assert!(
+        !response_body.contains("all eligible upstream routes"),
+        "common-mode breaker must not produce the all-routes-unavailable 503: {response_body}"
+    );
+
+    // Only K=2 routes are physically attempted, never the whole 8-key pool.
+    let attempts = hits.lock().unwrap().clone();
+    assert_eq!(attempts.len(), 2, "expected exactly 2 physical attempts");
+
+    // The two attempted routes carry no cooldown after the breaker reverted them.
+    let runtime_model_slug = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "common-mode-upstream")
+        .unwrap()
+        .resolved_model_name("gpt-4")
+        .unwrap();
+    for api_key in &account_keys[..2] {
+        let route = RouteHealthKey {
+            upstream_id: "common-mode-upstream".into(),
+            key_fingerprint: upstream_key_fingerprint("common-mode-upstream", api_key),
+            runtime_model_slug: runtime_model_slug.clone(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let snapshot = state.route_health_snapshot(&route).await.unwrap();
+        assert!(
+            snapshot.is_none() || snapshot.unwrap().cooldown_remaining.is_zero(),
+            "route for {api_key} must not be cooled after the breaker trip"
+        );
+    }
+
+    // A follow-up request hits the same pool from a clean state: still exactly
+    // two attempts (routes were never polluted by the breaker).  The rotated
+    // order differs per request id, so the exact keys may differ; what must
+    // hold is that the breaker trips again after two attempts and neither of
+    // the newly attempted routes carries a cooldown.
+    let response = request().await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let attempts = hits.lock().unwrap().clone();
+    assert_eq!(
+        attempts.len(),
+        4,
+        "second request must attempt exactly two routes"
+    );
+    for attempt in &attempts[2..] {
+        let api_key = attempt.strip_prefix("Bearer ").unwrap_or(attempt);
+        let route = RouteHealthKey {
+            upstream_id: "common-mode-upstream".into(),
+            key_fingerprint: upstream_key_fingerprint("common-mode-upstream", api_key),
+            runtime_model_slug: runtime_model_slug.clone(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let snapshot = state.route_health_snapshot(&route).await.unwrap();
+        assert!(
+            snapshot.is_none() || snapshot.unwrap().cooldown_remaining.is_zero(),
+            "route for {api_key} must not be cooled after the breaker trip"
+        );
+    }
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn common_mode_breaker_single_key_failure_preserves_key_isolation() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::upstream_key_fingerprint;
+    use chat_responses_codex::state::{ApiKeyModelConfig, RouteHealthKey};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hits_for_server = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, _body: String| {
+            let hits = hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                hits.lock().unwrap().push(authorization.clone());
+                let body: String = if authorization.ends_with("broken-key") {
+                    "<html><body><h1>502 Bad Gateway</h1></body></html>".to_string()
+                } else {
+                    serde_json::to_string(&json!({
+                        "id": "chatcmpl-isolated",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }))
+                    .unwrap()
+                };
+                let mut response_headers = HeaderMap::new();
+                response_headers.insert(
+                    header::CONTENT_TYPE,
+                    if authorization.ends_with("broken-key") {
+                        HeaderValue::from_static("text/html")
+                    } else {
+                        HeaderValue::from_static("application/json")
+                    },
+                );
+                if authorization.ends_with("broken-key") {
+                    (StatusCode::BAD_GATEWAY, response_headers, body)
+                } else {
+                    (StatusCode::OK, response_headers, body)
+                }
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let account_keys = [
+        "broken-key".to_string(),
+        "healthy-key-1".to_string(),
+        "healthy-key-2".to_string(),
+    ];
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "isolation-upstream".into(),
+                name: "isolation upstream".into(),
+                base_url: format!("http://{address}"),
+                api_key: account_keys[0].clone(),
+                api_keys: account_keys[1..].to_vec(),
+                api_key_models: account_keys
+                    .iter()
+                    .map(|api_key| ApiKeyModelConfig {
+                        api_key: api_key.clone(),
+                        supported_models: vec!["gpt-4".into()],
+                    })
+                    .collect(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                requests_per_minute: 100,
+                request_quota_requests: 1_000,
+                max_concurrency: 10,
+                active: true,
+                ..UpstreamConfig::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-isolation".into(),
+                name: "isolation test".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_same_route_retry_enabled: false,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+    let request = || async {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model": "gpt-4", "input": "Hello", "stream": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    // Candidate key order is rotated per request id (unpredictable), so keep
+    // sending until the broken key is physically tried first; the request
+    // succeeds either way once a healthy key answers.
+    let mut broken_key_tried_first = false;
+    for _ in 0..16 {
+        let attempted_before = hits.lock().unwrap().len();
+        let response = request().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let attempts = hits.lock().unwrap().clone();
+        if attempts
+            .get(attempted_before)
+            .is_some_and(|attempt| attempt.ends_with("broken-key"))
+        {
+            broken_key_tried_first = true;
+            break;
+        }
+    }
+    assert!(
+        broken_key_tried_first,
+        "broken key was never tried first across repeated requests; hits={:?}",
+        hits.lock().unwrap().clone()
+    );
+
+    // The broken key is the only one that failed: it must be briefly cooling,
+    // while the healthy keys stay Ready (exact key isolation, fe1c160).
+    let runtime_model_slug = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "isolation-upstream")
+        .unwrap()
+        .resolved_model_name("gpt-4")
+        .unwrap();
+    let broken_route = RouteHealthKey {
+        upstream_id: "isolation-upstream".into(),
+        key_fingerprint: upstream_key_fingerprint("isolation-upstream", "broken-key"),
+        runtime_model_slug: runtime_model_slug.clone(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    let broken_snapshot = state
+        .route_health_snapshot(&broken_route)
+        .await
+        .unwrap()
+        .expect("broken key route must have recorded its failure");
+    assert!(
+        broken_snapshot.cooldown_remaining > Duration::ZERO,
+        "broken key route must cool while healthy keys stay ready"
+    );
+    for api_key in &account_keys[1..] {
+        let healthy_route = RouteHealthKey {
+            upstream_id: "isolation-upstream".into(),
+            key_fingerprint: upstream_key_fingerprint("isolation-upstream", api_key),
+            runtime_model_slug: runtime_model_slug.clone(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let snapshot = state.route_health_snapshot(&healthy_route).await.unwrap();
+        assert!(
+            snapshot.is_none() || snapshot.unwrap().cooldown_remaining.is_zero(),
+            "healthy route for {api_key} must stay ready"
+        );
+    }
+
+    upstream_server.abort();
+}

@@ -852,6 +852,8 @@ impl GatewayError {
                     || category == "upstream_capacity_unavailable"
                 {
                     Some(FailureClass::TransientServer)
+                } else if category == "upstream_edge_proxy_error" {
+                    Some(FailureClass::EdgeProxyError)
                 } else {
                     None
                 }

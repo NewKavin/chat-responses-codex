@@ -269,6 +269,16 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_U32
   },
   {
+    key: 'upstream_common_mode_breaker_threshold',
+    group: 'routing',
+    label: '共模失败熔断阈值',
+    apply: 'immediate',
+    control: 'number',
+    unit: '条',
+    min: 0,
+    max: 64
+  },
+  {
     key: 'default_upstream_max_concurrency',
     group: 'concurrency',
     label: '新建上游每 Key 默认最大并发',
