@@ -1851,6 +1851,12 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/capabilities/policy/rebootstrap",
+            post(admin_capability_policy_rebootstrap).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
+        .route(
             "/api/admin/capabilities/profiles",
             get(admin_capability_profiles).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),

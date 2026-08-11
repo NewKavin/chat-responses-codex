@@ -362,6 +362,13 @@ impl Default for ProbeConfiguration {
 pub struct CapabilityConfiguration {
     pub schema_version: u32,
     pub revision: u64,
+    /// Version of the embedded builtin policy template that has been merged
+    /// into this configuration. Configurations bootstrapped from the template
+    /// carry the template's version; older stored configurations default to 0
+    /// and receive a one-shot append-only merge of new builtin entries on
+    /// upgrade (see `merge_builtin_policy_entries`).
+    #[serde(default)]
+    pub builtin_policy_version: u32,
     pub policies: Vec<CapabilityPolicy>,
     pub route_overrides: Vec<RouteCapabilityOverride>,
     pub route_tags: Vec<RouteTagAssignment>,
@@ -375,6 +382,7 @@ impl Default for CapabilityConfiguration {
         Self {
             schema_version: CAPABILITY_SCHEMA_VERSION,
             revision: 0,
+            builtin_policy_version: 0,
             policies: Vec::new(),
             route_overrides: Vec::new(),
             route_tags: Vec::new(),

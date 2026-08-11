@@ -95,7 +95,6 @@ async fn enabled_deployment_bootstrap_replaces_only_revision_zero() {
     };
     write_capability_state(&custom_path, custom.clone()).await;
     let custom_sidecar = custom_path.with_file_name("state.json.capabilities.json");
-    let custom_bytes = tokio::fs::read(&custom_sidecar).await.unwrap();
     let loaded = AppState::load_from_path(
         &custom_path,
         AppConfig {
@@ -105,8 +104,23 @@ async fn enabled_deployment_bootstrap_replaces_only_revision_zero() {
     )
     .await
     .unwrap();
-    assert_eq!(loaded.capability_snapshot().configuration.source(), &custom);
-    assert_eq!(tokio::fs::read(custom_sidecar).await.unwrap(), custom_bytes);
+    let loaded_snapshot = loaded.capability_snapshot();
+    let loaded_config = loaded_snapshot.configuration.source();
+    // A non-zero revision is not replaced wholesale, but still receives the
+    // append-only builtin merge: domestic entries arrive, revision bumps by
+    // one, and the builtin template version is recorded.
+    assert_eq!(loaded_config.revision, 89);
+    assert_eq!(loaded_config.builtin_policy_version, 1);
+    assert!(
+        loaded_config
+            .policies
+            .iter()
+            .any(|policy| policy.id.starts_with("domestic-")),
+        "builtin domestic entries must be merged into stored configs"
+    );
+    let persisted: CapabilityStateDocument =
+        serde_json::from_slice(&tokio::fs::read(&custom_sidecar).await.unwrap()).unwrap();
+    assert_eq!(persisted.configuration, *loaded_config);
 
     let disabled_dir = tempdir().unwrap();
     let disabled_path = disabled_dir.path().join("state.json");
@@ -2632,4 +2646,130 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
     assert_eq!(first.key.runtime_model_slug, "Lab/Case-Sensitive");
     assert_eq!(second.key.upstream_id, "up-1");
     assert_eq!(second.key.runtime_model_slug, "Lab/Case-Sensitive");
+}
+
+#[test]
+fn merge_builtin_policy_entries_appends_only_missing_builtin_entries() {
+    let operator_policy = CapabilityPolicy {
+        id: "operator-custom".into(),
+        ..Default::default()
+    };
+    let mut stored = CapabilityConfiguration {
+        revision: 3,
+        builtin_policy_version: 0,
+        policies: vec![operator_policy.clone()],
+        bundles: vec![CompatibilityBundle {
+            id: "agent_core".into(),
+            required: Default::default(),
+        }],
+        ..Default::default()
+    };
+    let template = CapabilityConfiguration {
+        revision: 3,
+        builtin_policy_version: 1,
+        policies: vec![
+            CapabilityPolicy {
+                id: "domestic-deepseek-family".into(),
+                ..Default::default()
+            },
+            CapabilityPolicy {
+                id: "domestic-glm-5-family".into(),
+                ..Default::default()
+            },
+            operator_policy,
+            CapabilityPolicy {
+                id: "deepseek-v4-flash".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let added = merge_builtin_policy_entries(&mut stored, &template);
+
+    assert_eq!(
+        added,
+        vec!["domestic-deepseek-family", "domestic-glm-5-family"]
+    );
+    assert!(stored.policies.iter().any(|p| p.id == "operator-custom"));
+    assert!(
+        !stored.policies.iter().any(|p| p.id == "deepseek-v4-flash"),
+        "non-builtin template entries must not be merged"
+    );
+
+    let second = merge_builtin_policy_entries(&mut stored, &template);
+    assert!(second.is_empty(), "merge must be idempotent");
+}
+
+#[tokio::test]
+async fn startup_merges_builtin_domestic_entries_into_revision_zero_config_once() {
+    async fn write_capability_state(
+        path: &std::path::Path,
+        configuration: CapabilityConfiguration,
+    ) {
+        let document = CapabilityStateDocument {
+            configuration,
+            profiles: Default::default(),
+        };
+        let sidecar = path.with_file_name(format!(
+            "{}.capabilities.json",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        tokio::fs::write(sidecar, serde_json::to_vec_pretty(&document).unwrap())
+            .await
+            .unwrap();
+    }
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let operator_policy = CapabilityPolicy {
+        id: "operator-custom".into(),
+        ..Default::default()
+    };
+    let stored = CapabilityConfiguration {
+        revision: 3,
+        builtin_policy_version: 0,
+        policies: vec![operator_policy.clone()],
+        ..Default::default()
+    };
+    write_capability_state(&path, stored).await;
+
+    let state = AppState::load_from_path(&path, AppConfig::default())
+        .await
+        .unwrap();
+    let snapshot = state.capability_snapshot();
+    let loaded = snapshot.configuration.source();
+    assert!(
+        loaded
+            .policies
+            .iter()
+            .any(|p| p.id == "domestic-deepseek-family"),
+        "builtin domestic entries must be merged into stored configs"
+    );
+    assert!(
+        loaded
+            .policies
+            .iter()
+            .any(|p| p.id == "domestic-glm-5-family"),
+        "builtin domestic entries must be merged into stored configs"
+    );
+    assert!(
+        loaded.policies.iter().any(|p| p.id == "operator-custom"),
+        "operator entries must be preserved"
+    );
+    assert_eq!(loaded.revision, 4, "merge must bump revision by one");
+    assert_eq!(
+        loaded.builtin_policy_version, 1,
+        "merge must record the template builtin version"
+    );
+
+    // A second load sees the recorded builtin version and merges nothing.
+    let reloaded = AppState::load_from_path(&path, AppConfig::default())
+        .await
+        .unwrap();
+    let reloaded_snapshot = reloaded.capability_snapshot();
+    let reloaded_config = reloaded_snapshot.configuration.source();
+    assert_eq!(reloaded_config.revision, 4);
+    assert_eq!(reloaded_config.policies.len(), loaded.policies.len());
+    assert_eq!(reloaded_config.builtin_policy_version, 1);
 }

@@ -40,6 +40,16 @@ pub(super) struct ProbeAllRequest {
     models: Vec<String>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct RebootstrapPolicyRequest {
+    /// "merge" (default) appends missing builtin entries; "replace"
+    /// reinstalls the embedded template wholesale and requires confirm=true.
+    mode: Option<String>,
+    #[serde(default)]
+    confirm: Option<bool>,
+}
+
 #[derive(Serialize)]
 pub(super) struct CapabilityModelDiscoverySummary {
     exposed_model_slug: String,
@@ -66,6 +76,77 @@ pub(super) async fn admin_capabilities_export(State(state): State<AppState>) -> 
     let mut configuration = snapshot.configuration.source().clone();
     crate::capabilities::sanitize_sensitive_urls(&mut configuration);
     (StatusCode::OK, Json(configuration)).into_response()
+}
+
+pub(super) async fn admin_capability_policy_rebootstrap(
+    State(state): State<AppState>,
+    body: Result<Json<RebootstrapPolicyRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(_) => RebootstrapPolicyRequest::default(),
+    };
+    let template = match crate::capabilities::deployment_capability_configuration() {
+        Ok(template) => template,
+        Err(_) => return capability_import_error().into_response(),
+    };
+    let snapshot = state.capability_snapshot();
+    let mut configuration = snapshot.configuration.source().clone();
+    let mode = request.mode.as_deref().unwrap_or("merge");
+    let mut added = Vec::new();
+    match mode {
+        "merge" => {
+            added =
+                crate::capabilities::merge_builtin_policy_entries(&mut configuration, &template);
+            if !added.is_empty() {
+                configuration.revision += 1;
+                configuration.builtin_policy_version = template.builtin_policy_version;
+            }
+        }
+        "replace" => {
+            if request.confirm != Some(true) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "code": "capability_rebootstrap_requires_confirm",
+                            "message": "replace mode requires confirm=true"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            configuration = template;
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "capability_rebootstrap_unknown_mode",
+                        "message": "mode must be \"merge\" or \"replace\""
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+    if (!added.is_empty() || mode == "replace")
+        && state
+            .replace_capability_configuration(configuration.clone())
+            .await
+            .is_err()
+    {
+        return capability_persist_error();
+    }
+    Json(json!({
+        "ok": true,
+        "mode": mode,
+        "added": added,
+        "revision": configuration.revision,
+        "builtin_policy_version": configuration.builtin_policy_version,
+    }))
+    .into_response()
 }
 
 pub(super) async fn admin_capabilities_import(

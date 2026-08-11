@@ -4808,10 +4808,39 @@ impl AppState {
             crate::capabilities::sanitize_sensitive_urls(&mut capability_state.configuration);
         let bootstrapped = self.config.capability_policy_bootstrap_on_zero
             && capability_state.configuration.revision == 0;
+        let mut merged_builtin_entries = Vec::new();
         if bootstrapped {
             capability_state.configuration =
                 crate::capabilities::deployment_capability_configuration()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        } else if capability_state.configuration.revision > 0 {
+            // Append-only upgrade for operator-managed configurations: new
+            // builtin (domestic-*) entries from the embedded template are
+            // merged in without touching operator entries, so upgrades reach
+            // deployments whose revision never returns to zero.
+            let template = crate::capabilities::deployment_capability_configuration()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if template.builtin_policy_version
+                > capability_state.configuration.builtin_policy_version
+            {
+                merged_builtin_entries = crate::capabilities::merge_builtin_policy_entries(
+                    &mut capability_state.configuration,
+                    &template,
+                );
+                if !merged_builtin_entries.is_empty() {
+                    capability_state.configuration.revision += 1;
+                    capability_state.configuration.builtin_policy_version =
+                        template.builtin_policy_version;
+                }
+            }
+        }
+        if !merged_builtin_entries.is_empty() {
+            tracing::info!(
+                capability_policy_merged_revision = capability_state.configuration.revision,
+                capability_policy_builtin_version = capability_state.configuration.builtin_policy_version,
+                merged_entries = ?merged_builtin_entries,
+                "merged new builtin capability policy entries into stored configuration"
+            );
         }
         let compiled = Arc::new(
             capability_state
@@ -4819,7 +4848,7 @@ impl AppState {
                 .compile()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
         );
-        if bootstrapped || migrated {
+        if bootstrapped || migrated || !merged_builtin_entries.is_empty() {
             self.config_store
                 .persist_capability_configuration(&capability_state.configuration)
                 .await?;

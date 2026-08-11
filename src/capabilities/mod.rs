@@ -6,7 +6,7 @@ mod resolver;
 mod runtime_hints;
 mod types;
 
-pub use bootstrap::deployment_capability_configuration;
+pub use bootstrap::{deployment_capability_configuration, merge_builtin_policy_entries};
 pub use policy::{
     is_sensitive_url, sanitize_sensitive_urls, CapabilityPolicyError,
     CompiledCapabilityConfiguration, CompiledExpectation,

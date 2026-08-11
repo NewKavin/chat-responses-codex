@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "revision": 3,
+  "builtin_policy_version": 1,
   "route_overrides": [],
   "bundles": [
     {

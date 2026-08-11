@@ -1392,3 +1392,102 @@ async fn capability_export_import_round_trips_safe_fixture_urls() {
         .await;
     assert_eq!(imported.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn admin_policy_rebootstrap_merges_builtin_entries_and_requires_confirm_for_replace() {
+    let fixture = AdminCapabilityFixture::new().await;
+    let operator_policy = CapabilityPolicy {
+        id: "operator-custom".into(),
+        ..Default::default()
+    };
+    fixture
+        .state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 3,
+            policies: vec![operator_policy.clone()],
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+
+    // merge mode (default): builtin domestic entries appended, operator kept.
+    let response = fixture
+        .post_json(
+            "/api/admin/capabilities/policy/rebootstrap",
+            json!({"mode": "merge"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["mode"], "merge");
+    let added = body["added"].as_array().expect("added array");
+    assert!(
+        added
+            .iter()
+            .any(|id| id.as_str().unwrap().starts_with("domestic-")),
+        "merge must add builtin domestic entries, got {added:?}"
+    );
+    assert_eq!(body["revision"], 4);
+    assert_eq!(body["builtin_policy_version"], 1);
+
+    let export = fixture.export().await;
+    let exported_policies = export["policies"].as_array().expect("policies array");
+    assert!(exported_policies
+        .iter()
+        .any(|policy| policy["id"] == "domestic-deepseek-family"));
+    assert!(
+        exported_policies
+            .iter()
+            .any(|policy| policy["id"] == "operator-custom"),
+        "operator entries must be preserved"
+    );
+
+    // Second merge is idempotent.
+    let response = fixture
+        .post_json(
+            "/api/admin/capabilities/policy/rebootstrap",
+            json!({"mode": "merge"}),
+        )
+        .await;
+    let body = response_json(response).await;
+    assert!(body["added"].as_array().expect("added").is_empty());
+    assert_eq!(body["revision"], 4);
+
+    // Replace requires explicit confirmation.
+    let bad = fixture
+        .post_json(
+            "/api/admin/capabilities/policy/rebootstrap",
+            json!({"mode": "replace"}),
+        )
+        .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(bad).await["error"]["code"],
+        "capability_rebootstrap_requires_confirm"
+    );
+
+    // Replace with confirm reinstalls the embedded template wholesale.
+    let ok = fixture
+        .post_json(
+            "/api/admin/capabilities/policy/rebootstrap",
+            json!({"mode": "replace", "confirm": true}),
+        )
+        .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let export = fixture.export().await;
+    assert_eq!(export["revision"], 3, "template carries its own revision");
+    assert_eq!(export["builtin_policy_version"], 1);
+    let exported_policies = export["policies"].as_array().expect("policies array");
+    assert!(
+        exported_policies
+            .iter()
+            .any(|policy| policy["id"] == "deepseek-v4-flash"),
+        "replace must install all template policies"
+    );
+    assert!(
+        !exported_policies
+            .iter()
+            .any(|policy| policy["id"] == "operator-custom"),
+        "replace must not keep operator entries"
+    );
+}
