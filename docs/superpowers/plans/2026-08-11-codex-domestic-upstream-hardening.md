@@ -197,7 +197,7 @@
 
 **测试**：模拟上游 A（200+reasoning_content）→ verified；模拟上游 B（200 无证据）→ ignored 且档位不写入；模拟上游 C（400 unsupported）→ rejected。
 
-### E3. 批次执行体验
+### E3. 批次执行体验 ✅ 已完成 (commits 75bbe85, ec9e8c6, cbefdb9, 738dfc3)
 **改动**：
 - 探测并发从固定 2 改为 runtime setting `capability_probe_concurrency`（默认 4，按账号 key 并发预算封顶），批次预计剩余时间在 `GET /api/admin/capabilities/probe-batches/{id}` 返回并前端展示。
 - 冷却中的路由：探测跳过时记 evidence `skipped_route_cooling` 并在 UI 单独归类（现在笼统的失败让用户误判"全失败"）。
