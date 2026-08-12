@@ -28,6 +28,7 @@ export interface RuntimeSettingField {
   step?: number
   integer?: boolean
   maxLength?: number
+  description?: string
 }
 
 export type RuntimeSettingsValidationErrors = Partial<Record<RuntimeSettingKey, string>>
@@ -136,7 +137,8 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     group: 'discovery',
     label: '自动能力探测',
     apply: 'immediate',
-    control: 'switch'
+    control: 'switch',
+    description: '开启后会周期性对所有下游可见模型自动探测（消耗 token）'
   },
   {
     key: 'upstream_rate_limit_default_retry_seconds',

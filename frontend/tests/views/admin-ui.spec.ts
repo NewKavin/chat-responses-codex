@@ -48,6 +48,17 @@ describe('admin ui structure', () => {
     expect(adminProbe).toContain('const activeProbeTab = ref<ProbeTab>(\'status\')')
     expect(adminProbe).toContain("activeProbeTab.value = 'reasoning'")
     expect(adminProbe).toContain('description="暂无思考档位探测结果"')
+    expect(adminProbe).toContain("mode: 'reasoning'")
+    expect(adminProbe).toContain('selectedProbeModels.length === 0')
+    expect(adminProbe).toContain('请先选择要探测的模型')
+    expect(adminProbe).toContain('probeModelScopeLoadFailed')
+    expect(adminProbe).toContain('filterCapabilityDiscoveryByModels')
+    expect(adminProbe).toContain('const showOnlyCurrentBatch = ref(true)')
+    expect(adminProbe).toContain('capabilityDiagnosticTooltip')
+    expect(adminProbe).toContain('全局 discovery')
+    expect(adminProbe).not.toContain('selectedProbeModels.value = [...models]')
+    expect(adminProbe).not.toContain('const { data: full } = await adminApi.getModels()')
+    expect(adminProbe).not.toContain('后端按全量处理')
     const statusTabStart = adminProbe.indexOf('<el-tab-pane label="模型状态" name="status">')
     const reasoningTabStart = adminProbe.indexOf('<el-tab-pane label="思考档位" name="reasoning">')
     const tabsEnd = adminProbe.indexOf('</el-tabs>', reasoningTabStart)
@@ -264,6 +275,14 @@ describe('admin ui structure', () => {
     expect(baseStyles).toContain('.el-message.settings-feedback-message')
     expect(baseStyles).toContain('bottom: max(16px, env(safe-area-inset-bottom)) !important')
     expect(page).not.toMatch(/ElMessage\.(success|warning|error)\(/)
+  })
+
+  it('warns that automatic capability probing scans every visible model', () => {
+    const page = source('views/admin/Settings.vue')
+    const catalog = source('utils/runtimeSettings.ts')
+
+    expect(catalog).toContain('开启后会周期性对所有下游可见模型自动探测（消耗 token）')
+    expect(page).toContain('field.description')
   })
 })
 

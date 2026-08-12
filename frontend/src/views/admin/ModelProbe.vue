@@ -21,14 +21,14 @@
         </el-button>
       </el-tooltip>
       <el-tooltip
-        content="对每个模型通道发起真实请求，探测其支持的思考档位（low/medium/high/xhigh/max）。会消耗模型 token。"
+        :content="capabilityProbeTooltip"
         placement="top"
       >
         <el-button
           type="primary"
           plain
           :loading="probingCapabilities"
-          :disabled="loading || probingCapabilities"
+          :disabled="loading || probingCapabilities || loadingProbeModels || probeModelScopeLoadFailed || selectedProbeModels.length === 0"
           @click="runCapabilityProbe"
         >
           <Radar :size="15" :stroke-width="1.8" style="margin-right: 6px" />
@@ -43,7 +43,7 @@
         collapse-tags-tooltip
         :max-collapse-tags="2"
         :loading="loadingProbeModels"
-        placeholder="选择探测模型（默认下游可见）"
+        placeholder="选择要探测的模型"
         class="probe-model-scope-select"
       >
         <el-option
@@ -53,6 +53,15 @@
           :value="model"
         />
       </el-select>
+      <el-button
+        v-if="probeModelScopeLoadFailed"
+        text
+        type="danger"
+        :icon="RefreshCw"
+        @click="loadProbeModelScope"
+      >
+        范围加载失败，重试
+      </el-button>
     </div>
 
     <el-tabs v-model="activeProbeTab" class="model-probe-tabs">
@@ -188,7 +197,16 @@
                   </template>
                 </el-table-column>
                 <el-table-column label="诊断" min-width="150" show-overflow-tooltip>
-                  <template #default="{ row }">{{ row.diagnostic_code || '-' }}</template>
+                  <template #default="{ row }">
+                    <el-tooltip
+                      v-if="row.diagnostic_code"
+                      :content="capabilityDiagnosticTooltip(row.diagnostic_code)"
+                      placement="top"
+                    >
+                      <span>{{ row.diagnostic_code }}</span>
+                    </el-tooltip>
+                    <span v-else>-</span>
+                  </template>
                 </el-table-column>
               </el-table>
             </div>
@@ -201,6 +219,15 @@
           >
             <div class="capability-probe-results__header">
               <h3>模型汇总</h3>
+              <el-switch
+                v-model="showOnlyCurrentBatch"
+                inline-prompt
+                active-text="本批次"
+                inactive-text="全局"
+              />
+              <span class="capability-probe-results__scope-label">
+                {{ showOnlyCurrentBatch ? '仅显示本批次模型' : '全局 discovery' }}
+              </span>
               <el-tag type="success" effect="plain">
                 {{ capabilityModelResults.filter(row => row.levels.length > 0).length }} 个模型已验证
               </el-tag>
@@ -276,8 +303,17 @@
                     <span v-else class="capability-probe-results__none">无</span>
                   </template>
                 </el-table-column>
-                <el-table-column prop="operational_code" label="诊断" min-width="170" show-overflow-tooltip>
-                  <template #default="{ row }">{{ row.operational_code || '-' }}</template>
+                <el-table-column label="诊断" min-width="170" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <el-tooltip
+                      v-if="row.operational_code"
+                      :content="capabilityDiagnosticTooltip(row.operational_code)"
+                      placement="top"
+                    >
+                      <span>{{ row.operational_code }}</span>
+                    </el-tooltip>
+                    <span v-else>-</span>
+                  </template>
                 </el-table-column>
                 <el-table-column label="下次重试" width="110">
                   <template #default="{ row }">{{ formatProbeRetry(row.next_probe_at) }}</template>
@@ -300,7 +336,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { BadgeCheck, Radar } from '@lucide/vue'
+import { BadgeCheck, Radar, RefreshCw } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
@@ -316,6 +352,8 @@ import type {
 } from '@/types'
 import {
   CAPABILITY_PROBE_WAIT_TIMEOUT_MS,
+  capabilityDiagnosticTooltip,
+  filterCapabilityDiscoveryByModels,
   formatProbeEta,
   pollCapabilityDiscovery,
   pollCapabilityProbeBatch,
@@ -359,6 +397,13 @@ const capabilityProbeBatch = ref<CapabilityProbeBatchStatus | null>(null)
 const probeScopeModels = ref<string[]>([])
 const selectedProbeModels = ref<string[]>([])
 const loadingProbeModels = ref(false)
+const probeModelScopeLoadFailed = ref(false)
+const showOnlyCurrentBatch = ref(true)
+const capabilityProbeTooltip = computed(() => {
+  if (probeModelScopeLoadFailed.value) return '模型范围加载失败，请重试'
+  if (selectedProbeModels.value.length === 0) return '请先选择要探测的模型'
+  return '对所选模型发起真实请求，探测其支持的思考档位。会消耗模型 token。'
+})
 const capabilityProbeBatchRows = computed(() =>
   capabilityProbeBatch.value?.candidates ?? []
 )
@@ -373,20 +418,26 @@ const capabilityProbeBatchEta = computed(() => {
   if (!status || status.terminal_at !== null) return null
   return formatProbeEta(status.estimated_remaining_seconds)
 })
-const capabilityModelResults = computed(() =>
-  capabilityDiscovery.value.models.map(model => ({
+const capabilityModelResults = computed(() => {
+  const discovery = showOnlyCurrentBatch.value
+    ? filterCapabilityDiscoveryByModels(capabilityDiscovery.value, capabilityProbeBatchModels.value)
+    : capabilityDiscovery.value
+  return discovery.models.map(model => ({
     exposed_model_slug: model.exposed_model_slug,
     levels: model.verified_reasoning_levels
   }))
-)
-const capabilityRouteResults = computed(() =>
-  capabilityDiscovery.value.models.flatMap(model =>
+})
+const capabilityRouteResults = computed(() => {
+  const discovery = showOnlyCurrentBatch.value
+    ? filterCapabilityDiscoveryByModels(capabilityDiscovery.value, capabilityProbeBatchModels.value)
+    : capabilityDiscovery.value
+  return discovery.models.flatMap(model =>
     model.routes.map(route => ({
       ...route,
       exposed_model_slug: model.exposed_model_slug
     }))
   )
-)
+})
 
 const fetchCapabilityDiscovery = async (
   timeoutMs?: number
@@ -398,19 +449,17 @@ const fetchCapabilityDiscovery = async (
 const loadProbeModelScope = async () => {
   if (isUnmounted) return
   loadingProbeModels.value = true
+  probeModelScopeLoadFailed.value = false
   try {
     const { data: visible } = await adminApi.getModels({ scope: 'visible' })
-    let models = visible.models
-    if (models.length === 0) {
-      // 无下游可见模型时回退全量，保持旧行为（空集合 = 后端全量探测）
-      const { data: full } = await adminApi.getModels()
-      models = full.models
-    }
+    const models = visible.models
     if (isUnmounted) return
     probeScopeModels.value = models
-    selectedProbeModels.value = [...models]
+    selectedProbeModels.value = []
   } catch {
-    // 范围加载失败不阻塞探测：保持空集合，后端按全量处理
+    probeModelScopeLoadFailed.value = true
+    probeScopeModels.value = []
+    selectedProbeModels.value = []
   } finally {
     loadingProbeModels.value = false
   }
@@ -465,6 +514,7 @@ const runCapabilityProbe = async () => {
   capabilityProbeBatch.value = null
   try {
     const { data: receipt } = await adminApi.probeAllCapabilities({
+      mode: 'reasoning',
       models: selectedProbeModels.value
     })
     if (isUnmounted) return

@@ -626,6 +626,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export interface ProbeAllCapabilitiesRequest {
   upstream_ids?: string[]
   models?: string[]
+  mode?: 'reasoning' | 'full'
 }
 
 export type CapabilityProbeCandidateState =

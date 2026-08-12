@@ -101,6 +101,9 @@
                 </el-tag>
               </div>
               <code>{{ field.key }}</code>
+              <p v-if="field.description" class="settings-field-description">
+                {{ field.description }}
+              </p>
             </div>
 
             <div class="settings-control-column">

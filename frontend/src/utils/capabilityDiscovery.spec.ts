@@ -6,7 +6,10 @@ import type {
 } from '@/types'
 import {
   discoveryBatchProgress,
+  filterCapabilityDiscoveryByModels,
   capabilityProbeBatchProgress,
+  capabilityDiagnosticLabel,
+  capabilityDiagnosticTooltip,
   indexDiscovery,
   pollCapabilityProbeBatch,
   pollCapabilityDiscovery,
@@ -89,6 +92,19 @@ describe('capability discovery', () => {
     expect(indexed.routes.size).toBe(2)
   })
 
+  it('filters discovery to the explicit batch model scope', () => {
+    const full = discovery()
+    full.models.push({
+      exposed_model_slug: 'unselected-model',
+      verified_reasoning_levels: ['max'],
+      routes: []
+    })
+
+    expect(filterCapabilityDiscoveryByModels(full, ['deepseek-v4-flash']).models)
+      .toEqual([full.models[0]])
+    expect(filterCapabilityDiscoveryByModels(full, []).models).toEqual([])
+  })
+
   it('keeps operational and deferred routes distinct from unsupported routes', () => {
     const operationalRoute = discovery().models[0].routes[1]
     const deferredRoute = { ...operationalRoute, outcome: 'deferred' as const }
@@ -100,6 +116,16 @@ describe('capability discovery', () => {
     expect(routeStatusTagType(operationalRoute)).toBe('warning')
     expect(routeStatusTagType(deferredRoute)).toBe('warning')
     expect(routeStatusTagType(rejectedRoute)).toBe('danger')
+  })
+
+  it('explains probe diagnostics while preserving unknown codes', () => {
+    expect(capabilityDiagnosticLabel('probe_timeout'))
+      .toContain('调大思考档位探测超时')
+    expect(capabilityDiagnosticTooltip('reasoning_control_ignored'))
+      .toContain('上游返回 200 但响应中无思考内容')
+    expect(capabilityDiagnosticTooltip('future_probe_code'))
+      .toBe('future_probe_code')
+    expect(capabilityDiagnosticLabel(null)).toBe('-')
   })
 
   it('counts only routes attempted in the current batch as settled', () => {

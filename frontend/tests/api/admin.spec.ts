@@ -129,10 +129,14 @@ describe('admin api auth behavior', () => {
       data: { models: [] }
     } as never)
 
-    await adminApi.probeAllCapabilities({ models: ['deepseek-v4-flash'] })
+    await adminApi.probeAllCapabilities({
+      mode: 'reasoning',
+      models: ['deepseek-v4-flash']
+    })
     await adminApi.getCapabilityDiscovery(2500)
 
     expect(post).toHaveBeenCalledWith('/admin/capabilities/probe-all', {
+      mode: 'reasoning',
       models: ['deepseek-v4-flash']
     })
     expect(get).toHaveBeenCalledWith('/admin/capabilities/discovery', { timeout: 2500 })

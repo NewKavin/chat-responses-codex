@@ -1,6 +1,6 @@
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey,
+    Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey, ProbeMode,
     ProbeProfileOutcome, RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile,
     WireProtocol,
 };
@@ -38,6 +38,7 @@ pub(super) struct ManualProbeRequest {
 pub(super) struct ProbeAllRequest {
     upstream_ids: Vec<String>,
     models: Vec<String>,
+    mode: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -465,8 +466,32 @@ pub(super) async fn admin_capability_probe_all(
 ) -> Response {
     let upstream_ids = body.upstream_ids.into_iter().collect::<BTreeSet<_>>();
     let models = body.models.into_iter().collect::<BTreeSet<_>>();
+    let mode = match body.mode.as_deref().unwrap_or("full") {
+        "full" => ProbeMode::Full,
+        "reasoning" => ProbeMode::Reasoning,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {
+                    "code": "capability_probe_unknown_mode",
+                    "message": "mode must be \"reasoning\" or \"full\""
+                }})),
+            )
+                .into_response();
+        }
+    };
+    if mode == ProbeMode::Reasoning && models.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {
+                "code": "capability_probe_scope_required",
+                "message": "必须显式选择探测模型"
+            }})),
+        )
+            .into_response();
+    }
     match state
-        .queue_manual_capability_probe_batch(&upstream_ids, &models)
+        .queue_manual_capability_probe_batch_with_mode(&upstream_ids, &models, mode)
         .await
     {
         Ok(receipt) => Json(json!({

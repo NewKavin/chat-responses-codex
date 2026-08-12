@@ -348,6 +348,85 @@ async fn capability_probe_all_models_filter_limits_batch_scope() {
 }
 
 #[tokio::test]
+async fn reasoning_probe_all_requires_explicit_model_scope() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    fixture.import_revision(1).await;
+
+    let response = fixture
+        .post_json(
+            "/api/admin/capabilities/probe-all",
+            json!({"mode": "reasoning", "models": []}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "capability_probe_scope_required");
+    assert_eq!(body["error"]["message"], "必须显式选择探测模型");
+}
+
+#[tokio::test]
+async fn reasoning_probe_all_limits_candidates_to_selected_models() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    fixture
+        .state
+        .update_upstream(
+            "up-1",
+            UpstreamConfig {
+                id: "up-1".into(),
+                name: "Primary".into(),
+                base_url: "https://example.invalid".into(),
+                api_key: "upstream-secret".into(),
+                supported_models: vec!["model-a".into(), "model-b".into(), "model-c".into()],
+                active: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture.import_revision(1).await;
+    let (sender, mut receiver) = mpsc::channel(1);
+    fixture.state.set_capability_probe_sender(sender);
+
+    let response = fixture
+        .post_json(
+            "/api/admin/capabilities/probe-all",
+            json!({"mode": "reasoning", "models": ["model-a", "model-c"]}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["models"], json!(["model-a", "model-c"]));
+    let candidate_models = body["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["exposed_model_slug"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        candidate_models,
+        ["model-a", "model-c"].into_iter().collect()
+    );
+
+    let jobs = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_jobs();
+    assert!(jobs
+        .iter()
+        .all(|job| job.mode == chat_responses_codex::capabilities::ProbeMode::Reasoning));
+    let job_models = jobs
+        .iter()
+        .flat_map(|job| job.exposed_model_slugs.iter().map(String::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(job_models, ["model-a", "model-c"].into_iter().collect());
+}
+
+#[tokio::test]
 async fn capability_probe_all_rejects_revision_zero_policy() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;

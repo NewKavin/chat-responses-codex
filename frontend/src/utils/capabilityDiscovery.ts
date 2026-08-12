@@ -46,6 +46,16 @@ export interface PollCapabilityDiscoveryResult {
   cancelled: boolean
 }
 
+export const filterCapabilityDiscoveryByModels = (
+  response: CapabilityDiscoveryResponse,
+  models: readonly string[]
+): CapabilityDiscoveryResponse => {
+  const scope = new Set(models)
+  return {
+    models: response.models.filter(model => scope.has(model.exposed_model_slug))
+  }
+}
+
 // One full probe round can take 30-60+ minutes with 130 routes at
 // concurrency 2 and up to request-timeout seconds per route. The poll must
 // not give up mid-round: keep waiting until the batch settles, with a 2h
@@ -105,6 +115,22 @@ export const routeStatusTagType = (
     case 'pending':
       return 'info'
   }
+}
+
+const CAPABILITY_DIAGNOSTIC_LABELS: Record<string, string> = {
+  probe_timeout: '上游响应超过探测超时，请调大思考档位探测超时',
+  probe_case_timeout: '单个探测 case 超时，已跳过并保留其他证据',
+  probe_stream_transport_failed: '流式传输中断，未能完成该探测 case',
+  reasoning_control_ignored: '上游返回 200 但响应中无思考内容，档位可能被网关忽略'
+}
+
+export const capabilityDiagnosticLabel = (code: string | null | undefined): string =>
+  code ? CAPABILITY_DIAGNOSTIC_LABELS[code] ?? code : '-'
+
+export const capabilityDiagnosticTooltip = (code: string | null | undefined): string => {
+  if (!code) return ''
+  const label = capabilityDiagnosticLabel(code)
+  return label === code ? code : `${label}（${code}）`
 }
 
 export const discoveryBatchProgress = (
