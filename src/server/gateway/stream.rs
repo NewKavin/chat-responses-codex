@@ -997,6 +997,14 @@ impl ProxiedStreamState {
 
             consumed += frame.len() + delimiter_len;
 
+            if sse_payload_is_keepalive(&payload) {
+                // Empty `data:` events and comment-style `data: : ping`
+                // padding are transport keepalives, not protocol events.
+                // Dropping them (rather than forwarding) keeps the downstream
+                // stream free of unparseable frames.
+                continue;
+            }
+
             if payload.trim() == "[DONE]" {
                 // finish_stream clears the buffer; zero the cursor so the
                 // trailing drain below is a no-op rather than an out-of-range.
@@ -1744,6 +1752,14 @@ impl TranslatedStreamState {
 
             consumed += frame.len() + delimiter_len;
 
+            if sse_payload_is_keepalive(&payload) {
+                // Empty `data:` events and comment-style `data: : ping`
+                // padding are transport keepalives, not protocol events.
+                // Dropping them (rather than forwarding) keeps the downstream
+                // stream free of unparseable frames.
+                continue;
+            }
+
             if payload.trim() == "[DONE]" {
                 // finish_stream clears the buffer; zero the cursor so the
                 // trailing drain below is a no-op rather than out-of-range.
@@ -2073,6 +2089,15 @@ fn serialize_sse_data(value: &Value) -> Bytes {
         }
         _ => Bytes::from(format!("data: {value}\n\n")),
     }
+}
+
+/// SSE heartbeat padding: an empty `data:` payload or a comment smuggled
+/// into a data line (`data: : ping`). Neither is parseable JSON and neither
+/// carries protocol semantics; domestic upstreams emit them to keep the
+/// connection warm between real chunks.
+pub(super) fn sse_payload_is_keepalive(payload: &str) -> bool {
+    let trimmed = payload.trim();
+    trimmed.is_empty() || trimmed.starts_with(':')
 }
 
 fn is_sse_comment_frame(frame: &[u8]) -> bool {
@@ -2624,6 +2649,63 @@ mod diagnostic_tests {
                 next_sse_frame(&buf),
                 next_sse_frame_reference(&buf),
                 "mismatch for input {buf:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sse_framing_tests {
+    use super::*;
+
+    #[test]
+    fn comment_frames_are_recognized_as_comments_only() {
+        assert!(is_sse_comment_frame(b": ping\n\n"));
+        assert!(is_sse_comment_frame(b": keepalive\r\n\r\n"));
+        assert!(is_sse_comment_frame(b": a\n: b\n\n"));
+        assert!(!is_sse_comment_frame(b"data: x\n\n"));
+        assert!(!is_sse_comment_frame(b"data:\n\n"));
+        assert!(!is_sse_comment_frame(b"data: : ping\n\n"));
+        assert!(!is_sse_comment_frame(b"event: x\n\n"));
+    }
+
+    #[test]
+    fn parse_sse_data_payload_distinguishes_comments_from_empty_data() {
+        // Comment-only frames carry no data field.
+        assert_eq!(parse_sse_data_payload(b": ping\n\n").unwrap(), None);
+        // An empty `data:` field is a data field with an empty payload.
+        assert_eq!(
+            parse_sse_data_payload(b"data:\n\n").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(
+            parse_sse_data_payload(b"data: \r\n\r\n").unwrap(),
+            Some(String::new())
+        );
+        // A comment smuggled into a data line keeps its payload.
+        assert_eq!(
+            parse_sse_data_payload(b"data: : ping\n\n").unwrap(),
+            Some(": ping".to_string())
+        );
+    }
+
+    #[test]
+    fn keepalive_payloads_are_empty_or_comment_style() {
+        for keepalive in ["", "   ", "\t", ": ping", ": keepalive"] {
+            assert!(
+                sse_payload_is_keepalive(keepalive),
+                "{keepalive:?} should be treated as keepalive"
+            );
+        }
+        for json_payload in [
+            "[DONE]",
+            "{\"choices\":[]}",
+            "{\"id\":\"chatcmpl-x\"}",
+            "x: not-a-comment",
+        ] {
+            assert!(
+                !sse_payload_is_keepalive(json_payload),
+                "{json_payload:?} must not be treated as keepalive"
             );
         }
     }
