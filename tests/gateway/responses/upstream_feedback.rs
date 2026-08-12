@@ -2280,6 +2280,177 @@ async fn common_mode_edge_proxy_html_502_breaks_after_two_routes_and_keeps_pool_
 }
 
 #[tokio::test]
+async fn common_mode_breaker_threshold_zero_disables_the_breaker_and_tries_all_routes() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::upstream_key_fingerprint;
+    use chat_responses_codex::state::{ApiKeyModelConfig, RouteHealthKey};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hits_for_server = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, _body: String| {
+            let hits = hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                hits.lock().unwrap().push(authorization);
+                let mut response_headers = HeaderMap::new();
+                response_headers
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+                (
+                    StatusCode::BAD_GATEWAY,
+                    response_headers,
+                    "<html><body><h1>502 Bad Gateway</h1></body></html>",
+                )
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let account_keys = (1..=8)
+        .map(|index| format!("pool-{index}"))
+        .collect::<Vec<_>>();
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "common-mode-upstream".into(),
+                name: "common mode upstream".into(),
+                base_url: format!("http://{address}"),
+                api_key: account_keys[0].clone(),
+                api_keys: account_keys[1..].to_vec(),
+                api_key_models: account_keys
+                    .iter()
+                    .map(|api_key| ApiKeyModelConfig {
+                        api_key: api_key.clone(),
+                        supported_models: vec!["gpt-4".into()],
+                    })
+                    .collect(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                requests_per_minute: 100,
+                request_quota_requests: 1_000,
+                max_concurrency: 10,
+                active: true,
+                ..UpstreamConfig::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-common-mode".into(),
+                name: "common mode test".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_same_route_retry_enabled: false,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            // K=0 disables the common-mode breaker entirely (B2 knobs).
+            upstream_common_mode_breaker_threshold: 0,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let response_body = response_body_text(response).await;
+    assert!(
+        !response_body.contains("rejected this request on multiple routes"),
+        "with the breaker disabled the terminal error must not be the common-mode one: {response_body}"
+    );
+    assert!(
+        response_body.contains("all eligible upstream routes are temporarily unavailable"),
+        "the request must run to the ordinary all-routes temporary error: {response_body}"
+    );
+
+    // Every key is physically attempted: the breaker did not stop the replay
+    // after K=2 identical (class, status) failures.
+    let attempts = hits.lock().unwrap().clone();
+    assert_eq!(
+        attempts.len(),
+        8,
+        "with the breaker disabled all 8 keys must be attempted"
+    );
+
+    // Because the breaker is off, the failures are ordinary edge-proxy
+    // outcomes: short cooldowns are recorded, but the pool is not pinned by
+    // a request-shape verdict and a follow-up request still tries routes.
+    let runtime_model_slug = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "common-mode-upstream")
+        .unwrap()
+        .resolved_model_name("gpt-4")
+        .unwrap();
+    for api_key in &account_keys[..2] {
+        let route = RouteHealthKey {
+            upstream_id: "common-mode-upstream".into(),
+            key_fingerprint: upstream_key_fingerprint("common-mode-upstream", api_key),
+            runtime_model_slug: runtime_model_slug.clone(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let snapshot = state.route_health_snapshot(&route).await.unwrap();
+        assert!(
+            snapshot.is_none() || snapshot.unwrap().cooldown_remaining <= Duration::from_secs(5),
+            "edge proxy cooldown for {api_key} must stay short"
+        );
+    }
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
 async fn common_mode_breaker_single_key_failure_preserves_key_isolation() {
     use chat_responses_codex::capabilities::WireProtocol;
     use chat_responses_codex::keys::upstream_key_fingerprint;
