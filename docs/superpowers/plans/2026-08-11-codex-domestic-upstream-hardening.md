@@ -236,7 +236,7 @@
 
 **测试**：上游对 `stream_options` 回 400/502（两种各测）→ 首路由内一次降级重试成功、无路由冷却、hint 生效后第二个请求首发即不带该字段。
 
-### A4. 反向流转换鲁棒性（国模 SSE 兼容清单）
+### A4. 反向流转换鲁棒性（国模 SSE 兼容清单） ✅ 已完成 (commits 85c475f, 278d546)
 **改动**（`src/protocol.rs` chat→Responses 流转换器区域）：
 - 容忍并跳过非 JSON keepalive 行/注释行（`: ping`）；
 - 最终 usage-only chunk（`choices:[]` 仅 `usage`）正确并入 `response.completed.usage`；
