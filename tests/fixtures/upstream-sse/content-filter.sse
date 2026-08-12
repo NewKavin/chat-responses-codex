@@ -1,0 +1,5 @@
+data: {"id":"chatcmpl-cf","object":"chat.completion.chunk","created":4,"model":"glm-5.2","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-cf","object":"chat.completion.chunk","created":4,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}
+
+data: [DONE]

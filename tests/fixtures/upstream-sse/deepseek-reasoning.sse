@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-ds-reason","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me think step by step."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ds-reason","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"The answer is 42."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ds-reason","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-ds-reason","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":9,"total_tokens":20}}
+
+data: [DONE]

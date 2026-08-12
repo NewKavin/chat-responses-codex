@@ -1,0 +1,15 @@
+: ping
+
+data:
+
+data: : ping
+
+data: {"id":"chatcmpl-glm-keepalive","object":"chat.completion.chunk","created":2,"model":"glm-5.2","choices":[{"index":0,"delta":{"content":"Keepalive tolerated."},"finish_reason":null}]}
+
+: ping
+
+data: {"id":"chatcmpl-glm-keepalive","object":"chat.completion.chunk","created":2,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-glm-keepalive","object":"chat.completion.chunk","created":2,"model":"glm-5.2","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}
+
+data: [DONE]

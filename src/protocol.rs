@@ -662,7 +662,11 @@ pub fn chat_response_to_responses_payload_with_tool_registry(
 }
 
 fn responses_incomplete_reason(finish_reason: Option<&str>) -> Option<&'static str> {
-    (finish_reason == Some("length")).then_some("max_output_tokens")
+    match finish_reason {
+        Some("length") => Some("max_output_tokens"),
+        Some("content_filter") => Some("content_filter"),
+        _ => None,
+    }
 }
 
 fn gateway_response_id() -> String {
@@ -2805,17 +2809,29 @@ impl ChatToResponsesState {
         let Some((name, arguments)) = extract_tool_call_details(object) else {
             return Ok(());
         };
+        let call_id_hint = object
+            .get("id")
+            .or_else(|| object.get("call_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        // Missing `index`: merge by call id when the call was seen before (a
+        // provider may move the same call to a different array position in a
+        // later chunk). A brand-new call with an id gets the next free key so
+        // it never collides with an existing entry; only id-less calls fall
+        // back to the position in this delta.
         let index = object
             .get("index")
             .and_then(Value::as_u64)
             .map(|value| value as usize)
-            .unwrap_or(fallback_index);
-        let call_id = object
-            .get("id")
-            .or_else(|| object.get("call_id"))
-            .and_then(Value::as_str)
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| format!("call-{}", index));
+            .unwrap_or_else(|| match call_id_hint.as_deref() {
+                Some(call_id) => self
+                    .tool_calls
+                    .iter()
+                    .find_map(|(index, state)| (state.call_id == call_id).then_some(*index))
+                    .unwrap_or_else(|| self.tool_calls.keys().next_back().map_or(0, |max| max + 1)),
+                None => fallback_index,
+            });
+        let call_id = call_id_hint.unwrap_or_else(|| format!("call-{}", index));
 
         let response_id = self.response_id_value();
         let mut added_event = None;

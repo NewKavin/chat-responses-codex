@@ -2684,6 +2684,280 @@ fn chat_stream_length_emits_response_incomplete() {
 }
 
 #[test]
+fn chat_response_maps_content_filter_to_incomplete_reason() {
+    let chat = json!({
+        "id": "chatcmpl-content-filter",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "partial"},
+            "finish_reason": "content_filter"
+        }]
+    });
+
+    let response = chat_response_to_responses_payload(&chat).unwrap();
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["incomplete_details"]["reason"], "content_filter");
+    assert_eq!(response["output"][0]["status"], "incomplete");
+}
+
+#[test]
+fn chat_stream_maps_content_filter_finish_to_incomplete_reason() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    let chunk = json!({
+        "id": "chatcmpl-content-filter",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "partial"},
+            "finish_reason": "content_filter"
+        }]
+    });
+
+    let finish_reason_events = translator.translate_event(&chunk).unwrap();
+    assert!(!finish_reason_events.iter().any(|event| matches!(
+        event["type"].as_str(),
+        Some("response.completed" | "response.incomplete")
+    )));
+    let events = translator.finish().unwrap();
+    let incomplete = events
+        .iter()
+        .find(|event| event["type"] == "response.incomplete")
+        .expect("content_filter should emit response.incomplete at stream termination");
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "content_filter"
+    );
+    assert!(events
+        .iter()
+        .all(|event| event["type"] != "response.completed"));
+}
+
+#[test]
+fn chat_stream_interleaves_parallel_tool_call_indices() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    let chunks = [
+        json!({
+            "id": "chatcmpl-parallel",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "alpha", "arguments": ""}
+                }]},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-parallel",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 1,
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "beta", "arguments": ""}
+                }]},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-parallel",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": "{\"arg\":1}"}
+                }]},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-parallel",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 1,
+                    "function": {"arguments": "{\"arg\":2}"}
+                }]},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-parallel",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ];
+
+    let mut events = chunks
+        .iter()
+        .flat_map(|chunk| translator.translate_event(chunk).unwrap())
+        .collect::<Vec<_>>();
+    events.extend(translator.finish().unwrap());
+
+    let added = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.added")
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 2, "exactly two function_call items expected");
+    assert_eq!(added[0]["item"]["name"], "alpha");
+    assert_eq!(added[0]["item"]["call_id"], "call_a");
+    assert_eq!(added[1]["item"]["name"], "beta");
+    assert_eq!(added[1]["item"]["call_id"], "call_b");
+    assert_eq!(added[0]["output_index"], 0);
+    assert_eq!(added[1]["output_index"], 1);
+
+    let arguments = events
+        .iter()
+        .filter(|event| event["type"] == "response.function_call_arguments.delta")
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 2);
+    let merged_a = arguments[0]["delta"].as_str().unwrap();
+    let merged_b = arguments[1]["delta"].as_str().unwrap();
+    assert!(merged_a.contains("\"arg\":1"));
+    assert!(merged_b.contains("\"arg\":2"));
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("tool_calls finish should complete the response");
+    assert_eq!(completed["response"]["output"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn chat_stream_merges_missing_index_tool_calls_by_call_id() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    // The first chunk has no tool_call index; the second chunk carries the
+    // same call at a different array position. Without id-based merging this
+    // splits `call_a` into two output items.
+    let chunks = [
+        json!({
+            "id": "chatcmpl-noindex",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "alpha", "arguments": ""}
+                }]},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-noindex",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [
+                    {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": {"name": "beta", "arguments": ""}
+                    },
+                    {
+                        "id": "call_a",
+                        "type": "function",
+                        "function": {"arguments": "{\"arg\":1}"}
+                    }
+                ]},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-noindex",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ];
+
+    let mut events = chunks
+        .iter()
+        .flat_map(|chunk| translator.translate_event(chunk).unwrap())
+        .collect::<Vec<_>>();
+    events.extend(translator.finish().unwrap());
+
+    let added = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.added")
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 2, "call_a must merge into one item by id");
+    let call_a_added = added
+        .iter()
+        .find(|event| event["item"]["call_id"] == "call_a")
+        .expect("call_a item should exist");
+    assert_eq!(call_a_added["item"]["name"], "alpha");
+    let arguments = events
+        .iter()
+        .filter(|event| event["type"] == "response.function_call_arguments.delta")
+        .filter(|event| event["item_id"] == call_a_added["item"]["id"])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments.len(),
+        1,
+        "call_a arguments must accumulate on one item"
+    );
+    assert_eq!(arguments[0]["delta"], "{\"arg\":1}");
+
+    // The completed response must contain exactly two output items, and the
+    // alpha item must carry both the name and the accumulated arguments.
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("tool_calls finish should complete the response");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert_eq!(
+        output.len(),
+        2,
+        "two output items in the completed response"
+    );
+    let alpha = output
+        .iter()
+        .find(|item| item["type"] == "function_call" && item["name"] == "alpha")
+        .expect("alpha function_call item should exist");
+    assert_eq!(alpha["arguments"], "{\"arg\":1}");
+}
+
+#[test]
 fn chat_stream_translator_maps_completed_usage_to_responses_usage() {
     let mut translator = StreamTranslator::new(
         UpstreamProtocol::ChatCompletions,
@@ -3702,4 +3976,184 @@ mod stream_aggregate_tests {
         }
         assert!(total.push(b":").is_err());
     }
+}
+
+// ---------------------------------------------------------------------------
+// A4: fixture-driven chat->Responses SSE translation.
+// Fixtures under tests/fixtures/upstream-sse/ are synthetic wire captures of
+// the shapes domestic providers actually emit (deepseek reasoning_content,
+// GLM keepalive padding, minimax parallel tool calls, content_filter
+// termination). Real intranet captures are not available to the sandbox; the
+// task permits synthetic samples matching the documented shapes.
+// ---------------------------------------------------------------------------
+
+/// Minimal mirror of the gateway's raw-SSE ingestion for chat->Responses:
+/// skip comment/empty/keepalive frames, canonicalize JSON chunks, translate to
+/// Responses events, and finish at [DONE].
+fn translate_chat_sse_fixture(fixture: &[u8]) -> Vec<Value> {
+    let source = std::str::from_utf8(fixture).expect("fixture must be utf-8");
+    let mut canonicalizer = ChatStreamCanonicalizer::new("chatcmpl-fixture", "fixture-model", 1);
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    let mut translated = Vec::new();
+    let mut saw_done = false;
+    for frame in source.split("\n\n") {
+        let mut data_lines = Vec::new();
+        for line in frame.lines() {
+            if line.starts_with(':') {
+                continue;
+            }
+            if let Some(payload) = line.strip_prefix("data:") {
+                data_lines.push(payload.strip_prefix(' ').unwrap_or(payload));
+            }
+        }
+        let payload = data_lines.join("\n");
+        // Comment frames, empty `data:` events and comment-style `data: : ping`
+        // padding are transport keepalives: skip them like the gateway does.
+        let trimmed = payload.trim();
+        if trimmed.is_empty() || trimmed.starts_with(':') {
+            continue;
+        }
+        if trimmed == "[DONE]" {
+            saw_done = true;
+            break;
+        }
+        let event: Value =
+            serde_json::from_str(&payload).expect("fixture chunk must be valid JSON");
+        for event in canonicalizer
+            .push(event)
+            .expect("canonicalizer should accept fixture chunk")
+        {
+            translated.extend(
+                translator
+                    .translate_event(&event)
+                    .expect("translator should accept canonicalized chunk"),
+            );
+        }
+    }
+    assert!(saw_done, "fixture must end with [DONE]");
+    // Mirror TranslatedStreamState::finish_stream: canonicalizer finish (which
+    // emits the usage envelope) feeds the translator, then translator.finish
+    // emits the protocol terminal.
+    for event in canonicalizer
+        .finish_after_done()
+        .expect("canonicalizer should finish after [DONE]")
+    {
+        translated.extend(
+            translator
+                .translate_event(&event)
+                .expect("translator should accept canonicalizer finish event"),
+        );
+    }
+    translated.extend(
+        translator
+            .finish()
+            .expect("translator should finish cleanly"),
+    );
+    translated
+}
+
+#[test]
+fn chat_stream_fixture_deepseek_reasoning_orders_reasoning_before_text() {
+    let events = translate_chat_sse_fixture(include_bytes!(
+        "fixtures/upstream-sse/deepseek-reasoning.sse"
+    ));
+
+    let reasoning_delta = events
+        .iter()
+        .position(|event| event["type"] == "response.reasoning_text.delta")
+        .expect("reasoning delta should be emitted");
+    let text_delta = events
+        .iter()
+        .position(|event| event["type"] == "response.output_text.delta")
+        .expect("text delta should be emitted");
+    assert!(reasoning_delta < text_delta, "{events:#?}");
+    assert_eq!(
+        events[reasoning_delta]["delta"],
+        "Let me think step by step."
+    );
+    assert_eq!(events[text_delta]["delta"], "The answer is 42.");
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("usage tail should complete the response");
+    assert_eq!(completed["response"]["usage"]["input_tokens"], 11);
+    assert_eq!(completed["response"]["usage"]["output_tokens"], 9);
+}
+
+#[test]
+fn chat_stream_fixture_glm_keepalive_padding_is_skipped_and_completes() {
+    let events =
+        translate_chat_sse_fixture(include_bytes!("fixtures/upstream-sse/glm-keepalive.sse"));
+
+    let text_delta = events
+        .iter()
+        .find(|event| event["type"] == "response.output_text.delta")
+        .expect("text delta should be emitted");
+    assert_eq!(text_delta["delta"], "Keepalive tolerated.");
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("usage tail should complete the response");
+    assert_eq!(completed["response"]["usage"]["input_tokens"], 4);
+    assert_eq!(completed["response"]["usage"]["output_tokens"], 3);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "response.completed")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn chat_stream_fixture_parallel_tool_calls_merge_missing_index_by_id() {
+    let events = translate_chat_sse_fixture(include_bytes!(
+        "fixtures/upstream-sse/parallel-tool-calls.sse"
+    ));
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("tool_calls finish should complete the response");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert_eq!(output.len(), 2, "interleaved calls must stay two items");
+
+    let alpha = output
+        .iter()
+        .find(|item| item["type"] == "function_call" && item["name"] == "get_weather")
+        .expect("alpha function_call item should exist");
+    assert_eq!(alpha["call_id"], "call-alpha");
+    assert_eq!(alpha["arguments"], r#"{"city":"shanghai"}"#);
+
+    let beta = output
+        .iter()
+        .find(|item| item["type"] == "function_call" && item["name"] == "get_time")
+        .expect("beta function_call item should exist");
+    assert_eq!(beta["call_id"], "call-beta");
+    assert_eq!(beta["arguments"], r#"{"tz":"asia"}"#);
+}
+
+#[test]
+fn chat_stream_fixture_content_filter_marks_response_incomplete() {
+    let events =
+        translate_chat_sse_fixture(include_bytes!("fixtures/upstream-sse/content-filter.sse"));
+
+    let incomplete = events
+        .iter()
+        .find(|event| event["type"] == "response.incomplete")
+        .expect("content_filter should emit response.incomplete");
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "content_filter"
+    );
+    assert!(events
+        .iter()
+        .all(|event| event["type"] != "response.completed"));
 }
