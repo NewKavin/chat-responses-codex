@@ -50,6 +50,7 @@ fn job(upstream: &str, model: &str) -> ProbeJob {
         },
         exposed_model_slugs: std::collections::BTreeSet::from([model.into()]),
         reason: ProbeReason::ConfigurationChanged,
+        mode: ProbeMode::Full,
         configuration: ProbeConfigurationBinding {
             configuration_fingerprint: "test-fingerprint".into(),
             configuration_digest: "test-digest".into(),

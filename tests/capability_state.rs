@@ -31,6 +31,7 @@ fn blocker_probe_batch() -> ProbeJobBatch {
         },
         exposed_model_slugs: std::collections::BTreeSet::from(["Lab/Blocker".into()]),
         reason: ProbeReason::Manual,
+        mode: chat_responses_codex::capabilities::ProbeMode::Full,
         configuration: chat_responses_codex::capabilities::ProbeConfigurationBinding {
             configuration_fingerprint: "test-fingerprint".into(),
             configuration_digest: "test-digest".into(),

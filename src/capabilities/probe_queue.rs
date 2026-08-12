@@ -18,6 +18,18 @@ impl ProbeReason {
     }
 }
 
+/// Whether a manual probe batch targets the full capability catalog or only
+/// the reasoning-level discovery cases. Reasoning batches run a deliberately
+/// minimal plan (connectivity gate + reasoning controls) so the button never
+/// burns tokens on unrelated capabilities, and their results merge into the
+/// profile instead of replacing previously verified evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum ProbeMode {
+    #[default]
+    Full,
+    Reasoning,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeConfigurationBinding {
     pub configuration_fingerprint: String,
@@ -32,6 +44,7 @@ pub struct ProbeJob {
     pub key: DialectProfileKey,
     pub exposed_model_slugs: BTreeSet<String>,
     pub reason: ProbeReason,
+    pub mode: ProbeMode,
     pub configuration: ProbeConfigurationBinding,
     pub plan_configuration: Arc<CompiledCapabilityConfiguration>,
 }
@@ -60,15 +73,35 @@ impl ProbeQueueBatchEnqueueOutcome {
 #[derive(Clone, Debug)]
 pub struct ProbeJobBatch {
     jobs: Vec<ProbeJob>,
+    mode: ProbeMode,
 }
 
 impl ProbeJobBatch {
     pub fn new(jobs: Vec<ProbeJob>) -> Self {
-        Self { jobs }
+        let mode = jobs.first().map(|job| job.mode).unwrap_or_default();
+        Self { jobs, mode }
     }
 
     pub fn single(job: ProbeJob) -> Self {
-        Self { jobs: vec![job] }
+        let mode = job.mode;
+        Self {
+            jobs: vec![job],
+            mode,
+        }
+    }
+
+    pub fn mode(&self) -> ProbeMode {
+        self.mode
+    }
+
+    /// Rewrites every job in the batch to the given mode (used when a
+    /// caller builds a reasoning-scoped batch from pre-built jobs).
+    pub fn with_mode(mut self, mode: ProbeMode) -> Self {
+        for job in &mut self.jobs {
+            job.mode = mode;
+        }
+        self.mode = mode;
+        self
     }
 
     pub fn into_jobs(self) -> Vec<ProbeJob> {
@@ -186,6 +219,19 @@ impl ProbeQueueState {
         self.known.insert(job.key.clone());
         self.pending.push_back(job);
         Ok(ProbeQueueEnqueueOutcome::Enqueued)
+    }
+
+    /// True while any queued or in-flight job targets the reasoning-only
+    /// mode. The worker throttles per-upstream concurrency to 1 while such a
+    /// batch is present so internal gateway rate limits are not tripped.
+    pub fn has_reasoning_job(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|job| job.mode == ProbeMode::Reasoning)
+            || self
+                .active_jobs
+                .values()
+                .any(|job| job.mode == ProbeMode::Reasoning)
     }
 
     pub fn set_limits(&mut self, max_global: usize, max_per_upstream: usize) {

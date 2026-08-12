@@ -15,8 +15,9 @@ use super::compat::normalize_chat_payload_for_upstream_compatibility;
 use crate::capabilities::{
     apply_probe_outcome, apply_probe_outcome_partial, Capability, CompiledCapabilityConfiguration,
     DeclarativeProbeCase, DialectProfileKey, EvidenceState, PredicateOperator, ProbeJob,
-    ProbeJobBatch, ProbeOutcome, ProbeQueueEnqueueOutcome, ProbeQueueState, ReasoningCarrier,
-    ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    ProbeJobBatch, ProbeMode, ProbeOutcome, ProbeQueueEnqueueOutcome, ProbeQueueState,
+    ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile,
+    WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
@@ -309,6 +310,33 @@ pub fn probe_plan_for_job(job: &ProbeJob) -> ProbePlan {
         tags: BTreeSet::new(),
     };
     configuration.apply_route_tags(&mut route);
+    if job.mode == ProbeMode::Reasoning {
+        // Reasoning-scoped batches probe only the connectivity gate and the
+        // declared reasoning-control candidates. Everything else (tools,
+        // images, streaming, token limits) is deliberately excluded: the
+        // button exists to discover thinking levels, and a minimal plan keeps
+        // the batch short enough to survive internal gateway rate limits.
+        let mut plan = ProbePlan {
+            protocol: job.key.protocol,
+            cases: vec![CoreProbeCase::MinimalText { stream: false }],
+            output_token_cap: configuration.source().probe.output_token_cap.min(64),
+        };
+        let candidates = configuration.probe_candidates_for(&route);
+        for (field, values) in &candidates.reasoning_controls {
+            for value in values {
+                if !plan.cases.iter().any(|case| {
+                    matches!(case, CoreProbeCase::ReasoningControl { field: existing_field, value: existing_value }
+                        if existing_field == field && existing_value == value)
+                }) {
+                    plan.cases.push(CoreProbeCase::ReasoningControl {
+                        field: field.clone(),
+                        value: value.clone(),
+                    });
+                }
+            }
+        }
+        return plan;
+    }
     let mut plan = probe_plan_for_route(configuration, &route);
     plan.cases
         .retain(|case| !matches!(case, CoreProbeCase::ImageHttps { .. }));
@@ -778,7 +806,7 @@ pub async fn run_probe_job(state: &AppState, job: &ProbeJob) -> ProbeJobExecutio
             attempted_at,
         } => {
             conclusive_capabilities = Some(capabilities.keys().copied().collect::<BTreeSet<_>>());
-            if completeness == ProbePlanCompleteness::Full {
+            if completeness == ProbePlanCompleteness::Full && job.mode == ProbeMode::Full {
                 apply_probe_outcome(
                     &mut profile,
                     ProbeOutcome::Conclusive {
@@ -795,10 +823,11 @@ pub async fn run_probe_job(state: &AppState, job: &ProbeJob) -> ProbeJobExecutio
                     },
                 );
             } else {
-                // A capacity-skipped probe is partial: merge instead of
-                // replace so previously-known evidence (reasoning levels,
-                // carriers, supported capabilities) is never erased by the
-                // cases that could not run.
+                // A capacity-skipped probe or a reasoning-scoped batch is
+                // partial: merge instead of replace so previously-known
+                // evidence (reasoning levels, carriers, supported
+                // capabilities) is never erased by the cases that could not
+                // run or were deliberately excluded from the minimal plan.
                 apply_probe_outcome_partial(
                     &mut profile,
                     ProbeOutcome::Conclusive {

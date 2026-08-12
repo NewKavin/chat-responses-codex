@@ -12,7 +12,7 @@ pub use policy::{
     CompiledCapabilityConfiguration, CompiledExpectation,
 };
 pub use probe_queue::{
-    ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeQueueBatchEnqueueOutcome,
+    ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeMode, ProbeQueueBatchEnqueueOutcome,
     ProbeQueueEnqueueOutcome, ProbeQueueState, ProbeReason,
 };
 pub use profile::{

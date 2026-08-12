@@ -12,9 +12,9 @@ use chat_responses_codex::capabilities::{
     apply_probe_outcome, apply_probe_outcome_partial, AgentClientProfile, Capability,
     CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, CompatibilityExpectation,
     DeclarativeProbeCase, DialectProfileKey, EvidenceState, HttpsImageFixture, PredicateOperator,
-    ProbeCandidates, ProbeJob, ProbeJobBatch, ProbeOutcome, ProbeProfileOutcome, ProbeQueueState,
-    ProbeReason, ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField,
-    UpstreamDialectProfile, WireProtocol,
+    ProbeCandidates, ProbeJob, ProbeJobBatch, ProbeMode, ProbeOutcome, ProbeProfileOutcome,
+    ProbeQueueState, ProbeReason, ReasoningCarrier, ResponsePredicate, RouteIdentity,
+    TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::protocol::stream_aggregate::MAX_STREAM_AGGREGATE_TOTAL_BYTES;
 use chat_responses_codex::server::{
@@ -651,6 +651,83 @@ fn agent_core_plan_probes_basic_tool_continuation() {
 }
 
 #[test]
+fn reasoning_mode_plan_is_limited_to_connectivity_and_reasoning_controls() {
+    let configuration = CapabilityConfiguration {
+        policies: vec![CapabilityPolicy {
+            id: "dialect".into(),
+            selector: CapabilitySelector {
+                runtime_model_glob: Some("lab/*".into()),
+                protocol: Some(WireProtocol::ChatCompletions),
+                ..Default::default()
+            },
+            probe_candidates: ProbeCandidates {
+                token_limit_fields: vec![TokenLimitField::MaxCompletionTokens],
+                reasoning_controls: std::collections::BTreeMap::from([(
+                    "reasoning_effort".into(),
+                    vec![json!("low"), json!("high")],
+                )]),
+                reasoning_carriers: vec![ReasoningCarrier::ReasoningContent],
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap();
+    let job = ProbeJob {
+        key: DialectProfileKey {
+            key_fingerprint: String::new(),
+            upstream_id: "up-1".into(),
+            runtime_model_slug: "lab/opaque".into(),
+            protocol: WireProtocol::ChatCompletions,
+        },
+        exposed_model_slugs: std::collections::BTreeSet::from(["public".into()]),
+        reason: ProbeReason::Manual,
+        mode: ProbeMode::Reasoning,
+        configuration: chat_responses_codex::capabilities::ProbeConfigurationBinding {
+            configuration_fingerprint: "test-fingerprint".into(),
+            configuration_digest: "test-digest".into(),
+            configuration_schema_version: 1,
+            configuration_revision: 1,
+            probe_schema_version: chat_responses_codex::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
+        },
+        plan_configuration: std::sync::Arc::new(configuration),
+    };
+
+    let plan = probe_plan_for_job(&job);
+
+    assert_eq!(
+        plan.cases.len(),
+        3,
+        "reasoning plan must be minimal: {plan:?}"
+    );
+    assert!(matches!(
+        plan.cases[0],
+        chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false }
+    ));
+    let reasoning = plan
+        .cases
+        .iter()
+        .filter(|case| {
+            matches!(
+                case,
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasoning.len(),
+        2,
+        "both reasoning candidate values must be probed"
+    );
+    assert!(plan.cases.iter().all(|case| matches!(
+        case,
+        chat_responses_codex::server::CoreProbeCase::MinimalText { .. }
+            | chat_responses_codex::server::CoreProbeCase::ReasoningControl { .. }
+    )));
+}
+
+#[test]
 fn queued_probe_preserves_exposed_model_for_fixture_selection() {
     let fixture = HttpsImageFixture {
         url: "https://fixtures.example.test/blue.png".into(),
@@ -681,6 +758,7 @@ fn queued_probe_preserves_exposed_model_for_fixture_selection() {
         key: key.clone(),
         exposed_model_slugs: std::collections::BTreeSet::from(["plain-alias".into()]),
         reason: ProbeReason::Manual,
+        mode: chat_responses_codex::capabilities::ProbeMode::Full,
         configuration: chat_responses_codex::capabilities::ProbeConfigurationBinding {
             configuration_fingerprint: "test-fingerprint".into(),
             configuration_digest: "test-digest".into(),
@@ -694,6 +772,7 @@ fn queued_probe_preserves_exposed_model_for_fixture_selection() {
         key,
         exposed_model_slugs: std::collections::BTreeSet::from(["public-vision-alias".into()]),
         reason: ProbeReason::Manual,
+        mode: chat_responses_codex::capabilities::ProbeMode::Full,
         configuration: chat_responses_codex::capabilities::ProbeConfigurationBinding {
             configuration_fingerprint: "test-fingerprint".into(),
             configuration_digest: "test-digest".into(),
@@ -4441,6 +4520,118 @@ fn partial_probe_outcome_without_reasoning_keeps_prior_levels() {
         profile.capabilities.get(&Capability::TextStream),
         Some(&EvidenceState::Supported)
     );
+}
+
+#[tokio::test]
+async fn reasoning_mode_probe_merges_partially_and_keeps_prior_evidence() {
+    with_proxy_env_cleared(|| async move {
+        let mock = ProbeMock::chat(|_| {
+            json!({
+                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                "model": "Lab/ProbeExec",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "391",
+                    "reasoning_content": "17 * 23 = 391"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+        })
+        .await;
+        let upstream = UpstreamConfig {
+            id: "up-probe-exec".into(),
+            name: "up-probe-exec".into(),
+            base_url: mock.base_url.clone(),
+            api_key: "probe-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["Lab/ProbeExec".into()],
+            active: true,
+            ..Default::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                revision: 1,
+                policies: vec![CapabilityPolicy {
+                    id: "probe-dialect".into(),
+                    selector: CapabilitySelector {
+                        runtime_model_glob: Some("Lab/*".into()),
+                        protocol: Some(WireProtocol::ChatCompletions),
+                        ..Default::default()
+                    },
+                    probe_candidates: ProbeCandidates {
+                        reasoning_controls: std::collections::BTreeMap::from([(
+                            "reasoning_effort".into(),
+                            vec![json!("low"), json!("high")],
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        state.set_capability_probe_sender(sender);
+        let filters = std::collections::BTreeSet::new();
+        state
+            .queue_manual_capability_probe_batch_with_mode(
+                &filters,
+                &filters,
+                chat_responses_codex::capabilities::ProbeMode::Reasoning,
+            )
+            .await
+            .unwrap();
+        let job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+        assert_eq!(
+            job.mode,
+            chat_responses_codex::capabilities::ProbeMode::Reasoning
+        );
+
+        // Pre-seed the profile with evidence that the minimal reasoning plan
+        // must not erase (function tools, an already-verified carrier, and a
+        // previously accepted max level).
+        let mut profile = UpstreamDialectProfile::unknown(job.key.clone());
+        profile
+            .capabilities
+            .insert(Capability::FunctionTools, EvidenceState::Supported);
+        profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
+        profile
+            .reasoning_controls
+            .insert("reasoning_effort".into(), vec![json!("max")]);
+        state.upsert_dialect_profile(profile).await.unwrap();
+
+        let execution = run_probe_job(&state, &job).await;
+        assert!(matches!(execution, ProbeJobExecution::Completed));
+
+        let snapshot = state.capability_snapshot();
+        let stored = snapshot.profiles.get(&job.key).expect("profile stored");
+        assert_eq!(
+            stored.capabilities.get(&Capability::FunctionTools),
+            Some(&EvidenceState::Supported),
+            "reasoning-scoped probe must merge, not replace, prior capability evidence"
+        );
+        assert_eq!(
+            stored.capabilities.get(&Capability::NonStreamingResponse),
+            Some(&EvidenceState::Supported)
+        );
+        assert_eq!(
+            stored.reasoning_controls.get("reasoning_effort"),
+            Some(&vec![json!("max"), json!("low"), json!("high")]),
+            "newly probed levels must merge with the previously verified max"
+        );
+        assert_eq!(
+            stored.last_probe_outcome,
+            Some(ProbeProfileOutcome::Deferred)
+        );
+    })
+    .await;
 }
 
 #[tokio::test]

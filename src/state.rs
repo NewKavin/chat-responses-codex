@@ -2,8 +2,8 @@ use crate::capabilities::{
     normalize_route_base_url, profile_is_current, route_fingerprint, Capability,
     CapabilityConfiguration, CapabilityHintKey, CapabilityRuntimeSnapshot, CapabilityStateDocument,
     DialectProfileKey, EvidenceState, ProbeConfigurationBinding, ProbeJob, ProbeJobBatch,
-    ProbeReason, RouteFingerprintInput, RuntimeCapabilityHintSnapshot, RuntimeCapabilityHints,
-    UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
+    ProbeMode, ProbeReason, RouteFingerprintInput, RuntimeCapabilityHintSnapshot,
+    RuntimeCapabilityHints, UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
 use crate::keys::{
     anonymous_route_id, upstream_key_fingerprint, validated_downstream_plaintext,
@@ -1923,6 +1923,16 @@ impl AppState {
         upstream_ids: &BTreeSet<String>,
         models: &BTreeSet<String>,
     ) -> Result<ManualProbeBatchReceipt, ManualProbeBatchError> {
+        self.queue_manual_capability_probe_batch_with_mode(upstream_ids, models, ProbeMode::Full)
+            .await
+    }
+
+    pub async fn queue_manual_capability_probe_batch_with_mode(
+        &self,
+        upstream_ids: &BTreeSet<String>,
+        models: &BTreeSet<String>,
+        mode: ProbeMode,
+    ) -> Result<ManualProbeBatchReceipt, ManualProbeBatchError> {
         let _persist_guard = self.config_persist_lock.lock().await;
         let _capability_guard = self.capability_update_lock.lock().await;
         let routing = self.routing_snapshot().await;
@@ -1954,6 +1964,7 @@ impl AppState {
                         &key.runtime_model_slug,
                         protocol,
                         ProbeReason::Manual,
+                        mode,
                     ) else {
                         continue;
                     };
@@ -1981,6 +1992,12 @@ impl AppState {
         let batch_id = Uuid::new_v4().to_string();
         let started_at = unix_seconds();
         let mut batch_models = BTreeSet::new();
+        tracing::info!(
+            batch_id = %batch_id,
+            mode = ?mode,
+            models = %serde_json::to_string(&models.iter().collect::<Vec<_>>()).unwrap_or_default(),
+            "accepted manual capability probe batch request"
+        );
         for job in &prepared_jobs {
             batch_models.extend(job.exposed_model_slugs.iter().cloned());
         }
@@ -2026,6 +2043,17 @@ impl AppState {
                     state,
                     diagnostic_code: None,
                 };
+                tracing::info!(
+                    batch_id = %batch_id,
+                    mode = ?mode,
+                    upstream_id = %job.key.upstream_id,
+                    route_id = %summary.route_id,
+                    exposed_model_slug = %summary.exposed_model_slug,
+                    runtime_model_slug = %summary.runtime_model_slug,
+                    protocol = ?summary.protocol,
+                    state = ?summary.state,
+                    "capability probe batch candidate"
+                );
                 candidates.push(CapabilityProbeBatchCandidate {
                     summary,
                     key: job.key,
@@ -2292,6 +2320,7 @@ impl AppState {
             runtime_model_slug,
             protocol,
             reason,
+            ProbeMode::Full,
         )
     }
 
@@ -2321,6 +2350,7 @@ impl AppState {
             runtime_model_slug,
             protocol,
             ProbeReason::Manual,
+            ProbeMode::Full,
         )
         .ok()
         .flatten()
@@ -2335,6 +2365,7 @@ impl AppState {
         runtime_model_slug: &str,
         protocol: UpstreamProtocol,
         reason: ProbeReason,
+        mode: ProbeMode,
     ) -> io::Result<Option<ProbeJob>> {
         if !capability_snapshot.configuration.source().probe.enabled
             || !upstream.active
@@ -2365,6 +2396,7 @@ impl AppState {
             ),
             exposed_model_slugs: BTreeSet::from([exposed_model_slug.to_owned()]),
             reason,
+            mode,
             configuration: ProbeConfigurationBinding {
                 configuration_fingerprint,
                 configuration_digest: capability_snapshot.configuration.digest().to_owned(),
@@ -4927,6 +4959,7 @@ impl AppState {
                                         &runtime,
                                         protocol,
                                         ProbeReason::ConfigurationChanged,
+                                        ProbeMode::Full,
                                     )?
                                 else {
                                     continue;
@@ -5266,6 +5299,7 @@ impl AppState {
                 &key.runtime_model_slug,
                 protocol,
                 reason,
+                ProbeMode::Full,
             )?
             else {
                 continue;
