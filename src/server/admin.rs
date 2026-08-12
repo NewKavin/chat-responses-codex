@@ -499,6 +499,11 @@ fn classify_dashboard_failure(log: &UsageLog) -> Option<String> {
     {
         return Some("429-配额/限流".to_string());
     }
+    if error_message.contains("multiple routes failed with identical")
+        || error_message.contains("on multiple routes with the same failure")
+    {
+        return Some("共模熔断".to_string());
+    }
     if status >= 500 || error_message.contains("upstream") || error_message.contains("bad gateway")
     {
         return Some("5xx-上游异常".to_string());

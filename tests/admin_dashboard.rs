@@ -913,3 +913,80 @@ async fn admin_dashboard_user_agent_clusters_deduplicate_by_downstream() {
 
     assert_eq!(claude_cluster["value"], 1);
 }
+
+#[tokio::test]
+async fn admin_dashboard_classifies_common_mode_trips_separately() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+
+    let mut transient_log = dashboard_usage_log("transient-trip", now.saturating_sub(60));
+    transient_log.status_code = 502;
+    transient_log.error_message = Some(
+        "multiple routes failed with identical transient upstream errors (upstream HTTP 502) \
+         — likely a shared upstream gateway outage; the request was retried once after a short \
+         backoff and still failed. First upstream error: upstream server error (status 502)"
+            .to_string(),
+    );
+    transient_log.error_category = Some("upstream_error".to_string());
+
+    let mut shape_log = dashboard_usage_log("shape-trip", now.saturating_sub(30));
+    shape_log.status_code = 400;
+    shape_log.error_message = Some(
+        "upstream rejected this request on multiple routes with the same failure \
+         (request_rejected consecutive similar failures (upstream HTTP 400)); the request was \
+         not replayed across the remaining routes. First upstream error: bad request"
+            .to_string(),
+    );
+    shape_log.error_category = Some("upstream_error".to_string());
+
+    let state = AppState::new(
+        PersistedState {
+            usage_logs: vec![transient_log, shape_log],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        config,
+    );
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let failure_categories = result["analytics"]["failure_categories"]
+        .as_array()
+        .unwrap();
+    let common_mode = failure_categories
+        .iter()
+        .find(|item| item["name"] == "共模熔断")
+        .expect("common-mode trips must get their own dashboard category");
+    assert_eq!(common_mode["value"], 2);
+    let upstream_failure = failure_categories
+        .iter()
+        .find(|item| item["name"] == "5xx-上游异常");
+    assert!(
+        upstream_failure.is_none(),
+        "common-mode trips must not be double-counted as plain upstream failures"
+    );
+}
