@@ -65,27 +65,6 @@
         </p>
       </article>
 
-      <article v-if="data.quota_summary.token_daily" class="quota-summary-item crc-surface">
-        <div class="quota-summary-head">
-          <span class="quota-summary-icon"><CalendarClock :size="14" :stroke-width="1.8" /></span>
-          <span class="quota-summary-label">每日 Token</span>
-          <span class="quota-summary-meta">DAILY</span>
-        </div>
-        <div class="quota-summary-value-row">
-          <strong>{{ formatCompact(data.quota_summary.token_daily.used) }}</strong>
-          <span>/ {{ formatCompact(data.quota_summary.token_daily.limit) }}</span>
-        </div>
-        <el-progress
-          :percentage="formatPct(data.quota_summary.token_daily.percentage)"
-          :color="getQuotaStatusColor(data.quota_summary.token_daily.percentage)"
-          :show-text="false"
-          :stroke-width="6"
-        />
-        <p class="quota-summary-foot">
-          剩余 {{ formatCompact(data.quota_summary.token_daily.remaining) }} · {{ formatPct(data.quota_summary.token_daily.percentage) }}%
-        </p>
-      </article>
-
       <article v-if="data.quota_summary.cost_daily" class="quota-summary-item crc-surface">
         <div class="quota-summary-head">
           <span class="quota-summary-icon"><Wallet :size="14" :stroke-width="1.8" /></span>
@@ -263,35 +242,6 @@
           </section>
         </el-collapse-item>
 
-        <el-collapse-item name="daily" v-if="quotaData.token_quota?.daily">
-          <template #title>
-            <div class="quota-detail-title-row">
-              <span>每日 Token 配额</span>
-              <span class="quota-detail-title-meta">当日累计</span>
-            </div>
-          </template>
-          <section class="quota-detail-section">
-            <div class="quota-detail-metrics">
-              <div class="quota-detail-metric">
-                <span>配额限制</span>
-                <strong>{{ quotaData.token_quota.daily.limit.toLocaleString() }}</strong>
-              </div>
-              <div class="quota-detail-metric">
-                <span>已使用</span>
-                <strong>{{ quotaData.token_quota.daily.used.toLocaleString() }}</strong>
-              </div>
-              <div class="quota-detail-metric">
-                <span>剩余</span>
-                <strong>{{ quotaData.token_quota.daily.remaining.toLocaleString() }}</strong>
-              </div>
-            </div>
-            <el-progress
-              :percentage="formatPct(quotaData.token_quota.daily.percentage)"
-              :color="getQuotaStatusColor(quotaData.token_quota.daily.percentage)"
-            />
-          </section>
-        </el-collapse-item>
-
         <el-collapse-item name="monthly" v-if="quotaData.token_quota?.monthly">
           <template #title>
             <div class="quota-detail-title-row">
@@ -361,7 +311,6 @@ import { ElMessage } from 'element-plus'
 import {
   Activity,
   Boxes,
-  CalendarClock,
   CalendarDays,
   CalendarRange,
   Clock3,
@@ -407,13 +356,12 @@ const quotaData = ref<PortalQuota>({
 const quotaLoading = ref(false)
 const availableModelSlugs = ref<string[]>([])
 const modelLoadError = ref('')
-const activeDetail = ref(['request', 'daily', 'monthly', 'models', 'ips'])
+const activeDetail = ref(['request', 'monthly', 'models', 'ips'])
 const overviewLoaded = ref(false)
 
 const hasQuotaSummary = computed(() =>
   Boolean(
     data.value.quota_summary.request_quota ||
-      data.value.quota_summary.token_daily ||
       data.value.quota_summary.token_monthly ||
       data.value.quota_summary.cost_daily
   )
@@ -433,7 +381,6 @@ const concurrencyUsagePct = computed(() => {
 const heroGauges = computed(() => {
   const gauges: Array<{ label: string; sub: string; pct: number }> = []
   const request = data.value.quota_summary.request_quota
-  const daily = data.value.quota_summary.token_daily
   const monthly = data.value.quota_summary.token_monthly
   if (request) {
     gauges.push({
@@ -441,9 +388,6 @@ const heroGauges = computed(() => {
       sub: `${request.window_hours}H 窗口`,
       pct: formatPct(request.percentage)
     })
-  }
-  if (daily) {
-    gauges.push({ label: '每日 TOKEN', sub: '当日累计', pct: formatPct(daily.percentage) })
   }
   if (monthly) {
     gauges.push({ label: '每月 TOKEN', sub: '本月累计', pct: formatPct(monthly.percentage) })
