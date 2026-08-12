@@ -666,6 +666,10 @@ fn downstream_plaintext_pairs_unchanged(
 }
 
 impl StateStore for PostgresStateStore {
+    fn backend_name(&self) -> &'static str {
+        "postgres"
+    }
+
     fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async move { self.replace_state(state).await })
     }
@@ -2734,6 +2738,12 @@ impl AppState {
             restart_required: !restart_required_fields.is_empty(),
             restart_required_fields,
         }
+    }
+
+    /// Backend identifier of the active config store ("postgres" or "file"),
+    /// surfaced in admin persistence-failure details for operator triage.
+    pub fn config_store_backend_name(&self) -> &'static str {
+        self.config_store.backend_name()
     }
 
     pub async fn runtime_settings_response(&self) -> RuntimeSettingsResponse {

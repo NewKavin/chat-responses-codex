@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::error::Error;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -905,13 +906,21 @@ pub(super) async fn admin_update_runtime_settings(
         )
             .into_response(),
         Err(RuntimeSettingsUpdateError::Persist(error)) => {
-            tracing::error!(kind = ?error.kind(), "failed to persist runtime settings");
+            tracing::error!(
+                error = %error,
+                source = ?error.source(),
+                backend = state.config_store_backend_name(),
+                "failed to persist runtime settings"
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": {
                         "code": "runtime_settings_persist_failed",
-                        "message": "Failed to save runtime settings"
+                        "message": "Failed to save runtime settings",
+                        "details": {
+                            "backend": state.config_store_backend_name()
+                        }
                     }
                 })),
             )

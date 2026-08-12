@@ -319,6 +319,7 @@ async fn runtime_settings_persistence_failure_is_sanitized_and_keeps_startup_sna
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = response_json(response).await;
     assert_eq!(body["error"]["code"], "runtime_settings_persist_failed");
+    assert_eq!(body["error"]["details"]["backend"], "file");
     assert!(!body.to_string().contains("persist-credential-do-not-echo"));
     assert_eq!(harness.state.runtime_settings().app_name, "Startup Gateway");
     assert!(harness.state.snapshot().await.runtime_settings.is_none());

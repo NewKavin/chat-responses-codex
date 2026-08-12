@@ -12,6 +12,13 @@ use std::pin::Pin;
 pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait StateStore: Send + Sync {
+    /// Stable backend identifier surfaced in admin error details so
+    /// operators can tell whether a persistence failure came from the file
+    /// backend or the PostgreSQL backend.
+    fn backend_name(&self) -> &'static str {
+        "file"
+    }
+
     fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>>;
 
     fn load_capability_state<'a>(&'a self) -> StoreFuture<'a, io::Result<CapabilityStateDocument>> {

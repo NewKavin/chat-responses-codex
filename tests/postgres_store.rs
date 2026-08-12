@@ -190,6 +190,7 @@ async fn persist_config_round_trips_through_postgres() {
     let state = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should connect to the PostgreSQL test database");
+    assert_eq!(state.config_store_backend_name(), "postgres");
 
     // One upstream per non-standard-field policy value: the boolean column
     // and the text column must both round-trip (Auto and AlwaysStrip both map
