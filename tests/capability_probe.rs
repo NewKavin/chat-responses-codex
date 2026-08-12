@@ -1759,6 +1759,110 @@ async fn probe_service_runtime_concurrency_setting_bounds_global_concurrency() {
 }
 
 #[tokio::test]
+async fn reasoning_probe_batch_forces_single_concurrency_per_upstream() {
+    with_proxy_env_cleared(|| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let active = active.clone();
+                let max_active = max_active.clone();
+                let request_count = request_count.clone();
+                move || {
+                    let active = active.clone();
+                    let max_active = max_active.clone();
+                    let request_count = request_count.clone();
+                    async move {
+                        request_count.fetch_add(1, Ordering::SeqCst);
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        (
+                            StatusCode::FORBIDDEN,
+                            axum::Json(json!({"error": {"message": "denied"}})),
+                        )
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let upstream = UpstreamConfig {
+            id: "reasoning-upstream".into(),
+            name: "reasoning-upstream".into(),
+            base_url: format!("http://{address}"),
+            api_key: "probe-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["model-a".into(), "model-b".into()],
+            active: true,
+            ..Default::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: Arc::new(vec![upstream]),
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                revision: 1,
+                probe: chat_responses_codex::capabilities::ProbeConfiguration {
+                    enabled: true,
+                    max_global_concurrency: 4,
+                    max_per_upstream_concurrency: 4,
+                    ..Default::default()
+                },
+                policies: vec![CapabilityPolicy {
+                    id: "reasoning-concurrency".into(),
+                    selector: CapabilitySelector {
+                        upstream_id: Some("reasoning-upstream".into()),
+                        protocol: Some(WireProtocol::ChatCompletions),
+                        ..Default::default()
+                    },
+                    probe_candidates: ProbeCandidates {
+                        reasoning_controls: std::collections::BTreeMap::from([(
+                            "reasoning_effort".into(),
+                            vec![json!("low")],
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let _service = CapabilityProbeService::spawn(state.clone());
+        let filters = std::collections::BTreeSet::new();
+        state
+            .queue_manual_capability_probe_batch_with_mode(&filters, &filters, ProbeMode::Reasoning)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while request_count.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn probe_service_periodically_reconciles_expired_verified_profiles() {
     with_proxy_env_cleared(|| async move {
         let mock = ProbeMock::chat(|_| json!({"choices": [{"message": {"content": "ok"}}]})).await;
@@ -5434,6 +5538,125 @@ async fn reasoning_mode_probe_merges_partially_and_keeps_prior_evidence() {
         assert_eq!(
             stored.last_probe_outcome,
             Some(ProbeProfileOutcome::Deferred)
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reasoning_mode_uses_its_timeout_and_spaces_cases() {
+    with_proxy_env_cleared(|| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let arrivals = arrivals.clone();
+                move |request: Request<Body>| {
+                    let arrivals = arrivals.clone();
+                    async move {
+                        arrivals.lock().unwrap().push(std::time::Instant::now());
+                        let (_, body) = request.into_parts();
+                        let payload: Value = serde_json::from_slice(
+                            &to_bytes(body, usize::MAX).await.unwrap(),
+                        )
+                        .unwrap();
+                        if payload["stream"] == true {
+                            tokio::time::sleep(Duration::from_millis(1_100)).await;
+                            let event = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n";
+                            (
+                                StatusCode::OK,
+                                [(header::CONTENT_TYPE, "text/event-stream")],
+                                Body::from(event),
+                            )
+                                .into_response()
+                        } else {
+                            (StatusCode::OK, axum::Json(text_response("391"))).into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let upstream = UpstreamConfig {
+            id: "reasoning-timeout-upstream".into(),
+            name: "reasoning-timeout-upstream".into(),
+            base_url: format!("http://{address}"),
+            api_key: "probe-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["reasoning-model".into()],
+            active: true,
+            ..Default::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: Arc::new(vec![upstream]),
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig {
+                capability_probe_request_timeout_seconds: 1,
+                capability_probe_reasoning_timeout_seconds: 2,
+                ..Default::default()
+            },
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                revision: 1,
+                policies: vec![CapabilityPolicy {
+                    id: "reasoning-timeout".into(),
+                    selector: CapabilitySelector {
+                        runtime_model: Some("reasoning-model".into()),
+                        protocol: Some(WireProtocol::ChatCompletions),
+                        ..Default::default()
+                    },
+                    probe_candidates: ProbeCandidates {
+                        reasoning_controls: std::collections::BTreeMap::from([(
+                            "reasoning_effort".into(),
+                            vec![json!("low")],
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        state.set_capability_probe_sender(sender);
+        let filters = std::collections::BTreeSet::new();
+        state
+            .queue_manual_capability_probe_batch_with_mode(
+                &filters,
+                &filters,
+                ProbeMode::Reasoning,
+            )
+            .await
+            .unwrap();
+        let job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+
+        assert!(matches!(
+            run_probe_job(&state, &job).await,
+            ProbeJobExecution::Completed
+        ));
+        let snapshot = state.capability_snapshot();
+        let stored = snapshot.profiles.get(&job.key).unwrap();
+        assert_eq!(
+            stored.reasoning_controls.get("reasoning_effort"),
+            Some(&vec![json!("low")]),
+            "reasoning case must use the longer dedicated timeout"
+        );
+        let arrivals = arrivals.lock().unwrap();
+        assert_eq!(arrivals.len(), 2);
+        assert!(
+            arrivals[1].duration_since(arrivals[0]) >= Duration::from_millis(350),
+            "reasoning cases must be spaced to avoid upstream RPM bursts"
         );
     })
     .await;

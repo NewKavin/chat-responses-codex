@@ -141,6 +141,8 @@ pub struct AppConfig {
     /// accepted batch are expanded and deduplicated by `ProbeQueueState`.
     pub capability_probe_queue_capacity: usize,
     pub capability_probe_request_timeout_seconds: u64,
+    #[serde(default = "default_capability_probe_reasoning_timeout_seconds")]
+    pub capability_probe_reasoning_timeout_seconds: u64,
     #[serde(default = "default_capability_probe_concurrency")]
     pub capability_probe_concurrency: u32,
     pub automatic_capability_probes_enabled: bool,
@@ -237,6 +239,7 @@ impl Default for AppConfig {
             redis_key_prefix: "chat2responses".into(),
             capability_probe_queue_capacity: 256,
             capability_probe_request_timeout_seconds: 20,
+            capability_probe_reasoning_timeout_seconds: 90,
             capability_probe_concurrency: 4,
             automatic_capability_probes_enabled: false,
             capability_policy_bootstrap_on_zero: true,
@@ -852,6 +855,10 @@ pub fn default_upstream_max_concurrency() -> u32 {
 
 pub fn default_capability_probe_concurrency() -> u32 {
     4
+}
+
+pub fn default_capability_probe_reasoning_timeout_seconds() -> u64 {
+    90
 }
 
 pub fn default_upstream_common_mode_breaker_threshold() -> u32 {

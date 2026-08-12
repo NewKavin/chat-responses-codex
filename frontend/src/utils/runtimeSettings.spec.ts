@@ -23,6 +23,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_model_key_sync_interval_seconds: 0,
   capability_probe_queue_capacity: 64,
   capability_probe_request_timeout_seconds: 30,
+  capability_probe_reasoning_timeout_seconds: 90,
   automatic_capability_probes_enabled: false,
   upstream_rate_limit_default_retry_seconds: 1,
   routing_affinity_enabled: true,
@@ -67,6 +68,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_model_key_sync_interval_seconds',
   'capability_probe_queue_capacity',
   'capability_probe_request_timeout_seconds',
+  'capability_probe_reasoning_timeout_seconds',
   'automatic_capability_probes_enabled',
   'upstream_rate_limit_default_retry_seconds',
   'routing_affinity_enabled',
@@ -109,10 +111,10 @@ describe('runtime settings catalog', () => {
       'http',
       'logs'
     ])
-    expect(runtimeSettingFields).toHaveLength(41)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(41)
+    expect(runtimeSettingFields).toHaveLength(42)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(42)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(29)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(30)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(12)
   })
 })
@@ -133,6 +135,7 @@ describe('runtime settings helpers', () => {
     const invalid = validSettings()
     invalid.app_name = '  '
     invalid.default_upstream_max_concurrency = 0
+    invalid.capability_probe_reasoning_timeout_seconds = 0
     invalid.upstream_transient_route_cooldown_base_seconds = 61
     invalid.upstream_stream_keepalive_interval_seconds = 120
     invalid.upstream_stream_idle_timeout_seconds = 120
@@ -145,6 +148,7 @@ describe('runtime settings helpers', () => {
     const errors = validateRuntimeSettings(invalid)
     expect(errors.app_name).toBeTruthy()
     expect(errors.default_upstream_max_concurrency).toBeTruthy()
+    expect(errors.capability_probe_reasoning_timeout_seconds).toBeTruthy()
     expect(errors.upstream_transient_route_cooldown_base_seconds).toBeTruthy()
     expect(errors.upstream_stream_keepalive_interval_seconds).toBeTruthy()
     expect(errors.upstream_stream_idle_timeout_seconds).toBeTruthy()

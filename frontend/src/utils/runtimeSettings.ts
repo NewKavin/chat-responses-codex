@@ -122,6 +122,16 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'capability_probe_reasoning_timeout_seconds',
+    group: 'discovery',
+    label: '思考档位探测超时',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: MAX_SAFE_INTEGER
+  },
+  {
     key: 'automatic_capability_probes_enabled',
     group: 'discovery',
     label: '自动能力探测',

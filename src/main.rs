@@ -140,6 +140,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             20,
         )
         .max(1),
+        capability_probe_reasoning_timeout_seconds: env_u64(
+            "CAPABILITY_PROBE_REASONING_TIMEOUT_SECONDS",
+            90,
+        )
+        .max(1),
         capability_probe_concurrency: env_u32("CAPABILITY_PROBE_CONCURRENCY", 4).max(1),
         automatic_capability_probes_enabled: env_bool("AUTOMATIC_CAPABILITY_PROBES_ENABLED", false),
         capability_policy_bootstrap_on_zero: env_bool("CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO", true),

@@ -113,13 +113,14 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 41);
+    assert_eq!(all.len(), 42);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
     );
     assert!(all.contains("app_name"));
     assert!(all.contains("default_upstream_max_concurrency"));
+    assert!(all.contains("capability_probe_reasoning_timeout_seconds"));
     assert!(all.contains("upstream_concurrency_probe_delays_ms"));
     for field in [
         "upstream_transient_route_cooldown_base_seconds",
@@ -323,5 +324,51 @@ fn runtime_settings_round_trip_capability_probe_concurrency() {
     assert_eq!(
         RuntimeSettings::from_app_config(&config).capability_probe_concurrency,
         6
+    );
+}
+
+#[test]
+fn runtime_settings_without_reasoning_timeout_use_canonical_default() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("capability_probe_reasoning_timeout_seconds");
+
+    let loaded: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let reserialized = serde_json::to_value(loaded).unwrap();
+
+    assert_eq!(
+        reserialized["capability_probe_reasoning_timeout_seconds"],
+        90
+    );
+}
+
+#[test]
+fn runtime_settings_reject_zero_reasoning_timeout() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized["capability_probe_reasoning_timeout_seconds"] = serde_json::json!(0);
+
+    let settings: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let error = settings.validate_and_normalize().unwrap_err();
+
+    assert_eq!(error.field(), "capability_probe_reasoning_timeout_seconds");
+}
+
+#[test]
+fn runtime_settings_round_trip_reasoning_timeout() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    assert_eq!(settings.capability_probe_reasoning_timeout_seconds, 90);
+    settings.capability_probe_reasoning_timeout_seconds = 120;
+    let normalized = settings.validate_and_normalize().unwrap();
+
+    let mut config = AppConfig::default();
+    normalized.apply_to_app_config(&mut config);
+    assert_eq!(config.capability_probe_reasoning_timeout_seconds, 120);
+    assert_eq!(
+        RuntimeSettings::from_app_config(&config).capability_probe_reasoning_timeout_seconds,
+        120
     );
 }

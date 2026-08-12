@@ -460,6 +460,7 @@ pub async fn run_probe_plan_with_coordination_for_test(
         runtime_model_slug: key.runtime_model_slug.clone(),
         request_timeout: Duration::from_secs(timeout_seconds.max(1)),
         reasoning_timeout: Duration::from_secs(timeout_seconds.max(1)),
+        case_delay: Duration::ZERO,
     }
     .run_plan(&key, plan)
     .await
@@ -495,10 +496,15 @@ impl CapabilityProbeService {
                 let capability_snapshot = state.capability_snapshot();
                 let probe = &capability_snapshot.configuration.source().probe;
                 let runtime_settings = state.runtime_settings();
+                let per_upstream_limit = if queue.has_reasoning_job() {
+                    1
+                } else {
+                    probe.max_per_upstream_concurrency
+                };
                 queue.set_limits(
                     (runtime_settings.capability_probe_concurrency as usize)
                         .min(probe.max_global_concurrency),
-                    probe.max_per_upstream_concurrency,
+                    per_upstream_limit,
                 );
                 if probe.enabled {
                     if let Some(batch) = deferred_batch.take() {
@@ -764,9 +770,14 @@ pub async fn run_probe_job(state: &AppState, job: &ProbeJob) -> ProbeJobExecutio
         ),
         reasoning_timeout: Duration::from_secs(
             runtime_settings
-                .capability_probe_request_timeout_seconds
+                .capability_probe_reasoning_timeout_seconds
                 .max(1),
         ),
+        case_delay: if job.mode == ProbeMode::Reasoning {
+            Duration::from_millis(400)
+        } else {
+            Duration::ZERO
+        },
     }
     .run_plan(&job.key, plan)
     .await;
@@ -881,6 +892,7 @@ struct ProbeExecutor {
     runtime_model_slug: String,
     request_timeout: Duration,
     reasoning_timeout: Duration,
+    case_delay: Duration,
 }
 
 impl ProbeExecutor {
@@ -897,10 +909,18 @@ impl ProbeExecutor {
         let mut first_http_status: Option<u16> = None;
         // A plan-level budget caps the whole run so per-case retries and
         // slow reasoning requests cannot drag a batch out indefinitely.
-        let total_budget = plan_total_budget(&plan, self.request_timeout, self.reasoning_timeout);
+        let total_budget = plan_total_budget(
+            &plan,
+            self.request_timeout,
+            self.reasoning_timeout,
+            self.case_delay,
+        );
         let deadline = Instant::now() + total_budget;
         for (case_index, case) in plan.cases.into_iter().enumerate() {
             let is_connectivity_gate = case_index == 0;
+            if case_index > 0 && !self.case_delay.is_zero() {
+                tokio::time::sleep(self.case_delay).await;
+            }
             let case_timeout = self.case_timeout_for(&case);
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -2517,6 +2537,7 @@ fn plan_total_budget(
     plan: &ProbePlan,
     request_timeout: Duration,
     reasoning_timeout: Duration,
+    case_delay: Duration,
 ) -> Duration {
     let per_case_seconds = plan
         .cases
@@ -2533,7 +2554,10 @@ fn plan_total_budget(
             timeout.as_secs().max(1)
         })
         .sum::<u64>();
-    Duration::from_secs(per_case_seconds.clamp(1, 600))
+    let delay = case_delay.saturating_mul(plan.cases.len().saturating_sub(1) as u32);
+    Duration::from_secs(per_case_seconds.max(1))
+        .saturating_add(delay)
+        .min(Duration::from_secs(600))
 }
 
 /// Parses a Retry-After header (integer seconds form), capped so a stale

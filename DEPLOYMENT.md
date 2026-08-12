@@ -89,6 +89,16 @@ disabled by default because they send real inference requests and consume
 model tokens; manual probes and “真实验证并应用” still consume tokens when an
 administrator explicitly runs them.
 
+Legacy startup environments may set
+`CAPABILITY_PROBE_REQUEST_TIMEOUT_SECONDS` (default `20`) for ordinary probe
+cases, `CAPABILITY_PROBE_REASONING_TIMEOUT_SECONDS` (default `90`) for
+reasoning-control and reasoning-triggered cases, and
+`CAPABILITY_PROBE_CONCURRENCY` (default `4`) for global probe concurrency.
+Once Admin > Settings has been saved, the persisted values shown there take
+precedence over these startup fallbacks. Reasoning-only batches additionally
+serialize work per upstream and space cases to reduce internal gateway RPM
+bursts.
+
 Automatic upstream model discovery is disabled by default. Manual model
 discovery remains available when automatic discovery is disabled and persists
 only the models selected when the upstream is saved. Set the background

@@ -817,6 +817,7 @@ export interface RuntimeSettings {
   upstream_model_key_sync_interval_seconds: number
   capability_probe_queue_capacity: number
   capability_probe_request_timeout_seconds: number
+  capability_probe_reasoning_timeout_seconds: number
   automatic_capability_probes_enabled: boolean
   upstream_rate_limit_default_retry_seconds: number
   routing_affinity_enabled: boolean
