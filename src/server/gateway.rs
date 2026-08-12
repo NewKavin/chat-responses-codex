@@ -6572,12 +6572,21 @@ async fn process_gateway_request_inner(
                             }
                             Err(error)
                                 if runtime_settings.upstream_same_route_retry_enabled
+                                    && runtime_settings
+                                        .upstream_transient_same_route_retry_enabled
                                     && !same_route_retry_attempted
                                     && !stream_only_recovery.final_attempt
                                     && should_retry_same_route_once(&error) =>
                             {
                                 same_route_retry_attempted = true;
                                 any_same_route_retry = true;
+                                let retry_after = error.retry_after().filter(|d| !d.is_zero());
+                                let requested_delay = retry_after
+                                    .unwrap_or_else(|| Duration::from_millis(300))
+                                    .clamp(Duration::from_millis(200), Duration::from_secs(2));
+                                let remaining_budget = route_retry_policy
+                                    .remaining_wait_budget(route_retry_budget.waited());
+                                let retry_delay = requested_delay.min(remaining_budget);
                                 tracing::info!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -6594,11 +6603,14 @@ async fn process_gateway_request_inner(
                                     same_route_retry = true,
                                     cooldown_seconds = 0,
                                     remaining_candidates = candidate_keys.len().saturating_sub(key_index + 1),
-                                    retry_delay_ms = 300,
+                                    retry_delay_ms = retry_delay.as_millis() as u64,
                                     error_category = %error.error_category(),
                                     "retrying transient upstream failure on the same route"
                                 );
-                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                if !retry_delay.is_zero() {
+                                    tokio::time::sleep(retry_delay).await;
+                                }
+                                route_retry_budget.record_wait_time(retry_delay);
                                 continue;
                             }
                             Err(error)
