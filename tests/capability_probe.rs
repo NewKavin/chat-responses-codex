@@ -4,6 +4,7 @@ mod common;
 use axum::response::{IntoResponse, Response};
 use common::*;
 use futures_util::stream;
+use futures_util::StreamExt;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Notify};
@@ -335,8 +336,13 @@ async fn responses_reasoning_control_probe_uses_nested_reasoning_effort() {
     .unwrap();
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
+    // Streaming-first: the stream request is answered with a JSON body
+    // (not SSE), so the probe falls back to one non-streaming request.
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["stream"], true);
     assert!(requests[0].get("reasoning_effort").is_none());
+    assert_eq!(requests[1]["stream"], false);
+    assert!(requests[1].get("reasoning_effort").is_none());
     assert!(matches!(
         outcome,
         ProbeOutcome::Conclusive {
@@ -617,6 +623,416 @@ async fn chat_reasoning_control_probe_supports_object_thinking_values() {
             ..
         } if reasoning_controls.get("thinking") == Some(&vec![json!({"type": "enabled"})])
     ));
+}
+
+#[test]
+fn reasoning_trigger_uses_first_candidate_value() {
+    // The trigger that gates the ToolContinuation case must be the first
+    // (cheapest) candidate value, not the last ("max"): a max trigger would
+    // drag the slowest thinking level into the same plan that is supposed to
+    // discover the levels.
+    let configuration = CapabilityConfiguration {
+        policies: vec![CapabilityPolicy {
+            id: "first-trigger".into(),
+            selector: CapabilitySelector {
+                runtime_model_glob: Some("lab/*".into()),
+                protocol: Some(WireProtocol::ChatCompletions),
+                ..Default::default()
+            },
+            probe_candidates: ProbeCandidates {
+                reasoning_controls: std::collections::BTreeMap::from([(
+                    "reasoning_effort".into(),
+                    vec![json!("low"), json!("medium"), json!("max")],
+                )]),
+                reasoning_carriers: vec![ReasoningCarrier::ReasoningContent],
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap();
+    let route = RouteIdentity {
+        key_fingerprint: String::new(),
+        upstream_id: "up-1".into(),
+        exposed_model_slug: "public".into(),
+        runtime_model_slug: "lab/opaque".into(),
+        protocol: WireProtocol::ChatCompletions,
+        tags: Default::default(),
+    };
+
+    let plan = probe_plan_for_route(&configuration, &route);
+    let trigger = plan
+        .cases
+        .iter()
+        .find_map(|case| match case {
+            chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                reasoning_trigger: Some(trigger),
+                ..
+            } => Some(trigger),
+            _ => None,
+        })
+        .expect("reasoning carrier must produce a ToolContinuation case");
+    assert_eq!(
+        trigger.value,
+        json!("low"),
+        "the trigger must be the first candidate value, not the last"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_control_stream_early_stops_on_first_reasoning_delta() {
+    // A stream that emits one reasoning delta and then stays open forever:
+    // the probe must declare Supported on the first thinking increment and
+    // drop the stream instead of waiting for it to end.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_clone = requests.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let requests = requests_clone.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                requests.lock().unwrap().push(payload.clone());
+                if payload["stream"] == true {
+                    let first = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking step\"}}]}\n\n";
+                    let body = Body::from_stream(
+                        stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(first))])
+                            .chain(stream::pending()),
+                    );
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        body,
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({"error": {"message": "streaming required"}})),
+                    )
+                        .into_response()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_probe_plan_for_test(
+            &format!("http://{address}"),
+            "probe-secret",
+            CapabilityProbePlan {
+                protocol: WireProtocol::ChatCompletions,
+                cases: vec![
+                    chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                        field: "reasoning_effort".into(),
+                        value: json!("high"),
+                    },
+                ],
+                output_token_cap: 16,
+            },
+            5,
+        ),
+    )
+    .await
+    .expect("early stop must not wait for the stream to end")
+    .expect("probe execution should complete");
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "no fallback after streaming evidence");
+    assert_eq!(requests[0]["stream"], true);
+    assert_eq!(requests[0]["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn reasoning_control_stream_400_falls_back_to_non_streaming() {
+    // Upstreams that reject streaming with a 400 must still be probed
+    // through the legacy non-streaming path.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_clone = requests.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let requests = requests_clone.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                requests.lock().unwrap().push(payload.clone());
+                if payload["stream"] == true {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({"error": {"message": "streaming unsupported"}})),
+                    )
+                        .into_response()
+                } else {
+                    let mut response = text_response("391");
+                    response["choices"][0]["message"]["reasoning_content"] = json!("17 * 23 = 391");
+                    (StatusCode::OK, axum::Json(response)).into_response()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .expect("probe execution should complete");
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "stream request plus non-stream fallback");
+    assert_eq!(requests[0]["stream"], true);
+    assert_eq!(requests[1]["stream"], false);
+    assert_eq!(requests[1]["reasoning_effort"], "high");
+}
+
+#[tokio::test]
+async fn reasoning_control_complete_stream_without_reasoning_evidence_is_ignored() {
+    // A complete stream that never carries a reasoning delta is an ignored
+    // field, exactly like the non-streaming 200-without-evidence case.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_clone = requests.clone();
+    let sse_body = concat!(
+        "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"391\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chunk-2\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_owned();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let requests = requests_clone.clone();
+            let sse_body = sse_body.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                requests.lock().unwrap().push(payload.clone());
+                if payload["stream"] == true {
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        sse_body,
+                    )
+                        .into_response()
+                } else {
+                    (StatusCode::OK, axum::Json(text_response("391"))).into_response()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .expect("probe execution should complete");
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_ignored"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "a complete stream must not fall back");
+    assert_eq!(requests[0]["stream"], true);
+}
+
+#[tokio::test]
+async fn reasoning_control_stream_usage_reasoning_tokens_is_evidence() {
+    // Evidence may arrive via the final usage chunk's reasoning_tokens
+    // counter even when no delta carries a reasoning channel.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_clone = requests.clone();
+    let sse_body = concat!(
+        "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"391\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chunk-2\",\"choices\":[],",
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,",
+        "\"completion_tokens_details\":{\"reasoning_tokens\":7}}}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_owned();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let requests = requests_clone.clone();
+            let sse_body = sse_body.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                requests.lock().unwrap().push(payload.clone());
+                if payload["stream"] == true {
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        sse_body,
+                    )
+                        .into_response()
+                } else {
+                    (StatusCode::OK, axum::Json(text_response("391"))).into_response()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .expect("probe execution should complete");
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+}
+
+#[tokio::test]
+async fn responses_reasoning_control_stream_reasoning_item_is_evidence() {
+    // Responses streams report thinking through output_item.added events of
+    // type "reasoning"; observing the add must be enough to declare the bin
+    // accepted, without waiting for response.completed.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_clone = requests.clone();
+    let first = concat!(
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",",
+        "\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"17 * 23 = 391\"}]}}\n\n"
+    )
+    .to_owned();
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let requests = requests_clone.clone();
+            let first = first.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                requests.lock().unwrap().push(payload.clone());
+                if payload["stream"] == true {
+                    let body = Body::from_stream(
+                        stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(first))])
+                            .chain(stream::pending()),
+                    );
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        body,
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({"error": {"message": "streaming required"}})),
+                    )
+                        .into_response()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_probe_plan_for_test(
+            &format!("http://{address}"),
+            "probe-secret",
+            CapabilityProbePlan {
+                protocol: WireProtocol::Responses,
+                cases: vec![
+                    chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                        field: "reasoning_effort".into(),
+                        value: json!("high"),
+                    },
+                ],
+                output_token_cap: 16,
+            },
+            5,
+        ),
+    )
+    .await
+    .expect("early stop must not wait for the stream to end")
+    .expect("probe execution should complete");
+
+    assert!(outcome
+        .evidence_codes()
+        .contains("reasoning_control_accepted"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "no fallback after streaming evidence");
+    assert_eq!(requests[0]["stream"], true);
 }
 
 #[tokio::test]
@@ -1998,13 +2414,18 @@ async fn candidate_and_extension_probe_evidence_is_persisted_in_profile() {
         Some(&EvidenceState::Supported)
     );
     let requests = mock.requests();
-    assert_eq!(requests.len(), 3);
+    // The reasoning-control case now streams first and falls back to a
+    // non-streaming request when the upstream answers with a JSON body.
+    assert_eq!(requests.len(), 4);
     assert_eq!(requests[0]["max_completion_tokens"], 16);
     assert!(requests[0].get("max_tokens").is_none());
     assert!(requests[0].get("max_output_tokens").is_none());
     assert_eq!(requests[1]["reasoning_effort"], "high");
+    assert_eq!(requests[1]["stream"], true);
     assert!(requests[1].get("max_completion_tokens").is_none());
-    assert_eq!(requests[2]["service_tier"], "auto");
+    assert_eq!(requests[2]["reasoning_effort"], "high");
+    assert_eq!(requests[2]["stream"], false);
+    assert_eq!(requests[3]["service_tier"], "auto");
 }
 
 #[tokio::test]
@@ -4697,7 +5118,8 @@ async fn mid_plan_429_retries_once_with_retry_after_then_continues() {
         evidence_codes.contains("reasoning_control_accepted"),
         "retried case must land as accepted: {evidence_codes:?}"
     );
-    assert_eq!(count.load(Ordering::SeqCst), 3, "mock saw 3 requests");
+    // 1 minimal-text + stream 429/retry (2) + non-streaming fallback (1).
+    assert_eq!(count.load(Ordering::SeqCst), 4, "mock saw 4 requests");
 }
 
 #[tokio::test]

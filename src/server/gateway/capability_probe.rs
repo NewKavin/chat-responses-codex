@@ -228,7 +228,7 @@ pub fn probe_plan_for_route(
             .next()
             .and_then(|(field, values)| {
                 values
-                    .last()
+                    .first()
                     .map(|value| ReasoningTrigger::new(field.clone(), value.clone()))
             });
     for reasoning_carrier in candidates
@@ -1919,39 +1919,110 @@ with the exact result as the nonce string.";
                 ))
             }
             CoreProbeCase::ReasoningControl { field, value } => {
-                let mut body = if self.protocol() == WireProtocol::Responses {
+                // Streaming first: thinking evidence can be observed in the
+                // stream (delta.reasoning_content / reasoning item / usage
+                // reasoning_tokens) and the probe stops as soon as the first
+                // reasoning increment arrives, so a slow thinking model costs
+                // only its first-token latency instead of a full completion.
+                let mut stream_body = if self.protocol() == WireProtocol::Responses {
                     json!({
                         "model": &self.runtime_model_slug,
                         "input": PROBE_INPUT_PROMPT,
-                        "stream": false,
+                        "stream": true,
                     })
                 } else {
                     json!({
                         "model": &self.runtime_model_slug,
                         "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
-                        "stream": false,
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
                     })
                 };
                 if self.protocol() == WireProtocol::Responses && field == "reasoning_effort" {
-                    body["reasoning"] = json!({"effort": value});
+                    stream_body["reasoning"] = json!({"effort": value});
                 } else {
-                    body[field] = value.clone();
+                    stream_body[field] = value.clone();
                 }
+                let mut stop_on_reasoning =
+                    |summary: &ProbeStreamSummary| summary.saw_reasoning_delta;
                 let response = if self.protocol() == WireProtocol::Responses {
-                    self.post_responses(body).await?
+                    self.post_stream(
+                        stream_body,
+                        "/v1/responses",
+                        UpstreamProtocol::Responses,
+                        &mut stop_on_reasoning,
+                    )
+                    .await?
                 } else {
-                    self.post_chat(body).await?
+                    let body = self.normalize_probe_chat_body(stream_body);
+                    self.post_stream(
+                        body,
+                        "/v1/chat/completions",
+                        UpstreamProtocol::ChatCompletions,
+                        &mut stop_on_reasoning,
+                    )
+                    .await?
                 };
-                if response.status == StatusCode::OK {
-                    if reasoning_response_has_evidence(&response.body) {
-                        return Ok(ProbeCaseVerdict::Supported {
-                            evidence_code: "reasoning_control_accepted".into(),
+                if response.saw_reasoning_delta {
+                    return Ok(ProbeCaseVerdict::Supported {
+                        evidence_code: "reasoning_control_accepted".into(),
+                    });
+                }
+                if response.status == StatusCode::BAD_REQUEST
+                    || (response.status == StatusCode::OK && !response.saw_done)
+                {
+                    // The upstream rejected streaming (400) or answered the
+                    // stream request with a non-stream body (a JSON response
+                    // or a broken/incomplete stream): fall back to the legacy
+                    // non-streaming judgment instead of dropping the case.
+                    let mut body = if self.protocol() == WireProtocol::Responses {
+                        json!({
+                            "model": &self.runtime_model_slug,
+                            "input": PROBE_INPUT_PROMPT,
+                            "stream": false,
+                        })
+                    } else {
+                        json!({
+                            "model": &self.runtime_model_slug,
+                            "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
+                            "stream": false,
+                        })
+                    };
+                    if self.protocol() == WireProtocol::Responses && field == "reasoning_effort" {
+                        body["reasoning"] = json!({"effort": value});
+                    } else {
+                        body[field] = value.clone();
+                    }
+                    let response = if self.protocol() == WireProtocol::Responses {
+                        self.post_responses(body).await?
+                    } else {
+                        self.post_chat(body).await?
+                    };
+                    if response.status == StatusCode::OK {
+                        if reasoning_response_has_evidence(&response.body) {
+                            return Ok(ProbeCaseVerdict::Supported {
+                                evidence_code: "reasoning_control_accepted".into(),
+                            });
+                        }
+                        // Most domestic gateways silently ignore unknown fields and
+                        // return a plain 200. Without reasoning evidence that is
+                        // not an acceptance: the bin must stay unverified or the
+                        // catalog would advertise fake thinking levels.
+                        return Ok(ProbeCaseVerdict::Rejected {
+                            evidence_code: "reasoning_control_ignored".into(),
+                            http_status: Some(200),
                         });
                     }
-                    // Most domestic gateways silently ignore unknown fields and
-                    // return a plain 200. Without reasoning evidence that is
-                    // not an acceptance: the bin must stay unverified or the
-                    // catalog would advertise fake thinking levels.
+                    return Ok(verdict_for_status(
+                        response.status,
+                        "reasoning_control_accepted",
+                        "reasoning_control_rejected",
+                        "reasoning_control_failed",
+                    ));
+                }
+                if response.status == StatusCode::OK {
+                    // A complete stream without any reasoning evidence is an
+                    // ignored field, exactly like the non-streaming case.
                     return Ok(ProbeCaseVerdict::Rejected {
                         evidence_code: "reasoning_control_ignored".into(),
                         http_status: Some(200),
@@ -2194,8 +2265,13 @@ with the exact result as the nonce string.";
     }
 
     async fn post_responses_stream(&self, body: Value) -> io::Result<ProbeSseResponse> {
-        self.post_stream(body, "/v1/responses", UpstreamProtocol::Responses)
-            .await
+        self.post_stream(
+            body,
+            "/v1/responses",
+            UpstreamProtocol::Responses,
+            &mut |_| false,
+        )
+        .await
     }
 
     fn protocol(&self) -> WireProtocol {
@@ -2208,6 +2284,7 @@ with the exact result as the nonce string.";
             body,
             "/v1/chat/completions",
             UpstreamProtocol::ChatCompletions,
+            &mut |_| false,
         )
         .await
     }
@@ -2217,6 +2294,7 @@ with the exact result as the nonce string.";
         body: Value,
         path: &str,
         protocol: UpstreamProtocol,
+        early_stop: &mut impl FnMut(&ProbeStreamSummary) -> bool,
     ) -> io::Result<ProbeSseResponse> {
         let _held = self.reserve_upstream_request().await?;
         let url = join_upstream_url(&self.base_url, path);
@@ -2257,6 +2335,9 @@ with the exact result as the nonce string.";
             let result = aggregator.push_observing(&chunk, |event| {
                 summary.observe(protocol, event);
             });
+            if early_stop(&summary) {
+                return Ok(ProbeSseResponse::early_stopped(status, summary));
+            }
             match result {
                 Ok(StreamAggregateResult::Complete(_)) => {
                     complete = true;
@@ -2548,6 +2629,7 @@ struct ProbeSseResponse {
     saw_done: bool,
     saw_text_delta: bool,
     saw_usage: bool,
+    saw_reasoning_delta: bool,
     tool_calls: BTreeMap<u64, ToolArgumentProbe>,
     operational_code: Option<&'static str>,
 }
@@ -2559,6 +2641,7 @@ impl ProbeSseResponse {
             saw_done: false,
             saw_text_delta: false,
             saw_usage: false,
+            saw_reasoning_delta: false,
             tool_calls: BTreeMap::new(),
             operational_code: stream_http_status_is_operational(status)
                 .then_some("probe_stream_http_failed"),
@@ -2578,6 +2661,7 @@ impl ProbeSseResponse {
             saw_done: false,
             saw_text_delta: summary.saw_text_delta,
             saw_usage: summary.saw_usage,
+            saw_reasoning_delta: summary.saw_reasoning_delta,
             tool_calls: summary.tool_calls,
             operational_code: None,
         }
@@ -2596,6 +2680,22 @@ impl ProbeSseResponse {
             },
             saw_text_delta: summary.saw_text_delta,
             saw_usage: summary.saw_usage,
+            saw_reasoning_delta: summary.saw_reasoning_delta,
+            tool_calls: summary.tool_calls,
+            operational_code: None,
+        }
+    }
+
+    /// The probe observer asked to stop as soon as it saw the evidence it
+    /// needed (e.g. the first reasoning delta). The stream is dropped at
+    /// that point, so no further chunks are consumed.
+    fn early_stopped(status: StatusCode, summary: ProbeStreamSummary) -> Self {
+        Self {
+            status,
+            saw_done: false,
+            saw_text_delta: summary.saw_text_delta,
+            saw_usage: summary.saw_usage,
+            saw_reasoning_delta: summary.saw_reasoning_delta,
             tool_calls: summary.tool_calls,
             operational_code: None,
         }
@@ -2634,6 +2734,7 @@ struct ProbeStreamSummary {
     saw_chat_done: bool,
     saw_text_delta: bool,
     saw_usage: bool,
+    saw_reasoning_delta: bool,
     tool_calls: BTreeMap<u64, ToolArgumentProbe>,
 }
 
@@ -2654,6 +2755,7 @@ impl ProbeStreamSummary {
             UpstreamProtocol::ChatCompletions => {
                 self.saw_text_delta |= chat_stream_has_text_delta(&value);
                 self.saw_usage |= chat_stream_has_usage(&value);
+                self.saw_reasoning_delta |= chat_stream_has_reasoning_delta(&value);
                 observe_chat_tool_arguments(&mut self.tool_calls, &value);
             }
             UpstreamProtocol::Responses => {
@@ -2666,6 +2768,8 @@ impl ProbeStreamSummary {
                     && value["response"]["usage"]
                         .as_object()
                         .is_some_and(responses_usage_has_token_field);
+                self.saw_reasoning_delta |=
+                    responses_stream_has_reasoning_delta(&value, event_type);
                 observe_responses_tool_arguments(&mut self.tool_calls, &value, event_type);
             }
         }
@@ -3007,4 +3111,75 @@ fn responses_usage_has_token_field(usage: &serde_json::Map<String, Value>) -> bo
     usage.contains_key("input_tokens")
         || usage.contains_key("output_tokens")
         || usage.contains_key("total_tokens")
+}
+
+/// Streaming chat evidence of an active reasoning path: a non-empty
+/// `delta.reasoning_content` (deepseek-style), a non-null `delta.reasoning`
+/// (GLM-style thinking objects), or a positive reasoning token counter in a
+/// usage chunk.
+fn chat_stream_has_reasoning_delta(event: &Value) -> bool {
+    let delta_has_reasoning = event["choices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|choice| {
+            let delta = &choice["delta"];
+            delta
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.is_empty())
+                || delta
+                    .get("reasoning")
+                    .is_some_and(|reasoning| !reasoning.is_null())
+        });
+    delta_has_reasoning || chat_stream_has_reasoning_tokens(event)
+}
+
+fn chat_stream_has_reasoning_tokens(event: &Value) -> bool {
+    event
+        .get("usage")
+        .and_then(Value::as_object)
+        .is_some_and(|usage| {
+            usage
+                .get("completion_tokens_details")
+                .and_then(Value::as_object)
+                .and_then(|details| details.get("reasoning_tokens"))
+                .and_then(Value::as_u64)
+                .is_some_and(|tokens| tokens > 0)
+                || usage
+                    .get("output_tokens_details")
+                    .and_then(Value::as_object)
+                    .and_then(|details| details.get("reasoning_tokens"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|tokens| tokens > 0)
+        })
+}
+
+/// Streaming Responses evidence of an active reasoning path: a
+/// `response.reasoning_summary_text.delta` event with a non-empty delta, a
+/// `response.output_item.added` event whose item is a reasoning item, or a
+/// positive `usage.output_tokens_details.reasoning_tokens` counter on
+/// `response.completed`.
+fn responses_stream_has_reasoning_delta(event: &Value, event_type: Option<&str>) -> bool {
+    if event_type == Some("response.reasoning_summary_text.delta")
+        && event
+            .get("delta")
+            .and_then(Value::as_str)
+            .is_some_and(|delta| !delta.is_empty())
+    {
+        return true;
+    }
+    if event_type == Some("response.output_item.added")
+        && event["item"]["type"].as_str() == Some("reasoning")
+    {
+        return true;
+    }
+    if event_type == Some("response.completed")
+        && event["response"]["usage"]["output_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .is_some_and(|tokens| tokens > 0)
+    {
+        return true;
+    }
+    false
 }
