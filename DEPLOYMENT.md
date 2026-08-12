@@ -179,6 +179,55 @@ Stable client outcomes:
 | 502 `upstream_model_unsupported` | Every attempted route rejected the requested model |
 | 400 `capability_not_supported` | No route can preserve an explicitly required feature |
 | 502 `upstream_protocol_unsupported` | No route supports the requested endpoint or protocol |
+| 400 `upstream_request_rejected` / 502 `upstream_request_shape_rejected` | Multiple routes rejected the same request shape; stop replaying and fix the request or the upstream policy instead of retrying |
+| 502 `upstream_transient_pool_failure` | Distinct upstream hosts failed with identical transient errors even after one delayed replay round (likely a shared gateway / egress outage); retry using `Retry-After` |
+
+### Intranet / Aggregated Gateway Deployment
+
+When several "different" routes share the same physical infrastructure (one
+one-api / new-api aggregated gateway, one egress proxy, or one upstream host
+with multiple keys), the common-mode breaker must not treat a transient outage
+of that shared hop as a request-shape problem. The breaker counts only
+identical `(failure class, HTTP status)` failures across routes on **different
+hosts**; a repeated failure on the same route or the same host restarts the
+streak.
+
+Relevant settings (see `Runtime Settings Operations`):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `upstream_common_mode_breaker_threshold` | 2 | Request-shape breaker (`RequestRejected` only). Reached → stop replaying, return 400/502 immediately. `0` disables. |
+| `upstream_common_mode_transient_threshold` | 4 | Transient breaker (`TransientServer` / `EdgeProxyError`). Reached → one delayed replay round (≤500ms) before returning 502 `upstream_transient_pool_failure` with `Retry-After`. `0` disables this class. Validated ≤ 64. |
+| `upstream_transient_same_route_retry_enabled` | true | Retry the same route once (200–500ms backoff, honoring upstream `Retry-After` up to 2s) on transient 502/503/504 before entering failover. Only applies before any byte was sent downstream. |
+| `upstream_same_route_retry_enabled` | true | Master switch for the same-route retry above; both switches must be on for the retry to fire. |
+
+Recommended values for a single aggregated gateway deployment:
+
+- `upstream_common_mode_transient_threshold = 0` (or `>= 4` when you have ≥4
+  genuinely distinct upstream hosts and want pool-outage detection). With one
+  aggregated gateway, transient 502s are always "same host" and can never trip;
+  `0` keeps the code path simple and relies on the normal per-route failover +
+  temporary recovery rounds (bounded by the route-exhaustion retry rounds
+  setting in Admin > Settings).
+- Keep `upstream_common_mode_breaker_threshold` at its default; `RequestRejected`
+  (400 semantics) repetition is still a genuine request-shape signal.
+- Keep `upstream_transient_same_route_retry_enabled = true`; it absorbs single
+  network glitches without burning routes or feeding the breaker streak.
+
+Troubleshooting:
+
+- Downstream sees `502 upstream_transient_pool_failure` with
+  `details.common_mode = true`, `details.retried = true`: several distinct
+  upstream hosts failed identically even after the replay round. Check the
+  shared egress / aggregated gateway, not the request. `details` include
+  `failed_route_count`, `distinct_hosts`, `streak`, `threshold`.
+- Downstream sees `upstream_request_shape_rejected`: routes rejected the same
+  request shape (`RequestRejected`). Inspect the request payload and the
+  upstream error in `message`; the gateway deliberately stopped replaying to
+  protect the pool.
+- A single intra-request replay round already happened for transient trips;
+  the `Retry-After` header on `upstream_transient_pool_failure` tells the
+  client when to retry.
 
 ## Build The Image
 
