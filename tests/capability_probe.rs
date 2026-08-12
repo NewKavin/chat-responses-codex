@@ -4981,7 +4981,7 @@ async fn single_case_timeout_keeps_plan_running_and_preserves_prior_evidence() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let outcome = run_probe_plan_for_model_for_test(
+    let (outcome, completeness) = run_probe_plan_with_coordination_for_test(
         &format!("http://{address}"),
         "probe-secret",
         "probe-model",
@@ -4997,9 +4997,13 @@ async fn single_case_timeout_keeps_plan_running_and_preserves_prior_evidence() {
             output_token_cap: 16,
         },
         1,
+        None,
+        None,
     )
     .await
     .expect("a single case timeout must not abort the plan");
+
+    assert_eq!(completeness, ProbePlanCompleteness::CapacitySkipped);
 
     let ProbeOutcome::Conclusive {
         capabilities,
@@ -5175,7 +5179,7 @@ async fn mid_plan_429_without_recovery_skips_case_and_keeps_later_evidence() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let outcome = run_probe_plan_for_model_for_test(
+    let (outcome, completeness) = run_probe_plan_with_coordination_for_test(
         &format!("http://{address}"),
         "probe-secret",
         "probe-model",
@@ -5194,9 +5198,13 @@ async fn mid_plan_429_without_recovery_skips_case_and_keeps_later_evidence() {
             output_token_cap: 16,
         },
         5,
+        None,
+        None,
     )
     .await
     .expect("a persistent 429 must skip the case and keep the plan running");
+
+    assert_eq!(completeness, ProbePlanCompleteness::CapacitySkipped);
 
     let ProbeOutcome::Conclusive {
         reasoning_controls,
@@ -5272,7 +5280,7 @@ async fn mid_plan_5xx_skips_case_and_keeps_later_evidence() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let outcome = run_probe_plan_for_model_for_test(
+    let (outcome, completeness) = run_probe_plan_with_coordination_for_test(
         &format!("http://{address}"),
         "probe-secret",
         "probe-model",
@@ -5291,9 +5299,13 @@ async fn mid_plan_5xx_skips_case_and_keeps_later_evidence() {
             output_token_cap: 16,
         },
         5,
+        None,
+        None,
     )
     .await
     .expect("a 5xx must skip the case and keep the plan running");
+
+    assert_eq!(completeness, ProbePlanCompleteness::CapacitySkipped);
 
     let ProbeOutcome::Conclusive {
         reasoning_controls,

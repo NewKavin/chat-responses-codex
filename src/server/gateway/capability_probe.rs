@@ -892,18 +892,20 @@ impl ProbeExecutor {
         let mut evidence = ProbeEvidence::new(plan.protocol);
         let mut completeness = ProbePlanCompleteness::Full;
         let mut saw_conclusive_evidence = false;
+        let mut saw_capacity_skip = false;
         let mut saw_case_timeout = false;
         let mut first_http_status: Option<u16> = None;
         // A plan-level budget caps the whole run so per-case retries and
         // slow reasoning requests cannot drag a batch out indefinitely.
         let total_budget = plan_total_budget(&plan, self.request_timeout, self.reasoning_timeout);
         let deadline = Instant::now() + total_budget;
-        let mut first_case = true;
-        for case in plan.cases {
+        for (case_index, case) in plan.cases.into_iter().enumerate() {
+            let is_connectivity_gate = case_index == 0;
             let case_timeout = self.case_timeout_for(&case);
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 saw_case_timeout = true;
+                completeness = ProbePlanCompleteness::CapacitySkipped;
                 evidence.apply(
                     &case,
                     ProbeCaseVerdict::Unobserved {
@@ -926,9 +928,35 @@ impl ProbeExecutor {
                     // rest of the plan still runs and records.
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         completeness = ProbePlanCompleteness::CapacitySkipped;
+                        saw_capacity_skip = true;
                         continue;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        completeness = ProbePlanCompleteness::CapacitySkipped;
+                        evidence.apply(
+                            &case,
+                            ProbeCaseVerdict::Unobserved {
+                                operational_code: "probe_case_transport_failed".into(),
+                                http_status: None,
+                            },
+                        );
+                        if is_connectivity_gate && !saw_conclusive_evidence {
+                            return Ok((
+                                ProbeOutcome::OperationalFailure {
+                                    code: "probe_case_transport_failed".into(),
+                                    http_status: None,
+                                    attempted_at: unix_seconds(),
+                                },
+                                completeness,
+                            ));
+                        }
+                        tracing::debug!(
+                            error = %error,
+                            case = ?case,
+                            "capability probe case transport failed; continuing plan"
+                        );
+                        continue;
+                    }
                 },
                 Err(_) => {
                     // A per-case timeout records the case as unobserved and
@@ -936,6 +964,7 @@ impl ProbeExecutor {
                     // reasoning controls that actually carry the levels the
                     // button is looking for) still execute.
                     saw_case_timeout = true;
+                    completeness = ProbePlanCompleteness::CapacitySkipped;
                     evidence.apply(
                         &case,
                         ProbeCaseVerdict::Unobserved {
@@ -965,7 +994,7 @@ impl ProbeExecutor {
                 ProbeCaseVerdict::Unobserved {
                     operational_code,
                     http_status,
-                } if first_case => {
+                } if is_connectivity_gate => {
                     // The first case is the connectivity gate: when it fails
                     // (timeout, 5xx, 429, network error) the whole route is
                     // operationally blocked, so fail fast.
@@ -979,6 +1008,7 @@ impl ProbeExecutor {
                     ));
                 }
                 ProbeCaseVerdict::Unobserved { http_status, .. } => {
+                    completeness = ProbePlanCompleteness::CapacitySkipped;
                     if first_http_status.is_none() {
                         first_http_status = http_status;
                     }
@@ -989,9 +1019,8 @@ impl ProbeExecutor {
                     evidence.apply(&case, other);
                 }
             }
-            first_case = false;
         }
-        if saw_conclusive_evidence || completeness == ProbePlanCompleteness::CapacitySkipped {
+        if saw_conclusive_evidence || saw_capacity_skip {
             // Capacity-skipped plans keep the conclusive shape so the caller
             // merges them partially (Unobserved entries carry no
             // information); only a plan whose cases all failed for real
