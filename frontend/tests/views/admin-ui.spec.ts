@@ -56,6 +56,8 @@ describe('admin ui structure', () => {
     expect(adminProbe).toContain('const showOnlyCurrentBatch = ref(true)')
     expect(adminProbe).toContain('capabilityDiagnosticTooltip')
     expect(adminProbe).toContain('全局 discovery')
+    expect(adminProbe).toContain('<el-collapse')
+    expect(adminProbe).toContain('globalCapabilityModelResults')
     expect(adminProbe).not.toContain('selectedProbeModels.value = [...models]')
     expect(adminProbe).not.toContain('const { data: full } = await adminApi.getModels()')
     expect(adminProbe).not.toContain('后端按全量处理')

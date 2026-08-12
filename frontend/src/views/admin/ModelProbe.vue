@@ -261,6 +261,45 @@
               </el-table>
             </div>
 
+            <el-collapse
+              v-if="showOnlyCurrentBatch && globalCapabilityModelResults.length > capabilityModelResults.length"
+              class="capability-probe-global-discovery"
+            >
+              <el-collapse-item name="global-discovery">
+                <template #title>
+                  <span>全局 discovery（{{ globalCapabilityModelResults.length }} 个模型）</span>
+                </template>
+                <div class="crc-table-shell">
+                  <el-table
+                    :data="globalCapabilityModelResults"
+                    size="small"
+                    empty-text="无全局模型探测结果"
+                  >
+                    <el-table-column
+                      prop="exposed_model_slug"
+                      label="模型"
+                      min-width="175"
+                      show-overflow-tooltip
+                    />
+                    <el-table-column label="思考档位" min-width="145">
+                      <template #default="{ row }">
+                        <span v-if="row.levels.length === 0" class="capability-probe-results__none">无</span>
+                        <el-tag
+                          v-for="level in row.levels"
+                          :key="level"
+                          size="small"
+                          effect="plain"
+                          class="capability-probe-results__level"
+                        >
+                          {{ level }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+
             <div class="capability-probe-results__subheader">
               <h4>精确路由</h4>
               <span>{{ capabilityRouteResults.length }} 条</span>
@@ -438,6 +477,10 @@ const capabilityRouteResults = computed(() => {
     }))
   )
 })
+const globalCapabilityModelResults = computed(() => capabilityDiscovery.value.models.map(model => ({
+  exposed_model_slug: model.exposed_model_slug,
+  levels: model.verified_reasoning_levels
+})))
 
 const fetchCapabilityDiscovery = async (
   timeoutMs?: number
