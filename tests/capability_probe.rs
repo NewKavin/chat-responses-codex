@@ -4523,6 +4523,377 @@ fn partial_probe_outcome_without_reasoning_keeps_prior_levels() {
 }
 
 #[tokio::test]
+async fn single_case_timeout_keeps_plan_running_and_preserves_prior_evidence() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let count = count.clone();
+            move || {
+                let count = count.clone();
+                async move {
+                    if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // First case hangs forever: a case-level timeout.
+                        std::future::pending::<Response>().await
+                    } else {
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391", "reasoning_content": "17 * 23 = 391"},
+                                    "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false },
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        1,
+    )
+    .await
+    .expect("a single case timeout must not abort the plan");
+
+    let ProbeOutcome::Conclusive {
+        capabilities,
+        reasoning_controls,
+        evidence_codes,
+        ..
+    } = &outcome
+    else {
+        panic!("later case evidence must still conclude: {outcome:?}");
+    };
+    assert_eq!(
+        capabilities.get(&Capability::NonStreamingResponse),
+        Some(&EvidenceState::Unobserved),
+        "timed-out case stays unobserved"
+    );
+    assert_eq!(
+        reasoning_controls.get("reasoning_effort"),
+        Some(&vec![json!("high")]),
+        "reasoning evidence collected after the timeout must be kept"
+    );
+    assert!(
+        evidence_codes.contains("probe_case_timeout"),
+        "timed-out case must record its own diagnostic code: {evidence_codes:?}"
+    );
+}
+
+#[tokio::test]
+async fn mid_plan_429_retries_once_with_retry_after_then_continues() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let count = count.clone();
+            move || {
+                let count = count.clone();
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    match attempt {
+                        0 => (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response(),
+                        // The reasoning-control case is rate limited once, then
+                        // accepted on the Retry-After-driven retry.
+                        1 => (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(axum::http::header::RETRY_AFTER, "1")],
+                            axum::Json(json!({"error": {"message": "rate limited"}})),
+                        )
+                            .into_response(),
+                        _ => (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391", "reasoning_content": "17 * 23 = 391"},
+                                    "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response(),
+                    }
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false },
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .expect("a 429 must not abort the plan");
+
+    let ProbeOutcome::Conclusive {
+        reasoning_controls,
+        evidence_codes,
+        ..
+    } = &outcome
+    else {
+        panic!("429 must degrade to a case skip, not an abort: {outcome:?}");
+    };
+    assert_eq!(
+        reasoning_controls.get("reasoning_effort"),
+        Some(&vec![json!("high")]),
+        "the Retry-After retry must succeed and record the level"
+    );
+    assert!(
+        evidence_codes.contains("reasoning_control_accepted"),
+        "retried case must land as accepted: {evidence_codes:?}"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 3, "mock saw 3 requests");
+}
+
+#[tokio::test]
+async fn mid_plan_429_without_recovery_skips_case_and_keeps_later_evidence() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let count = count.clone();
+            move || {
+                let count = count.clone();
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    match attempt {
+                        0 => (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response(),
+                        // 429 twice: once for the case, once for its retry.
+                        1 | 2 => (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(axum::http::header::RETRY_AFTER, "1")],
+                            axum::Json(json!({"error": {"message": "rate limited"}})),
+                        )
+                            .into_response(),
+                        _ => (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response(),
+                    }
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false },
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+                chat_responses_codex::server::CoreProbeCase::TokenLimit {
+                    field: chat_responses_codex::capabilities::TokenLimitField::MaxCompletionTokens,
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .expect("a persistent 429 must skip the case and keep the plan running");
+
+    let ProbeOutcome::Conclusive {
+        reasoning_controls,
+        token_limit_field,
+        evidence_codes,
+        ..
+    } = &outcome
+    else {
+        panic!("later case evidence must still conclude: {outcome:?}");
+    };
+    assert!(
+        reasoning_controls.is_empty(),
+        "rate-limited case stays unverified"
+    );
+    assert!(
+        token_limit_field.is_some(),
+        "the case after the 429 must still run"
+    );
+    assert!(
+        evidence_codes.contains("reasoning_control_failed"),
+        "the skipped case must record its operational code: {evidence_codes:?}"
+    );
+}
+
+#[tokio::test]
+async fn mid_plan_5xx_skips_case_and_keeps_later_evidence() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let count = count.clone();
+            move || {
+                let count = count.clone();
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    match attempt {
+                        0 => (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response(),
+                        1 => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(json!({"error": {"message": "upstream down"}})),
+                        )
+                            .into_response(),
+                        _ => (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-probe", "object": "chat.completion", "created": 1,
+                                "model": "probe-model",
+                                "choices": [{"index": 0, "message": {"role": "assistant",
+                                    "content": "391"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                            .into_response(),
+                    }
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "probe-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false },
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: json!("high"),
+                },
+                chat_responses_codex::server::CoreProbeCase::TokenLimit {
+                    field: chat_responses_codex::capabilities::TokenLimitField::MaxCompletionTokens,
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .expect("a 5xx must skip the case and keep the plan running");
+
+    let ProbeOutcome::Conclusive {
+        reasoning_controls,
+        token_limit_field,
+        evidence_codes,
+        ..
+    } = &outcome
+    else {
+        panic!("later case evidence must still conclude: {outcome:?}");
+    };
+    assert!(reasoning_controls.is_empty(), "5xx case stays unverified");
+    assert!(
+        token_limit_field.is_some(),
+        "the case after the 5xx must still run"
+    );
+    assert!(
+        evidence_codes.contains("reasoning_control_failed"),
+        "the skipped case must record its operational code: {evidence_codes:?}"
+    );
+}
+
+#[tokio::test]
 async fn reasoning_mode_probe_merges_partially_and_keeps_prior_evidence() {
     with_proxy_env_cleared(|| async move {
         let mock = ProbeMock::chat(|_| {

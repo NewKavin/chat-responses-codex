@@ -459,6 +459,7 @@ pub async fn run_probe_plan_with_coordination_for_test(
         upstream,
         runtime_model_slug: key.runtime_model_slug.clone(),
         request_timeout: Duration::from_secs(timeout_seconds.max(1)),
+        reasoning_timeout: Duration::from_secs(timeout_seconds.max(1)),
     }
     .run_plan(&key, plan)
     .await
@@ -761,6 +762,11 @@ pub async fn run_probe_job(state: &AppState, job: &ProbeJob) -> ProbeJobExecutio
                 .capability_probe_request_timeout_seconds
                 .max(1),
         ),
+        reasoning_timeout: Duration::from_secs(
+            runtime_settings
+                .capability_probe_request_timeout_seconds
+                .max(1),
+        ),
     }
     .run_plan(&job.key, plan)
     .await;
@@ -874,6 +880,7 @@ struct ProbeExecutor {
     upstream: Option<UpstreamConfig>,
     runtime_model_slug: String,
     request_timeout: Duration,
+    reasoning_timeout: Duration,
 }
 
 impl ProbeExecutor {
@@ -884,9 +891,30 @@ impl ProbeExecutor {
     ) -> io::Result<(ProbeOutcome, ProbePlanCompleteness)> {
         let mut evidence = ProbeEvidence::new(plan.protocol);
         let mut completeness = ProbePlanCompleteness::Full;
+        let mut saw_conclusive_evidence = false;
+        let mut saw_case_timeout = false;
+        let mut first_http_status: Option<u16> = None;
+        // A plan-level budget caps the whole run so per-case retries and
+        // slow reasoning requests cannot drag a batch out indefinitely.
+        let total_budget = plan_total_budget(&plan, self.request_timeout, self.reasoning_timeout);
+        let deadline = Instant::now() + total_budget;
+        let mut first_case = true;
         for case in plan.cases {
+            let case_timeout = self.case_timeout_for(&case);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                saw_case_timeout = true;
+                evidence.apply(
+                    &case,
+                    ProbeCaseVerdict::Unobserved {
+                        operational_code: "probe_case_timeout".into(),
+                        http_status: None,
+                    },
+                );
+                continue;
+            }
             let verdict = match tokio::time::timeout(
-                self.request_timeout,
+                case_timeout.min(remaining),
                 self.run_case(key, &case, plan.output_token_cap.min(64)),
             )
             .await
@@ -903,21 +931,28 @@ impl ProbeExecutor {
                     Err(error) => return Err(error),
                 },
                 Err(_) => {
-                    return Ok((
-                        ProbeOutcome::OperationalFailure {
-                            code: "probe_timeout".into(),
+                    // A per-case timeout records the case as unobserved and
+                    // keeps the plan running: later cases (e.g. the
+                    // reasoning controls that actually carry the levels the
+                    // button is looking for) still execute.
+                    saw_case_timeout = true;
+                    evidence.apply(
+                        &case,
+                        ProbeCaseVerdict::Unobserved {
+                            operational_code: "probe_case_timeout".into(),
                             http_status: None,
-                            attempted_at: unix_seconds(),
                         },
-                        completeness,
-                    ));
+                    );
+                    continue;
                 }
             };
             match verdict {
                 ProbeCaseVerdict::Unobserved {
                     operational_code,
                     http_status,
-                } if matches!(http_status, Some(401 | 403 | 429 | 500..=599) | None) => {
+                } if matches!(http_status, Some(401 | 403)) => {
+                    // Credential errors are not transient: every later case
+                    // would hit the same wall, so abort the plan.
                     return Ok((
                         ProbeOutcome::OperationalFailure {
                             code: operational_code,
@@ -927,13 +962,74 @@ impl ProbeExecutor {
                         completeness,
                     ));
                 }
-                other => evidence.apply(&case, other),
+                ProbeCaseVerdict::Unobserved {
+                    operational_code,
+                    http_status,
+                } if first_case => {
+                    // The first case is the connectivity gate: when it fails
+                    // (timeout, 5xx, 429, network error) the whole route is
+                    // operationally blocked, so fail fast.
+                    return Ok((
+                        ProbeOutcome::OperationalFailure {
+                            code: operational_code,
+                            http_status,
+                            attempted_at: unix_seconds(),
+                        },
+                        completeness,
+                    ));
+                }
+                ProbeCaseVerdict::Unobserved { http_status, .. } => {
+                    if first_http_status.is_none() {
+                        first_http_status = http_status;
+                    }
+                    evidence.apply(&case, verdict);
+                }
+                other => {
+                    saw_conclusive_evidence = true;
+                    evidence.apply(&case, other);
+                }
             }
+            first_case = false;
         }
-        Ok((
-            evidence.into_conclusive_outcome(unix_seconds()),
-            completeness,
-        ))
+        if saw_conclusive_evidence || completeness == ProbePlanCompleteness::CapacitySkipped {
+            // Capacity-skipped plans keep the conclusive shape so the caller
+            // merges them partially (Unobserved entries carry no
+            // information); only a plan whose cases all failed for real
+            // reasons becomes an operational failure.
+            Ok((
+                evidence.into_conclusive_outcome(unix_seconds()),
+                completeness,
+            ))
+        } else {
+            Ok((
+                ProbeOutcome::OperationalFailure {
+                    code: if saw_case_timeout {
+                        "probe_timeout".into()
+                    } else {
+                        "probe_all_unobserved".into()
+                    },
+                    http_status: first_http_status,
+                    attempted_at: unix_seconds(),
+                },
+                completeness,
+            ))
+        }
+    }
+
+    fn case_timeout_for(&self, case: &CoreProbeCase) -> Duration {
+        let reasoning_case = matches!(case, CoreProbeCase::ReasoningControl { .. })
+            || matches!(
+                case,
+                CoreProbeCase::ToolContinuation {
+                    reasoning_trigger: Some(_),
+                    ..
+                }
+            );
+        if reasoning_case {
+            self.reasoning_timeout
+        } else {
+            self.request_timeout
+        }
     }
 
     async fn run_case(
@@ -1945,6 +2041,32 @@ with the exact result as the nonce string.";
         body
     }
 
+    /// Sends a probe request, retrying exactly once when the upstream answers
+    /// 429 with a Retry-After header. The retry sleeps at most the header
+    /// value (capped) and is bounded by the outer per-case timeout, so a
+    /// rate-limited probe degrades to a case skip instead of aborting the
+    /// whole plan.
+    async fn send_with_retry_after(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> io::Result<reqwest::Response> {
+        let mut response = request
+            .try_clone()
+            .ok_or_else(|| io::Error::other("probe request body is not cloneable"))?
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(retry_after) = retry_after_seconds(response.headers()) {
+                tokio::time::sleep(retry_after).await;
+                if let Some(retried) = request.try_clone() {
+                    response = retried.send().await.map_err(io::Error::other)?;
+                }
+            }
+        }
+        Ok(response)
+    }
+
     async fn post_chat(&self, body: Value) -> io::Result<ProbeHttpResponse> {
         self.post_chat_inner(body, true).await
     }
@@ -1964,14 +2086,12 @@ with the exact result as the nonce string.";
             body
         };
         let url = join_upstream_url(&self.base_url, "/v1/chat/completions");
-        let response = self
+        let request = self
             .client
             .post(url)
             .bearer_auth(self.api_key.trim())
-            .json(&body)
-            .send()
-            .await
-            .map_err(io::Error::other)?;
+            .json(&body);
+        let response = self.send_with_retry_after(request).await?;
         let status = response.status();
         let body = response.json::<Value>().await.map_err(io::Error::other)?;
         Ok(ProbeHttpResponse { status, body })
@@ -2062,14 +2182,12 @@ with the exact result as the nonce string.";
     async fn post_responses(&self, body: Value) -> io::Result<ProbeHttpResponse> {
         let _held = self.reserve_upstream_request().await?;
         let url = join_upstream_url(&self.base_url, "/v1/responses");
-        let response = self
+        let request = self
             .client
             .post(url)
             .bearer_auth(self.api_key.trim())
-            .json(&body)
-            .send()
-            .await
-            .map_err(io::Error::other)?;
+            .json(&body);
+        let response = self.send_with_retry_after(request).await?;
         let status = response.status();
         let body = response.json::<Value>().await.map_err(io::Error::other)?;
         Ok(ProbeHttpResponse { status, body })
@@ -2102,14 +2220,12 @@ with the exact result as the nonce string.";
     ) -> io::Result<ProbeSseResponse> {
         let _held = self.reserve_upstream_request().await?;
         let url = join_upstream_url(&self.base_url, path);
-        let response = self
+        let request = self
             .client
             .post(url)
             .bearer_auth(self.api_key.trim())
-            .json(&body)
-            .send()
-            .await
-            .map_err(io::Error::other)?;
+            .json(&body);
+        let response = self.send_with_retry_after(request).await?;
         let status = response.status();
         if status != StatusCode::OK {
             return Ok(ProbeSseResponse::empty(status));
@@ -2281,6 +2397,41 @@ fn reasoning_response_has_evidence(body: &Value) -> bool {
         return true;
     }
     false
+}
+
+/// Plan-level time budget: the sum of every case's timeout, capped at ten
+/// minutes. Retries inside a case are bounded by the case timeout, and the
+/// whole plan by this budget, so a pathological route cannot hold a batch
+/// forever.
+fn plan_total_budget(
+    plan: &ProbePlan,
+    request_timeout: Duration,
+    reasoning_timeout: Duration,
+) -> Duration {
+    let per_case_seconds = plan
+        .cases
+        .iter()
+        .map(|case| {
+            let timeout = match case {
+                CoreProbeCase::ReasoningControl { .. } => reasoning_timeout,
+                CoreProbeCase::ToolContinuation {
+                    reasoning_trigger: Some(_),
+                    ..
+                } => reasoning_timeout,
+                _ => request_timeout,
+            };
+            timeout.as_secs().max(1)
+        })
+        .sum::<u64>();
+    Duration::from_secs(per_case_seconds.clamp(1, 600))
+}
+
+/// Parses a Retry-After header (integer seconds form), capped so a stale
+/// or hostile upstream cannot stall the probe worker.
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let seconds = value.parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds.min(60)))
 }
 
 fn verdict_for_status(
