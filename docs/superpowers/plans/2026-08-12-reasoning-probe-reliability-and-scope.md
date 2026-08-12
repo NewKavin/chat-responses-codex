@@ -41,7 +41,7 @@
 
 ## 三、开发任务
 
-### 任务 1：探测计划的档位专用模式（后端，优先级最高）
+### 任务 1：探测计划的档位专用模式（后端，优先级最高） ✅ 已完成 (commit cf1f36b)
 
 目标：按钮只为发现思考档位服务，不再跑完整能力计划。
 
@@ -53,7 +53,7 @@
 3. reasoning 模式的探测结果必须走 `apply_probe_outcome_partial`（合并，不整体替换 profile），避免精简计划把已验证的其他能力清空。`run_probe_job`（`capability_probe.rs:674`）里按 mode 选择 apply 路径。
 4. 前端「一键探测思考档位」按钮请求带 `mode: "reasoning"`；「真实验证并应用」维持 full。
 
-### 任务 2：case 级失败隔离，杜绝"一个失败全盘丢弃"（后端）
+### 任务 2：case 级失败隔离，杜绝"一个失败全盘丢弃"（后端） ✅ 已完成 (commit 521168d, 2f267fb)
 
 修改 `ProbeExecutor::run_plan`（`capability_probe.rs:851-908`）：
 
@@ -63,7 +63,7 @@
 4. 结束时若存在至少一个 Supported/Rejected 证据 → 走 Conclusive（若有 case 被跳过则用 `apply_probe_outcome_partial` 合并）；全部 Unobserved 才记 OperationalFailure。
 5. 保留证据码：跳过的 case 以 operational_code 写入 `evidence_codes`，便于 UI 诊断列展示。
 
-### 任务 3：档位探测改流式 + 早停（后端，解决根因 C 与超时）
+### 任务 3：档位探测改流式 + 早停（后端，解决根因 C 与超时） ✅ 已完成 (commit 1c4f8e2)
 
 改造 `CoreProbeCase::ReasoningControl` 执行（`capability_probe.rs:1796-1841`）：
 
@@ -74,13 +74,13 @@
 5. 现有非流式判定逻辑保留为回退路径，`reasoning_control_ignored` 语义不变。
 6. `reasoning_trigger`（`capability_probe.rs:223-232`）从 `values.last()` 改为 `values.first()`（low），避免 full 模式下 max 档位拖垮 ToolContinuation。
 
-### 任务 4：超时与并发的运行时参数调整（后端 + 文档)
+### 任务 4：超时与并发的运行时参数调整（后端 + 文档) ✅ 已完成 (commit b664e80)
 
 1. 新增运行时设置 `capability_probe_reasoning_timeout_seconds`（默认 90，环境变量 `CAPABILITY_PROBE_REASONING_TIMEOUT_SECONDS`），用于 `ReasoningControl` 与带 reasoning_trigger 的 case；其余 case 沿用现有 20 秒。
 2. reasoning 模式批次内，**同一上游并发压到 1**（`ProbeQueueState::set_limits` 已支持 per-upstream 并发，直接在 reasoning 模式下传 1），case 间加 300–500ms 间隔，避免触发内网网关 RPM。
 3. `docs/` 部署文档补充这两个环境变量说明。
 
-### 任务 5：严格按所选模型探测（前后端，用户硬性要求）
+### 任务 5：严格按所选模型探测（前后端，用户硬性要求） ✅ 已完成 (commit c795158)
 
 1. **后端**：`admin_capability_probe_all`（`capability_admin.rs:462`）当请求携带 `mode:"reasoning"` 时，`models` 为空直接返回 400 `capability_probe_scope_required`（"必须显式选择探测模型"）。旧 full 模式保持空=全量的兼容语义（供"真实验证并应用"使用）。
 2. **后端**：受理时以 info 级日志输出生效范围：`batch_id`、`models`、每条 candidate 的 upstream/route/protocol，便于内网核对。
@@ -92,7 +92,7 @@
 4. **自动探测**：确认 `automatic_capability_probes_enabled` 默认 false；管理设置页该开关旁加说明文案"开启后会周期性对所有下游可见模型自动探测（消耗 token）"。reconcile 自动探测（`state.rs:4850`）保持受该开关控制，不做其他改动。
 5. **部署核对项**（交付时在 PR 描述注明）：内网构建必须包含 `738dfc3`、`dd56bf5`、`cbefdb9`、`0e57dc2` 之后的代码，否则 models 过滤与批次状态接口不存在。
 
-### 任务 6：诊断可见性（前端，小改动）
+### 任务 6：诊断可见性（前端，小改动） ✅ 已完成 (commit 2c44ef7, c795158)
 
 1. 「精确路由」表的诊断列已显示 `operational_code`；补充对 `probe_timeout` / `probe_case_timeout` / `probe_stream_transport_failed` / `reasoning_control_ignored` 的中文释义映射（tooltip），让内网用户能自助定位：
    - `probe_timeout`/`probe_case_timeout` → "上游响应超过探测超时，请调大 CAPABILITY_PROBE_REASONING_TIMEOUT_SECONDS"；
