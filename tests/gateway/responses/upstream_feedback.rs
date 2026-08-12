@@ -2091,192 +2091,111 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
 }
 
 #[tokio::test]
-async fn common_mode_edge_proxy_html_502_breaks_after_two_routes_and_keeps_pool_ready() {
+async fn common_mode_edge_proxy_html_502_distinct_hosts_trips_transient_and_keeps_pool_ready() {
     use chat_responses_codex::capabilities::WireProtocol;
     use chat_responses_codex::keys::upstream_key_fingerprint;
-    use chat_responses_codex::state::{ApiKeyModelConfig, RouteHealthKey};
+    use chat_responses_codex::state::RouteHealthKey;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
-    let hits_for_server = hits.clone();
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(move |headers: HeaderMap, _body: String| {
-            let hits = hits_for_server.clone();
-            async move {
-                let authorization = headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default()
-                    .to_string();
-                hits.lock().unwrap().push(authorization);
-                let mut response_headers = HeaderMap::new();
-                response_headers
-                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
-                (
-                    StatusCode::BAD_GATEWAY,
-                    response_headers,
-                    "<html><body><h1>502 Bad Gateway</h1></body></html>",
-                )
-            }
-        }),
-    );
-    let upstream_server = tokio::spawn(async move {
-        axum::serve(listener, upstream_app).await.unwrap();
+    // EdgeProxyError (HTML/empty 502) is a transient breaker class: across
+    // two distinct upstream hosts it still trips after K=2, but the verdict
+    // is the shared-gateway-outage one (one delayed replay round first, then
+    // upstream_transient_pool_failure), and the cooldowns this request wrote
+    // are reverted so the pool stays ready.
+    let hits = Arc::new(Mutex::new(0usize));
+    let behavior = shared_hit_behavior(hits.clone(), move |_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            None,
+            "<html><body><h1>502 Bad Gateway</h1></body></html>".to_string(),
+        )
     });
+    let harness = common_mode_pool_harness(2, behavior, transient_breaker_config).await;
 
-    let account_keys = (1..=8)
-        .map(|index| format!("pool-{index}"))
-        .collect::<Vec<_>>();
-    let downstream_key = generate_downstream_key("gw");
-    let directory = tempdir().unwrap();
-    let state = AppState::new(
-        PersistedState {
-            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
-                id: "common-mode-upstream".into(),
-                name: "common mode upstream".into(),
-                base_url: format!("http://{address}"),
-                api_key: account_keys[0].clone(),
-                api_keys: account_keys[1..].to_vec(),
-                api_key_models: account_keys
-                    .iter()
-                    .map(|api_key| ApiKeyModelConfig {
-                        api_key: api_key.clone(),
-                        supported_models: vec!["gpt-4".into()],
-                    })
-                    .collect(),
-                protocol: UpstreamProtocol::ChatCompletions,
-                protocols: vec![UpstreamProtocol::ChatCompletions],
-                supported_models: vec!["gpt-4".into()],
-                requests_per_minute: 100,
-                request_quota_requests: 1_000,
-                max_concurrency: 10,
-                active: true,
-                ..UpstreamConfig::default()
-            }]),
-            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
-                id: "down-common-mode".into(),
-                name: "common mode test".into(),
-                hash: downstream_key.hash.clone(),
-                plaintext_key: Some(downstream_key.plaintext.clone()),
-                plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".into()],
-                rate_limit_enabled: false,
-                per_minute_limit: 60,
-                max_concurrency: 10,
-                daily_token_limit: None,
-                monthly_token_limit: None,
-                input_token_price_per_million_cents: None,
-                output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
-                request_quota_window_hours: None,
-                request_quota_requests: None,
-                ip_allowlist: vec![],
-                expires_at: None,
-                active: true,
-                billing_mode: "request".into(),
-            }]),
-            usage_logs: vec![],
-            announcement: None,
-            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
-            runtime_settings: None,
-        },
-        directory.path().join("state.json"),
-        AppConfig {
-            upstream_hedge_enabled: false,
-            upstream_same_route_retry_enabled: false,
-            upstream_route_exhaustion_retry_max_wait_ms: 0,
-            ..AppConfig::default()
-        },
+    let response = harness.request(false).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "edge-proxy HTML 502 across distinct hosts must end in the transient pool 502"
     );
-    let app = build_router(state.clone());
-
-    let request = || async {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/responses")
-                    .header(
-                        header::AUTHORIZATION,
-                        format!("Bearer {}", downstream_key.plaintext),
-                    )
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({"model": "gpt-4", "input": "Hello", "stream": false}).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    };
-
-    let response = request().await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let response_body = response_body_text(response).await;
+    let body = response_body_text(response).await;
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    let error = &payload["error"];
+    assert_eq!(
+        error["code"], "upstream_transient_pool_failure",
+        "unexpected payload: {payload}"
+    );
+    let details = &error["details"];
+    assert_eq!(details["common_mode"], true);
+    assert_eq!(details["retried"], true);
+    assert_eq!(details["streak"], 2);
+    assert_eq!(details["threshold"], 2);
+    assert_eq!(details["failed_route_count"], 2);
+    assert_eq!(details["distinct_hosts"].as_array().unwrap().len(), 2);
     assert!(
-        !response_body.contains("all eligible upstream routes"),
-        "common-mode breaker must not produce the all-routes-unavailable 503: {response_body}"
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("likely a shared upstream gateway outage"),
+        "message must point at the shared gateway: {payload}"
     );
 
-    // Only K=2 routes are physically attempted, never the whole 8-key pool.
-    let attempts = hits.lock().unwrap().clone();
-    assert_eq!(attempts.len(), 2, "expected exactly 2 physical attempts");
+    // Round 1 (2 hits) + replay round (2 hits) = 4 physical attempts; the
+    // breaker stops the replay after two routes within each round.
+    assert_eq!(*hits.lock().unwrap(), 4);
 
     // The two attempted routes carry no cooldown after the breaker reverted them.
-    let runtime_model_slug = state
+    let runtime_model_slug = harness
+        .state
         .snapshot()
         .await
         .upstreams
         .iter()
-        .find(|upstream| upstream.id == "common-mode-upstream")
+        .find(|upstream| upstream.id == "up-host-0")
         .unwrap()
         .resolved_model_name("gpt-4")
         .unwrap();
-    for api_key in &account_keys[..2] {
+    for (upstream_id, api_key) in [("up-host-0", "key-0"), ("up-host-1", "key-1")] {
         let route = RouteHealthKey {
-            upstream_id: "common-mode-upstream".into(),
-            key_fingerprint: upstream_key_fingerprint("common-mode-upstream", api_key),
+            upstream_id: upstream_id.into(),
+            key_fingerprint: upstream_key_fingerprint(upstream_id, api_key),
             runtime_model_slug: runtime_model_slug.clone(),
             protocol: WireProtocol::ChatCompletions,
         };
-        let snapshot = state.route_health_snapshot(&route).await.unwrap();
+        let snapshot = harness.state.route_health_snapshot(&route).await.unwrap();
         assert!(
             snapshot.is_none() || snapshot.unwrap().cooldown_remaining.is_zero(),
-            "route for {api_key} must not be cooled after the breaker trip"
+            "route for {upstream_id} must not be cooled after the transient breaker trip"
         );
     }
 
     // A follow-up request hits the same pool from a clean state: still exactly
-    // two attempts (routes were never polluted by the breaker).  The rotated
-    // order differs per request id, so the exact keys may differ; what must
-    // hold is that the breaker trips again after two attempts and neither of
-    // the newly attempted routes carries a cooldown.
-    let response = request().await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let attempts = hits.lock().unwrap().clone();
+    // four attempts (two per round) and neither route carries a cooldown.
+    let (status, body) = harness.request_text(false).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_transient_pool_failure");
     assert_eq!(
-        attempts.len(),
-        4,
-        "second request must attempt exactly two routes"
+        *hits.lock().unwrap(),
+        8,
+        "second request must attempt exactly four routes"
     );
-    for attempt in &attempts[2..] {
-        let api_key = attempt.strip_prefix("Bearer ").unwrap_or(attempt);
+    for (upstream_id, api_key) in [("up-host-0", "key-0"), ("up-host-1", "key-1")] {
         let route = RouteHealthKey {
-            upstream_id: "common-mode-upstream".into(),
-            key_fingerprint: upstream_key_fingerprint("common-mode-upstream", api_key),
+            upstream_id: upstream_id.into(),
+            key_fingerprint: upstream_key_fingerprint(upstream_id, api_key),
             runtime_model_slug: runtime_model_slug.clone(),
             protocol: WireProtocol::ChatCompletions,
         };
-        let snapshot = state.route_health_snapshot(&route).await.unwrap();
+        let snapshot = harness.state.route_health_snapshot(&route).await.unwrap();
         assert!(
             snapshot.is_none() || snapshot.unwrap().cooldown_remaining.is_zero(),
-            "route for {api_key} must not be cooled after the breaker trip"
+            "route for {upstream_id} must stay clean after the second trip"
         );
     }
 
-    upstream_server.abort();
+    for server in harness.servers {
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -2662,6 +2581,758 @@ async fn common_mode_breaker_single_key_failure_preserves_key_isolation() {
             "healthy route for {api_key} must stay ready"
         );
     }
+
+    upstream_server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// B2 common-mode breaker: transient 502 split (2026-08-12 plan).
+// TransientServer/EdgeProxyError trips now replay one round before returning
+// upstream_transient_pool_failure, and the streak only grows across distinct
+// upstream hosts.
+// ---------------------------------------------------------------------------
+
+type SharedBehavior = Arc<dyn Fn(usize) -> (StatusCode, Option<u64>, String) + Send + Sync>;
+
+async fn spawn_behavior_upstream(
+    behavior: SharedBehavior,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let behavior = behavior.clone();
+            async move {
+                let (status, retry_after, body) = behavior(0);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    if body.starts_with('<') {
+                        HeaderValue::from_static("text/html")
+                    } else {
+                        HeaderValue::from_static("application/json")
+                    },
+                );
+                if let Some(retry_after) = retry_after {
+                    headers.insert(
+                        header::RETRY_AFTER,
+                        HeaderValue::from_str(&retry_after.to_string()).unwrap(),
+                    );
+                }
+                (status, headers, body)
+            }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+    (address, server)
+}
+
+fn shared_hit_behavior(
+    hits: Arc<Mutex<usize>>,
+    behavior: impl Fn(usize) -> (StatusCode, Option<u64>, String) + Send + Sync + 'static,
+) -> SharedBehavior {
+    Arc::new(move |_| {
+        let mut guard = hits.lock().unwrap();
+        let index = *guard;
+        *guard += 1;
+        behavior(index)
+    })
+}
+
+fn transient_json_502(retry_after: Option<u64>) -> (StatusCode, Option<u64>, String) {
+    (
+        StatusCode::BAD_GATEWAY,
+        retry_after,
+        json!({"error": {"message": "upstream server error", "type": "server_error"}}).to_string(),
+    )
+}
+
+fn rejected_json_400() -> (StatusCode, Option<u64>, String) {
+    (
+        StatusCode::BAD_REQUEST,
+        None,
+        json!({"error": {"message": "invalid request", "type": "invalid_request_error"}})
+            .to_string(),
+    )
+}
+
+fn healthy_json_200() -> (StatusCode, Option<u64>, String) {
+    (
+        StatusCode::OK,
+        None,
+        json!({
+            "id": "chatcmpl-ok",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string(),
+    )
+}
+
+struct CommonModePoolHarness {
+    state: AppState,
+    app: Router,
+    downstream_key: GeneratedDownstreamKey,
+    servers: Vec<tokio::task::JoinHandle<()>>,
+    _directory: tempfile::TempDir,
+}
+
+async fn common_mode_pool_harness(
+    host_count: usize,
+    behavior: SharedBehavior,
+    configure: impl Fn(AppConfig) -> AppConfig,
+) -> CommonModePoolHarness {
+    let mut addresses = Vec::new();
+    let mut servers = Vec::new();
+    for _ in 0..host_count {
+        let (address, server) = spawn_behavior_upstream(behavior.clone()).await;
+        addresses.push(address);
+        servers.push(server);
+    }
+    let directory = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let upstreams = addresses
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| UpstreamConfig {
+            id: format!("up-host-{index}"),
+            name: format!("host upstream {index}"),
+            base_url: format!("http://{address}"),
+            api_key: format!("key-{index}"),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["gpt-4".into()],
+            requests_per_minute: 100,
+            request_quota_requests: 1_000,
+            max_concurrency: 10,
+            active: true,
+            ..UpstreamConfig::default()
+        })
+        .collect::<Vec<_>>();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(upstreams),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-common-mode-2".into(),
+                name: "common mode two".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        directory.path().join("state.json"),
+        configure(AppConfig::default()),
+    );
+    let app = build_router(state.clone());
+    CommonModePoolHarness {
+        state,
+        app,
+        downstream_key,
+        servers,
+        _directory: directory,
+    }
+}
+
+impl CommonModePoolHarness {
+    async fn request(&self, stream: bool) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", self.downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model": "gpt-4", "input": "Hello", "stream": stream}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn request_text(&self, stream: bool) -> (StatusCode, String) {
+        let response = self.request(stream).await;
+        let status = response.status();
+        let body = response_body_text(response).await;
+        (status, body)
+    }
+}
+
+fn transient_breaker_config(mut config: AppConfig) -> AppConfig {
+    config.upstream_hedge_enabled = false;
+    config.upstream_same_route_retry_enabled = false;
+    config.upstream_transient_same_route_retry_enabled = false;
+    config.upstream_route_exhaustion_retry_max_wait_ms = 0;
+    config.upstream_common_mode_breaker_threshold = 2;
+    config.upstream_common_mode_transient_threshold = 2;
+    config
+}
+
+#[tokio::test]
+async fn common_mode_same_host_502_does_not_trip_and_tries_all_routes() {
+    // Two upstreams on the SAME host (one listener, two keys) returning an
+    // identical HTML 502. The host-diversity rule treats this as a
+    // route-local / shared-gateway fault: the streak must never accumulate,
+    // exactly as if the breaker were disabled.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hits_for_server = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, _body: String| {
+            let hits = hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                hits.lock().unwrap().push(authorization);
+                let mut response_headers = HeaderMap::new();
+                response_headers
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+                (
+                    StatusCode::BAD_GATEWAY,
+                    response_headers,
+                    "<html><body><h1>502 Bad Gateway</h1></body></html>",
+                )
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let account_keys = ["same-host-key-1".to_string(), "same-host-key-2".to_string()];
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    use chat_responses_codex::state::ApiKeyModelConfig;
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "same-host-upstream".into(),
+                name: "same host upstream".into(),
+                base_url: format!("http://{address}"),
+                api_key: account_keys[0].clone(),
+                api_keys: account_keys[1..].to_vec(),
+                api_key_models: account_keys
+                    .iter()
+                    .map(|api_key| ApiKeyModelConfig {
+                        api_key: api_key.clone(),
+                        supported_models: vec!["gpt-4".into()],
+                    })
+                    .collect(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                requests_per_minute: 100,
+                request_quota_requests: 1_000,
+                max_concurrency: 10,
+                active: true,
+                ..UpstreamConfig::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-same-host".into(),
+                name: "same host test".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: false,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        directory.path().join("state.json"),
+        transient_breaker_config(AppConfig::default()),
+    );
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let response_body = response_body_text(response).await;
+    assert!(
+        !response_body.contains("multiple routes failed with identical transient")
+            && !response_body.contains("rejected this request on multiple routes"),
+        "same-host transient failures must not trip any common-mode breaker: {response_body}"
+    );
+    assert!(
+        response_body.contains("all eligible upstream routes are temporarily unavailable"),
+        "the request must run to the ordinary all-routes temporary error: {response_body}"
+    );
+
+    // Both keys are physically attempted exactly once: the same-host streak
+    // never accumulates, so no replay round is scheduled either.
+    let attempts = hits.lock().unwrap().clone();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "same-host failures must not trip the breaker but must exhaust the pool"
+    );
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn common_mode_transient_across_distinct_hosts_replays_once_then_succeeds() {
+    let hits = Arc::new(Mutex::new(0usize));
+    let behavior = shared_hit_behavior(hits.clone(), move |index| {
+        if index < 2 {
+            transient_json_502(Some(1))
+        } else {
+            healthy_json_200()
+        }
+    });
+    let harness = common_mode_pool_harness(2, behavior, transient_breaker_config).await;
+
+    let (status, body) = harness.request_text(false).await;
+    assert_eq!(status, StatusCode::OK, "replay round must recover: {body}");
+
+    // Round 1: two hosts fail (trip) -> one delayed replay round -> host 0
+    // succeeds. Exactly 3 physical attempts, never a 4th.
+    assert_eq!(*hits.lock().unwrap(), 3);
+
+    for server in harness.servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn common_mode_transient_across_distinct_hosts_returns_transient_pool_failure_after_replay() {
+    let hits = Arc::new(Mutex::new(0usize));
+    let behavior = shared_hit_behavior(hits.clone(), move |_| transient_json_502(Some(5)));
+    let harness = common_mode_pool_harness(2, behavior, transient_breaker_config).await;
+
+    let response = harness.request(false).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
+    let body = response_body_text(response).await;
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    let error = &payload["error"];
+    assert_eq!(
+        error["code"], "upstream_transient_pool_failure",
+        "unexpected payload: {payload}"
+    );
+    let details = &error["details"];
+    assert_eq!(details["common_mode"], true);
+    assert_eq!(details["retried"], true);
+    assert_eq!(details["streak"], 2);
+    assert_eq!(details["threshold"], 2);
+    assert_eq!(details["failed_route_count"], 2);
+    assert_eq!(details["distinct_hosts"].as_array().unwrap().len(), 2);
+    let distinct_hosts = details["distinct_hosts"].as_array().unwrap();
+    assert_ne!(
+        distinct_hosts[0], distinct_hosts[1],
+        "the two failing routes must be on distinct hosts: {payload}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("likely a shared upstream gateway outage"),
+        "message must point at the shared gateway: {payload}"
+    );
+
+    // Round 1 (2 hits) + replay round (2 hits) = 4 physical attempts.
+    assert_eq!(*hits.lock().unwrap(), 4);
+
+    for server in harness.servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn common_mode_request_rejected_across_distinct_hosts_still_trips_immediately() {
+    let hits = Arc::new(Mutex::new(0usize));
+    let behavior = shared_hit_behavior(hits.clone(), move |_| rejected_json_400());
+    let harness = common_mode_pool_harness(2, behavior, transient_breaker_config).await;
+
+    let (status, body) = harness.request_text(false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_request_rejected");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("upstream rejected the request"),
+        "request-shape rejection must keep its current message: {payload}"
+    );
+
+    // RequestRejected keeps today's semantics: the first rejection stops the
+    // replay immediately, before the second host is ever attempted.
+    assert_eq!(*hits.lock().unwrap(), 1);
+
+    for server in harness.servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn common_mode_transient_same_route_retry_once_then_success_leaves_no_failure_record() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::upstream_key_fingerprint;
+    use chat_responses_codex::state::RouteHealthKey;
+
+    let hits = Arc::new(Mutex::new(0usize));
+    let behavior = shared_hit_behavior(hits.clone(), move |index| {
+        if index == 0 {
+            transient_json_502(None)
+        } else {
+            healthy_json_200()
+        }
+    });
+    let harness = common_mode_pool_harness(1, behavior, |mut config| {
+        config.upstream_hedge_enabled = false;
+        config.upstream_same_route_retry_enabled = true;
+        config.upstream_transient_same_route_retry_enabled = true;
+        config.upstream_route_exhaustion_retry_max_wait_ms = 0;
+        config.upstream_common_mode_transient_threshold = 0;
+        config
+    })
+    .await;
+
+    let (status, body) = harness.request_text(false).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "same-route retry must recover: {body}"
+    );
+    assert_eq!(
+        *hits.lock().unwrap(),
+        2,
+        "exactly one same-route retry after the first transient 502"
+    );
+
+    // The retry succeeded, so the route must carry no failure record.
+    let runtime_model_slug = harness
+        .state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-host-0")
+        .unwrap()
+        .resolved_model_name("gpt-4")
+        .unwrap();
+    let route = RouteHealthKey {
+        upstream_id: "up-host-0".into(),
+        key_fingerprint: upstream_key_fingerprint("up-host-0", "key-0"),
+        runtime_model_slug: runtime_model_slug.clone(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    let snapshot = harness.state.route_health_snapshot(&route).await.unwrap();
+    assert!(
+        snapshot.is_none() || snapshot.unwrap().cooldown_remaining.is_zero(),
+        "successful same-route retry must not cool the route"
+    );
+
+    for server in harness.servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn common_mode_transient_same_route_retry_still_502_records_one_failure() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::upstream_key_fingerprint;
+    use chat_responses_codex::state::RouteHealthKey;
+
+    let hits = Arc::new(Mutex::new(0usize));
+    let behavior = shared_hit_behavior(hits.clone(), move |_| transient_json_502(Some(2)));
+    let harness = common_mode_pool_harness(1, behavior, |mut config| {
+        config.upstream_hedge_enabled = false;
+        config.upstream_same_route_retry_enabled = true;
+        config.upstream_transient_same_route_retry_enabled = true;
+        config.upstream_route_exhaustion_retry_max_wait_ms = 0;
+        config.upstream_common_mode_transient_threshold = 0;
+        config
+    })
+    .await;
+
+    let (status, body) = harness.request_text(false).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "single transient route must end in the ordinary all-routes 503: {body}"
+    );
+    assert_eq!(
+        *hits.lock().unwrap(),
+        2,
+        "one same-route retry then the failure is recorded"
+    );
+
+    let runtime_model_slug = harness
+        .state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-host-0")
+        .unwrap()
+        .resolved_model_name("gpt-4")
+        .unwrap();
+    let route = RouteHealthKey {
+        upstream_id: "up-host-0".into(),
+        key_fingerprint: upstream_key_fingerprint("up-host-0", "key-0"),
+        runtime_model_slug: runtime_model_slug.clone(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    let snapshot = harness
+        .state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("the failed route must be cooling");
+    assert!(
+        snapshot.cooldown_remaining > Duration::ZERO,
+        "the transient failure must be recorded after the retry failed"
+    );
+
+    for server in harness.servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn common_mode_transient_streaming_mid_stream_failure_never_retries_same_route() {
+    // The same-route transient retry must only fire before any byte reaches
+    // the downstream client.  Use a native Responses SSE upstream: the
+    // prefetch commits as soon as the first usable delta is read (the stream
+    // is then committed and bytes WILL be relayed), and the connection reset
+    // that follows surfaces while the downstream body is being polled — long
+    // after routing completed.  Re-requesting the same route there would
+    // duplicate a partially emitted response, so the gateway must not.
+    let hits = Arc::new(Mutex::new(0usize));
+    let hits_for_server = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |_body: String| {
+            let hits = hits_for_server.clone();
+            async move {
+                *hits.lock().unwrap() += 1;
+                let event = |event_type: &str, data: Value| {
+                    format!("event: {event_type}\ndata: {data}\n\n")
+                };
+                let created = event(
+                    "response.created",
+                    json!({
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_upstream_1",
+                            "object": "response",
+                            "status": "in_progress",
+                            "output": []
+                        }
+                    }),
+                );
+                let delta = event(
+                    "response.output_text.delta",
+                    json!({
+                        "type": "response.output_text.delta",
+                        "delta": "hello",
+                        "item_id": "msg_1",
+                        "output_index": 0,
+                        "sequence_number": 1
+                    }),
+                );
+                let chunks = futures_util::stream::once(async {
+                    Ok::<Bytes, std::io::Error>(Bytes::from(created))
+                })
+                .chain(futures_util::stream::once(async {
+                    Ok::<Bytes, std::io::Error>(Bytes::from(delta))
+                }))
+                .chain(futures_util::stream::once(async {
+                    // Let the gateway prefetch the delta (and commit the
+                    // stream) before the transport die, so the reset is
+                    // observed during downstream body polling, not during
+                    // routing.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "upstream died mid-stream",
+                    ))
+                }));
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(chunks),
+                )
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let directory = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-stream-mid".into(),
+                name: "mid stream upstream".into(),
+                base_url: format!("http://{address}"),
+                api_key: "key-0".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4".into()],
+                requests_per_minute: 100,
+                request_quota_requests: 1_000,
+                max_concurrency: 10,
+                active: true,
+                ..UpstreamConfig::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-stream-mid".into(),
+                name: "mid stream test".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: false,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            // Same-route transient retry enabled (default), wait budget zero
+            // so the test never sleeps; breakers off so nothing else can
+            // interfere with the assertion.
+            upstream_hedge_enabled: false,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            upstream_common_mode_breaker_threshold: 0,
+            upstream_common_mode_transient_threshold: 0,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response_body_text(response).await;
+    assert_eq!(
+        *hits.lock().unwrap(),
+        1,
+        "a stream that already relayed a usable delta must never be re-requested on the same route"
+    );
+    assert!(
+        body.contains("hello"),
+        "the relayed delta must reach the downstream client: {body}"
+    );
+    assert!(
+        body.contains("response.failed") || body.contains("upstream_network_error"),
+        "the downstream stream must terminate with the upstream failure: {body}"
+    );
 
     upstream_server.abort();
 }
