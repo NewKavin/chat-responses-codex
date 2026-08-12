@@ -12,6 +12,8 @@ mod claude;
 mod common;
 #[path = "gateway/compatibility.rs"]
 mod compatibility;
+#[path = "gateway/dialect_matrix.rs"]
+mod dialect_matrix;
 #[path = "gateway/dialect_retry.rs"]
 mod dialect_retry;
 #[path = "gateway/images.rs"]
