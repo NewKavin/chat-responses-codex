@@ -409,6 +409,12 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
 #[tokio::test]
 async fn downstream_usage_summary_matches_existing_portal_totals() {
     let now = chat_responses_codex::state::unix_seconds();
+    // Clamp the historical log timestamps to the current UTC day so the test
+    // is deterministic when it runs within 10 minutes after midnight (the
+    // `now - 600` logs would otherwise fall on the previous day and the
+    // "today" totals would be 0).
+    let today_start = (now / 86_400) * 86_400;
+    let clamp_into_today = |offset: u64| now.saturating_sub(offset).max(today_start);
     let generated = generate_downstream_key("sk");
     let state = AppState::new(
         PersistedState {
@@ -460,9 +466,9 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                 },
             ]),
             usage_logs: vec![
-                usage_log("log-a", "downstream-2", "gpt-4", 200, 100, now - 600),
-                usage_log("log-b", "downstream-2", "gpt-4", 200, 120, now - 300),
-                usage_log("log-c", "downstream-3", "gpt-4.1-mini", 200, 999, now - 60),
+                usage_log("log-a", "downstream-2", "gpt-4", 200, 100, clamp_into_today(600)),
+                usage_log("log-b", "downstream-2", "gpt-4", 200, 120, clamp_into_today(300)),
+                usage_log("log-c", "downstream-3", "gpt-4.1-mini", 200, 999, clamp_into_today(60)),
             ],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
