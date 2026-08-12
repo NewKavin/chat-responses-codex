@@ -33,6 +33,7 @@ use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream as futures_stream, FutureExt, StreamExt};
 use mime_guess::from_path;
+use reqwest::Url;
 use rust_embed::RustEmbed;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -731,7 +732,9 @@ fn record_cooled_route_attempt(
 
 /// Failure classes whose identical repetition across different routes of
 /// the same pool within one request indicates a request-shape problem shared
-/// by the whole pool (B2 common-mode breaker).
+/// by the whole pool (B2 common-mode breaker).  `RequestRejected` keeps the
+/// request-shape semantics; transient classes get the shared-gateway-outage
+/// treatment (one delayed replay round before a request-level 502).
 fn is_common_mode_breaker_class(class: FailureClass) -> bool {
     matches!(
         class,
@@ -739,6 +742,72 @@ fn is_common_mode_breaker_class(class: FailureClass) -> bool {
             | FailureClass::EdgeProxyError
             | FailureClass::RequestRejected
     )
+}
+
+fn is_common_mode_transient_class(class: FailureClass) -> bool {
+    matches!(
+        class,
+        FailureClass::TransientServer | FailureClass::EdgeProxyError
+    )
+}
+
+/// The host part of an upstream `base_url`, used to tell "two keys on the
+/// same aggregated gateway" (route-local fault) apart from "two genuinely
+/// distinct upstream hosts failed identically" (pool-wide transient
+/// signature).  Unparseable URLs count as distinct hosts (fall back to
+/// route-based counting).
+fn upstream_host(base_url: &str) -> Option<String> {
+    let url = Url::parse(base_url).ok()?;
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}
+
+/// B2 common-mode streak, scoped to one downstream request.  The streak only
+/// grows when a *different route on a different upstream host* fails with the
+/// exact same (class, status); the same route or the same host failing again
+/// is a route-local fault that restarts the streak at 1.
+#[derive(Clone)]
+struct CommonModeStreak {
+    class: FailureClass,
+    upstream_status: Option<u16>,
+    last_route: RouteHealthKey,
+    last_host: Option<String>,
+    count: u32,
+    hosts: Vec<String>,
+    retry_after: Option<Duration>,
+}
+
+impl CommonModeStreak {
+    fn new(
+        class: FailureClass,
+        upstream_status: Option<u16>,
+        route: RouteHealthKey,
+        host: Option<String>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        let hosts = host.clone().map(|host| vec![host]).unwrap_or_default();
+        Self {
+            class,
+            upstream_status,
+            last_route: route,
+            last_host: host,
+            count: 1,
+            hosts,
+            retry_after,
+        }
+    }
+
+    fn same_signature(&self, class: FailureClass, upstream_status: Option<u16>) -> bool {
+        self.class == class && self.upstream_status == upstream_status
+    }
+
+    fn route_local_fault(&self, route: &RouteHealthKey, host: &Option<String>) -> bool {
+        self.last_route == *route
+            || (host.is_some() && self.last_host.is_some() && self.last_host == *host)
+    }
 }
 
 /// Request-level error for a common-mode breaker trip: the upstream pool
@@ -750,6 +819,9 @@ fn common_mode_breaker_error(
     class: FailureClass,
     upstream_status: Option<u16>,
     first_upstream_message: &str,
+    streak: &CommonModeStreak,
+    threshold: u32,
+    failed_route_count: usize,
 ) -> GatewayError {
     let upstream_status = upstream_status.filter(|status| *status != 0);
     let status_summary = upstream_status
@@ -767,6 +839,11 @@ fn common_mode_breaker_error(
     let mut details = Map::from_iter([
         ("scope".to_string(), json!("upstream")),
         ("common_mode".to_string(), json!(true)),
+        ("failed_route_count".to_string(), json!(failed_route_count)),
+        ("distinct_hosts".to_string(), json!(streak.hosts)),
+        ("streak".to_string(), json!(streak.count)),
+        ("threshold".to_string(), json!(threshold)),
+        ("retried".to_string(), json!(false)),
     ]);
     if let Some(status) = upstream_status {
         details.insert("upstream_status".to_string(), json!(status));
@@ -778,6 +855,48 @@ fn common_mode_breaker_error(
         code,
         code,
         None,
+        Some(Value::Object(details)),
+    )
+}
+
+/// Request-level error for a *transient* common-mode verdict: multiple
+/// distinct upstream hosts failed with the identical transient signature
+/// even after one delayed replay round, so the gateway stops replaying,
+/// reverts the cooldowns this request wrote, and reports the likely shared
+/// gateway outage to the operator (HTTP 502 + Retry-After).
+fn common_mode_transient_pool_error(
+    first_upstream_message: &str,
+    streak: &CommonModeStreak,
+    threshold: u32,
+    failed_route_count: usize,
+    retried: bool,
+) -> GatewayError {
+    let upstream_status = streak.upstream_status.filter(|status| *status != 0);
+    let status_summary = upstream_status
+        .map(|status| format!(" (upstream HTTP {status})"))
+        .unwrap_or_default();
+    let message = format!(
+        "multiple routes failed with identical transient upstream errors{status_summary} — likely a shared upstream gateway outage; the request was retried once after a short backoff and still failed. First upstream error: {first_upstream_message}",
+    );
+    let mut details = Map::from_iter([
+        ("scope".to_string(), json!("upstream")),
+        ("common_mode".to_string(), json!(true)),
+        ("failed_route_count".to_string(), json!(failed_route_count)),
+        ("distinct_hosts".to_string(), json!(streak.hosts)),
+        ("streak".to_string(), json!(streak.count)),
+        ("threshold".to_string(), json!(threshold)),
+        ("retried".to_string(), json!(retried)),
+    ]);
+    if let Some(status) = upstream_status {
+        details.insert("upstream_status".to_string(), json!(status));
+    }
+    GatewayError::classified(
+        StatusCode::BAD_GATEWAY,
+        message,
+        "upstream_error",
+        "upstream_transient_pool_failure",
+        "upstream_transient_pool_failure",
+        streak.retry_after.map(duration_seconds_ceil),
         Some(Value::Object(details)),
     )
 }
@@ -5189,15 +5308,18 @@ async fn process_gateway_request_inner(
     // K consecutive different routes fail with the exact same (class, status)
     // the request shape is the likely culprit: stop replaying, revert the
     // cooldowns this request wrote, and return a request-level error instead
-    // of burning the whole pool.
-    // (class, upstream_status, last failed route, streak length).  The streak
-    // only grows when a *different* route fails with the identical signature;
-    // the same route failing again (e.g. across routing rounds) is a route-
-    // level fault, not pool-wide request-shape evidence.
-    let mut common_mode: Option<(FailureClass, Option<u16>, RouteHealthKey, u32)> = None;
+    // of burning the whole pool.  Transient classes first get one delayed
+    // replay round (the aggregated-gateway outage case) before the verdict.
+    // The streak only grows when a *different route on a different upstream
+    // host* fails with the identical signature; the same route or the same
+    // host failing again (e.g. across routing rounds or across keys of one
+    // aggregated gateway) is a route-local fault, not pool-wide evidence.
+    let mut common_mode: Option<CommonModeStreak> = None;
     let mut common_mode_first_message: Option<String> = None;
     let mut common_mode_failed_routes: Vec<RouteHealthKey> = Vec::new();
     let mut common_mode_tripped = false;
+    let mut transient_pool_replay_done = false;
+    let mut transient_pool_retried = false;
 
     'routing_rounds: loop {
         let upstream_runtime_snapshots = state
@@ -6872,70 +6994,157 @@ async fn process_gateway_request_inner(
                         }
                     }
                     if let Some((class, upstream_status, message)) = route_failed {
-                        let threshold = runtime_settings.upstream_common_mode_breaker_threshold;
+                        let is_transient = is_common_mode_transient_class(class);
+                        let threshold = if class == FailureClass::RequestRejected {
+                            runtime_settings.upstream_common_mode_breaker_threshold
+                        } else if is_transient {
+                            runtime_settings.upstream_common_mode_transient_threshold
+                        } else {
+                            0
+                        };
                         if threshold > 0 && is_common_mode_breaker_class(class) {
+                            let host = upstream_host(&upstream.base_url);
+                            let retry_after =
+                                last_error.as_ref().and_then(GatewayError::retry_after);
                             match common_mode {
-                                Some((c, s, last_route, _count))
-                                    if c == class
-                                        && s == upstream_status
-                                        && last_route == route_health_key =>
+                                Some(ref mut streak)
+                                    if streak.same_signature(class, upstream_status) =>
                                 {
-                                    // Identical failure on the *same* route as
-                                    // the previous one: route-local fault, not a
-                                    // pool-wide request-shape signature.  Restart
-                                    // the streak from this route.
-                                    common_mode =
-                                        Some((class, upstream_status, route_health_key.clone(), 1));
-                                    common_mode_first_message = Some(message);
-                                    common_mode_failed_routes = vec![route_health_key.clone()];
-                                }
-                                Some((c, s, _, count)) if c == class && s == upstream_status => {
-                                    let count = count + 1;
-                                    common_mode = Some((
-                                        class,
-                                        upstream_status,
-                                        route_health_key.clone(),
-                                        count,
-                                    ));
-                                    common_mode_failed_routes.push(route_health_key.clone());
-                                    if count >= threshold {
-                                        common_mode_tripped = true;
-                                        for failed_route in common_mode_failed_routes.drain(..) {
-                                            state.clear_route_health(&failed_route).await.map_err(
+                                    if streak.route_local_fault(&route_health_key, &host) {
+                                        // Identical failure on the *same route*
+                                        // or the *same upstream host* as the
+                                        // previous one: route-local fault, not a
+                                        // pool-wide signature.  Restart the
+                                        // streak from this route.
+                                        *streak = CommonModeStreak::new(
+                                            class,
+                                            upstream_status,
+                                            route_health_key.clone(),
+                                            host,
+                                            retry_after,
+                                        );
+                                        common_mode_first_message = Some(message);
+                                        common_mode_failed_routes = vec![route_health_key.clone()];
+                                    } else {
+                                        streak.count += 1;
+                                        streak.last_route = route_health_key.clone();
+                                        streak.last_host = host.clone();
+                                        if let Some(host) = host {
+                                            if !streak.hosts.iter().any(|seen| seen == &host) {
+                                                streak.hosts.push(host);
+                                            }
+                                        }
+                                        if retry_after.is_some() {
+                                            streak.retry_after = retry_after;
+                                        }
+                                        common_mode_failed_routes.push(route_health_key.clone());
+                                        if streak.count >= threshold {
+                                            common_mode_tripped = true;
+                                            let failed_route_count =
+                                                common_mode_failed_routes.len();
+                                            for failed_route in common_mode_failed_routes.drain(..)
+                                            {
+                                                state.clear_route_health(&failed_route).await.map_err(
                                                 |_| {
                                                     runtime_coordination_unavailable_gateway_error()
                                                 },
                                             )?;
+                                            }
+                                            let first_message = common_mode_first_message
+                                                .clone()
+                                                .unwrap_or_else(|| message.clone());
+                                            let distinct_hosts = streak.hosts.len();
+                                            if is_transient && !transient_pool_replay_done {
+                                                transient_pool_replay_done = true;
+                                                transient_pool_retried = true;
+                                                tracing::warn!(
+                                                    request_id = %request_id,
+                                                    downstream_key_id = %downstream.id,
+                                                    path = %request_path,
+                                                    original_model = %model,
+                                                    normalized_model = %normalized_model,
+                                                    selected_upstream_id = %upstream.id,
+                                                    selected_upstream_name = %upstream.name,
+                                                    selected_upstream_protocol = ?protocol,
+                                                    route_id = %route_id,
+                                                    failure_class = class.as_str(),
+                                                    upstream_status,
+                                                    common_mode_threshold = threshold,
+                                                    common_mode_distinct_hosts = distinct_hosts,
+                                                    breaker_branch = "transient",
+                                                    "transient common-mode failure over distinct hosts: suspected shared upstream gateway outage; replaying one round after a short backoff"
+                                                );
+                                                let remaining = route_retry_policy
+                                                    .remaining_wait_budget(
+                                                        route_retry_budget.waited(),
+                                                    );
+                                                let replay_delay =
+                                                    Duration::from_millis(500).min(remaining);
+                                                if !replay_delay.is_zero() {
+                                                    tokio::time::sleep(replay_delay).await;
+                                                }
+                                                route_retry_budget
+                                                    .record_external_wait(replay_delay);
+                                                // Reset the streak and the attempt
+                                                // tracker so the replay round is a
+                                                // fresh full pass over the pool; the
+                                                // next transient trip with the same
+                                                // signature returns the final
+                                                // request-level error.
+                                                common_mode = None;
+                                                common_mode_first_message = None;
+                                                common_mode_failed_routes.clear();
+                                                request_route_attempts =
+                                                    request_route_attempts.next_round();
+                                                continue 'routing_rounds;
+                                            }
+                                            tracing::warn!(
+                                                request_id = %request_id,
+                                                downstream_key_id = %downstream.id,
+                                                path = %request_path,
+                                                original_model = %model,
+                                                normalized_model = %normalized_model,
+                                                selected_upstream_id = %upstream.id,
+                                                selected_upstream_name = %upstream.name,
+                                                selected_upstream_protocol = ?protocol,
+                                                route_id = %route_id,
+                                                failure_class = class.as_str(),
+                                                upstream_status,
+                                                common_mode_threshold = threshold,
+                                                common_mode_distinct_hosts = distinct_hosts,
+                                                breaker_branch = if is_transient { "transient-final" } else { "request_shape" },
+                                                "common-mode failure detected: stopping route replay and reverting cooldowns"
+                                            );
+                                            last_error = Some(if is_transient {
+                                                common_mode_transient_pool_error(
+                                                    &first_message,
+                                                    streak,
+                                                    threshold,
+                                                    failed_route_count,
+                                                    transient_pool_retried,
+                                                )
+                                            } else {
+                                                common_mode_breaker_error(
+                                                    class,
+                                                    upstream_status,
+                                                    &first_message,
+                                                    streak,
+                                                    threshold,
+                                                    failed_route_count,
+                                                )
+                                            });
+                                            break 'routing_rounds;
                                         }
-                                        let first_message = common_mode_first_message
-                                            .clone()
-                                            .unwrap_or_else(|| message.clone());
-                                        tracing::warn!(
-                                            request_id = %request_id,
-                                            downstream_key_id = %downstream.id,
-                                            path = %request_path,
-                                            original_model = %model,
-                                            normalized_model = %normalized_model,
-                                            selected_upstream_id = %upstream.id,
-                                            selected_upstream_name = %upstream.name,
-                                            selected_upstream_protocol = ?protocol,
-                                            route_id = %route_id,
-                                            failure_class = class.as_str(),
-                                            upstream_status,
-                                            common_mode_threshold = threshold,
-                                            "common-mode failure detected: stopping route replay and reverting cooldowns"
-                                        );
-                                        last_error = Some(common_mode_breaker_error(
-                                            class,
-                                            upstream_status,
-                                            &first_message,
-                                        ));
-                                        break 'routing_rounds;
                                     }
                                 }
                                 _ => {
-                                    common_mode =
-                                        Some((class, upstream_status, route_health_key.clone(), 1));
+                                    common_mode = Some(CommonModeStreak::new(
+                                        class,
+                                        upstream_status,
+                                        route_health_key.clone(),
+                                        host,
+                                        retry_after,
+                                    ));
                                     common_mode_first_message = Some(message);
                                     common_mode_failed_routes = vec![route_health_key.clone()];
                                 }

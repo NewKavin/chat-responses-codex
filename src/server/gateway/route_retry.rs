@@ -30,6 +30,23 @@ impl RouteRetryBudget {
         self.waited
     }
 
+    /// Record a wait that happened outside `RouteRetryPolicy::decide`
+    /// without advancing the round counter (e.g. the intra-round same-route
+    /// retry backoff), so later round-level decisions still see the
+    /// accumulated wait time.
+    pub fn record_wait_time(&mut self, waited: Duration) {
+        self.waited = self.waited.checked_add(waited).unwrap_or(Duration::MAX);
+    }
+
+    /// Consume a wait that is not the decision of `RouteRetryPolicy::decide`
+    /// (e.g. the transient common-mode replay round) while keeping the round
+    /// and budget accounting consistent for later `decide` calls.
+    pub fn record_external_wait(&mut self, sleep_for: Duration) {
+        let next_round = self.current_round.saturating_add(1);
+        self.current_round = next_round;
+        self.waited = self.waited.checked_add(sleep_for).unwrap_or(Duration::MAX);
+    }
+
     pub fn record_wait(&mut self, wait: RouteRetryWait) {
         debug_assert_eq!(wait.next_round, self.current_round.saturating_add(1));
         self.current_round = wait.next_round;
@@ -88,6 +105,10 @@ impl RouteRetryPolicy {
             Duration::from_millis(runtime_settings.upstream_concurrency_recovery_max_wait_ms),
             runtime_settings.upstream_concurrency_recovery_max_rounds,
         )
+    }
+
+    pub fn remaining_wait_budget(self, waited: Duration) -> Duration {
+        self.max_wait.saturating_sub(waited)
     }
 
     pub fn decide(
