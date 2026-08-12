@@ -249,7 +249,13 @@
 
 ---
 
-## 8. Workstream G：交付验证与部署
+## 8. Workstream G：交付验证与部署 ✅ 已完成（实施侧，commits 9c16f32；部署/运维侧条目见下）
+
+> 实施侧交付（本仓库可验证部分）：
+> - 方言矩阵集成测试 4×5 全绿（`tests/gateway/dialect_matrix.rs`，commit 9c16f32）。
+> - 全量验证：`rtk cargo test` 1529 passed / 77 ignored；`rtk cargo clippy --all-targets --all-features -- -D warnings` 无告警；`rtk npm --prefix frontend test -- --run` 248 passed；type-check 与 build 通过。
+> - 各 Workstream 独立 commit/分支（F→B→C/D→E→A→G），每步可单独回滚。
+> - 待部署/运维侧执行：Phase 0 线上 502 body 样本采集与夹具固化；确认内网镜像包含 3329210；双窗口串话 soak、2-3 Codex 并行 30 分钟 soak、探测验收、Codex 实机多轮工具会话；`scripts/build-package-image.sh` / `scripts/deploy.sh` 部署。
 
 1. **Phase 0（实施前）**：确认内网部署镜像包含 2026-08-11 全部修复（`3329210`）；采集一次线上 `all eligible ...` 发生时的网关日志与对应上游错误 body 样本，验证 §1 根因假设（尤其 502 的 body 形态），把样本固化为测试夹具。
 2. 单测/集成全绿：`rtk cargo test`、`rtk cargo clippy --all-targets -- -D warnings`、`rtk npm --prefix frontend test -- --run`、type-check、build。
