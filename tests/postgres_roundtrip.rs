@@ -844,6 +844,10 @@ async fn postgres_roundtrip_preserves_capability_state() {
 
     let capability_configuration = CapabilityConfiguration {
         revision: 17,
+        // Match the embedded template's builtin policy version so the
+        // append-only builtin merge (revision bump) does not fire; this test
+        // verifies plain round-trip preservation.
+        builtin_policy_version: 2,
         ..CapabilityConfiguration::default()
     };
     state

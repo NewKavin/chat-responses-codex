@@ -1147,7 +1147,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &(upstream.last_synced_at as i64),
             &api_keys_json,
             &api_key_models_json,
-            &upstream.strip_nonstandard_chat_fields.as_db_str(),
+            &(upstream.strip_nonstandard_chat_fields != NonstandardFieldPolicy::Forward),
             &upstream.strip_nonstandard_chat_fields.as_db_str(),
             &upstream.remark,
             &upstream.continuation_provider_group,
@@ -1165,7 +1165,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1963,11 +1963,15 @@ CREATE INDEX IF NOT EXISTS usage_logs_upstream_idx
 
 /// Reads the three-state non-standard field policy, preferring the newer
 /// `nonstandard_field_policy` text column and falling back to the legacy
-/// boolean `strip_nonstandard_chat_fields` column.
+/// boolean `strip_nonstandard_chat_fields` column for unknown values. The
+/// boolean column is written as a derived flag (`policy != 'forward'`), so a
+/// known text value always wins; the legacy fallback only applies to rows
+/// whose text column holds a value outside the three-state vocabulary.
 fn decode_nonstandard_field_policy(policy: String, legacy: bool) -> NonstandardFieldPolicy {
     match policy.as_str() {
         "always_strip" => NonstandardFieldPolicy::AlwaysStrip,
         "forward" => NonstandardFieldPolicy::Forward,
+        "auto" => NonstandardFieldPolicy::Auto,
         _ => {
             if legacy {
                 NonstandardFieldPolicy::AlwaysStrip
