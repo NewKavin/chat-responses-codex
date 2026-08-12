@@ -1,6 +1,8 @@
 use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
-    default_upstream_common_mode_breaker_threshold, default_upstream_max_concurrency, AppConfig,
+    default_upstream_common_mode_breaker_threshold,
+    default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
+    default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -28,12 +30,14 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_hedge_interval_ms",
     "upstream_hedge_max_extra_attempts",
     "upstream_same_route_retry_enabled",
+    "upstream_transient_same_route_retry_enabled",
     "upstream_transient_route_cooldown_base_seconds",
     "upstream_transient_route_cooldown_max_seconds",
     "upstream_route_health_half_open_ttl_seconds",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
+    "upstream_common_mode_transient_threshold",
     "default_upstream_max_concurrency",
     "upstream_concurrency_recovery_max_wait_ms",
     "upstream_concurrency_probe_delays_ms",
@@ -93,6 +97,10 @@ pub struct RuntimeSettings {
     pub upstream_route_exhaustion_retry_max_rounds: u32,
     #[serde(default = "default_upstream_common_mode_breaker_threshold")]
     pub upstream_common_mode_breaker_threshold: u32,
+    #[serde(default = "default_upstream_common_mode_transient_threshold")]
+    pub upstream_common_mode_transient_threshold: u32,
+    #[serde(default = "default_upstream_transient_same_route_retry_enabled")]
+    pub upstream_transient_same_route_retry_enabled: bool,
     #[serde(default = "default_upstream_max_concurrency")]
     pub default_upstream_max_concurrency: u32,
     pub downstream_lease_ttl_seconds: u64,
@@ -229,6 +237,10 @@ impl RuntimeSettings {
             upstream_route_exhaustion_retry_max_rounds: config
                 .upstream_route_exhaustion_retry_max_rounds,
             upstream_common_mode_breaker_threshold: config.upstream_common_mode_breaker_threshold,
+            upstream_common_mode_transient_threshold: config
+                .upstream_common_mode_transient_threshold,
+            upstream_transient_same_route_retry_enabled: config
+                .upstream_transient_same_route_retry_enabled,
             default_upstream_max_concurrency: default_upstream_max_concurrency(),
             downstream_lease_ttl_seconds: config.downstream_lease_ttl_seconds,
             upstream_concurrency_recovery_max_wait_ms: config
@@ -293,6 +305,10 @@ impl RuntimeSettings {
         config.upstream_route_exhaustion_retry_max_rounds =
             self.upstream_route_exhaustion_retry_max_rounds;
         config.upstream_common_mode_breaker_threshold = self.upstream_common_mode_breaker_threshold;
+        config.upstream_common_mode_transient_threshold =
+            self.upstream_common_mode_transient_threshold;
+        config.upstream_transient_same_route_retry_enabled =
+            self.upstream_transient_same_route_retry_enabled;
         config.downstream_lease_ttl_seconds = self.downstream_lease_ttl_seconds;
         config.upstream_concurrency_recovery_max_wait_ms =
             self.upstream_concurrency_recovery_max_wait_ms;
@@ -415,6 +431,12 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_common_mode_breaker_threshold",
                 "must be at most 64 (0 disables the breaker)",
+            ));
+        }
+        if self.upstream_common_mode_transient_threshold > 64 {
+            return Err(invalid(
+                "upstream_common_mode_transient_threshold",
+                "must be at most 64 (0 disables the transient breaker)",
             ));
         }
         if self.downstream_lease_ttl_seconds < 60 {

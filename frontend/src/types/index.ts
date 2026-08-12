@@ -829,6 +829,7 @@ export interface RuntimeSettings {
   upstream_hedge_interval_ms: number
   upstream_hedge_max_extra_attempts: number
   upstream_same_route_retry_enabled: boolean
+  upstream_transient_same_route_retry_enabled: boolean
   upstream_transient_route_cooldown_base_seconds: number
   upstream_transient_route_cooldown_max_seconds: number
   upstream_route_health_half_open_ttl_seconds: number
@@ -836,6 +837,7 @@ export interface RuntimeSettings {
   upstream_route_exhaustion_retry_max_wait_ms: number
   upstream_route_exhaustion_retry_max_rounds: number
   upstream_common_mode_breaker_threshold: number
+  upstream_common_mode_transient_threshold: number
   default_upstream_max_concurrency: number
   downstream_lease_ttl_seconds: number
   upstream_concurrency_recovery_max_wait_ms: number

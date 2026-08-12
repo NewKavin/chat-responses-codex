@@ -224,6 +224,14 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     control: 'switch'
   },
   {
+    key: 'upstream_transient_same_route_retry_enabled',
+    group: 'routing',
+    label: '瞬态 5xx 同路由快速重试',
+    apply: 'immediate',
+    control: 'switch',
+    description: 'TransientServer 502/503/504 在进入 failover 前对同一路由快速重试一次（退避 200–500ms，尊重上游 Retry-After，上限 2s）。'
+  },
+  {
     key: 'upstream_transient_route_cooldown_base_seconds',
     group: 'routing',
     label: '瞬时错误基础冷却',
@@ -283,12 +291,24 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'upstream_common_mode_breaker_threshold',
     group: 'routing',
-    label: '共模失败熔断阈值',
+    label: '请求拒绝共模熔断阈值',
     apply: 'immediate',
     control: 'number',
     unit: '条',
     min: 0,
-    max: 64
+    max: 64,
+    description: 'RequestRejected（请求形状问题）复读熔断：不同路由连续相同失败达到阈值即停止重放。0 禁用。'
+  },
+  {
+    key: 'upstream_common_mode_transient_threshold',
+    group: 'routing',
+    label: '瞬态共模熔断阈值',
+    apply: 'immediate',
+    control: 'number',
+    unit: '条',
+    min: 0,
+    max: 64,
+    description: 'TransientServer/EdgeProxyError（5xx/网关错误）跨不同上游 host 连续相同失败达到阈值时，先延迟重放一轮，仍失败才返回 502 upstream_transient_pool_failure。同 host 多 key 不累计。0 禁用。'
   },
   {
     key: 'default_upstream_max_concurrency',

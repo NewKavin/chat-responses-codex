@@ -193,7 +193,7 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
         body["settings"]["capability_probe_reasoning_timeout_seconds"],
         90
     );
-    assert_eq!(body["settings"].as_object().unwrap().len(), 43);
+    assert_eq!(body["settings"].as_object().unwrap().len(), 45);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

@@ -34,6 +34,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_hedge_interval_ms: 750,
   upstream_hedge_max_extra_attempts: 2,
   upstream_same_route_retry_enabled: true,
+  upstream_transient_same_route_retry_enabled: true,
   upstream_transient_route_cooldown_base_seconds: 5,
   upstream_transient_route_cooldown_max_seconds: 60,
   upstream_route_health_half_open_ttl_seconds: 30,
@@ -41,6 +42,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_route_exhaustion_retry_max_wait_ms: 15_000,
   upstream_route_exhaustion_retry_max_rounds: 3,
   upstream_common_mode_breaker_threshold: 2,
+  upstream_common_mode_transient_threshold: 4,
   default_upstream_max_concurrency: 4,
   downstream_lease_ttl_seconds: 120,
   upstream_concurrency_recovery_max_wait_ms: 30_000,
@@ -79,6 +81,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_hedge_interval_ms',
   'upstream_hedge_max_extra_attempts',
   'upstream_same_route_retry_enabled',
+  'upstream_transient_same_route_retry_enabled',
   'upstream_transient_route_cooldown_base_seconds',
   'upstream_transient_route_cooldown_max_seconds',
   'upstream_route_health_half_open_ttl_seconds',
@@ -86,6 +89,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_route_exhaustion_retry_max_wait_ms',
   'upstream_route_exhaustion_retry_max_rounds',
   'upstream_common_mode_breaker_threshold',
+  'upstream_common_mode_transient_threshold',
   'default_upstream_max_concurrency',
   'downstream_lease_ttl_seconds',
   'upstream_concurrency_recovery_max_wait_ms',
@@ -111,10 +115,10 @@ describe('runtime settings catalog', () => {
       'http',
       'logs'
     ])
-    expect(runtimeSettingFields).toHaveLength(42)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(42)
+    expect(runtimeSettingFields).toHaveLength(44)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(44)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(30)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(32)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(12)
   })
 })

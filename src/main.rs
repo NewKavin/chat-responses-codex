@@ -2,7 +2,8 @@ use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
     ModelKeySyncService, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
-    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
@@ -11,6 +12,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
 };
 use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use chrono::{FixedOffset, Utc};
@@ -213,6 +215,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_common_mode_breaker_threshold: env_u32(
             "UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD",
             DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+        ),
+        upstream_common_mode_transient_threshold: env_u32(
+            "UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD",
+            DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD,
+        ),
+        upstream_transient_same_route_retry_enabled: env_bool(
+            "UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED",
+            DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
         ),
         upstream_concurrency_recovery_max_wait_ms: env_u64(
             "UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS",

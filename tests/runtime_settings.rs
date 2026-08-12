@@ -113,7 +113,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 42);
+    assert_eq!(all.len(), 44);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -128,6 +128,8 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_route_health_half_open_ttl_seconds",
         "upstream_concurrency_recovery_max_wait_ms",
         "upstream_concurrency_probe_delays_ms",
+        "upstream_common_mode_transient_threshold",
+        "upstream_transient_same_route_retry_enabled",
     ] {
         assert!(
             IMMEDIATE_RUNTIME_SETTING_FIELDS.contains(&field),
@@ -371,4 +373,57 @@ fn runtime_settings_round_trip_reasoning_timeout() {
         RuntimeSettings::from_app_config(&config).capability_probe_reasoning_timeout_seconds,
         120
     );
+}
+
+#[test]
+fn runtime_settings_without_transient_breaker_fields_use_canonical_defaults() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("upstream_common_mode_transient_threshold");
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("upstream_transient_same_route_retry_enabled");
+
+    let loaded: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let reserialized = serde_json::to_value(loaded).unwrap();
+
+    assert_eq!(reserialized["upstream_common_mode_transient_threshold"], 4);
+    assert_eq!(
+        reserialized["upstream_transient_same_route_retry_enabled"],
+        true
+    );
+}
+
+#[test]
+fn runtime_settings_reject_transient_threshold_over_64() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    settings.upstream_common_mode_transient_threshold = 65;
+    let error = settings
+        .validate_and_normalize()
+        .expect_err("threshold above 64 must be rejected");
+    assert_eq!(error.field(), "upstream_common_mode_transient_threshold");
+}
+
+#[test]
+fn runtime_settings_round_trip_transient_breaker_tuning() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    assert_eq!(settings.upstream_common_mode_transient_threshold, 4);
+    assert!(settings.upstream_transient_same_route_retry_enabled);
+    settings.upstream_common_mode_transient_threshold = 0;
+    settings.upstream_transient_same_route_retry_enabled = false;
+    let normalized = settings.validate_and_normalize().unwrap();
+
+    let mut config = AppConfig::default();
+    normalized.apply_to_app_config(&mut config);
+    assert_eq!(config.upstream_common_mode_transient_threshold, 0);
+    assert!(!config.upstream_transient_same_route_retry_enabled);
+    assert_eq!(
+        RuntimeSettings::from_app_config(&config).upstream_common_mode_transient_threshold,
+        0
+    );
+    assert!(!RuntimeSettings::from_app_config(&config).upstream_transient_same_route_retry_enabled);
 }
