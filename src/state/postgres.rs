@@ -1153,21 +1153,37 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &upstream.continuation_provider_group,
             &upstream.dialect_preset,
         ];
-        tx.execute(
-            "INSERT INTO upstreams (
-                id, name, base_url, api_key, protocol, protocols, model_contexts,
-                request_quota_5h, default_model_context, request_quota_window_hours, request_quota_requests,
-                requests_per_minute, max_concurrency, priority, premium_only,
-                protect_premium_quota, active, failure_count,
-                auto_managed, managed_source, last_synced_at, api_keys, api_key_models,
-                strip_nonstandard_chat_fields, nonstandard_field_policy, remark, continuation_provider_group, dialect_preset
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7,
-                $8, $9, $10,
-                $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
-            )
-            ON CONFLICT (id) DO UPDATE SET
+        const UPSTREAM_COLUMNS: [&str; 28] = [
+            "id",
+            "name",
+            "base_url",
+            "api_key",
+            "protocol",
+            "protocols",
+            "model_contexts",
+            "request_quota_5h",
+            "default_model_context",
+            "request_quota_window_hours",
+            "request_quota_requests",
+            "requests_per_minute",
+            "max_concurrency",
+            "priority",
+            "premium_only",
+            "protect_premium_quota",
+            "active",
+            "failure_count",
+            "auto_managed",
+            "managed_source",
+            "last_synced_at",
+            "api_keys",
+            "api_key_models",
+            "strip_nonstandard_chat_fields",
+            "nonstandard_field_policy",
+            "remark",
+            "continuation_provider_group",
+            "dialect_preset",
+        ];
+        const UPSTREAM_INSERT_CONFLICT: &str = "ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
                 base_url = EXCLUDED.base_url,
                 api_key = EXCLUDED.api_key,
@@ -1194,11 +1210,10 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 nonstandard_field_policy = EXCLUDED.nonstandard_field_policy,
                 remark = EXCLUDED.remark,
                 continuation_provider_group = EXCLUDED.continuation_provider_group,
-                dialect_preset = EXCLUDED.dialect_preset",
-            params,
-        )
-        .await
-        .map_err(io_other)?;
+                dialect_preset = EXCLUDED.dialect_preset";
+        debug_assert_eq!(UPSTREAM_COLUMNS.len(), params.len());
+        let sql = insert_statement("upstreams", &UPSTREAM_COLUMNS, UPSTREAM_INSERT_CONFLICT);
+        tx.execute(&sql, params).await.map_err(io_other)?;
 
         tx.execute(
             "DELETE FROM upstream_supported_models WHERE upstream_id = $1",
@@ -1294,19 +1309,26 @@ async fn sync_downstreams(
             &daily_cost_limit_cents,
         ];
 
-        tx.execute(
-            "INSERT INTO downstreams (
-                id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit,
-                max_concurrency, daily_token_limit, monthly_token_limit,
-                request_quota_window_hours, request_quota_requests, expires_at, active,
-                billing_mode, input_token_price_per_million_cents,
-                output_token_price_per_million_cents, daily_cost_limit_cents
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, $9,
-                $10, $11, $12, $13, $14, $15, $16, $17
-            )
-            ON CONFLICT (id) DO UPDATE SET
+        const DOWNSTREAM_COLUMNS: [&str; 17] = [
+            "id",
+            "name",
+            "hash",
+            "plaintext_key",
+            "rate_limit_enabled",
+            "per_minute_limit",
+            "max_concurrency",
+            "daily_token_limit",
+            "monthly_token_limit",
+            "request_quota_window_hours",
+            "request_quota_requests",
+            "expires_at",
+            "active",
+            "billing_mode",
+            "input_token_price_per_million_cents",
+            "output_token_price_per_million_cents",
+            "daily_cost_limit_cents",
+        ];
+        const DOWNSTREAM_INSERT_CONFLICT: &str = "ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
                 hash = EXCLUDED.hash,
                 plaintext_key = EXCLUDED.plaintext_key,
@@ -1322,11 +1344,14 @@ async fn sync_downstreams(
                 billing_mode = EXCLUDED.billing_mode,
                 input_token_price_per_million_cents = EXCLUDED.input_token_price_per_million_cents,
                 output_token_price_per_million_cents = EXCLUDED.output_token_price_per_million_cents,
-                daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents",
-            params,
-        )
-        .await
-        .map_err(io_other)?;
+                daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents";
+        debug_assert_eq!(DOWNSTREAM_COLUMNS.len(), params.len());
+        let sql = insert_statement(
+            "downstreams",
+            &DOWNSTREAM_COLUMNS,
+            DOWNSTREAM_INSERT_CONFLICT,
+        );
+        tx.execute(&sql, params).await.map_err(io_other)?;
 
         tx.execute(
             "DELETE FROM downstream_model_allowlist WHERE downstream_id = $1",
@@ -1980,4 +2005,24 @@ fn decode_nonstandard_field_policy(policy: String, legacy: bool) -> NonstandardF
             }
         }
     }
+}
+
+/// Builds an INSERT statement with one `$n` placeholder per column, so the
+/// placeholder list can never drift from the column list by hand. `columns`
+/// must be non-empty; the caller pairs every column with exactly one bound
+/// parameter and should `debug_assert_eq!(columns.len(), params.len())`.
+#[doc(hidden)]
+pub fn insert_statement(table: &str, columns: &[&str], conflict_clause: &str) -> String {
+    assert!(
+        !columns.is_empty(),
+        "insert_statement requires at least one column"
+    );
+    let placeholders = (1..=columns.len())
+        .map(|index| format!("${index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {table} (\n    {}\n) VALUES (\n    {placeholders}\n)\n{conflict_clause}",
+        columns.join(", "),
+    )
 }

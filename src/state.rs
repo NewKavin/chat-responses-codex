@@ -23,6 +23,14 @@ mod file_store;
 pub mod log_queries;
 #[path = "state/postgres.rs"]
 mod postgres;
+
+/// Test-only seam: builds an INSERT statement with one `$n` placeholder per
+/// column so the placeholder list can never drift from the column list by
+/// hand. Exposed for integration tests (the state module lives in the
+/// gateway-core dependency crate, whose `#[cfg(test)]` items are not compiled
+/// by the root package's test run).
+#[doc(hidden)]
+pub use postgres::insert_statement;
 #[path = "state/redis_runtime.rs"]
 mod redis_runtime;
 #[path = "state/store.rs"]
