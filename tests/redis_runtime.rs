@@ -2572,6 +2572,217 @@ async fn redis_route_health_cooldown_and_half_open_owner_are_shared() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_probe_ignores_cooldown_and_is_single_flight() {
+    // A3 Redis backend: while the route is cooling, the last-resort probe API
+    // ignores the remaining cooldown and grants a single-flight half-open
+    // lease; a second caller is busy until the first finishes, and a
+    // successful probe clears the cooldown entirely.
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("early-probe-upstream", "fingerprint-a");
+    let route = redis_test_health_route("early-probe-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    // Default tuning observes a long cooldown; a normal reserve must refuse.
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    let permit = match first
+        .reserve_route_health_probe(&route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    // Single-flight: the second early probe on the same route is busy while
+    // the lease is active, even though the cooldown has not elapsed.
+    assert!(matches!(
+        second
+            .reserve_route_health_probe(&route, &key)
+            .await
+            .unwrap(),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // A successful probe clears the cooldown and the route is healthy again:
+    // the Redis backend drops the route hash entirely, so the snapshot is
+    // gone and a normal reserve is ready immediately.
+    permit.finish(RouteOutcome::Success).await.unwrap();
+    assert!(first
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(permit) if !permit.is_half_open()
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_probe_enforces_one_second_interval_per_route() {
+    // A3 Redis backend: after an early probe (even a cancelled one) the same
+    // route refuses another early probe for ~1s; normal reserves stay cooling
+    // during the window and a fresh probe is granted after it.
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("early-probe-interval-upstream", "fingerprint-a");
+    let route = redis_test_health_route("early-probe-interval-upstream", "fingerprint-a", "model-a");
+
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+
+    let first = match state
+        .reserve_route_health_probe(&route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    // Released without a physical attempt: the interval still applies.
+    first.finish(RouteOutcome::Cancelled).await.unwrap();
+
+    let busy = match state
+        .reserve_route_health_probe(&route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::HalfOpenBusy { retry_after, .. } => retry_after,
+        other => panic!("expected interval-busy, got {other:?}"),
+    };
+    assert!(
+        busy <= Duration::from_secs(1),
+        "interval refusal must report the remaining 1s window, got {busy:?}"
+    );
+    assert!(matches!(
+        state.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(matches!(
+        state
+            .reserve_route_health_probe(&route, &key)
+            .await
+            .unwrap(),
+        RouteAvailability::Ready(permit) if permit.is_half_open()
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_probe_failure_stays_capped_and_keeps_interval() {
+    // A3 Redis backend: a failing early probe follows the half-open failure
+    // path: the step stays capped and the 1s probe window stays armed for the
+    // next caller.
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("early-probe-capped-upstream", "fingerprint-a");
+    let route = redis_test_health_route("early-probe-capped-upstream", "fingerprint-a", "model-a");
+
+    // Seed a step of 5 through independent failures; a probe failure must not
+    // push it to 6.
+    for _ in 0..5 {
+        state
+            .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+            .await
+            .unwrap();
+    }
+    let seeded = state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("seeded route health must exist");
+    assert_eq!(seeded.consecutive_failures, 5);
+
+    let permit = match state
+        .reserve_route_health_probe(&route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    permit
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: Some(502),
+            repeat_within_request: false,
+        })
+        .await
+        .unwrap();
+    let snapshot = state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("route health must survive a failed probe");
+    assert_eq!(
+        snapshot.consecutive_failures, 5,
+        "an early probe failure must stay capped at the half-open step"
+    );
+    assert!(snapshot.cooldown_remaining > Duration::ZERO);
+
+    // The interval persists after the failed probe: no immediate re-probe.
+    assert!(matches!(
+        state
+            .reserve_route_health_probe(&route, &key)
+            .await
+            .unwrap(),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_probe_refuses_when_key_cooling_or_route_healthy() {
+    // A3 Redis backend guards: a cooling key (credentials/quota quarantine)
+    // must not be probed, and a route without health state has nothing to
+    // probe.
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("early-probe-guards-upstream", "fingerprint-a");
+    let route = redis_test_health_route("early-probe-guards-upstream", "fingerprint-a", "model-a");
+
+    // No route health state: nothing to probe.
+    let refusal = match state
+        .reserve_route_health_probe(&route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::Cooling { retry_after, .. } => retry_after,
+        other => panic!("expected refusal for a route without health state, got {other:?}"),
+    };
+    assert!(refusal.is_zero());
+
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    state
+        .observe_key_failure(&key, RouteFailureClass::Credentials, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        state
+            .reserve_route_health_probe(&route, &key)
+            .await
+            .unwrap(),
+        RouteAvailability::Cooling { .. }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn route_reservation_self_heals_only_legacy_local_admission_cooldown() {
     let config = redis_test_config();
     let (state, _second, _directory) = redis_test_states(&config).await;

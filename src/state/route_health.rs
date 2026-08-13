@@ -269,6 +269,12 @@ struct HealthState {
     cooldown_until: Option<Instant>,
     half_open_generation: Option<u64>,
     half_open_expires_at: Option<Instant>,
+    /// When the last last-resort early probe was granted for this route
+    /// (A3).  Early probes are single-flight (the half-open lease) and
+    /// rate-limited to one per second per route to avoid hammering a
+    /// cooling upstream; the timestamp survives cancelled/failed probes and
+    /// is cleared together with the rest of the state on success.
+    last_early_probe_at: Option<Instant>,
     state_generation: u64,
     last_access: Instant,
 }
@@ -283,6 +289,7 @@ impl HealthState {
             cooldown_until: None,
             half_open_generation: None,
             half_open_expires_at: None,
+            last_early_probe_at: None,
             state_generation: 0,
             last_access: now,
         }
@@ -313,6 +320,7 @@ impl HealthState {
         self.cooldown_until = None;
         self.half_open_generation = None;
         self.half_open_expires_at = None;
+        self.last_early_probe_at = None;
         self.last_access = now;
     }
 
@@ -705,6 +713,115 @@ impl RouteHealthRegistry {
             route_generation,
             route_state_generation,
             half_open: key_generation.is_some() || route_generation.is_some(),
+        })
+    }
+
+    /// Reserve a single-flight half-open lease for an *early* probe of a
+    /// cooling route, ignoring the remaining cooldown (A3 last-resort probe).
+    ///
+    /// Used only when a whole routing round ended with zero physical attempts
+    /// because every candidate was cooling with a transient-family failure.
+    /// The route's cooldown is deliberately not consulted; instead the call
+    /// is gated by:
+    /// - the key must not itself be cooling (credentials/quota quarantines
+    ///   are not probeable route outages),
+    /// - the existing half-open single-flight lease (one probe at a time per
+    ///   route),
+    /// - a per-route minimum interval of `HALF_OPEN_BUSY_RETRY` (1s) between
+    ///   early probes (`last_early_probe_at`), aligned with the optimistic
+    ///   half-open poll interval.
+    ///
+    /// On success the caller finishes the lease with the regular half-open
+    /// success path (clears the cooldown); on failure the regular half-open
+    /// failure path applies (`ROUTE_HALF_OPEN_FAILURE_STEP_CAP` plus the
+    /// A1 in-request suppression).
+    pub fn reserve_route_health_probe(
+        &mut self,
+        route: &RouteHealthKey,
+        key: &KeyHealthKey,
+    ) -> RouteAvailability<HealthLease> {
+        debug_assert_eq!(route.upstream_id, key.upstream_id);
+        debug_assert_eq!(route.key_fingerprint, key.key_fingerprint);
+        let now = Instant::now();
+
+        if let Some(state) = self.keys.get_mut(key) {
+            state.last_access = now;
+            if state.is_cooling(now) {
+                return RouteAvailability::Cooling {
+                    class: state
+                        .last_failure_class
+                        .expect("cooling key health must retain its failure class"),
+                    retry_after: state.retry_after(now),
+                    upstream_status: state.last_failure_status,
+                };
+            }
+            if state.is_active(now) {
+                return RouteAvailability::HalfOpenBusy {
+                    class: state
+                        .last_failure_class
+                        .expect("half-open key health must retain its failure class"),
+                    retry_after: HALF_OPEN_BUSY_RETRY,
+                    upstream_status: state.last_failure_status,
+                };
+            }
+        }
+
+        let Some(state) = self.routes.get_mut(route) else {
+            // No health state: nothing is cooling for this route, so there is
+            // nothing a last-resort probe could verify.
+            return RouteAvailability::Cooling {
+                class: RouteFailureClass::TransientServer,
+                retry_after: Duration::ZERO,
+                upstream_status: None,
+            };
+        };
+        state.last_access = now;
+        let class = state
+            .last_failure_class
+            .expect("cooling route health must retain its failure class");
+        let upstream_status = state.last_failure_status;
+        if state.is_active(now) {
+            return RouteAvailability::HalfOpenBusy {
+                class,
+                retry_after: HALF_OPEN_BUSY_RETRY,
+                upstream_status,
+            };
+        }
+        if !state.is_cooling(now) {
+            // Not cooling: a normal reserve already covers this route; the
+            // early-probe API is only meaningful for cooling routes.
+            return RouteAvailability::Cooling {
+                class,
+                retry_after: Duration::ZERO,
+                upstream_status,
+            };
+        }
+        if let Some(last_probe) = state.last_early_probe_at {
+            let elapsed = now.duration_since(last_probe);
+            if elapsed < HALF_OPEN_BUSY_RETRY {
+                return RouteAvailability::HalfOpenBusy {
+                    class,
+                    retry_after: (HALF_OPEN_BUSY_RETRY - elapsed)
+                        .max(Duration::from_millis(1)),
+                    upstream_status,
+                };
+            }
+        }
+
+        let route_state_generation = Some(state.state_generation);
+        let key_generation = self.reserve_expired_half_open_key(key, now);
+        let route_generation = self.next_generation();
+        let state = self.routes.get_mut(route).expect("route state must exist");
+        state.half_open_generation = Some(route_generation);
+        state.half_open_expires_at = Some(now + self.half_open_ttl);
+        state.last_early_probe_at = Some(now);
+        RouteAvailability::Ready(HealthLease {
+            route: route.clone(),
+            key: key.clone(),
+            key_generation,
+            route_generation: Some(route_generation),
+            route_state_generation,
+            half_open: true,
         })
     }
 

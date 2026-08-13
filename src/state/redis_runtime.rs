@@ -1330,6 +1330,45 @@ impl RedisRuntimeCoordinator {
         result
     }
 
+    /// Reserve a single-flight half-open lease for an *early* probe of a
+    /// cooling route, ignoring the remaining cooldown (A3 last-resort probe).
+    /// Mirrors `reserve_route_health` for key blocking, adds a per-route
+    /// minimum interval between early probes (`last_early_probe_ms`) and
+    /// records the probe timestamp on the route state hash.  The regular
+    /// reserve script's concurrency legacy-admission cleanup does not apply:
+    /// early probes only ever target transient-family routes.
+    pub(super) async fn reserve_route_health_probe(
+        &self,
+        route: &RouteHealthKey,
+        key: &KeyHealthKey,
+        lease_id: &str,
+    ) -> Result<RouteAvailability<RedisHealthLease>, RuntimeCoordinationError> {
+        let key_state = self.key_health_state_key(key);
+        let route_state = self.route_health_state_key(route);
+        let mut connection = self.connection();
+        let script = redis::Script::new(include_str!("redis_runtime/route_health_probe.lua"));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(key_state)
+            .key(route_state)
+            .key(self.health_index_key(&key.upstream_id, "keys"))
+            .key(self.health_index_key(&route.upstream_id, "routes"))
+            .key(self.health_global_index_key("keys"))
+            .key(self.health_global_index_key("routes"))
+            .arg(lease_id)
+            .arg(self.tuning_snapshot().route_health_ttl_seconds)
+            .arg(self.tuning_snapshot().route_health_half_open_ttl_ms)
+            // Aligned with HALF_OPEN_BUSY_RETRY (the optimistic half-open
+            // poll interval): one early probe per route per second.
+            .arg(1000u64);
+        let result =
+            timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
+        if result.is_err() {
+            let _ = self.refresh_manager().await;
+        }
+        parse_route_health_reservation(result?, route, key, lease_id)
+    }
+
     pub(super) async fn reserve_route_health(
         &self,
         route: &RouteHealthKey,
@@ -2249,8 +2288,7 @@ fn parse_route_health_reservation(
             let retry_after = Duration::from_millis(
                 result[2]
                     .parse::<u64>()
-                    .map_err(|_| RuntimeCoordinationError)?
-                    .max(1),
+                    .map_err(|_| RuntimeCoordinationError)?,
             );
             let upstream_status = parse_optional_status(result.get(3))?;
             if result.first().map(String::as_str) == Some("1") {

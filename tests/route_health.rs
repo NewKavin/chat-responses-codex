@@ -1060,3 +1060,148 @@ async fn edge_proxy_error_cools_briefly_and_never_escalates_streak() {
         second.cooldown_remaining
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn reserve_route_health_probe_ignores_cooldown_and_is_single_flight() {
+    // A3: while a route is cooling, the last-resort probe API ignores the
+    // remaining cooldown and grants a single-flight half-open lease; a second
+    // caller is busy until the first finishes, and a successful probe clears
+    // the cooldown entirely.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let route = route("early-probe-single-flight", "glm-5.2");
+    let key = key("early-probe-single-flight");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    let lease = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    // Single-flight: the second early probe on the same route is busy while
+    // the lease is active, even though the cooldown has not elapsed.
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // A successful probe clears the cooldown and the route is healthy again:
+    // the entry stays (local registry keeps cleared entries) but the failure
+    // streak is reset and normal reserves are ready immediately.
+    registry.finish(lease, RouteOutcome::Success);
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(snapshot.consecutive_failures, 0);
+    assert!(snapshot.cooldown_remaining.is_zero());
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reserve_route_health_probe_enforces_one_second_interval_per_route() {
+    // A3: after an early probe (even a cancelled one) the same route refuses
+    // another early probe for HALF_OPEN_BUSY_RETRY (1s); normal reserves stay
+    // cooling during the window and a fresh probe is granted after it.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let route = route("early-probe-interval", "glm-5.2");
+    let key = key("early-probe-interval");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+
+    let first = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    // Released without a physical attempt: the interval still applies.
+    registry.finish(first, RouteOutcome::Cancelled);
+
+    let busy = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::HalfOpenBusy { retry_after, .. } => retry_after,
+        other => panic!("expected interval-busy, got {other:?}"),
+    };
+    assert!(
+        busy <= Duration::from_secs(1),
+        "interval refusal must report the remaining 1s window, got {busy:?}"
+    );
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::Ready(lease) if lease.is_half_open()
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
+    // A3: a failing early probe follows the half-open failure path: the step
+    // cannot exceed ROUTE_HALF_OPEN_FAILURE_STEP_CAP and the 1s probe window
+    // stays armed for the next caller.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let route = route("early-probe-capped-step", "glm-5.2");
+    let key = key("early-probe-capped-step");
+
+    // Seed a step of 5 through independent failures; a probe failure must not
+    // push it to 6.
+    for _ in 0..5 {
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    }
+    let seeded = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(seeded.consecutive_failures, 5);
+
+    let lease = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    registry.finish(
+        lease,
+        RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: Some(502),
+            repeat_within_request: false,
+        },
+    );
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.consecutive_failures, 5,
+        "an early probe failure must stay capped at the half-open step"
+    );
+    assert!(snapshot.cooldown_remaining > Duration::ZERO);
+
+    // The interval persists after the failed probe: no immediate re-probe.
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reserve_route_health_probe_refuses_when_key_cooling_or_route_healthy() {
+    // A3 guards: a cooling key (credentials/quota quarantine) must not be
+    // probed, and a route without health state has nothing to probe.
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("early-probe-guards", "glm-5.2");
+    let key = key("early-probe-guards");
+
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+}

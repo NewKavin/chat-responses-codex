@@ -1436,6 +1436,74 @@ impl AppState {
         }
     }
 
+    /// Reserve a single-flight half-open lease for an *early* probe of a
+    /// cooling route, ignoring the remaining cooldown (A3 last-resort probe).
+    /// Backed by the Redis `route_health_probe` script when runtime
+    /// coordination is Redis-backed and by the local registry otherwise; both
+    /// backends behave identically.
+    pub async fn reserve_route_health_probe(
+        &self,
+        route: &RouteHealthKey,
+        key: &KeyHealthKey,
+    ) -> Result<RouteAvailability<RouteHealthPermit>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let availability = coordinator
+                .reserve_route_health_probe(route, key, &Uuid::new_v4().to_string())
+                .await?;
+            return Ok(match availability {
+                RouteAvailability::Ready(lease) => RouteAvailability::Ready(
+                    RouteHealthPermit::new_redis(coordinator.clone(), lease),
+                ),
+                RouteAvailability::Cooling {
+                    class,
+                    retry_after,
+                    upstream_status,
+                } => RouteAvailability::Cooling {
+                    class,
+                    retry_after,
+                    upstream_status,
+                },
+                RouteAvailability::HalfOpenBusy {
+                    class,
+                    retry_after,
+                    upstream_status,
+                } => RouteAvailability::HalfOpenBusy {
+                    class,
+                    retry_after,
+                    upstream_status,
+                },
+            });
+        }
+        let availability = self
+            .route_health
+            .lock()
+            .await
+            .reserve_route_health_probe(route, key);
+        Ok(match availability {
+            RouteAvailability::Ready(lease) => RouteAvailability::Ready(
+                RouteHealthPermit::new_local(self.route_health.clone(), lease),
+            ),
+            RouteAvailability::Cooling {
+                class,
+                retry_after,
+                upstream_status,
+            } => RouteAvailability::Cooling {
+                class,
+                retry_after,
+                upstream_status,
+            },
+            RouteAvailability::HalfOpenBusy {
+                class,
+                retry_after,
+                upstream_status,
+            } => RouteAvailability::HalfOpenBusy {
+                class,
+                retry_after,
+                upstream_status,
+            },
+        })
+    }
+
     pub async fn reserve_route_health(
         &self,
         route: &RouteHealthKey,
