@@ -4674,7 +4674,7 @@ async fn process_gateway_request_inner(
         && routing_snapshot.upstreams.iter().any(|upstream| {
             upstream.active
                 && upstream.supports_protocol(UpstreamProtocol::Responses)
-                && upstream.supports_model_with(model, case_insensitive)
+                && upstream.supports_model_with(&normalized_model, case_insensitive)
         });
     let chat_only_responses_fallback =
         endpoint == EndpointKind::Responses && !responses_upstream_available;
@@ -4772,7 +4772,7 @@ async fn process_gateway_request_inner(
     let route_capability_cache = build_request_route_capability_cache_with_hints(
         &capability_snapshot,
         &routing_snapshot.upstreams,
-        model,
+        &normalized_model,
         endpoint,
         &requested_features,
         &runtime_capability_hints,
@@ -4794,9 +4794,9 @@ async fn process_gateway_request_inner(
             for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
                 upstream.active
                     && upstream.id == continuation.profile_key().upstream_id
-                    && upstream.supports_model_with(model, case_insensitive)
+                    && upstream.supports_model_with(&normalized_model, case_insensitive)
             }) {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -4878,9 +4878,9 @@ async fn process_gateway_request_inner(
         if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
             let mut eligible_profiles = Vec::new();
             for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
-                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
+                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(&normalized_model, case_insensitive)
             }) {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -4915,7 +4915,7 @@ async fn process_gateway_request_inner(
     let route_profile_constraint_active = continuation_profile_key.is_some();
     let route_matches_profile_constraint =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
-            let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+            let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                 return false;
             };
             if let Some(continuation) = exact_continuation.as_ref() {
@@ -5041,10 +5041,10 @@ async fn process_gateway_request_inner(
     }
     let required_route_available = if route_profile_constraint_active {
         routing_snapshot.upstreams.iter().any(|upstream| {
-            if !upstream.active || !upstream.supports_model_with(model, case_insensitive) {
+            if !upstream.active || !upstream.supports_model_with(&normalized_model, case_insensitive) {
                 return false;
             }
-            let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+            let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                 return false;
             };
             route_api_keys(upstream, &runtime_model_slug, case_insensitive)
@@ -5067,7 +5067,7 @@ async fn process_gateway_request_inner(
             } => routing_snapshot.upstreams.iter().any(|upstream| {
                 upstream.active
                     && upstream.id == *upstream_id
-                    && upstream.supports_model_with(model, case_insensitive)
+                    && upstream.supports_model_with(&normalized_model, case_insensitive)
                     && upstream.supports_protocol(*protocol)
                     && route_capability(upstream, key_fingerprint, *protocol)
                         .is_some_and(|route| route.eligible)
@@ -5076,13 +5076,13 @@ async fn process_gateway_request_inner(
                 let has_configured_route = routing_snapshot
                     .upstreams
                     .iter()
-                    .any(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive));
+                    .any(|upstream| upstream.active && upstream.supports_model_with(&normalized_model, case_insensitive));
                 !has_configured_route
                     || routing_snapshot.upstreams.iter().any(|upstream| {
-                        if !upstream.active || !upstream.supports_model_with(model, case_insensitive) {
+                        if !upstream.active || !upstream.supports_model_with(&normalized_model, case_insensitive) {
                             return false;
                         }
-                        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+                        let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                             return false;
                         };
                         route_api_keys(upstream, &runtime_model_slug, case_insensitive)
@@ -5145,9 +5145,9 @@ async fn process_gateway_request_inner(
                 for upstream in routing_snapshot
                     .upstreams
                     .iter()
-                    .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
+                    .filter(|upstream| upstream.active && upstream.supports_model_with(&normalized_model, case_insensitive))
                 {
-                    let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+                    let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                         continue;
                     };
                     if runtime_model_slug != profile_key.runtime_model_slug {
@@ -5269,7 +5269,7 @@ async fn process_gateway_request_inner(
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
             upstream.active
                 && upstream.supports_protocol(protocol)
-                && upstream.supports_model_with(model, case_insensitive)
+                && upstream.supports_model_with(&normalized_model, case_insensitive)
                 && route_matches_profile_constraint(upstream, key_fingerprint, protocol)
                 && (matches!(&claude_replay_route, ClaudeThinkingReplayRoute::NoReplay)
                     || matches!(
@@ -5286,7 +5286,7 @@ async fn process_gateway_request_inner(
                     .is_some_and(|route| route.eligible)
         };
     let upstream_has_candidate_route = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+        let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
             return false;
         };
         route_api_keys(upstream, &runtime_model_slug, case_insensitive)
@@ -5306,7 +5306,7 @@ async fn process_gateway_request_inner(
         let mut miss_tiers = std::collections::BTreeSet::new();
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -5353,14 +5353,14 @@ async fn process_gateway_request_inner(
             .upstreams
             .iter()
             .any(|upstream| {
-                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
+                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(&normalized_model, case_insensitive)
             })
             .then(|| upstream_id.to_string())
     } else if runtime_settings.routing_affinity_enabled {
         match state.get_affinity_upstream(&downstream.id, &normalized_model) {
             Some(upstream_id)
                 if routing_snapshot.upstreams.iter().any(|upstream| {
-                    upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
+                    upstream.active && upstream.id == upstream_id && upstream.supports_model_with(&normalized_model, case_insensitive)
                 }) =>
             {
                 Some(upstream_id)
@@ -5403,7 +5403,7 @@ async fn process_gateway_request_inner(
 
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -5427,7 +5427,7 @@ async fn process_gateway_request_inner(
 
         'candidate_passes: for (optional_miss_tier, protocol) in candidate_passes.iter().copied() {
             let upstream_optional_misses = |upstream: &UpstreamConfig| {
-                let runtime_model_slug = upstream.resolved_model_name_with(model, case_insensitive)?;
+                let runtime_model_slug = upstream.resolved_model_name_with(&normalized_model, case_insensitive)?;
                 route_api_keys(upstream, &runtime_model_slug, case_insensitive)
                     .into_iter()
                     .filter_map(|api_key| {
@@ -5453,7 +5453,7 @@ async fn process_gateway_request_inner(
                 .collect::<Vec<_>>();
             let mut deprioritized_upstreams = Vec::new();
             upstreams.retain(|upstream| {
-                let is_non_premium_request = !upstream.is_premium_model_request_with(model, case_insensitive);
+                let is_non_premium_request = !upstream.is_premium_model_request_with(&normalized_model, case_insensitive);
                 let should_deprioritize = upstream.protect_premium_quota
                     && !upstream.premium_models.is_empty()
                     && is_non_premium_request;
@@ -5674,7 +5674,7 @@ async fn process_gateway_request_inner(
                     upstream.request_quota_requests,
                     request_cost,
                     upstream.protect_premium_quota,
-                    upstream.is_premium_model_request_with(model, case_insensitive)
+                    upstream.is_premium_model_request_with(&normalized_model, case_insensitive)
                 )
             })
             .collect::<Vec<_>>();
@@ -5699,7 +5699,7 @@ async fn process_gateway_request_inner(
                 let minute_cost = runtime.minute_cost + request_cost;
                 let five_hour_cost = runtime.five_hour_cost + request_cost;
                 let Some(runtime_model_slug) =
-                    upstream.resolved_model_name_with(model, case_insensitive)
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)
                 else {
                     continue;
                 };
@@ -6236,7 +6236,7 @@ async fn process_gateway_request_inner(
                                     .skip(upstream_index + 1)
                                     .filter_map(|candidate| {
                                         let runtime_model_slug = candidate
-                                            .resolved_model_name_with(model, case_insensitive)?;
+                                            .resolved_model_name_with(&normalized_model, case_insensitive)?;
                                         route_api_keys(
                                             candidate,
                                             &runtime_model_slug,
@@ -6494,7 +6494,7 @@ async fn process_gateway_request_inner(
                                         if let Err(error) = state
                                             .learn_stream_only_route(
                                                 profile_key,
-                                                model,
+                                                &normalized_model,
                                                 configuration_fingerprint,
                                             )
                                             .await
@@ -6585,7 +6585,7 @@ async fn process_gateway_request_inner(
                                         .find(|candidate| candidate.id == selected_upstream_id)
                                     {
                                         if let Some(selected_runtime_model) =
-                                            selected_upstream.resolved_model_name_with(model, case_insensitive)
+                                            selected_upstream.resolved_model_name_with(&normalized_model, case_insensitive)
                                         {
                                             clear_runtime_capability_hints_for_success(
                                                 &state,

@@ -3173,7 +3173,7 @@ impl AppState {
             WireProtocol::Messages => return Ok(false),
         };
         if !upstream.supports_model(exposed_model_slug)
-            || !upstream.supports_model(&key.runtime_model_slug)
+            || !upstream.supports_stored_model(&key.runtime_model_slug)
         {
             return Ok(false);
         }
@@ -3274,7 +3274,7 @@ impl AppState {
             WireProtocol::Messages => return Ok(false),
         };
         if !upstream.supports_model(exposed_model_slug)
-            || !upstream.supports_model(&key.runtime_model_slug)
+            || !upstream.supports_stored_model(&key.runtime_model_slug)
         {
             return Ok(false);
         }

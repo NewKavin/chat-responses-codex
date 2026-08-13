@@ -1354,8 +1354,14 @@ pub(super) async fn send_to_upstream(
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
-    let mut final_upstream_model =
-        upstream.resolved_model_name(request_model).ok_or_else(|| {
+    // Resolve the wire model from the routing key (normalized downstream
+    // name) first: per-upstream model mappings rename the downstream view and
+    // the original spelling is shadowed (Part B-3 3.3.3). The raw body model
+    // remains the fallback for bodies that already carry a routable spelling.
+    let mut final_upstream_model = upstream
+        .resolved_model_name(normalized_model)
+        .or_else(|| upstream.resolved_model_name(request_model))
+        .ok_or_else(|| {
             GatewayError::BadRequest(format!(
                 "model \"{request_model}\" is not configured for upstream \"{}\"",
                 upstream.name

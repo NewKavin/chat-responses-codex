@@ -219,19 +219,38 @@ impl UpstreamConfig {
         }
 
         let model = model.trim();
-        !model.is_empty()
-            && self.premium_models.iter().any(|premium| {
+        if model.is_empty() {
+            return false;
+        }
+
+        let matches = |candidate: &str| {
+            self.premium_models.iter().any(|premium| {
                 let premium = premium.trim();
                 if case_insensitive {
-                    super::models_equivalent_with(premium, model, true)
-                        || super::codex_subagent_base_model(model).is_some_and(|base| {
+                    super::models_equivalent_with(premium, candidate, true)
+                        || super::codex_subagent_base_model(candidate).is_some_and(|base| {
                             super::models_equivalent_with(premium, base, true)
                         })
                 } else {
-                    premium == model
-                        || super::codex_subagent_base_model(model).is_some_and(|base| premium == base)
+                    premium == candidate
+                        || super::codex_subagent_base_model(candidate)
+                            .is_some_and(|base| premium == base)
                 }
             })
+        };
+
+        // Per-upstream model mappings rename the downstream view: premium is
+        // judged against the upstream's original spelling (3.3.3). Upstream A
+        // with premium_models ["gpt-4"] and mapping gpt-4 -> gpt-4-premium
+        // counts requests for "gpt-4-premium" as premium requests.
+        if let Some(resolved) = self.canonical_route_model(model, case_insensitive) {
+            if matches(&resolved) {
+                return true;
+            }
+        }
+        // Legacy fallback: upstreams that cannot resolve this request keep the
+        // raw-name comparison (quota-protection decisions are per-upstream).
+        matches(model)
     }
     pub fn request_quota_window_seconds(&self) -> u64 {
         u64::from(self.request_quota_window_hours.max(1)).saturating_mul(60 * 60)
@@ -433,20 +452,73 @@ impl UpstreamConfig {
         }
 
         let route_models = self.route_models();
+
+        // 3.3.1: per-upstream model mappings win over case folding. The
+        // mapping key is the downstream-facing name; the resolved value is the
+        // upstream's *stored* spelling, which every upstream-side check
+        // (payload model, RouteHealthKey.runtime_model_slug, premium,
+        // ModelContextConfig.slug, keys) then uses.
+        for mapping in &self.model_mappings {
+            let downstream = mapping.downstream_model.trim();
+            let matches = if case_insensitive {
+                super::models_equivalent_with(downstream, model, true)
+            } else {
+                downstream == model
+            };
+            if !matches {
+                continue;
+            }
+            let upstream = mapping.upstream_model.trim();
+            if upstream.is_empty() {
+                continue;
+            }
+            if let Some(stored) =
+                super::find_equivalent_stored(&route_models, upstream, case_insensitive)
+            {
+                return Some(stored.to_string());
+            }
+            // Stale mapping: the upstream_model is not in any current model
+            // list (model sync may have removed it). Skip the mapping; the
+            // fallback below still runs, and it revives automatically once
+            // the model is restored without any config change.
+            tracing::warn!(
+                upstream_id = %self.id,
+                upstream_model = %upstream,
+                downstream_model = %downstream,
+                "stale model mapping skipped: upstream_model is not in the upstream's model lists (removed-model)"
+            );
+            continue;
+        }
+
+        // 3.3.2: fall back to canonical case folding, but never resolve a
+        // model name that a mapping has claimed as the upstream side (rename
+        // semantics: the original spelling is shadowed downstream).
+        let occupied = self
+            .model_mappings
+            .iter()
+            .map(|mapping| super::canonical_model_id(mapping.upstream_model.trim()))
+            .collect::<HashSet<_>>();
+        let unoccupied = |candidate: &&String| {
+            !occupied.contains(&super::canonical_model_id(candidate))
+        };
+
         if route_models.is_empty() {
             return super::codex_subagent_base_model(model)
                 .is_none()
                 .then(|| model.to_string());
         }
 
-        if case_insensitive {
-            // The first canonical match wins, including when a later entry is
-            // an exact-case match. This keeps runtime spelling deterministic
-            // when one upstream lists case-only duplicates.
-            if let Some(candidate) = super::find_equivalent_stored(&route_models, model, true) {
-                return Some(candidate.to_string());
-            }
-        } else if let Some(candidate) = super::find_equivalent_stored(&route_models, model, false) {
+        if let Some(candidate) = route_models
+            .iter()
+            .filter(unoccupied)
+            .find(|candidate| {
+                if case_insensitive {
+                    super::models_equivalent_with(candidate, model, true)
+                } else {
+                    candidate.trim() == model
+                }
+            })
+        {
             return Some(candidate.to_string());
         }
 
@@ -458,7 +530,7 @@ impl UpstreamConfig {
                     candidate == &base_model
                 }
             };
-            if let Some(candidate) = route_models.iter().find(base_matches) {
+            if let Some(candidate) = route_models.iter().filter(unoccupied).find(base_matches) {
                 return Some(candidate.clone());
             }
         }
@@ -517,6 +589,20 @@ impl UpstreamConfig {
         // When explicit model-to-key mappings are configured, a miss means this
         // upstream does not have a usable key for the requested model.
         keys
+    }
+
+    /// Upstream-space spelling check: is `model` currently a routable *stored*
+    /// spelling of this upstream, ignoring per-upstream model mappings?
+    /// Mappings rename the downstream view; the stored spelling itself stays
+    /// routable upstream-side. Used by profile learning/GC paths that receive
+    /// runtime slugs (which are upstream spellings by construction).
+    pub fn supports_stored_model(&self, model: &str) -> bool {
+        let model = model.trim();
+        !model.is_empty()
+            && self
+                .route_models()
+                .iter()
+                .any(|stored| super::models_equivalent_with(stored, model, true))
     }
 }
 
@@ -626,6 +712,22 @@ mod tests {
         };
         let err = upstream.validate_configuration().unwrap_err();
         assert!(err.contains("gpt-4o"), "message was: {err}");
+    }
+
+    #[test]
+    fn model_mappings_premium_judged_on_upstream_spelling() {
+        let mut upstream = mapped_upstream();
+        upstream.premium_models = vec!["gpt-4".into()];
+        upstream.protect_premium_quota = true;
+        // Mapped request: premium must be judged against the upstream's
+        // original spelling (A: premium_models ["gpt-4"], mapping
+        // gpt-4 -> gpt-4-premium; request "gpt-4-premium" counts premium).
+        assert!(upstream.is_premium_model_request("gpt-4-premium"));
+        // An unrelated unmapped model is not premium.
+        assert!(!upstream.is_premium_model_request("gpt-4o"));
+        // The shadowed original spelling is not routable, but the legacy
+        // raw-name check stays monotonic for quota-protection decisions.
+        assert!(upstream.is_premium_model_request("gpt-4"));
     }
 
     #[test]

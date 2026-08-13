@@ -18,6 +18,8 @@ mod dialect_matrix;
 mod dialect_retry;
 #[path = "gateway/images.rs"]
 mod images;
+#[path = "gateway/model_mappings.rs"]
+mod model_mappings;
 #[path = "gateway/responses.rs"]
 mod responses;
 #[path = "gateway/responses/reasoning.rs"]
