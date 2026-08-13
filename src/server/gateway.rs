@@ -477,6 +477,7 @@ fn log_route_retry_wait(
         routing_round = route_attempts.routing_round(),
         route_retry_rounds = wait.next_round,
         route_retry_wait_ms = wait.sleep_for.as_millis() as u64,
+        route_retry_alignment = wait.alignment,
         route_retry_required_delay_ms = wait.required_delay.as_millis() as u64,
         route_retry_remaining_wait_budget_ms = wait.remaining_after.as_millis() as u64,
         route_retry_waited_ms = budget.waited().as_millis() as u64,

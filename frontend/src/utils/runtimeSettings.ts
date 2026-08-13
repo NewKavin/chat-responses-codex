@@ -289,6 +289,15 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_U32
   },
   {
+    key: 'upstream_route_exhaustion_budget_alignment_enabled',
+    group: 'routing',
+    label: '路由耗尽预算对齐等待',
+    apply: 'immediate',
+    control: 'boolean',
+    description:
+      '轮数上限打满但 live 瞬态恢复仍在剩余时间预算内时，允许多等一次对齐等待后再放弃；429 族耗尽与关闭开关时维持原行为。'
+  },
+  {
     key: 'upstream_common_mode_breaker_threshold',
     group: 'routing',
     label: '请求拒绝共模熔断阈值',

@@ -2073,6 +2073,243 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
 }
 
 #[tokio::test]
+async fn budget_aligned_last_wait_recovers_inside_remaining_budget() {
+    // A2: the round cap is hit after three failing rounds, but the live
+    // transient recovery still fits the remaining time budget, so the request
+    // earns one final aligned wait and succeeds when the upstream recovers.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    // Six failures = three routing rounds (each round tries once plus one
+    // in-place same-route retry); hit seven succeeds during the aligned round.
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        6,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 2,
+            upstream_transient_route_cooldown_max_seconds: 4,
+            upstream_route_exhaustion_retry_max_wait_ms: 30_000,
+            upstream_route_exhaustion_retry_max_rounds: 3,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("aligned retry must terminate")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["choices"][0]["message"]["content"], "second-round-ok");
+    // Three failing rounds (6 hits) plus one successful aligned-round attempt.
+    assert_eq!(hits.load(Ordering::SeqCst), 7);
+    assert!(
+        elapsed >= std::time::Duration::from_secs(5)
+            && elapsed <= std::time::Duration::from_secs(25),
+        "three short cooldown waits plus one aligned wait, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn budget_aligned_last_wait_refused_when_recovery_exceeds_budget() {
+    // A2: at the round cap the live recovery is still longer than the whole
+    // remaining budget, so the request must fail immediately without waiting.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        // The 8-12s first cooldown far exceeds the 5s wait budget, and the
+        // round cap is already hit on round one: no ordinary wait, no aligned
+        // wait, terminal immediately.
+        AppConfig {
+            upstream_route_exhaustion_retry_max_wait_ms: 5_000,
+            upstream_route_exhaustion_retry_max_rounds: 1,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("an over-budget recovery must not schedule an aligned wait")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // One round only: initial attempt plus the in-place same-route retry.
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn budget_aligned_last_wait_happens_only_once() {
+    // A2: the aligned wait is granted at most once per request; after it
+    // fails again, the request gives up even though the recovery still fits.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 2,
+            upstream_transient_route_cooldown_max_seconds: 4,
+            upstream_route_exhaustion_retry_max_wait_ms: 30_000,
+            upstream_route_exhaustion_retry_max_rounds: 1,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("aligned retry must terminate")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // Round one (2 hits) plus one aligned wait round (2 hits): if the
+    // alignment repeated, we would see 6 or more hits.
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn budget_aligned_last_wait_switch_off_keeps_round_cap_behavior() {
+    // A2: with the alignment switch off, the round cap gives up immediately
+    // even when the live recovery would fit the remaining budget.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        6,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 2,
+            upstream_transient_route_cooldown_max_seconds: 4,
+            upstream_route_exhaustion_retry_max_wait_ms: 30_000,
+            upstream_route_exhaustion_retry_max_rounds: 3,
+            upstream_route_exhaustion_budget_alignment_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("round-capped retry must terminate")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // Three failing rounds and no aligned fourth round.
+    assert_eq!(hits.load(Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
 async fn non_temporary_exhaustion_never_waits() {
     let hits = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();

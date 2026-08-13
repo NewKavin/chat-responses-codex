@@ -99,6 +99,11 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 /// gateway and Codex never sees a 503.
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+/// Whether an exhausted request may spend one final budget-aligned wait when
+/// the round cap is hit but a live transient recovery fits the remaining time
+/// budget (Part A / R2: max_rounds bounds blind retries, the time budget
+/// bounds evidence-backed waits).
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED: bool = true;
 /// Consecutive identical (class, upstream status) failures across different
 /// routes within one request that trip the common-mode breaker. 0 disables
 /// the breaker.
@@ -188,6 +193,7 @@ pub struct AppConfig {
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
+    pub upstream_route_exhaustion_budget_alignment_enabled: bool,
     pub upstream_common_mode_breaker_threshold: u32,
     pub upstream_common_mode_transient_threshold: u32,
     pub upstream_transient_same_route_retry_enabled: bool,
@@ -278,6 +284,8 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
             upstream_route_exhaustion_retry_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+            upstream_route_exhaustion_budget_alignment_enabled:
+                DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
             upstream_common_mode_breaker_threshold: DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
             upstream_common_mode_transient_threshold:
                 DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD,
@@ -882,6 +890,10 @@ pub fn default_upstream_common_mode_transient_threshold() -> u32 {
 
 pub fn default_upstream_transient_same_route_retry_enabled() -> bool {
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED
+}
+
+pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

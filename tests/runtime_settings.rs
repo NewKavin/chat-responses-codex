@@ -113,7 +113,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 44);
+    assert_eq!(all.len(), 45);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -130,6 +130,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_concurrency_probe_delays_ms",
         "upstream_common_mode_transient_threshold",
         "upstream_transient_same_route_retry_enabled",
+        "upstream_route_exhaustion_budget_alignment_enabled",
     ] {
         assert!(
             IMMEDIATE_RUNTIME_SETTING_FIELDS.contains(&field),

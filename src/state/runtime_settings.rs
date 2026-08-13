@@ -2,6 +2,7 @@ use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
+    default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
+    "upstream_route_exhaustion_budget_alignment_enabled",
     "upstream_common_mode_transient_threshold",
     "default_upstream_max_concurrency",
     "upstream_concurrency_recovery_max_wait_ms",
@@ -95,6 +97,8 @@ pub struct RuntimeSettings {
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
+    #[serde(default = "default_upstream_route_exhaustion_budget_alignment_enabled")]
+    pub upstream_route_exhaustion_budget_alignment_enabled: bool,
     #[serde(default = "default_upstream_common_mode_breaker_threshold")]
     pub upstream_common_mode_breaker_threshold: u32,
     #[serde(default = "default_upstream_common_mode_transient_threshold")]
@@ -236,6 +240,8 @@ impl RuntimeSettings {
                 .upstream_route_exhaustion_retry_max_wait_ms,
             upstream_route_exhaustion_retry_max_rounds: config
                 .upstream_route_exhaustion_retry_max_rounds,
+            upstream_route_exhaustion_budget_alignment_enabled: config
+                .upstream_route_exhaustion_budget_alignment_enabled,
             upstream_common_mode_breaker_threshold: config.upstream_common_mode_breaker_threshold,
             upstream_common_mode_transient_threshold: config
                 .upstream_common_mode_transient_threshold,
@@ -304,6 +310,8 @@ impl RuntimeSettings {
             self.upstream_route_exhaustion_retry_max_wait_ms;
         config.upstream_route_exhaustion_retry_max_rounds =
             self.upstream_route_exhaustion_retry_max_rounds;
+        config.upstream_route_exhaustion_budget_alignment_enabled =
+            self.upstream_route_exhaustion_budget_alignment_enabled;
         config.upstream_common_mode_breaker_threshold = self.upstream_common_mode_breaker_threshold;
         config.upstream_common_mode_transient_threshold =
             self.upstream_common_mode_transient_threshold;
