@@ -53,6 +53,7 @@ fn create_test_state() -> AppState {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(global_context_profiles),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         unique_state_path(),
         config,

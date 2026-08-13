@@ -61,6 +61,7 @@ fn create_test_state(base_url: String) -> AppState {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
+            model_aliases: vec![],
     };
 
     AppState::new(state, unique_state_path(), config)

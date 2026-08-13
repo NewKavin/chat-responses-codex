@@ -1,7 +1,7 @@
 # 方案：瞬态 502 路由耗尽自愈优化（Part A）+ 上下游模型名映射归一（Part B）
 
 日期：2026-08-13
-状态：Part A 已完成；Part B 待开发
+状态：Part A 已完成；Part B 开发中
 
 ## 任务回填（commits，branch `part-a`）
 
@@ -13,7 +13,14 @@
 | A4 参数与部署文档 | `626b9dc`（DEPLOYMENT.md Intranet 小节） |
 | A5 可观测性 | `0609d1f`（give_up_reason / StreamDiagnostics / dashboard 分类） |
 
-Part B 未动；分支基准为 `73fbdee`（本计划文档落地提交）。
+## 任务回填（commits，branch `feat/part-b-model-aliases`）
+
+| 任务 | commit |
+|------|--------|
+| B1 canonical 归一层 | `8894959`（model_identity 模块 + case-insensitive 匹配） |
+| B2 显式别名注册表 | 开发中（model_aliases 持久化 + Admin API + 测试） |
+
+Part B 分支基准为 `73fbdee`（本计划文档落地提交）。
 
 关联报错（内网聚合网关部署，2026-08-12 共模熔断方案落地之后仍出现）：
 

@@ -2368,3 +2368,65 @@ async fn postgres_append_usage_logs_persists_a_batch_of_rows() {
         env::remove_var("PGPASSWORD");
     }
 }
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_model_aliases() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let aliases = vec![
+        chat_responses_codex::state::model_identity::ModelAliasRule {
+            canonical: "deepseek-v3".to_string(),
+            aliases: vec!["deepseek-chat".to_string(), "DeepSeek-Chat".to_string()],
+        },
+        chat_responses_codex::state::model_identity::ModelAliasRule {
+            canonical: "GLM-4.5".to_string(),
+            aliases: vec!["glm-4-5".to_string(), "GLM-4.5-Preview".to_string()],
+        },
+    ];
+
+    state
+        .update_model_aliases(aliases.clone())
+        .await
+        .expect("should persist model aliases");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+
+    assert_eq!(snapshot.model_aliases.len(), 2);
+    assert_eq!(snapshot.model_aliases[0].canonical, "deepseek-v3");
+    assert_eq!(snapshot.model_aliases[0].aliases.len(), 2);
+    assert_eq!(snapshot.model_aliases[1].canonical, "GLM-4.5");
+    assert_eq!(snapshot.model_aliases[1].aliases.len(), 2);
+
+    // Verify the registry was built correctly
+    let registry = reloaded.model_alias_registry();
+    assert_eq!(
+        registry.resolve_alias("deepseek-chat"),
+        Some("deepseek-v3")
+    );
+    assert_eq!(
+        registry.resolve_alias("GLM-4.5-Preview"),
+        Some("GLM-4.5")
+    );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}

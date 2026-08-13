@@ -307,6 +307,7 @@ impl PostgresStateStore {
             usage_logs,
             announcement,
             runtime_settings,
+            model_aliases: vec![],
         })
     }
 

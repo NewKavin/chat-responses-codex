@@ -90,6 +90,7 @@ fn create_test_state() -> AppState {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
+            model_aliases: vec![],
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
@@ -118,6 +119,7 @@ fn create_test_state_with_upstreams_and_config(
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
+            model_aliases: vec![],
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))

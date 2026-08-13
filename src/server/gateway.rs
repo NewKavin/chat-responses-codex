@@ -1676,7 +1676,7 @@ impl StreamUsageLogContext {
                 downstream_key_id = %downstream_key_id,
                 path = %endpoint,
                 original_model = %model,
-                normalized_model = %normalized_model,
+                normalized_model = %&normalized_model,
                 selected_upstream_id = %upstream_key_id,
                 selected_upstream_protocol = ?upstream_protocol,
                 error = %error,
@@ -2099,6 +2099,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/runtime-settings",
             get(admin_get_runtime_settings)
                 .put(admin_update_runtime_settings)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/model-aliases",
+            get(admin_get_model_aliases)
+                .put(admin_update_model_aliases)
                 .route_layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     admin_auth_middleware,
@@ -4371,7 +4380,14 @@ async fn process_gateway_request_inner(
         }
     };
     let model = model_owned.as_str();
-    let normalized_model = model;
+    let normalized_model = {
+        let alias_registry = state.model_alias_registry();
+        if let Some(canonical) = alias_registry.resolve_alias(model) {
+            canonical.to_string()
+        } else {
+            model.to_string()
+        }
+    };
     let case_insensitive = runtime_settings.model_case_insensitive_matching;
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let stream_only_recovery_request_safe =
@@ -4392,7 +4408,7 @@ async fn process_gateway_request_inner(
         downstream_key_id = %downstream.id,
         path = %request_path,
         original_model = %model,
-        normalized_model = %normalized_model,
+        normalized_model = %&normalized_model,
         stream = request_stream,
         "received downstream request"
     );
@@ -4404,7 +4420,7 @@ async fn process_gateway_request_inner(
                 downstream_key_id = %downstream.id,
                 path = %request_path,
                 original_model = %model,
-                normalized_model = %normalized_model,
+                normalized_model = %&normalized_model,
                 expires_at,
                 "downstream key expired"
             );
@@ -4448,7 +4464,7 @@ async fn process_gateway_request_inner(
                 downstream_key_id = %downstream.id,
                 path = %request_path,
                 original_model = %model,
-                normalized_model = %normalized_model,
+                normalized_model = %&normalized_model,
                 client_ip = %client_ip,
                 "client IP not allowed"
             );
@@ -4485,7 +4501,7 @@ async fn process_gateway_request_inner(
             downstream_key_id = %downstream.id,
             path = %request_path,
             original_model = %model,
-            normalized_model = %normalized_model,
+            normalized_model = %&normalized_model,
             "model not allowed"
         );
         let error =
@@ -4560,7 +4576,7 @@ async fn process_gateway_request_inner(
                     downstream_key_id = %downstream.id,
                     path = %request_path,
                     original_model = %model,
-                    normalized_model = %normalized_model,
+                    normalized_model = %&normalized_model,
                     retry_after_seconds,
                     max_concurrency = downstream.max_concurrency,
                     rejection = ?rejection,
@@ -4672,7 +4688,7 @@ async fn process_gateway_request_inner(
             downstream_key_id = %downstream.id,
             path = %request_path,
             original_model = %model,
-            normalized_model = %normalized_model,
+            normalized_model = %&normalized_model,
             stream = request_stream,
             routing_fallback = fallback_to_chat,
             routing_fallback_reason = if fallback_to_chat {
@@ -5323,7 +5339,7 @@ async fn process_gateway_request_inner(
         downstream_key_id = %downstream.id,
         path = %request_path,
         original_model = %model,
-        normalized_model = %normalized_model,
+        normalized_model = %&normalized_model,
         stream = request_stream,
         candidate_protocols = ?candidate_protocols,
         "resolved candidate protocols"
@@ -5341,7 +5357,7 @@ async fn process_gateway_request_inner(
             })
             .then(|| upstream_id.to_string())
     } else if runtime_settings.routing_affinity_enabled {
-        match state.get_affinity_upstream(&downstream.id, normalized_model) {
+        match state.get_affinity_upstream(&downstream.id, &normalized_model) {
             Some(upstream_id)
                 if routing_snapshot.upstreams.iter().any(|upstream| {
                     upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
@@ -5350,7 +5366,7 @@ async fn process_gateway_request_inner(
                 Some(upstream_id)
             }
             Some(_) => {
-                state.clear_affinity_upstream(&downstream.id, normalized_model);
+                state.clear_affinity_upstream(&downstream.id, &normalized_model);
                 None
             }
             None => None,
@@ -5564,7 +5580,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     protocol = ?protocol,
                                     preferred_upstream_id = %preferred_upstream_id,
                                     escape_ratio,
@@ -5586,7 +5602,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     protocol = ?protocol,
                                     preferred_upstream_id = %preferred_upstream_id,
                                     escape_ratio,
@@ -5617,7 +5633,7 @@ async fn process_gateway_request_inner(
                     .take_while(|upstream| ranking_bucket_key(upstream) == top_bucket_key)
                     .count();
                 let tie_breaker =
-                    state.next_routing_tie_breaker(&downstream.id, normalized_model, protocol);
+                    state.next_routing_tie_breaker(&downstream.id, &normalized_model, protocol);
                 if top_bucket_len > 1 {
                     let rotation = tie_breaker as usize % top_bucket_len;
                     if rotation > 0 {
@@ -5628,7 +5644,7 @@ async fn process_gateway_request_inner(
                         downstream_key_id = %downstream.id,
                         path = %request_path,
                         original_model = %model,
-                        normalized_model = %normalized_model,
+                        normalized_model = %&normalized_model,
                         protocol = ?protocol,
                         tie_bucket_size = top_bucket_len,
                         tie_rotation = rotation,
@@ -5668,7 +5684,7 @@ async fn process_gateway_request_inner(
                 downstream_key_id = %downstream.id,
                 path = %request_path,
                 original_model = %model,
-                normalized_model = %normalized_model,
+                normalized_model = %&normalized_model,
                 protocol = ?protocol,
                 candidates = ?candidate_summary,
                 "sorted upstream candidates"
@@ -5730,7 +5746,7 @@ async fn process_gateway_request_inner(
                         downstream_key_id = %downstream.id,
                         path = %request_path,
                         original_model = %model,
-                        normalized_model = %normalized_model,
+                        normalized_model = %&normalized_model,
                         selected_upstream_id = %upstream.id,
                         selected_upstream_name = %upstream.name,
                         selected_upstream_protocol = ?protocol,
@@ -5744,7 +5760,7 @@ async fn process_gateway_request_inner(
                     downstream_key_id = %downstream.id,
                     path = %request_path,
                     original_model = %model,
-                    normalized_model = %normalized_model,
+                    normalized_model = %&normalized_model,
                     selected_upstream_id = %upstream.id,
                     selected_upstream_name = %upstream.name,
                     selected_upstream_protocol = ?protocol,
@@ -6029,7 +6045,7 @@ async fn process_gateway_request_inner(
                             downstream_key_id = %downstream.id,
                             path = %request_path,
                             original_model = %model,
-                            normalized_model = %normalized_model,
+                            normalized_model = %&normalized_model,
                             selected_upstream_id = %upstream.id,
                             selected_upstream_protocol = ?protocol,
                             route_id = %route_id,
@@ -6104,7 +6120,7 @@ async fn process_gateway_request_inner(
                                     &state,
                                     &downstream.id,
                                     client_family,
-                                    normalized_model,
+                                    &normalized_model,
                                     &upstream.id,
                                     original_responses_body
                                         .as_ref()
@@ -6115,7 +6131,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     client_family,
@@ -6321,7 +6337,7 @@ async fn process_gateway_request_inner(
                             started,
                             &request_id,
                             model,
-                            normalized_model,
+                            &normalized_model,
                             &downstream.id,
                             &downstream.name,
                             inference_strength.as_deref(),
@@ -6558,7 +6574,7 @@ async fn process_gateway_request_inner(
                                     state.clear_fallback_stage_failures(
                                         &downstream.id,
                                         client_family,
-                                        normalized_model,
+                                        &normalized_model,
                                         &selected_upstream_id,
                                     );
                                 }
@@ -6595,7 +6611,7 @@ async fn process_gateway_request_inner(
                                 if use_routing_affinity {
                                     state.set_affinity_upstream(
                                         &downstream.id,
-                                        normalized_model,
+                                        &normalized_model,
                                         &selected_upstream_id,
                                         runtime_settings.routing_affinity_ttl_seconds,
                                     );
@@ -6605,7 +6621,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %selected_upstream_id,
                                     selected_upstream_protocol = ?selected_upstream_protocol,
                                     status = result.status.as_u16(),
@@ -6678,7 +6694,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
@@ -6719,7 +6735,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_name = %upstream.name,
                                     selected_upstream_protocol = ?protocol,
@@ -6748,7 +6764,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_name = %upstream.name,
                                     selected_upstream_protocol = ?protocol,
@@ -6757,7 +6773,7 @@ async fn process_gateway_request_inner(
                                     "upstream concurrency/capacity response; moving to another route"
                                 );
                                 if runtime_settings.routing_affinity_enabled {
-                                    state.clear_affinity_upstream(&downstream.id, normalized_model);
+                                    state.clear_affinity_upstream(&downstream.id, &normalized_model);
                                 }
                                 if let Some(retry_after) = retry_after {
                                     if state
@@ -6846,7 +6862,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_name = %upstream.name,
                                     selected_upstream_protocol = ?protocol,
@@ -6855,7 +6871,7 @@ async fn process_gateway_request_inner(
                                     "upstream rate limited; moving to another route"
                                 );
                                 if runtime_settings.routing_affinity_enabled {
-                                    state.clear_affinity_upstream(&downstream.id, normalized_model);
+                                    state.clear_affinity_upstream(&downstream.id, &normalized_model);
                                 }
                                 if state
                                     .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
@@ -6912,7 +6928,7 @@ async fn process_gateway_request_inner(
                                     &state,
                                     &downstream.id,
                                     client_family,
-                                    normalized_model,
+                                    &normalized_model,
                                     &upstream.id,
                                     chat_fallback_stage,
                                     &error,
@@ -6922,7 +6938,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
@@ -6950,7 +6966,7 @@ async fn process_gateway_request_inner(
                                         &state,
                                         &downstream.id,
                                         client_family,
-                                        normalized_model,
+                                        &normalized_model,
                                         &upstream.id,
                                         chat_fallback_stage,
                                         &error,
@@ -6960,7 +6976,7 @@ async fn process_gateway_request_inner(
                                         downstream_key_id = %downstream.id,
                                         path = %request_path,
                                         original_model = %model,
-                                        normalized_model = %normalized_model,
+                                        normalized_model = %&normalized_model,
                                         selected_upstream_id = %upstream.id,
                                         selected_upstream_protocol = ?protocol,
                                         route_id = %route_id,
@@ -6984,7 +7000,7 @@ async fn process_gateway_request_inner(
                                     &state,
                                     &downstream.id,
                                     client_family,
-                                    normalized_model,
+                                    &normalized_model,
                                     &upstream.id,
                                     chat_fallback_stage,
                                     &error,
@@ -6994,7 +7010,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
@@ -7020,7 +7036,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
@@ -7040,7 +7056,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
@@ -7079,7 +7095,7 @@ async fn process_gateway_request_inner(
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
-                                    normalized_model = %normalized_model,
+                                    normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
@@ -7171,7 +7187,7 @@ async fn process_gateway_request_inner(
                                                     downstream_key_id = %downstream.id,
                                                     path = %request_path,
                                                     original_model = %model,
-                                                    normalized_model = %normalized_model,
+                                                    normalized_model = %&normalized_model,
                                                     selected_upstream_id = %upstream.id,
                                                     selected_upstream_name = %upstream.name,
                                                     selected_upstream_protocol = ?protocol,
@@ -7214,7 +7230,7 @@ async fn process_gateway_request_inner(
                                                 downstream_key_id = %downstream.id,
                                                 path = %request_path,
                                                 original_model = %model,
-                                                normalized_model = %normalized_model,
+                                                normalized_model = %&normalized_model,
                                                 selected_upstream_id = %upstream.id,
                                                 selected_upstream_name = %upstream.name,
                                                 selected_upstream_protocol = ?protocol,
@@ -7488,7 +7504,7 @@ async fn process_gateway_request_inner(
             downstream_key_id = %downstream.id,
             path = %request_path,
             original_model = %model,
-            normalized_model = %normalized_model,
+            normalized_model = %&normalized_model,
             endpoint = %request_path,
             route_id = %route_id,
             upstream_status,
@@ -7537,7 +7553,7 @@ async fn process_gateway_request_inner(
         downstream_key_id = %downstream.id,
         path = %request_path,
         original_model = %model,
-        normalized_model = %normalized_model,
+        normalized_model = %&normalized_model,
         endpoint = %request_path,
         "no routable upstream found for request"
     );

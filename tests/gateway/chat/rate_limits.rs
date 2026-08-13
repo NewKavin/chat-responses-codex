@@ -64,6 +64,7 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -199,6 +200,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -312,6 +314,7 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -418,6 +421,7 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -576,6 +580,7 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -669,6 +674,7 @@ async fn upstream_concurrency_retry_after_is_not_probed_early() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -756,6 +762,7 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -1232,6 +1239,7 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -1388,6 +1396,7 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -1692,6 +1701,7 @@ impl AccountCapacityHarness {
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
                 runtime_settings: None,
+            model_aliases: vec![],
             },
             self.directory.path().join("state.json"),
             config,
@@ -1854,6 +1864,7 @@ async fn runtime_settings_enable_route_exhaustion_retry_for_next_request() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -1925,6 +1936,7 @@ async fn default_route_exhaustion_budget_waits_out_a_transient_cooldown() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         // Default wait budget (30s) on purpose: the ~10s transient cooldown
@@ -1986,6 +1998,7 @@ async fn long_retry_after_returns_immediately_without_second_round() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -2039,6 +2052,7 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2114,6 +2128,7 @@ async fn budget_aligned_last_wait_recovers_inside_remaining_budget() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2177,6 +2192,7 @@ async fn budget_aligned_last_wait_refused_when_recovery_exceeds_budget() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         // The 8-12s first cooldown far exceeds the 5s wait budget, and the
@@ -2240,6 +2256,7 @@ async fn budget_aligned_last_wait_happens_only_once() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2307,6 +2324,7 @@ async fn budget_aligned_last_wait_switch_off_keeps_round_cap_behavior() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2376,6 +2394,7 @@ async fn non_temporary_exhaustion_never_waits() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig::default(),
@@ -2449,6 +2468,7 @@ async fn mixed_credentials_and_short_temporary_retries_only_the_temporary_route(
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2513,6 +2533,7 @@ async fn a1_same_route_failures_across_rounds_keep_step_flat() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2593,6 +2614,7 @@ async fn route_retry_last_resort_probe_recovers_earliest_route_when_all_cooling(
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2717,6 +2739,7 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {
@@ -2830,6 +2853,7 @@ async fn route_retry_last_resort_probe_disabled_keeps_zero_physical_attempts() {
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
         },
         state_path,
         AppConfig {

@@ -54,6 +54,7 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
+            model_aliases: vec![],
     };
 
     (

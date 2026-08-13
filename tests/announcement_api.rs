@@ -51,6 +51,7 @@ fn create_test_state_without_announcement() -> (AppState, String) {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
+            model_aliases: vec![],
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -104,6 +105,7 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
         }),
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
+            model_aliases: vec![],
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

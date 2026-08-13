@@ -219,6 +219,7 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
     let state = AppState::new(
         PersistedState {
             runtime_settings: Some(document.clone()),
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         state_path.clone(),

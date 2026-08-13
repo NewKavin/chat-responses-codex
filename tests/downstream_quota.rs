@@ -66,6 +66,7 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
             }],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -331,6 +332,7 @@ async fn request_quota_usage_remaining_calculation() {
                 .collect(),
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -409,6 +411,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
                 .collect(),
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -487,6 +490,7 @@ async fn downstream_request_mode_ignores_token_limits() {
             }],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -565,6 +569,7 @@ async fn downstream_token_mode_ignores_request_window_quota() {
                 .collect(),
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -640,6 +645,7 @@ async fn downstream_token_daily_window_slides_after_24h() {
             }],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
+            model_aliases: vec![],
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

@@ -46,7 +46,7 @@ mod model_discovery;
 #[path = "state/model_key_sync.rs"]
 mod model_key_sync;
 #[path = "state/model_identity.rs"]
-mod model_identity;
+pub mod model_identity;
 #[path = "state/model_qualification.rs"]
 mod model_qualification;
 #[path = "state/normalize.rs"]
@@ -588,6 +588,7 @@ pub struct AppState {
     capability_probe_batches: Arc<StdMutex<HashMap<String, CapabilityProbeBatchRecord>>>,
     model_key_sync_runtime: Arc<StdMutex<model_key_sync::ModelKeySyncRuntime>>,
     model_key_sync_lock: Arc<Mutex<()>>,
+    model_alias_registry: Arc<ArcSwap<model_identity::ModelAliasRegistry>>,
     troubleshooting_route_capture_token: Arc<str>,
     replica_owner_token: Arc<str>,
     pub store_path: PathBuf,
@@ -965,6 +966,12 @@ impl AppState {
         state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
+        let model_alias_registry = model_identity::ModelAliasRegistry::from_rules(
+            state.model_aliases.clone()
+        ).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "invalid model alias rules, ignoring");
+            model_identity::ModelAliasRegistry::default()
+        });
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -1012,6 +1019,7 @@ impl AppState {
                 model_key_sync::ModelKeySyncRuntime::default(),
             )),
             model_key_sync_lock: Arc::new(Mutex::new(())),
+            model_alias_registry: Arc::new(ArcSwap::from_pointee(model_alias_registry)),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
             replica_owner_token: new_internal_route_capture_token(),
             store_path,
@@ -1041,6 +1049,12 @@ impl AppState {
         state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
+        let model_alias_registry = model_identity::ModelAliasRegistry::from_rules(
+            state.model_aliases.clone()
+        ).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "invalid model alias rules, ignoring");
+            model_identity::ModelAliasRegistry::default()
+        });
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -1086,6 +1100,7 @@ impl AppState {
                 model_key_sync::ModelKeySyncRuntime::default(),
             )),
             model_key_sync_lock: Arc::new(Mutex::new(())),
+            model_alias_registry: Arc::new(ArcSwap::from_pointee(model_alias_registry)),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
             replica_owner_token: new_internal_route_capture_token(),
             store_path,
@@ -1113,6 +1128,12 @@ impl AppState {
         state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
+        let model_alias_registry = model_identity::ModelAliasRegistry::from_rules(
+            state.model_aliases.clone()
+        ).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "invalid model alias rules, ignoring");
+            model_identity::ModelAliasRegistry::default()
+        });
         let downstream_usage_logs = state.usage_logs.clone();
         let downstreams = state.downstreams.clone();
         let postgres = Arc::new(postgres);
@@ -1155,6 +1176,7 @@ impl AppState {
                 model_key_sync::ModelKeySyncRuntime::default(),
             )),
             model_key_sync_lock: Arc::new(Mutex::new(())),
+            model_alias_registry: Arc::new(ArcSwap::from_pointee(model_alias_registry)),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
             replica_owner_token: new_internal_route_capture_token(),
             store_path: PathBuf::new(),
@@ -2755,6 +2777,7 @@ impl AppState {
             announcement: None,
             global_context_profiles: state.global_context_profiles.clone(),
             runtime_settings: state.runtime_settings.clone(),
+            model_aliases: state.model_aliases.clone(),
         }
     }
 
@@ -2764,6 +2787,10 @@ impl AppState {
 
     pub fn startup_runtime_settings(&self) -> &RuntimeSettings {
         &self.startup_runtime_settings
+    }
+
+    pub fn model_alias_registry(&self) -> Arc<model_identity::ModelAliasRegistry> {
+        self.model_alias_registry.load_full()
     }
 
     fn runtime_settings_document(
@@ -2901,6 +2928,34 @@ impl AppState {
             response,
             applied_immediately,
         })
+    }
+
+    pub async fn update_model_aliases(
+        &self,
+        rules: Vec<model_identity::ModelAliasRule>,
+    ) -> Result<(), String> {
+        // Validate rules before persisting
+        let registry = model_identity::ModelAliasRegistry::from_rules(rules.clone())?;
+
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let mut state = self.inner.lock().await;
+        let mut candidate_state = state.clone();
+        candidate_state.model_aliases = rules;
+
+        self.config_store
+            .persist_config(&candidate_state)
+            .await
+            .map_err(|error| format!("failed to persist model aliases: {}", error))?;
+
+        state.model_aliases = candidate_state.model_aliases.clone();
+        self.model_alias_registry.store(Arc::new(registry));
+
+        tracing::info!(
+            rule_count = candidate_state.model_aliases.len(),
+            "updated model alias rules"
+        );
+
+        Ok(())
     }
 
     pub fn capability_snapshot(&self) -> Arc<CapabilityRuntimeSnapshot> {
@@ -5089,6 +5144,7 @@ impl AppState {
         };
         let snapshot = self.routing_snapshot().await;
         let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
+        let alias_registry = self.model_alias_registry();
 
         let mut seen = HashSet::new();
         let mut models = Vec::new();
@@ -5097,15 +5153,25 @@ impl AppState {
                 if downstream.model_allowlist.is_empty()
                     || portal_model_is_allowed(&downstream.model_allowlist, &model)
                 {
-                    let key = if case_insensitive {
+                    // B2: resolve through alias rules first, then fall back to B1 case-folding
+                    let display_name = if let Some(canonical) = alias_registry.resolve_alias(&model) {
+                        canonical.to_string()
+                    } else if case_insensitive {
                         canonical_model_id(&model)
                     } else {
                         model.trim().to_string()
                     };
-                    if key.is_empty() || !seen.insert(key.clone()) {
+
+                    let key = if case_insensitive {
+                        canonical_model_id(&display_name)
+                    } else {
+                        display_name.clone()
+                    };
+
+                    if key.is_empty() || !seen.insert(key) {
                         continue;
                     }
-                    models.push(key);
+                    models.push(display_name);
                 }
             }
         }
@@ -5121,6 +5187,8 @@ impl AppState {
     pub async fn downstream_visible_models(&self) -> Vec<String> {
         let snapshot = self.routing_snapshot().await;
         let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
+        let alias_registry = self.model_alias_registry();
+
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
@@ -5130,15 +5198,25 @@ impl AppState {
                         && (downstream.model_allowlist.is_empty()
                             || portal_model_is_allowed(&downstream.model_allowlist, &model))
                 }) {
-                    let key = if case_insensitive {
+                    // B2: resolve through alias rules first, then fall back to B1 case-folding
+                    let display_name = if let Some(canonical) = alias_registry.resolve_alias(&model) {
+                        canonical.to_string()
+                    } else if case_insensitive {
                         canonical_model_id(&model)
                     } else {
                         model.trim().to_string()
                     };
-                    if key.is_empty() || !seen.insert(key.clone()) {
+
+                    let key = if case_insensitive {
+                        canonical_model_id(&display_name)
+                    } else {
+                        display_name.clone()
+                    };
+
+                    if key.is_empty() || !seen.insert(key) {
                         continue;
                     }
-                    models.push(key);
+                    models.push(display_name);
                 }
             }
         }

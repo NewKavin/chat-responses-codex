@@ -2871,6 +2871,60 @@ pub(super) async fn admin_list_logs(
     .into_response()
 }
 
+// Model Aliases API
+
+pub(super) async fn admin_get_model_aliases(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    Json(json!({
+        "model_aliases": snapshot.model_aliases
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AdminUpdateModelAliasesRequest {
+    model_aliases: Vec<crate::state::model_identity::ModelAliasRule>,
+}
+
+pub(super) async fn admin_update_model_aliases(
+    State(state): State<AppState>,
+    payload: Result<Json<AdminUpdateModelAliasesRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let Json(body) = match payload {
+        Ok(payload) => payload,
+        Err(rejection) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("Invalid request body: {}", rejection)
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.update_model_aliases(body.model_aliases).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": error
+                }
+            })),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

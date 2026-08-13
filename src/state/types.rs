@@ -855,6 +855,8 @@ pub struct PersistedState {
     pub global_context_profiles: Arc<HashMap<String, GlobalContextProfile>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_settings: Option<RuntimeSettingsDocument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_aliases: Vec<crate::state::model_identity::ModelAliasRule>,
 }
 
 fn default_true() -> bool {
