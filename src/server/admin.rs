@@ -447,7 +447,7 @@ pub(super) async fn admin_dashboard(
         .upstreams
         .iter()
         .filter(|u| u.active)
-        .flat_map(|u| u.route_models())
+        .flat_map(|u| u.effective_downstream_models())
         .collect::<HashSet<_>>()
         .len();
 
@@ -660,7 +660,7 @@ pub(super) async fn admin_list_models(
         let mut seen = std::collections::HashSet::new();
         let mut models_list = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for model in upstream.route_models() {
+            for model in upstream.effective_downstream_models() {
                 let key = if case_insensitive {
                     crate::state::canonical_model_id(&model)
                 } else {

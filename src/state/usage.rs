@@ -174,7 +174,7 @@ pub(super) fn build_active_upstream_model_catalog(
     let mut seen_exact = HashSet::new();
 
     for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-        for model in upstream.route_models() {
+        for model in upstream.effective_downstream_models() {
             let model = model.trim();
             if model.is_empty() {
                 continue;
@@ -672,7 +672,7 @@ impl AppState {
 
             for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
                 let exposes = upstream
-                    .route_models()
+                    .effective_downstream_models()
                     .iter()
                     .any(|candidate| candidate.trim().eq_ignore_ascii_case(model.trim()));
                 if !exposes {

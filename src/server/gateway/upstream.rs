@@ -2804,7 +2804,7 @@ pub(super) fn no_routable_model_error(
         .upstreams
         .iter()
         .filter(|upstream| upstream.active)
-        .flat_map(|upstream| upstream.route_models())
+        .flat_map(|upstream| upstream.effective_downstream_models())
         .collect::<Vec<_>>();
     visible_models.sort();
     visible_models.dedup();

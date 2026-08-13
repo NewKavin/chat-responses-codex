@@ -366,3 +366,85 @@ async fn stale_model_mapping_is_skipped_and_revives_without_config_change() {
     );
     assert_eq!(payload2["choices"][0]["message"]["content"], "ok");
 }
+
+/// Request `/v1/models` in the standard or codex format (mirrors the helper
+/// in capability_routing.rs; kept local to avoid cross-test coupling).
+async fn get_models(state: AppState, secret: &str, codex: bool) -> Value {
+    let uri = if codex {
+        "/v1/models?client_version=0.144.1"
+    } else {
+        "/v1/models"
+    };
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// Plan section 5 item 1 (catalog limb): with A `gpt-4 -> gpt-4-premium`,
+/// B `gpt-4 -> gpt-4-standard`, C unmapped `gpt-4`, both catalog formats
+/// expose exactly `gpt-4` (from C), `gpt-4-premium`, `gpt-4-standard` —
+/// no duplicates, and never A/B's plain `gpt-4`.
+#[tokio::test]
+async fn per_upstream_mapping_catalogs_expose_downstream_names_only() {
+    let upstream_a = mapped_upstream("up-a", &["gpt-4"], &[("gpt-4", "gpt-4-premium")]);
+    let upstream_b = mapped_upstream("up-b", &["gpt-4"], &[("gpt-4", "gpt-4-standard")]);
+    let upstream_c = mapped_upstream("up-c", &["gpt-4"], &[]);
+    let (_tempdir, state, secret) = catalog_state_with_aliases(
+        vec![upstream_a, upstream_b, upstream_c],
+        vec![
+            "gpt-4-premium".into(),
+            "gpt-4-standard".into(),
+            "gpt-4".into(),
+        ],
+        vec![],
+    );
+
+    let standard = get_models(state.clone(), &secret, false).await;
+    let mut ids = standard["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "gpt-4".to_string(),
+            "gpt-4-premium".to_string(),
+            "gpt-4-standard".to_string()
+        ],
+        "standard catalog must expose the three effective downstream names exactly once"
+    );
+
+    let codex = get_models(state, &secret, true).await;
+    let mut slugs = codex["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["slug"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    slugs.sort();
+    assert_eq!(
+        slugs,
+        vec![
+            "gpt-4".to_string(),
+            "gpt-4-premium".to_string(),
+            "gpt-4-standard".to_string()
+        ],
+        "codex catalog must expose the same effective downstream set"
+    );
+}

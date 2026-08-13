@@ -219,7 +219,7 @@ pub fn build_downstream_usage_summary(
             .upstreams
             .iter()
             .filter(|upstream| upstream.active)
-            .flat_map(|upstream| upstream.route_models())
+            .flat_map(|upstream| upstream.effective_downstream_models())
             .collect::<HashSet<_>>()
             .len()
     };

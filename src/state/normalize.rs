@@ -604,6 +604,46 @@ impl UpstreamConfig {
                 .iter()
                 .any(|stored| super::models_equivalent_with(stored, model, true))
     }
+
+    /// Downstream-facing effective model set for this upstream (plan 3.4):
+    /// every live mapping's downstream name followed by every route model
+    /// that no mapping claims as its upstream side — the mapped originals
+    /// are shadowed downstream (rename semantics) unless another upstream
+    /// happens to declare them unmapped. A mapping whose `upstream_model` is
+    /// no longer in any model list is stale: it contributes nothing (and its
+    /// downstream name disappears from lists) until the model is restored.
+    /// Stored spelling is preserved; callers keep applying the global alias
+    /// display + canonical dedup pipeline on top of this set, exactly like
+    /// they do for `route_models()` today.
+    pub fn effective_downstream_models(&self) -> Vec<String> {
+        let route_models = self.route_models();
+        let mut models = Vec::new();
+        for mapping in &self.model_mappings {
+            let upstream = mapping.upstream_model.trim();
+            let downstream = mapping.downstream_model.trim();
+            if upstream.is_empty() || downstream.is_empty() {
+                continue;
+            }
+            if super::find_equivalent_stored(&route_models, upstream, true).is_none() {
+                // Stale mapping (model sync may have removed the model):
+                // skip until the stored spelling is restored.
+                continue;
+            }
+            models.push(downstream.to_string());
+        }
+        let occupied = self
+            .model_mappings
+            .iter()
+            .map(|mapping| super::canonical_model_id(mapping.upstream_model.trim()))
+            .collect::<HashSet<_>>();
+        for candidate in &route_models {
+            if occupied.contains(&super::canonical_model_id(candidate)) {
+                continue;
+            }
+            models.push(candidate.clone());
+        }
+        models
+    }
 }
 
 #[cfg(test)]
@@ -759,5 +799,75 @@ mod tests {
             ..mapped_upstream()
         };
         assert!(ok.validate_model_mappings_against_aliases(&registry).is_ok());
+    }
+    #[test]
+    fn model_mappings_effective_downstream_models_maps_names_then_unmapped_spellings() {
+        // gpt-4 -> gpt-4-premium mapping, gpt-4o unmapped.
+        assert_eq!(
+            mapped_upstream().effective_downstream_models(),
+            vec![
+                "gpt-4-premium".to_string(),
+                "gpt-4o".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn model_mappings_effective_downstream_models_shadows_mapped_originals() {
+        let models = mapped_upstream().effective_downstream_models();
+        assert!(
+            !models.iter().any(|model| model == "gpt-4"),
+            "the mapped original spelling must be shadowed downstream: {models:?}"
+        );
+    }
+
+    #[test]
+    fn model_mappings_effective_downstream_models_skips_stale_mappings() {
+        // upstream_model no longer in any model list: its downstream name
+        // must not be exposed until the model is restored.
+        let mut upstream = mapped_upstream();
+        upstream.model_mappings.push(mapping("removed-model", "gpt-x"));
+        assert_eq!(
+            upstream.effective_downstream_models(),
+            vec!["gpt-4-premium".to_string(), "gpt-4o".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_mappings_effective_downstream_models_preserves_unmapped_stored_spelling() {
+        let mut upstream = mapped_upstream();
+        upstream.supported_models = vec!["gpt-4".into(), "DeepSeek-Chat".into()];
+        upstream.model_mappings = vec![mapping("gpt-4", "gpt-4-premium")];
+        assert_eq!(
+            upstream.effective_downstream_models(),
+            vec!["gpt-4-premium".to_string(), "DeepSeek-Chat".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_mappings_effective_downstream_models_matches_upstream_side_canonically() {
+        // The mapping's upstream spelling only needs to canonically match a
+        // stored model (the wire payload keeps the stored spelling).
+        let mut upstream = mapped_upstream();
+        upstream.model_mappings = vec![mapping("GPT-4", "gpt-4-premium")];
+        assert_eq!(
+            upstream.effective_downstream_models(),
+            vec!["gpt-4-premium".to_string(), "gpt-4o".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_mappings_effective_downstream_models_defaults_to_route_models() {
+        let upstream = UpstreamConfig {
+            name: "plain".into(),
+            base_url: "https://example.invalid".into(),
+            api_key: "key-a".into(),
+            supported_models: vec!["gpt-4".into(), "gpt-4o".into()],
+            ..UpstreamConfig::default()
+        };
+        assert_eq!(
+            upstream.effective_downstream_models(),
+            vec!["gpt-4".to_string(), "gpt-4o".to_string()]
+        );
     }
 }

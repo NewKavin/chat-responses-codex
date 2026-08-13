@@ -1830,7 +1830,7 @@ impl AppState {
                 {
                     return false;
                 }
-                let exposed_models = upstream.route_models();
+                let exposed_models = upstream.effective_downstream_models();
                 let exposed_models = if exposed_models.is_empty() {
                     vec![key.profile.runtime_model_slug.clone()]
                 } else {
@@ -5074,7 +5074,7 @@ impl AppState {
         let mut jobs = Vec::<ProbeJob>::new();
         let mut queued = HashMap::<DialectProfileKey, usize>::new();
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
-            for exposed in upstream.route_models() {
+            for exposed in upstream.effective_downstream_models() {
                 let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
                     downstream.active
                         && (downstream.model_allowlist.is_empty()
@@ -5153,7 +5153,7 @@ impl AppState {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for model in upstream.route_models() {
+            for model in upstream.effective_downstream_models() {
                 if downstream.model_allowlist.is_empty()
                     || portal_model_is_allowed(&downstream.model_allowlist, &model)
                 {
@@ -5196,7 +5196,7 @@ impl AppState {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for model in upstream.route_models() {
+            for model in upstream.effective_downstream_models() {
                 if snapshot.downstreams.iter().any(|downstream| {
                     downstream.active
                         && (downstream.model_allowlist.is_empty()
@@ -5319,7 +5319,7 @@ impl AppState {
             }
 
             let mut exposed_models = upstream
-                .route_models()
+                .effective_downstream_models()
                 .into_iter()
                 .filter(|exposed| {
                     upstream.resolved_model_name(exposed).as_deref()
@@ -5448,7 +5448,7 @@ impl AppState {
             return BTreeMap::new();
         }
         let mut jobs = BTreeMap::<DialectProfileKey, BTreeSet<String>>::new();
-        for exposed_model in upstream.route_models() {
+        for exposed_model in upstream.effective_downstream_models() {
             let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                 continue;
             };
@@ -5562,7 +5562,7 @@ impl AppState {
             .refresh_interval_seconds;
         let mut jobs = BTreeMap::<DialectProfileKey, BTreeSet<String>>::new();
         for upstream in upstreams.into_iter().filter(|upstream| upstream.active) {
-            for exposed_model in upstream.route_models() {
+            for exposed_model in upstream.effective_downstream_models() {
                 let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                     continue;
                 };

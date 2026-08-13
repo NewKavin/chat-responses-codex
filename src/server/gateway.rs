@@ -2503,7 +2503,7 @@ fn codex_exposed_models(
         let slugs = upstreams
             .iter()
             .filter(|upstream| upstream.active)
-            .flat_map(UpstreamConfig::route_models)
+            .flat_map(UpstreamConfig::effective_downstream_models)
             .collect::<Vec<_>>();
         return group_models(slugs);
     }
@@ -2521,7 +2521,7 @@ fn codex_exposed_models(
     let mut exposed = upstreams
         .iter()
         .filter(|upstream| upstream.active)
-        .flat_map(UpstreamConfig::route_models)
+        .flat_map(UpstreamConfig::effective_downstream_models)
         .filter_map(|slug| {
             let match_key = slug.trim().to_ascii_lowercase();
             if match_key.is_empty() || !allowed_slugs.contains_key(&match_key) {

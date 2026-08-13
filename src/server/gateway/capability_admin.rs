@@ -662,7 +662,7 @@ fn profile_is_current_for_any_route(
         })
         .flat_map(|upstream| {
             upstream
-                .route_models()
+                .effective_downstream_models()
                 .into_iter()
                 .filter_map(move |exposed| {
                     (upstream.resolved_model_name(&exposed).as_deref()
@@ -701,7 +701,7 @@ pub(super) fn capability_discovery_summaries(
     let mut models =
         BTreeMap::<String, (BTreeSet<String>, Vec<CapabilityRouteDiscoverySummary>)>::new();
     for upstream in upstreams.iter().filter(|upstream| upstream.active) {
-        for exposed_model_slug in upstream.route_models() {
+        for exposed_model_slug in upstream.effective_downstream_models() {
             let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model_slug) else {
                 continue;
             };
