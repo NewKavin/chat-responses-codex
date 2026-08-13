@@ -38,7 +38,8 @@ import {
   Radar,
   SatelliteDish,
   ScrollText,
-  Settings as SettingsIcon
+  Settings as SettingsIcon,
+  ArrowRightLeft
 } from '@lucide/vue'
 import AppShell from '@/components/AppShell.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -67,6 +68,7 @@ const adminNavItems: AppNavItem[] = [
   { path: '/admin/model-probe', label: '模型探测', icon: Radar, group: '概览' },
   { path: '/admin/upstreams', label: '上游管理', icon: SatelliteDish, group: '资源管理' },
   { path: '/admin/downstreams', label: '下游管理', icon: KeyRound, group: '资源管理' },
+  { path: '/admin/model-aliases', label: '模型映射', icon: ArrowRightLeft, group: '资源管理' },
   { path: '/admin/logs', label: '运行日志', icon: ScrollText, group: '运维' },
   { path: '/admin/announcement', label: '公告管理', icon: Megaphone, group: '运维' },
   { path: '/admin/settings', label: '网关设置', icon: SettingsIcon, group: '运维' }

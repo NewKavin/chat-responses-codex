@@ -890,3 +890,12 @@ export interface Announcement {
   active: boolean
   updated_at: number
 }
+
+// ============================================================================
+// Model Alias Types
+// ============================================================================
+
+export interface ModelAliasRule {
+  canonical: string
+  aliases: string[]
+}

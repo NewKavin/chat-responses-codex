@@ -31,7 +31,8 @@ import type {
   KeyModelDiscoveryResult,
   UpstreamConfig,
   DownstreamRuntimeResponse,
-  NonstandardFieldPolicy
+  NonstandardFieldPolicy,
+  ModelAliasRule
 } from '@/types'
 
 
@@ -423,5 +424,11 @@ export const adminApi = {
   // Announcements
   getAnnouncement: () => adminHttp.get<AnnouncementResponse>('/admin/announcement'),
   updateAnnouncement: (data: UpdateAnnouncementRequest) =>
-    adminHttp.put<AnnouncementResponse>('/admin/announcement', data)
+    adminHttp.put<AnnouncementResponse>('/admin/announcement', data),
+
+  // Model Aliases
+  getModelAliases: () =>
+    adminHttp.get<{ model_aliases: ModelAliasRule[] }>('/admin/model-aliases'),
+  updateModelAliases: (data: { model_aliases: ModelAliasRule[] }) =>
+    adminHttp.put<{ success: boolean }>('/admin/model-aliases', data)
 }

@@ -76,6 +76,12 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '公告管理' }
     },
     {
+      path: '/admin/model-aliases',
+      name: 'AdminModelAliases',
+      component: () => import('@/views/admin/ModelAliases.vue'),
+      meta: { requiresAuth: true, title: '模型映射' }
+    },
+    {
       path: '/admin/settings',
       name: 'AdminSettings',
       component: () => import('@/views/admin/Settings.vue'),
