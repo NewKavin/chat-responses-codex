@@ -145,7 +145,7 @@ CRUD（`GET /admin/upstreams`、上游更新端点）自动携带；前端读列
 | M2 | 解析与路由集成（3.3）：mappings 优先命中、原名排除、失效跳过；上游侧检查全部走原拼写 | `6c7f02a` | `src/state/normalize.rs`、`src/state.rs`、对照 `8894959` 接线清单 |
 | M3 | 模型列表集成（3.4）：两种格式的对外集合替换 | `b6309f3` | `src/state.rs`、`src/server/gateway.rs`（codex 格式处） |
 | M4 | 前端改版（3.6）：双 tab、平铺表格、三步添加对话框、类型定义 | `4f81f19` | `frontend/src/views/admin/ModelAliases.vue`、`frontend/src/types` |
-| M5 | 文档：管理说明补「模型映射 vs 全局规则」一节；主方案文档 B-2 遗留项标注「由本方案承接」 | `a598e4a` | `docs/deployment-model-aliases-ui.md`、两份 plan 文档回填 |
+| M5 | 文档：管理说明补「模型映射 vs 全局规则」一节；主方案文档 B-2 遗留项标注「由本方案承接」 | `2e1bcba` | `docs/deployment-model-aliases-ui.md`、两份 plan 文档回填 |
 
 每任务独立 commit，测试先行，`rtk cargo test` / `rtk tsc` 全绿后提交；
 完成后把 commit 号回填到本文档。
