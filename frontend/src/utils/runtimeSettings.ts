@@ -298,6 +298,15 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
       '轮数上限打满但 live 瞬态恢复仍在剩余时间预算内时，允许多等一次对齐等待后再放弃；429 族耗尽与关闭开关时维持原行为。'
   },
   {
+    key: 'upstream_transient_last_resort_probe_enabled',
+    group: 'routing',
+    label: '全冷却兜底探测',
+    apply: 'immediate',
+    control: 'boolean',
+    description:
+      '所有候选路由都处于冷却且本请求零物理尝试时，把当前请求作为最后手段探针，提前半开最早恢复的路由并真实发送；便于上游恢复后下一请求立即成功。'
+  },
+  {
     key: 'upstream_common_mode_breaker_threshold',
     group: 'routing',
     label: '请求拒绝共模熔断阈值',

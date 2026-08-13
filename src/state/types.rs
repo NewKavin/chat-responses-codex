@@ -104,6 +104,11 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 /// budget (Part A / R2: max_rounds bounds blind retries, the time budget
 /// bounds evidence-backed waits).
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED: bool = true;
+/// Whether an all-cooled routing round may use the current request as a
+/// last-resort half-open probe of the earliest-recovering route (Part A / R3:
+/// a cooling route is otherwise skipped until its cooldown clock runs out,
+/// so perceived recovery latency equals the cooldown, not the real outage).
+pub const DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED: bool = true;
 /// Consecutive identical (class, upstream status) failures across different
 /// routes within one request that trip the common-mode breaker. 0 disables
 /// the breaker.
@@ -194,6 +199,7 @@ pub struct AppConfig {
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
     pub upstream_route_exhaustion_budget_alignment_enabled: bool,
+    pub upstream_transient_last_resort_probe_enabled: bool,
     pub upstream_common_mode_breaker_threshold: u32,
     pub upstream_common_mode_transient_threshold: u32,
     pub upstream_transient_same_route_retry_enabled: bool,
@@ -286,6 +292,8 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
             upstream_route_exhaustion_budget_alignment_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
+            upstream_transient_last_resort_probe_enabled:
+                DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
             upstream_common_mode_breaker_threshold: DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
             upstream_common_mode_transient_threshold:
                 DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD,
@@ -894,6 +902,10 @@ pub fn default_upstream_transient_same_route_retry_enabled() -> bool {
 
 pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED
+}
+
+pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
+    DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED
 }
 
 pub fn default_model_context_output_reserve() -> u32 {
