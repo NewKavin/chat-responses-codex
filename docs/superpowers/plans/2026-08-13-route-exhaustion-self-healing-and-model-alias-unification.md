@@ -1,7 +1,7 @@
 # 方案：瞬态 502 路由耗尽自愈优化（Part A）+ 上下游模型名映射归一（Part B）
 
 日期：2026-08-13
-状态：Part A 已完成；Part B 开发中
+状态：Part A 已完成；Part B 已合入 main（B-2 路由反向展开遗留由“按上游隔离的模型映射”方案承接，见 `2026-08-13-per-upstream-model-mappings.md`）
 
 ## 任务回填（commits，branch `part-a`）
 
@@ -18,7 +18,7 @@
 | 任务 | commit |
 |------|--------|
 | B1 canonical 归一层 | `8894959`（model_identity 模块 + case-insensitive 匹配） |
-| B2 显式别名注册表 | 开发中（model_aliases 持久化 + Admin API + 测试） |
+| B2 显式别名注册表 | `aac6e1f`（持久化 + Admin API + 校验 + 路由/列表接入）+ `7917bf0`（前端 ModelAliases 页） |
 
 Part B 分支基准为 `73fbdee`（本计划文档落地提交）。
 
@@ -243,6 +243,9 @@ for 6.8s across 3 routing rounds
    显式 alias 命中 → 该规则的 canonical；否则 → B1 大小写折叠。
    反向解析（选定某上游后）：在该上游 `route_models()` 中找出与请求模型
    等价（规则展开 + 大小写折叠）的**原拼写**作为 runtime_model_slug 发往上游。
+   **（遗留项：本方案未单独实现——由「按上游隔离的模型映射」
+   `2026-08-13-per-upstream-model-mappings.md` 承接：为只声明 `deepseek-chat` 的
+   上游配一条 `deepseek-chat → deepseek-v3` 映射即可路由，语义更精确。）**
 3. 用途示例：
    - 归并：`{canonical: "glm-4.5", aliases: ["glm-4-5", "GLM-4.5-Preview"]}`；
    - 重命名/统一品牌名：`{canonical: "deepseek-v3", aliases: ["deepseek-chat"]}`；

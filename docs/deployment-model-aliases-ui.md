@@ -314,3 +314,51 @@ A: 是的，从上游的 `supported_models` 配置读取。
 
 *生成时间: 2026-08-13 22:20*
 *生成者: Claude Opus 5*
+
+---
+
+## 🔀 更新（Part B-3，2026-08-14）：按上游模型映射 vs 全局规则
+
+模型映射页面（`/admin/model-aliases`）改版为**双 tab**，默认 tab 为「模型映射」，
+原全局规则内容移入第二个 tab「全局规则」。
+
+### Tab 1「模型映射」（按上游，默认）
+
+表达「**上游账号 + 上游模型名称 → 下游模型名称**」的三元组，平铺表格展示：
+
+上游账号 | 上游模型名称 | 下游模型名称 | 状态 | 操作（编辑/删除）
+
+- 顶部支持按上游筛选 + 模型名搜索。
+- 添加映射为三步对话框：选上游账号 → 选上游模型（**数据源 = 该上游已配置的
+  `supported_models` ∪ `api_key_models[].supported_models` 去重**，已映射条目禁用，
+  **绝不调用上游 `/v1/models`**）→ 输入下游名称。
+- 编辑锁定「上游账号 / 上游模型」，只改下游名称；删除需确认。
+- 「状态」列：`upstream_model` 已不在该上游任何模型清单 → 标记 **失效**（路由跳过，
+  恢复清单后自动生效，无需改配置）。
+
+### Tab 2「全局规则」（跨上游）
+
+保留原 Model Aliases 内容：canonical + aliases 规则对所有上游全局生效，
+做入口归一与列表显示拼写控制；页头提示改到 Tab 1 做按上游改名。
+
+### 两者怎么选
+
+| 场景 | 用哪个 |
+|------|--------|
+| 不同上游的同名模型要改成**不同的**下游名（A 的 `gpt-4` → `gpt-4-premium`，B 的 `gpt-4` → `gpt-4-standard`） | 「模型映射」tab（全局规则数学上无法表达） |
+| 跨上游把多种拼写归并成一个名字（`deepseek-chat`/`DeepSeek-Chat` → `deepseek-v3`） | 「全局规则」tab |
+| 只声明 `deepseek-chat` 的上游要能命中 `deepseek-v3` 请求 | 「模型映射」配一条 `deepseek-chat → deepseek-v3`（映射优先于全局规则） |
+
+### 运行语义（管理员应了解）
+
+- **解析顺序**：请求名先过全局 alias 归一，再到各上游的按上游映射（canonical 比较）；
+  映射命中后 `runtime_model_slug`、发往上游的 payload model、premium 判定、
+  `ModelContextConfig.slug` 查找全部使用**上游原拼写**。
+- **原名遮蔽**：被映射占用的上游原拼写对下游不可见、不可路由（除非其它上游未映射地
+  声明了它）；下游模型列表 = 各上游 { 映射下游名 } ∪ { 未映射原拼写 } 再经全局
+  alias 显示 + canonical 去重。
+- **键归属**：usage / 配额 / affinity / 日志 model 字段记**下游名**。
+- **持久化**：`model_mappings` 挂在 `UpstreamConfig` 上（file / postgres / redis 三后端
+  快照 `serde(default)`），不建数据库表、无 sqlx；删除上游即级联删除其映射。
+- **保存**：前端沿用既有上游更新接口（按字段 PATCH `{ model_mappings }`），
+  后端 `update_upstream_by_id` 合并并跑校验（下游名不得与全局 alias 冲突等）。
