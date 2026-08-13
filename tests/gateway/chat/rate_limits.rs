@@ -2529,3 +2529,302 @@ async fn a1_same_route_failures_across_rounds_keep_step_flat() {
         "three base-cooldown waits must stay below 9s, took {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn route_retry_last_resort_probe_recovers_earliest_route_when_all_cooling() {
+    // A3: when every route is cooling, the arrived request becomes the probe.
+    // It arms exactly ONE route (the earliest-recovering one) and sends one
+    // real upstream request; the upstream is back, the request succeeds and
+    // the half-open success path clears that route's cooldown while the other
+    // routes keep cooling.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    // Every upstream answers OK: the cooldowns below are seeded directly, so
+    // the only upstream hit the probe test should ever see is the probe.
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        0,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let upstreams = vec![
+        route_retry_upstream_config("up-a", "primary-a", base_url.clone()),
+        route_retry_upstream_config("up-b", "primary-b", base_url.clone()),
+        route_retry_upstream_config("up-c", "primary-c", base_url),
+    ];
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(upstreams),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 2,
+            upstream_transient_route_cooldown_max_seconds: 2,
+            upstream_route_exhaustion_retry_max_wait_ms: 6_000,
+            upstream_transient_same_route_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    let state_for_snapshot = state.clone();
+
+    // Seed three pre-existing transient cooldowns with distinct remaining
+    // cooldowns (30s / 40s / 50s): up-a is the deterministic probe target.
+    let routes = state_for_snapshot
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .map(|upstream| {
+            chat_responses_codex::state::RouteHealthKey {
+                upstream_id: upstream.id.clone(),
+                key_fingerprint: upstream_model_key_fingerprint(upstream, "gpt-4.1-mini"),
+                runtime_model_slug: "gpt-4.1-mini".into(),
+                protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
+            }
+        })
+        .collect::<Vec<_>>();
+    for (route, cooldown_seconds) in routes.iter().zip([30, 40, 50]) {
+        state
+            .observe_route_failure(
+                route,
+                chat_responses_codex::state::RouteFailureClass::TransientServer,
+                Some(Duration::from_secs(cooldown_seconds)),
+            )
+            .await
+            .unwrap();
+    }
+    let cooling = {
+        let mut snapshots = Vec::with_capacity(routes.len());
+        for route in &routes {
+            snapshots.push(
+                state_for_snapshot
+                    .route_health_snapshot(route)
+                    .await
+                    .unwrap()
+                    .expect("every route must be cooling after seeding"),
+            );
+        }
+        snapshots
+    };
+    assert!(cooling[0].cooldown_remaining < cooling[1].cooldown_remaining);
+    assert!(cooling[1].cooldown_remaining < cooling[2].cooldown_remaining);
+
+    // The request must probe exactly one route (up-a) and succeed.
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.clone().oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("probe request must terminate")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "exactly one real request (the last-resort probe) must reach the upstream"
+    );
+    let probed = state_for_snapshot
+        .route_health_snapshot(&routes[0])
+        .await
+        .unwrap()
+        .expect("probed route health must exist");
+    assert_eq!(probed.consecutive_failures, 0);
+    assert!(
+        probed.cooldown_remaining.is_zero(),
+        "a successful probe must clear the probed route cooldown"
+    );
+    for route in &routes[1..] {
+        let snapshot = state_for_snapshot
+            .route_health_snapshot(route)
+            .await
+            .unwrap()
+            .expect("unprobed route health must exist");
+        assert!(
+            snapshot.cooldown_remaining > Duration::ZERO,
+            "unprobed routes must keep cooling"
+        );
+    }
+}
+
+#[tokio::test]
+async fn route_retry_last_resort_probe_interval_blocks_second_request_then_reprobes() {
+    // A3 throttle: within the 1s per-route probe interval the next request
+    // cannot re-probe (single-flight + interval) and ends with zero physical
+    // attempts; once the interval elapses a fresh request may probe again.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let upstream = route_retry_upstream_config("up-a", "primary-a", base_url);
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, "gpt-4.1-mini"),
+        runtime_model_slug: "gpt-4.1-mini".into(),
+        protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 2,
+            upstream_transient_route_cooldown_max_seconds: 2,
+            upstream_route_exhaustion_retry_max_wait_ms: 1_000,
+            upstream_transient_same_route_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    // Pre-existing cooldown from a previous request: the pool is fully
+    // cooling before the probe requests arrive.
+    state
+        .observe_route_failure(
+            &route,
+            chat_responses_codex::state::RouteFailureClass::TransientServer,
+            None,
+        )
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    async fn send_request(
+        app: &axum::Router,
+        downstream_key: &GeneratedDownstreamKey,
+    ) -> serde_json::Value {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.clone().oneshot(route_retry_request(downstream_key)),
+        )
+        .await
+        .expect("request must terminate")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    // First request: the probe is granted, fails, and the half-open failure
+    // path resets the cooldown (step 2) while keeping the 1s interval armed.
+    let payload = send_request(&app, &downstream_key).await;
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let after_first = state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("route health must exist");
+    assert_eq!(after_first.consecutive_failures, 2);
+
+    // Second request within the 1s interval: the probe is refused and not one
+    // real request reaches the upstream.
+    let before = hits.load(Ordering::SeqCst);
+    let payload = send_request(&app, &downstream_key).await;
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(hits.load(Ordering::SeqCst) - before, 0);
+
+    // After the interval elapses a fresh probe is granted again.
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let before = hits.load(Ordering::SeqCst);
+    let payload = send_request(&app, &downstream_key).await;
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(hits.load(Ordering::SeqCst) - before, 1);
+    let after_third = state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("route health must exist");
+    assert_eq!(after_third.consecutive_failures, 3);
+}
+
+#[tokio::test]
+async fn route_retry_last_resort_probe_disabled_keeps_zero_physical_attempts() {
+    // A3 switch off: an all-cooled round keeps today's behavior, zero
+    // physical attempts and a plain terminal error.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let upstream = route_retry_upstream_config("up-a", "primary-a", base_url);
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, "gpt-4.1-mini"),
+        runtime_model_slug: "gpt-4.1-mini".into(),
+        protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 60,
+            upstream_transient_route_cooldown_max_seconds: 60,
+            upstream_route_exhaustion_retry_max_wait_ms: 1_000,
+            upstream_transient_same_route_retry_enabled: false,
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    state
+        .observe_route_failure(
+            &route,
+            chat_responses_codex::state::RouteFailureClass::TransientServer,
+            None,
+        )
+        .await
+        .unwrap();
+    let app = build_router(state);
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("request must terminate")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "the disabled switch must keep the zero-physical-attempt terminal path"
+    );
+}

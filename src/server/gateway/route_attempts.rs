@@ -3,7 +3,7 @@ use crate::state::{RouteHealthKey, RouteSetAggregateKey};
 pub(super) use crate::upstream_feedback::FailureClass;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -169,6 +169,17 @@ pub(super) struct RequestRouteAttempts {
     /// amplify a short upstream blip, while independent requests keep
     /// escalating normally.
     transient_failed_routes: Arc<Mutex<HashSet<String>>>,
+    /// Route armed as the A3 last-resort probe: the next round sends the
+    /// request itself as a real half-open probe to this route.  Shared across
+    /// rounds like `transient_failed_routes`.
+    last_resort_probe: Arc<Mutex<Option<RouteHealthKey>>>,
+    /// Whether this request already armed its single last-resort probe (or
+    /// already made one).  Bounds the probe to one arm per request so a pool
+    /// that stays cooling cannot spin extra rounds indefinitely.
+    last_resort_probe_armed: Arc<AtomicBool>,
+    /// Whether a probe lease was actually granted (a real probe request is
+    /// about to be sent).  Reported in the terminal error details (A5).
+    last_resort_probe_granted: Arc<AtomicBool>,
     routing_round: u32,
 }
 
@@ -179,6 +190,9 @@ impl Default for RequestRouteAttempts {
             ledger: Arc::new(Mutex::new(AttemptLedger::default())),
             metrics: Arc::new(RequestAttemptMetrics::default()),
             transient_failed_routes: Arc::new(Mutex::new(HashSet::new())),
+            last_resort_probe: Arc::new(Mutex::new(None)),
+            last_resort_probe_armed: Arc::new(AtomicBool::new(false)),
+            last_resort_probe_granted: Arc::new(AtomicBool::new(false)),
             routing_round: 1,
         }
     }
@@ -234,6 +248,9 @@ impl RequestRouteAttempts {
             ledger: Arc::new(Mutex::new(AttemptLedger::default())),
             metrics: self.metrics.clone(),
             transient_failed_routes: self.transient_failed_routes.clone(),
+            last_resort_probe: self.last_resort_probe.clone(),
+            last_resort_probe_armed: self.last_resort_probe_armed.clone(),
+            last_resort_probe_granted: self.last_resort_probe_granted.clone(),
             routing_round: self.routing_round.saturating_add(1),
         }
     }
@@ -305,6 +322,77 @@ impl RequestRouteAttempts {
             .contains(&route_id)
     }
 
+    /// Arm the A3 last-resort probe.  At most one arm per request is allowed
+    /// (`last_resort_probe_armed`), so a pool that stays cooling cannot spin
+    /// extra probing rounds indefinitely.
+    pub fn arm_last_resort_probe(&self, route: RouteHealthKey) {
+        self.last_resort_probe_armed
+            .store(true, Ordering::Relaxed);
+        *self
+            .last_resort_probe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(route);
+    }
+
+    /// Consume the armed probe when the request reaches its route.  Returns
+    /// whether the caller should reserve through the A3 probe API.
+    pub fn take_last_resort_probe_for(&self, route: &RouteHealthKey) -> bool {
+        let mut pending = self
+            .last_resort_probe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.as_ref() == Some(route) {
+            *pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop a stale arm that survived an entire round without being reached
+    /// (for example a concurrency-recovery account filter skipping the route).
+    pub fn clear_last_resort_probe(&self) {
+        *self
+            .last_resort_probe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub fn mark_last_resort_probe_granted(&self) {
+        self.last_resort_probe_granted
+            .store(true, Ordering::Relaxed);
+    }
+
+    pub fn last_resort_probe_armed(&self) -> bool {
+        self.last_resort_probe_armed.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)] // consumed by the A5 terminal error details
+    pub fn last_resort_probe_granted(&self) -> bool {
+        self.last_resort_probe_granted.load(Ordering::Relaxed)
+    }
+
+    /// The route with the shortest remaining cooldown among the candidates
+    /// this round skipped because they are cooling (A3 probe target).
+    pub fn earliest_cooled_route(&self) -> Option<RouteHealthKey> {
+        let ledger = self.ledger();
+        let selected = ledger
+            .cooled_candidates
+            .iter()
+            .min_by_key(|failure| failure.retry_after.unwrap_or(Duration::MAX))?;
+        self.tracker()
+            .eligible_routes()
+            .into_iter()
+            .find(|route| {
+                anonymous_route_id(
+                    &route.upstream_id,
+                    &route.key_fingerprint,
+                    &route.runtime_model_slug,
+                    route.protocol,
+                ) == selected.route_id
+            })
+    }
+
     pub fn take_newly_exhausted(&self) -> Vec<RouteSetObservation> {
         self.tracker().take_newly_exhausted()
     }
@@ -337,6 +425,23 @@ impl AttemptLedger {
         } else {
             self.failures.push(failure);
         }
+    }
+
+    /// Whether every candidate skipped this round is cooling for a
+    /// transient-family failure (TransientServer / EdgeProxyError /
+    /// CapacityUnavailable, the same family A1 suppression tracks).  Pure
+    /// rate-limit / key-quota quarantines (B3) and request-shape or
+    /// model-quarantine cooldowns never qualify for a last-resort probe.
+    pub fn is_all_cooled_transient_family(&self) -> bool {
+        !self.cooled_candidates.is_empty()
+            && self.cooled_candidates.iter().all(|failure| {
+                matches!(
+                    failure.class,
+                    FailureClass::TransientServer
+                        | FailureClass::EdgeProxyError
+                        | FailureClass::CapacityUnavailable
+                )
+            })
     }
 
     pub fn record_cooled(&mut self, failure: AttemptFailure) {

@@ -5734,13 +5734,30 @@ async fn process_gateway_request_inner(
                     {
                         continue;
                     }
+                    // A3 last-resort probe: when the previous round armed this
+                    // route, reserve through the early half-open probe API
+                    // (ignores the remaining cooldown, single-flight + 1s
+                    // per-route interval).  A refusal falls back to the ordinary
+                    // reserve semantics below so no in-gateway wait is added.
+                    let mut last_resort_probe_armed =
+                        request_route_attempts.take_last_resort_probe_for(&route_health_key);
                     let route_health_permit = loop {
-                        match state
-                            .reserve_route_health(&route_health_key, &key_health_key)
-                            .await
-                            .map_err(|_| runtime_coordination_unavailable_gateway_error())?
-                        {
+                        let availability = if last_resort_probe_armed {
+                            state
+                                .reserve_route_health_probe(&route_health_key, &key_health_key)
+                                .await
+                                .map_err(|_| runtime_coordination_unavailable_gateway_error())?
+                        } else {
+                            state
+                                .reserve_route_health(&route_health_key, &key_health_key)
+                                .await
+                                .map_err(|_| runtime_coordination_unavailable_gateway_error())?
+                        };
+                        match availability {
                             RouteAvailability::Ready(permit) => {
+                                if last_resort_probe_armed {
+                                    request_route_attempts.mark_last_resort_probe_granted();
+                                }
                                 break Some(Arc::new(TokioMutex::new(Some(permit))));
                             }
                             RouteAvailability::Cooling {
@@ -5753,6 +5770,13 @@ async fn process_gateway_request_inner(
                                 retry_after,
                                 upstream_status,
                             } => {
+                                if last_resort_probe_armed {
+                                    // Probe refused (busy lease / per-route
+                                    // interval / nothing left to probe): fall
+                                    // back to the ordinary reserve path.
+                                    last_resort_probe_armed = false;
+                                    continue;
+                                }
                                 if account_recovery.active_probe_account() == Some(&account_key) {
                                     tokio::select! {
                                         _ = tokio::time::sleep(retry_after) => {}
@@ -7208,6 +7232,41 @@ async fn process_gateway_request_inner(
                 .map_err(|_| runtime_coordination_unavailable_gateway_error())?,
             _ => None,
         };
+
+        // A3 last-resort probe: a round that made zero physical attempts and
+        // skipped every candidate only because of transient-family cooldowns
+        // arms the earliest-recovering route, so the next round sends the
+        // current request itself as a real half-open probe.  The probe either
+        // succeeds (cooldown cleared, request completes), fails through the
+        // existing half-open failure path (step capped, request-level repeats
+        // suppressed by A1), or is refused by single-flight / the 1s per-route
+        // interval, in which case the ordinary decide/terminal flow below
+        // applies.  At most one probe is armed per request, and a stale arm
+        // that never reached its route is dropped here before re-evaluating.
+        request_route_attempts.clear_last_resort_probe();
+        if runtime_settings.upstream_transient_last_resort_probe_enabled
+            && !stream_only_final_attempt
+            && round_terminal.is_some()
+            && round_ledger.attempt_count() == 0
+            && round_ledger.is_all_cooled_transient_family()
+            && !request_route_attempts.last_resort_probe_armed()
+        {
+            if let Some(probe_route) = request_route_attempts.earliest_cooled_route() {
+                tracing::info!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    probe_upstream_id = %probe_route.upstream_id,
+                    probe_model_slug = %probe_route.runtime_model_slug,
+                    cooled_candidates = round_ledger.cooled_candidate_count(),
+                    "arming last-resort half-open probe for the earliest-recovering route"
+                );
+                request_route_attempts.arm_last_resort_probe(probe_route);
+                request_route_attempts = request_route_attempts.next_round();
+                continue 'routing_rounds;
+            }
+        }
 
         if round_terminal.is_some()
             && round_ledger.is_pure_concurrency_exhaustion()
