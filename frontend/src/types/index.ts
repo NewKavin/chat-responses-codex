@@ -67,6 +67,13 @@ export interface ApiKeyModelConfig {
   supported_models: string[]
 }
 
+export interface UpstreamModelMapping {
+  /** 该上游 supported_models / api_key_models 中的原拼写（发往上游用） */
+  upstream_model: string
+  /** 下游可见与请求用的名称 */
+  downstream_model: string
+}
+
 export interface KeyModelDiscoveryResult {
   key_index: number
   models?: number
@@ -90,6 +97,7 @@ export interface UpstreamConfig {
   protocol: 'ChatCompletions' | 'Responses'
   protocols?: Array<'ChatCompletions' | 'Responses'>
   supported_models: string[]
+  model_mappings?: UpstreamModelMapping[]
   default_model_context?: DefaultModelContext
   model_contexts?: ModelContextConfig[]
   request_quota_window_hours: number
