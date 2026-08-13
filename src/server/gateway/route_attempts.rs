@@ -3,7 +3,7 @@ use crate::state::{RouteHealthKey, RouteSetAggregateKey};
 pub(super) use crate::upstream_feedback::FailureClass;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +23,31 @@ pub(super) enum TerminalFailure {
     CapabilityUnsupported,
     ProtocolUnsupported,
     MixedRoutesExhausted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GiveUpReason {
+    /// The routing-round cap was hit and no budget-aligned wait was
+    /// available (A2 switch off, or the recovery was not alignable).
+    RoundCap,
+    /// The next evidence-backed wait would exceed the remaining time budget.
+    WaitBudget,
+    /// No live route recovery was available to wait for.
+    NoRecovery,
+    /// The one budget-aligned wait per request was already consumed; the
+    /// round cap now applies for real.
+    AlignmentExhausted,
+}
+
+impl GiveUpReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundCap => "round_cap",
+            Self::WaitBudget => "wait_budget",
+            Self::NoRecovery => "no_recovery",
+            Self::AlignmentExhausted => "alignment_exhausted",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,6 +205,14 @@ pub(super) struct RequestRouteAttempts {
     /// Whether a probe lease was actually granted (a real probe request is
     /// about to be sent).  Reported in the terminal error details (A5).
     last_resort_probe_granted: Arc<AtomicBool>,
+    /// Why the request ultimately gave up on gateway-side retries (A5).
+    /// Set once at the round-end decision point when `decide` refuses a
+    /// wait; consumed by the terminal error details and stream diagnostics.
+    give_up_reason: Arc<Mutex<Option<GiveUpReason>>>,
+    /// Total in-gateway retry wait time in milliseconds, a mirror of
+    /// `RouteRetryBudget::waited` that survives `next_round` and reaches the
+    /// streaming diagnostics populate sites after the routing loop ends.
+    retry_waited_ms: Arc<AtomicU64>,
     routing_round: u32,
 }
 
@@ -193,6 +226,8 @@ impl Default for RequestRouteAttempts {
             last_resort_probe: Arc::new(Mutex::new(None)),
             last_resort_probe_armed: Arc::new(AtomicBool::new(false)),
             last_resort_probe_granted: Arc::new(AtomicBool::new(false)),
+            give_up_reason: Arc::new(Mutex::new(None)),
+            retry_waited_ms: Arc::new(AtomicU64::new(0)),
             routing_round: 1,
         }
     }
@@ -251,6 +286,8 @@ impl RequestRouteAttempts {
             last_resort_probe: self.last_resort_probe.clone(),
             last_resort_probe_armed: self.last_resort_probe_armed.clone(),
             last_resort_probe_granted: self.last_resort_probe_granted.clone(),
+            give_up_reason: self.give_up_reason.clone(),
+            retry_waited_ms: self.retry_waited_ms.clone(),
             routing_round: self.routing_round.saturating_add(1),
         }
     }
@@ -367,9 +404,41 @@ impl RequestRouteAttempts {
         self.last_resort_probe_armed.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // consumed by the A5 terminal error details
     pub fn last_resort_probe_granted(&self) -> bool {
         self.last_resort_probe_granted.load(Ordering::Relaxed)
+    }
+
+    /// Record why the request gave up on gateway-side retries.  The first
+    /// reason wins: later rounds may still re-evaluate, but the terminal
+    /// story is the one that stopped the retry loop.
+    pub fn set_give_up_reason(&self, reason: GiveUpReason) {
+        let mut slot = self
+            .give_up_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_none() {
+            *slot = Some(reason);
+        }
+    }
+
+    pub fn give_up_reason(&self) -> Option<GiveUpReason> {
+        *self
+            .give_up_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Mirror an in-gateway retry wait into the shared diagnostics counter
+    /// alongside `RouteRetryBudget` (which does not survive `next_round`).
+    pub fn record_retry_waited(&self, waited: Duration) {
+        self.retry_waited_ms.fetch_add(
+            waited.as_millis().try_into().unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn retry_waited_ms(&self) -> u64 {
+        self.retry_waited_ms.load(Ordering::Relaxed)
     }
 
     /// The route with the shortest remaining cooldown among the candidates

@@ -2062,6 +2062,17 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: the second round's doubled cooldown no longer fits the remaining
+    // wait budget, so the terminal must report a wait-budget give-up.
+    assert_eq!(payload["error"]["details"]["give_up_reason"], "wait_budget");
+    assert!(
+        payload["error"]["details"]["live_recovery_seconds"].is_number(),
+        "a live route recovery must be reported in the details"
+    );
+    assert_eq!(
+        payload["error"]["details"]["last_resort_probe_attempted"],
+        false
+    );
     // Each round issues one attempt plus one in-place same-route retry. Round two is
     // always admitted (first cooldown 8-12s fits the 15s budget) and the doubled second
     // cooldown (16-24s) never fits the remaining budget, so exactly two rounds run.
@@ -2191,6 +2202,12 @@ async fn budget_aligned_last_wait_refused_when_recovery_exceeds_budget() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: even the aligned wait would exceed the remaining budget.
+    assert_eq!(payload["error"]["details"]["give_up_reason"], "wait_budget");
+    assert_eq!(
+        payload["error"]["details"]["last_resort_probe_attempted"],
+        false
+    );
     // One round only: initial attempt plus the in-place same-route retry.
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
@@ -2247,6 +2264,16 @@ async fn budget_aligned_last_wait_happens_only_once() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: the aligned wait was consumed on the previous round, so the final
+    // give-up must be reported as alignment_exhausted.
+    assert_eq!(
+        payload["error"]["details"]["give_up_reason"],
+        "alignment_exhausted"
+    );
+    assert!(
+        payload["error"]["details"]["live_recovery_seconds"].is_number(),
+        "the recovery kept fitting the budget; the reason is the alignment cap"
+    );
     // Round one (2 hits) plus one aligned wait round (2 hits): if the
     // alignment repeated, we would see 6 or more hits.
     assert_eq!(hits.load(Ordering::SeqCst), 4);
@@ -2305,6 +2332,8 @@ async fn budget_aligned_last_wait_switch_off_keeps_round_cap_behavior() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: with the alignment switch off the round cap is a plain round_cap.
+    assert_eq!(payload["error"]["details"]["give_up_reason"], "round_cap");
     // Three failing rounds and no aligned fourth round.
     assert_eq!(hits.load(Ordering::SeqCst), 6);
 }
@@ -2730,6 +2759,10 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
     // path resets the cooldown (step 2) while keeping the 1s interval armed.
     let payload = send_request(&app, &downstream_key).await;
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: the terminal details must report that this request itself was the
+    // last-resort probe and that it failed inside a tight wait budget.
+    assert_eq!(payload["error"]["details"]["last_resort_probe_attempted"], true);
+    assert_eq!(payload["error"]["details"]["give_up_reason"], "wait_budget");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let after_first = state
         .route_health_snapshot(&route)
@@ -2744,12 +2777,19 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
     let payload = send_request(&app, &downstream_key).await;
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
     assert_eq!(hits.load(Ordering::SeqCst) - before, 0);
+    // A5: the interval-refused request never became a probe.
+    assert_eq!(
+        payload["error"]["details"]["last_resort_probe_attempted"],
+        false
+    );
 
     // After the interval elapses a fresh probe is granted again.
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     let before = hits.load(Ordering::SeqCst);
     let payload = send_request(&app, &downstream_key).await;
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: the fresh request probed again.
+    assert_eq!(payload["error"]["details"]["last_resort_probe_attempted"], true);
     assert_eq!(hits.load(Ordering::SeqCst) - before, 1);
     let after_third = state
         .route_health_snapshot(&route)
@@ -2822,6 +2862,13 @@ async fn route_retry_last_resort_probe_disabled_keeps_zero_physical_attempts() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // A5: with the switch off no probe was ever armed, and the give-up is
+    // the plain round-cap / budget classification (1s budget, 60s cooldown).
+    assert_eq!(
+        payload["error"]["details"]["last_resort_probe_attempted"],
+        false
+    );
+    assert_eq!(payload["error"]["details"]["give_up_reason"], "wait_budget");
     assert_eq!(
         hits.load(Ordering::SeqCst),
         0,

@@ -750,6 +750,15 @@ pub struct StreamDiagnostics {
     pub physical_attempt_count: u32,
     pub semantic_output_observed: bool,
     pub semantic_terminal_observed: bool,
+    /// Total in-gateway retry wait time before the first upstream bytes
+    /// arrived (round-level waits, same-route retries, transient common-mode
+    /// replay backoff); excludes downstream account admission waits
+    /// (`account_wait_ms`) and any wait after streaming started.
+    pub retry_waited_ms: u64,
+    /// Why the gateway stopped retrying (`round_cap` / `wait_budget` /
+    /// `no_recovery` / `alignment_exhausted`), when the request ended in
+    /// route exhaustion.
+    pub give_up_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

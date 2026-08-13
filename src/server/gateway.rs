@@ -6640,6 +6640,7 @@ async fn process_gateway_request_inner(
                                     tokio::time::sleep(retry_delay).await;
                                 }
                                 route_retry_budget.record_wait_time(retry_delay);
+                                request_route_attempts.record_retry_waited(retry_delay);
                                 continue;
                             }
                             Err(error)
@@ -7136,6 +7137,8 @@ async fn process_gateway_request_inner(
                                                 }
                                                 route_retry_budget
                                                     .record_external_wait(replay_delay);
+                                                request_route_attempts
+                                                    .record_retry_waited(replay_delay);
                                                 // Reset the streak and the attempt
                                                 // tracker so the replay round is a
                                                 // fresh full pass over the pool; the
@@ -7288,26 +7291,35 @@ async fn process_gateway_request_inner(
             }
         }
 
-        if let Some(wait) = round_terminal.and_then(|failure| {
-            route_retry_policy.decide(
+        let retry_decision = round_terminal.map(|failure| {
+            route_retry_policy.decide_with_reason(
                 &route_retry_budget,
                 failure,
                 round_recovery,
                 round_ledger.is_pure_client_rate_limit(),
                 &request_id,
             )
-        }) {
-            log_route_retry_wait(
-                &request_id,
-                &request_route_attempts,
-                &route_retry_budget,
-                wait,
-                round_recovery,
-            );
-            tokio::time::sleep(wait.sleep_for).await;
-            route_retry_budget.record_wait(wait);
-            request_route_attempts = request_route_attempts.next_round();
-            continue 'routing_rounds;
+        });
+        if let Some((wait, give_up_reason)) = retry_decision {
+            if let Some(reason) = give_up_reason {
+                // The retry loop stops here: record why, for the terminal
+                // error details and stream diagnostics (A5).
+                request_route_attempts.set_give_up_reason(reason);
+            }
+            if let Some(wait) = wait {
+                log_route_retry_wait(
+                    &request_id,
+                    &request_route_attempts,
+                    &route_retry_budget,
+                    wait,
+                    round_recovery,
+                );
+                tokio::time::sleep(wait.sleep_for).await;
+                route_retry_budget.record_wait(wait);
+                request_route_attempts.record_retry_waited(wait.sleep_for);
+                request_route_attempts = request_route_attempts.next_round();
+                continue 'routing_rounds;
+            }
         }
         break 'routing_rounds;
     }
@@ -7345,6 +7357,8 @@ async fn process_gateway_request_inner(
                     .saturating_add(account_recovery.waited()),
                 live_recovery,
                 request_route_attempts.physical_attempt_count(),
+                request_route_attempts.give_up_reason(),
+                request_route_attempts.last_resort_probe_granted(),
             )
         } else {
             last_route_error

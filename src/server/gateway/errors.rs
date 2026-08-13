@@ -1,4 +1,4 @@
-use super::route_attempts::{AttemptLedger, FailureClassSummary, TerminalFailure};
+use super::route_attempts::{AttemptLedger, FailureClassSummary, GiveUpReason, TerminalFailure};
 use crate::state::{DownstreamAdmissionRejection, RouteRecovery};
 use crate::upstream_feedback::{
     ClassifiedUpstreamFailure, FailureClass, UpstreamFeedbackClassification,
@@ -82,6 +82,8 @@ pub(super) fn terminal_route_failure_error(
     waited: Duration,
     live_recovery: Option<RouteRecovery>,
     physical_attempt_count: usize,
+    give_up_reason: Option<GiveUpReason>,
+    last_resort_probe_attempted: bool,
 ) -> GatewayError {
     let terminal = ledger.terminal_failure();
     let summaries = ledger.class_summaries();
@@ -90,6 +92,12 @@ pub(super) fn terminal_route_failure_error(
     for class in FailureClass::ALL {
         class_counts.insert(class.as_str().to_string(), json!(ledger.class_count(class)));
     }
+    // The health registry's live earliest recovery, in whole seconds.  This
+    // is what a client should wait before retrying (matches the retry_after
+    // selection below).  `None` when no eligible route is recovering.
+    let live_recovery_seconds = live_recovery.map(|recovery| {
+        duration_seconds_ceil(recovery.half_open_remaining.unwrap_or(recovery.retry_after))
+    });
     let mut details = Map::from_iter([
         ("attempt_count".to_string(), json!(ledger.attempt_count())),
         (
@@ -107,6 +115,15 @@ pub(super) fn terminal_route_failure_error(
         ("class_counts".to_string(), Value::Object(class_counts)),
         ("routing_rounds".to_string(), json!(routing_rounds)),
         ("waited_ms".to_string(), json!(waited.as_millis() as u64)),
+        (
+            "give_up_reason".to_string(),
+            json!(give_up_reason.map(GiveUpReason::as_str)),
+        ),
+        ("live_recovery_seconds".to_string(), json!(live_recovery_seconds)),
+        (
+            "last_resort_probe_attempted".to_string(),
+            json!(last_resort_probe_attempted),
+        ),
     ]);
 
     let (status, message, error_type, code, retry_after_seconds) = match terminal {

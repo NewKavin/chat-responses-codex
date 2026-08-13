@@ -931,6 +931,16 @@ impl ProxiedStreamState {
                     || self.usable_output_seen,
                 semantic_terminal_observed: self.commit_tracker.terminal_observed()
                     || self.semantic_terminal_emitted,
+                retry_waited_ms: self
+                    .body_read_diagnostic_context
+                    .route_attempts
+                    .retry_waited_ms(),
+                give_up_reason: self
+                    .body_read_diagnostic_context
+                    .route_attempts
+                    .give_up_reason()
+                    .map(GiveUpReason::as_str)
+                    .map(str::to_string),
             });
         }
     }
@@ -1668,6 +1678,16 @@ impl TranslatedStreamState {
                     || self.usable_output_observed,
                 semantic_terminal_observed: self.commit_tracker.terminal_observed()
                     || self.semantic_terminal_emitted,
+                retry_waited_ms: self
+                    .body_read_diagnostic_context
+                    .route_attempts
+                    .retry_waited_ms(),
+                give_up_reason: self
+                    .body_read_diagnostic_context
+                    .route_attempts
+                    .give_up_reason()
+                    .map(GiveUpReason::as_str)
+                    .map(str::to_string),
             });
         }
     }

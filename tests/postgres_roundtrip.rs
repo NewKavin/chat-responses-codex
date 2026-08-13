@@ -2019,6 +2019,8 @@ async fn stream_diagnostics_round_trip_through_postgres() {
         physical_attempt_count: 1,
         semantic_output_observed: true,
         semantic_terminal_observed: false,
+        retry_waited_ms: 4_700,
+        give_up_reason: Some("wait_budget".into()),
     };
 
     let log = UsageLog {
@@ -2084,6 +2086,11 @@ async fn stream_diagnostics_round_trip_through_postgres() {
     assert_eq!(reloaded_diag.physical_attempt_count, 1);
     assert!(reloaded_diag.semantic_output_observed);
     assert!(!reloaded_diag.semantic_terminal_observed);
+    assert_eq!(reloaded_diag.retry_waited_ms, 4_700);
+    assert_eq!(
+        reloaded_diag.give_up_reason.as_deref(),
+        Some("wait_budget")
+    );
 }
 
 #[tokio::test]

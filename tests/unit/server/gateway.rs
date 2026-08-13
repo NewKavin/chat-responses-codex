@@ -203,7 +203,7 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
                 .then(|| Duration::from_secs(11 + index as u64)),
         });
     }
-    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, classes.len())
+    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, classes.len(), None, false)
 }
 
 #[test]
@@ -285,9 +285,52 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         retry_after: Some(Duration::from_millis(1_001)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 1);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 1, None, false);
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
+    // No recovery and no probe: A5 details report the absence explicitly.
+    assert_eq!(error.safe_details()["give_up_reason"], serde_json::Value::Null);
+    assert_eq!(
+        error.safe_details()["live_recovery_seconds"],
+        serde_json::Value::Null
+    );
+    assert_eq!(error.safe_details()["last_resort_probe_attempted"], false);
+}
+
+#[test]
+fn terminal_details_report_give_up_reason_recovery_and_probe() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route".into(),
+        upstream_status: Some(502),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_secs(9)),
+    });
+
+    let error = terminal_route_failure_error(
+        &ledger,
+        3,
+        Duration::from_millis(6_800),
+        Some(RouteRecovery {
+            half_open_remaining: Some(Duration::from_secs(14)),
+            class: FailureClass::TransientServer,
+            retry_after: Duration::from_secs(12),
+        }),
+        0,
+        Some(GiveUpReason::AlignmentExhausted),
+        true,
+    );
+
+    let details = error.safe_details();
+    assert_eq!(details["give_up_reason"], "alignment_exhausted");
+    assert_eq!(
+        details["live_recovery_seconds"],
+        14,
+        "live recovery must prefer the half-open remaining time"
+    );
+    assert_eq!(details["last_resort_probe_attempted"], true);
+    // The client-facing retry hint keeps preferring the live recovery too.
+    assert_eq!(error.retry_after_seconds(), Some(14));
 }
 
 #[test]
@@ -306,7 +349,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         retry_after: Some(Duration::from_secs(2)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(9_800), None, 1);
+    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(9_800), None, 1, None, false);
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(error.error_type(), "rate_limit_error");
@@ -346,7 +389,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         });
     }
 
-    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(6_900), None, 0);
+    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(6_900), None, 0, None, false);
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let message = error.message();
@@ -378,7 +421,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         retry_after: Some(Duration::from_secs(10)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2, None, false);
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -413,7 +456,7 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         retry_after: Some(Duration::from_secs(10)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2, None, false);
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -441,6 +484,8 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
             retry_after: Duration::from_secs(27),
         }),
         1,
+        None,
+        true,
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);

@@ -990,3 +990,92 @@ async fn admin_dashboard_classifies_common_mode_trips_separately() {
         "common-mode trips must not be double-counted as plain upstream failures"
     );
 }
+
+#[tokio::test]
+async fn admin_dashboard_classifies_route_exhaustion_separately() {
+    // A5: the upstream_routes_exhausted terminal gets its own dashboard
+    // bucket, next to common-mode trips, instead of being folded into the
+    // generic 5xx / 429 buckets.
+    let now = chat_responses_codex::state::unix_seconds();
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+
+    let mut transient_log = dashboard_usage_log("exhaustion-503", now.saturating_sub(90));
+    transient_log.status_code = 503;
+    transient_log.error_message = Some(
+        "all eligible upstream routes are temporarily unavailable: transient upstream \
+         server errors (3 routes, upstream HTTP 502); please try again in 14s; gateway \
+         already retried for 6.8s across 3 routing rounds"
+            .to_string(),
+    );
+    transient_log.error_category = Some("upstream_routes_exhausted".to_string());
+
+    let mut rate_limit_log = dashboard_usage_log("exhaustion-429", now.saturating_sub(30));
+    rate_limit_log.status_code = 429;
+    rate_limit_log.error_message = Some(
+        "all eligible upstream routes are temporarily unavailable: rate limited by upstream \
+         (1 route, upstream HTTP 429); please try again in 5s"
+            .to_string(),
+    );
+    rate_limit_log.error_category = Some("upstream_routes_exhausted".to_string());
+
+    let state = AppState::new(
+        PersistedState {
+            usage_logs: vec![transient_log, rate_limit_log],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        config,
+    );
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let failure_categories = result["analytics"]["failure_categories"]
+        .as_array()
+        .unwrap();
+    let exhaustion = failure_categories
+        .iter()
+        .find(|item| item["name"] == "路由耗尽")
+        .expect("route exhaustion must get its own dashboard category");
+    assert_eq!(
+        exhaustion["value"], 2,
+        "both the 503 and the pure-429 exhaustion terminals must be counted"
+    );
+    assert!(
+        failure_categories
+            .iter()
+            .find(|item| item["name"] == "5xx-上游异常")
+            .is_none(),
+        "route exhaustion must not be double-counted as a generic upstream failure"
+    );
+    assert!(
+        failure_categories
+            .iter()
+            .find(|item| item["name"] == "429-配额/限流")
+            .is_none(),
+        "route exhaustion must not be double-counted as a plain rate-limit failure"
+    );
+}

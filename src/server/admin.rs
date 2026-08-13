@@ -492,6 +492,14 @@ fn classify_dashboard_failure(log: &UsageLog) -> Option<String> {
     {
         return Some("400-上下文超限".to_string());
     }
+    // Terminal route exhaustion gets its own bucket, next to the common-mode
+    // breaker trips (Part A observability): both signal pool-level health
+    // issues even when the wire status is 429 (pure rate-limit family) or 5xx.
+    if log.error_category.as_deref() == Some("upstream_routes_exhausted")
+        || error_message.contains("all eligible upstream routes")
+    {
+        return Some("路由耗尽".to_string());
+    }
     if status == 429
         || error_message.contains("rate limit")
         || error_message.contains("quota")

@@ -1,4 +1,4 @@
-use super::TerminalFailure;
+use super::{GiveUpReason, TerminalFailure};
 use crate::state::{AppConfig, RouteRecovery, RuntimeSettings};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -153,6 +153,7 @@ impl RouteRetryPolicy {
         self.max_wait.saturating_sub(waited)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn decide(
         self,
         budget: &RouteRetryBudget,
@@ -161,18 +162,40 @@ impl RouteRetryPolicy {
         client_retryable_rate_limit: bool,
         request_id: &str,
     ) -> Option<RouteRetryWait> {
+        self.decide_with_reason(
+            budget,
+            terminal,
+            health_recovery,
+            client_retryable_rate_limit,
+            request_id,
+        )
+        .0
+    }
+
+    /// Like [`Self::decide`], but also reports why no wait was granted when
+    /// that is a terminal give-up (A5 observability).  The reason is only
+    /// meaningful for the temporary-exhaustion path: non-temporary terminals
+    /// and retry-disabled requests report `None`.
+    pub fn decide_with_reason(
+        self,
+        budget: &RouteRetryBudget,
+        terminal: TerminalFailure,
+        health_recovery: Option<RouteRecovery>,
+        client_retryable_rate_limit: bool,
+        request_id: &str,
+    ) -> (Option<RouteRetryWait>, Option<GiveUpReason>) {
         if !self.enabled {
-            return None;
+            return (None, None);
         }
         let TerminalFailure::Temporary { retry_after } = terminal else {
-            return None;
+            return (None, None);
         };
         if client_retryable_rate_limit {
             // A pure upstream rate-limit / key-quota exhaustion (429 family)
             // is a client-side retry signal: codex honors Retry-After and
             // keeps the task alive, so the gateway must not absorb the
             // cooldown in-process (B3).
-            return None;
+            return (None, None);
         }
         let concurrency_recovery = health_recovery.is_some_and(|recovery| {
             recovery.class == crate::state::RouteFailureClass::ConcurrencySaturated
@@ -204,40 +227,70 @@ impl RouteRetryPolicy {
                     .retry_after;
                 let next_round = budget.current_round.saturating_add(1);
                 let jitter = deterministic_jitter(request_id, next_round);
-                let sleep_for = required_delay.checked_add(jitter)?;
+                let Some(sleep_for) = required_delay.checked_add(jitter) else {
+                    return (None, Some(GiveUpReason::WaitBudget));
+                };
                 let remaining = self.max_wait.saturating_sub(budget.waited);
                 if sleep_for <= remaining {
-                    return Some(RouteRetryWait {
-                        next_round,
-                        required_delay,
-                        jitter,
-                        sleep_for,
-                        remaining_after: remaining - sleep_for,
-                        alignment: true,
-                    });
+                    return (
+                        Some(RouteRetryWait {
+                            next_round,
+                            required_delay,
+                            jitter,
+                            sleep_for,
+                            remaining_after: remaining - sleep_for,
+                            alignment: true,
+                        }),
+                        None,
+                    );
                 }
+                // An aligned recovery even longer than the remaining budget
+                // is a wait-budget give-up, not a round-cap one: the cap was
+                // already provisionally answered by the alignment check.
+                return (None, Some(GiveUpReason::WaitBudget));
             }
-            return None;
+            // No budget-aligned wait available at the round cap.  Classify
+            // the give-up for observability: the alignment was already used,
+            // the switch is off, or the live recovery does not qualify.
+            if budget.alignment_used {
+                return (None, Some(GiveUpReason::AlignmentExhausted));
+            }
+            let give_up_reason = if !self.budget_alignment_enabled {
+                GiveUpReason::RoundCap
+            } else if health_recovery.is_none() {
+                GiveUpReason::NoRecovery
+            } else {
+                // Recovery exists but is not in the alignable transient
+                // family (for example a concurrency recovery on its own
+                // budget): that is the plain round-cap give-up.
+                GiveUpReason::RoundCap
+            };
+            return (None, Some(give_up_reason));
         }
         let required_delay = health_recovery
             .map(|recovery| recovery.retry_after)
             .unwrap_or(retry_after);
         let next_round = budget.current_round.saturating_add(1);
         let jitter = deterministic_jitter(request_id, next_round);
-        let sleep_for = required_delay.checked_add(jitter)?;
+        let Some(sleep_for) = required_delay.checked_add(jitter) else {
+            return (None, Some(GiveUpReason::WaitBudget));
+        };
         let remaining = max_wait.saturating_sub(budget.waited);
         if sleep_for > remaining {
-            return None;
+            return (None, Some(GiveUpReason::WaitBudget));
         }
 
-        Some(RouteRetryWait {
-            next_round,
-            required_delay,
-            jitter,
-            sleep_for,
-            remaining_after: remaining - sleep_for,
-            alignment: false,
-        })
+        (
+            Some(RouteRetryWait {
+                next_round,
+                required_delay,
+                jitter,
+                sleep_for,
+                remaining_after: remaining - sleep_for,
+                alignment: false,
+            }),
+            None,
+        )
     }
 }
 
@@ -617,6 +670,118 @@ mod tests {
                 .decide(&budget, terminal, Some(recovery), false, "switch-off")
                 .is_none(),
             "with the switch off, the round cap must keep giving up immediately"
+        );
+    }
+
+    #[test]
+    fn give_up_reasons_classify_decide_refusals() {
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(1),
+        };
+        let transient = RouteRecovery {
+            class: RouteFailureClass::TransientServer,
+            retry_after: Duration::from_secs(5),
+            half_open_remaining: None,
+        };
+
+        // 1. Round cap with the alignment switch off -> round_cap.
+        let policy = RouteRetryPolicy::new_with_alignment(true, Duration::from_secs(30), 3, false);
+        let budget = RouteRetryBudget {
+            current_round: 3,
+            waited: Duration::from_secs(10),
+            alignment_used: false,
+        };
+        assert_eq!(
+            policy
+                .decide_with_reason(&budget, terminal, Some(transient), false, "cap")
+                .1,
+            Some(GiveUpReason::RoundCap),
+        );
+
+        // 2. Round cap reached again after the aligned wait was consumed
+        //    -> alignment_exhausted.
+        let policy = RouteRetryPolicy::new(true, Duration::from_secs(30), 3);
+        let exhausted = RouteRetryBudget {
+            current_round: 3,
+            waited: Duration::from_secs(10),
+            alignment_used: true,
+        };
+        assert_eq!(
+            policy
+                .decide_with_reason(&exhausted, terminal, Some(transient), false, "cap-again")
+                .1,
+            Some(GiveUpReason::AlignmentExhausted),
+        );
+
+        // 3. Round cap with alignment enabled but no live recovery
+        //    -> no_recovery.
+        assert_eq!(
+            policy
+                .decide_with_reason(&budget, terminal, None, false, "no-recovery")
+                .1,
+            Some(GiveUpReason::NoRecovery),
+        );
+
+        // 4. The next evidence-backed wait exceeds the remaining budget
+        //    -> wait_budget (both inside the aligned branch and in the
+        //    ordinary branch).
+        let small_budget = RouteRetryBudget {
+            current_round: 1,
+            waited: Duration::from_secs(29),
+            alignment_used: false,
+        };
+        assert_eq!(
+            policy
+                .decide_with_reason(&small_budget, terminal, None, false, "budget")
+                .1,
+            Some(GiveUpReason::WaitBudget),
+        );
+        let aligned_over_budget = RouteRetryBudget {
+            current_round: 3,
+            waited: Duration::from_secs(29),
+            alignment_used: false,
+        };
+        let long_recovery = RouteRecovery {
+            class: RouteFailureClass::TransientServer,
+            retry_after: Duration::from_secs(30),
+            half_open_remaining: None,
+        };
+        assert_eq!(
+            policy
+                .decide_with_reason(
+                    &aligned_over_budget,
+                    terminal,
+                    Some(long_recovery),
+                    false,
+                    "aligned-budget",
+                )
+                .1,
+            Some(GiveUpReason::WaitBudget),
+        );
+
+        // A granted wait never carries a reason, and non-temporary terminals /
+        // pure 429-family exhaustions report None rather than a gateway
+        // give-up reason.
+        let fresh = RouteRetryBudget {
+            current_round: 1,
+            waited: Duration::ZERO,
+            alignment_used: false,
+        };
+        let (wait, reason) =
+            policy.decide_with_reason(&fresh, terminal, Some(transient), false, "granted");
+        assert!(wait.is_some());
+        assert_eq!(reason, None);
+        let credentials = TerminalFailure::Credentials;
+        assert_eq!(
+            policy.decide_with_reason(&fresh, credentials, None, false, "credentials").1,
+            None,
+        );
+        assert_eq!(
+            policy
+                .decide_with_reason(&fresh, terminal, Some(transient), true, "client-429")
+                .1,
+            None,
+            "pure 429-family exhaustion is a client signal, not a gateway give-up (B3)"
         );
     }
 
