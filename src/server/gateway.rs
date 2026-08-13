@@ -635,7 +635,7 @@ fn duration_seconds_ceil(duration: Duration) -> u64 {
         .max(1)
 }
 
-fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
+fn route_health_outcome(error: &GatewayError, repeat_within_request: bool) -> RouteOutcome {
     let retry_after = error.retry_after();
     if matches!(error, GatewayError::ConcurrencyFull { .. }) {
         let upstream_status = error.upstream_status();
@@ -644,10 +644,12 @@ fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
                 class: FailureClass::ConcurrencySaturated,
                 retry_after,
                 upstream_status,
+                repeat_within_request,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
                 class: FailureClass::ConcurrencySaturated,
                 upstream_status,
+                repeat_within_request,
             });
     }
     let upstream_status = error.upstream_status();
@@ -661,10 +663,12 @@ fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
                 class,
                 retry_after,
                 upstream_status,
+                repeat_within_request,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
                 class,
                 upstream_status,
+                repeat_within_request,
             }),
         None => RouteOutcome::Cancelled,
     }
@@ -6620,7 +6624,7 @@ async fn process_gateway_request_inner(
                             {
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(&error),
+                                    route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
                                 )
                                 .await?;
                                 record_route_attempt(route_attempt_context, &error).await?;
@@ -6724,11 +6728,17 @@ async fn process_gateway_request_inner(
                                                     class: FailureClass::ConcurrencySaturated,
                                                     retry_after,
                                                     upstream_status,
+                                                    repeat_within_request: request_route_attempts
+                                                        .has_transient_failure_for(
+                                                            &route_health_key,
+                                                        ),
                                                 }
                                             })
                                             .unwrap_or(RouteOutcome::RouteFailure {
                                                 class: FailureClass::ConcurrencySaturated,
                                                 upstream_status,
+                                                repeat_within_request: request_route_attempts
+                                                    .has_transient_failure_for(&route_health_key),
                                             })
                                     },
                                 )
@@ -6800,6 +6810,8 @@ async fn process_gateway_request_inner(
                                             class: FailureClass::RateLimited,
                                             retry_after,
                                             upstream_status: None,
+                                            repeat_within_request: request_route_attempts
+                                                .has_transient_failure_for(&route_health_key),
                                         }
                                     },
                                 )
@@ -6880,7 +6892,7 @@ async fn process_gateway_request_inner(
                                 if class.is_some() {
                                     finish_route_health_permit(
                                         &route_health_permit,
-                                        route_health_outcome(&error),
+                                        route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
                                     )
                                     .await?;
                                     record_route_attempt(route_attempt_context, &error).await?;
@@ -6917,7 +6929,7 @@ async fn process_gateway_request_inner(
                             {
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(&error),
+                                    route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
                                 )
                                 .await?;
                                 tracing::debug!(
@@ -6959,6 +6971,8 @@ async fn process_gateway_request_inner(
                                         RouteOutcome::RouteFailure {
                                             class: FailureClass::TransientServer,
                                             upstream_status: None,
+                                            repeat_within_request: request_route_attempts
+                                                .has_transient_failure_for(&route_health_key),
                                         }
                                     },
                                 )
@@ -6991,7 +7005,7 @@ async fn process_gateway_request_inner(
                                 );
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(&error),
+                                    route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
                                 )
                                 .await?;
                                 record_route_attempt(route_attempt_context, &error).await?;

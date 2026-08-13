@@ -2983,6 +2983,7 @@ async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
         .finish(RouteOutcome::RouteFailure {
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
+            repeat_within_request: false,
         })
         .await
         .unwrap();
@@ -3113,10 +3114,101 @@ async fn redis_route_health_reconcile_defers_active_lease_then_removes_on_finish
         .finish(RouteOutcome::RouteFailure {
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
+            repeat_within_request: false,
         })
         .await
         .unwrap();
     assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_repeated_transient_failure_within_same_request_keeps_step_flat() {
+    // A1 Redis backend: the Lua observe() must mirror failure_step and keep
+    // the step flat for repeat failures of the same downstream request.
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 1;
+    config.upstream_transient_route_cooldown_max_seconds = 1;
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("request-suppressed-upstream", "fingerprint-a");
+    let route =
+        redis_test_health_route("request-suppressed-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    let first_step = first
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("first failure must create route health state");
+    assert_eq!(first_step.consecutive_failures, 1);
+
+    for round in 2..=3 {
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+            RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+            other => panic!("expected half-open permit in round {round}, got {other:?}"),
+        };
+        permit
+            .finish(RouteOutcome::RouteFailure {
+                class: RouteFailureClass::TransientServer,
+                upstream_status: None,
+                repeat_within_request: true,
+            })
+            .await
+            .unwrap();
+        let snapshot = second
+            .route_health_snapshot(&route)
+            .await
+            .unwrap()
+            .expect("repeat failure must keep route health state");
+        assert_eq!(
+            snapshot.consecutive_failures, 1,
+            "round {round} of the same request must not escalate the failure step"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_independent_request_failures_still_escalate_the_step() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 1;
+    config.upstream_transient_route_cooldown_max_seconds = 1;
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("independent-escalation-upstream", "fingerprint-a");
+    let route =
+        redis_test_health_route("independent-escalation-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    permit
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: None,
+            repeat_within_request: false,
+        })
+        .await
+        .unwrap();
+    let snapshot = second
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("second failure must keep route health state");
+    assert_eq!(
+        snapshot.consecutive_failures, 2,
+        "an independent request failure must escalate the step"
+    );
 }
 
 #[tokio::test]
@@ -3309,6 +3401,7 @@ async fn redis_route_health_finish_rejects_capacity_exhaustion_and_corrupt_marke
         "model-a".into(),
         "responses".into(),
         "".into(),
+        "0".into(),
         "1".into(),
         "1000".into(),
         "0".into(),
@@ -3614,6 +3707,7 @@ async fn redis_route_health_finish_retry_is_idempotent() {
         .finish(RouteOutcome::RouteFailure {
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
+            repeat_within_request: false,
         })
         .await
         .unwrap();

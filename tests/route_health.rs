@@ -116,6 +116,88 @@ async fn route_cooldown_has_one_half_open_lease_and_resets_after_success() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
+    // A1: one downstream request that burns several routing rounds against the
+    // same route must not amplify the failure step (R1): only the first
+    // failure of the request escalates, later rounds reset the cooldown start
+    // without growing the cooldown.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let route = route("request-suppressed-step", "glm-5.2");
+    let key = key("request-suppressed-step");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let first_step = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(first_step.consecutive_failures, 1);
+    let first_cooldown = first_step.cooldown_remaining;
+
+    for round in 2..=3 {
+        let remaining =
+            registry.route_health_snapshot(&route).unwrap().cooldown_remaining;
+        tokio::time::advance(remaining + Duration::from_millis(1)).await;
+        let lease = match registry.reserve(&route, &key) {
+            RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+            other => panic!("expected half-open permit in round {round}, got {other:?}"),
+        };
+        registry.finish(
+            lease,
+            RouteOutcome::RouteFailure {
+                class: RouteFailureClass::TransientServer,
+                upstream_status: Some(500),
+                repeat_within_request: true,
+            },
+        );
+        let snapshot = registry.route_health_snapshot(&route).unwrap();
+        assert_eq!(
+            snapshot.consecutive_failures, 1,
+            "round {round} of the same request must not escalate the failure step"
+        );
+        assert_eq!(
+            snapshot.cooldown_remaining, first_cooldown,
+            "round {round} of the same request must not grow the cooldown"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn independent_request_failures_still_escalate_the_step() {
+    // A1 counter-check: failures from independent requests keep escalating.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let route = route("independent-escalation", "glm-5.2");
+    let key = key("independent-escalation");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let first_cooldown = registry
+        .route_health_snapshot(&route)
+        .unwrap()
+        .cooldown_remaining;
+
+    tokio::time::advance(first_cooldown + Duration::from_millis(1)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    registry.finish(
+        lease,
+        RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: Some(500),
+            repeat_within_request: false,
+        },
+    );
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.consecutive_failures, 2,
+        "an independent request failure must escalate the step"
+    );
+    assert!(
+        snapshot.cooldown_remaining > first_cooldown,
+        "second independent failure must produce a longer cooldown"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() {
     let mut registry =
         RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
@@ -139,6 +221,7 @@ async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() 
             RouteOutcome::RouteFailure {
                 class: RouteFailureClass::TransientServer,
                 upstream_status: Some(500),
+                repeat_within_request: false,
             },
         );
         streak = registry
@@ -390,6 +473,7 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
             RouteOutcome::RouteFailure {
                 class: RouteFailureClass::ConcurrencySaturated,
                 upstream_status: None,
+                repeat_within_request: false,
             },
         );
         let expected_delay = Duration::from_millis(expected_delay);

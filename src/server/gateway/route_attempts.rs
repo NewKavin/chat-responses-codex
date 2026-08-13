@@ -265,6 +265,30 @@ impl RequestRouteAttempts {
         self.ledger().record_cooled(failure);
     }
 
+    /// Whether the given route already recorded a transient-family failure
+    /// (`TransientServer` / `EdgeProxyError` / `CapacityUnavailable`) earlier
+    /// in this downstream request.  The health registry uses this to suppress
+    /// failure-step escalation for the request's own routing rounds (R1): a
+    /// request must not amplify a short upstream blip into a longer cooldown,
+    /// while independent requests keep escalating normally.
+    pub fn has_transient_failure_for(&self, route: &RouteHealthKey) -> bool {
+        let route_id = anonymous_route_id(
+            &route.upstream_id,
+            &route.key_fingerprint,
+            &route.runtime_model_slug,
+            route.protocol,
+        );
+        self.ledger().failures.iter().any(|failure| {
+            failure.route_id == route_id
+                && matches!(
+                    failure.class,
+                    FailureClass::TransientServer
+                        | FailureClass::EdgeProxyError
+                        | FailureClass::CapacityUnavailable
+                )
+        })
+    }
+
     pub fn take_newly_exhausted(&self) -> Vec<RouteSetObservation> {
         self.tracker().take_newly_exhausted()
     }

@@ -812,7 +812,12 @@ fn send_route_hedge_attempt(
             Err(error) => {
                 super::finish_route_health_permit(
                     &completion.route_health_permit,
-                    super::route_health_outcome(&error),
+                    super::route_health_outcome(
+                        &error,
+                        context
+                            .route_attempts
+                            .has_transient_failure_for(&route_health_key),
+                    ),
                 )
                 .await?;
                 if !context.route_attempts.should_attempt(&route_health_key) {

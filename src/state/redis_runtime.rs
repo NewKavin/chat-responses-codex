@@ -1405,7 +1405,8 @@ impl RedisRuntimeCoordinator {
         lease: &RedisHealthLease,
         outcome: RouteOutcome,
     ) -> Result<(), RuntimeCoordinationError> {
-        let (outcome_name, class, retry_after, upstream_status) = route_outcome_parts(outcome);
+        let (outcome_name, class, retry_after, upstream_status, repeat_within_request) =
+            route_outcome_parts(outcome);
         let route_schedule = class
             .filter(|class| route_failure_has_cooldown(*class))
             .map(|class| {
@@ -1460,6 +1461,7 @@ impl RedisRuntimeCoordinator {
                     .map(|status| status.to_string())
                     .unwrap_or_default(),
             )
+            .arg(if repeat_within_request { "1" } else { "0" })
             .arg(route_schedule.len() as u64);
         for cooldown_ms in route_schedule {
             invocation.arg(cooldown_ms);
@@ -2456,34 +2458,45 @@ fn route_outcome_parts(
     Option<RouteFailureClass>,
     Option<Duration>,
     Option<u16>,
+    bool,
 ) {
     match outcome {
-        RouteOutcome::Success => ("success", None, None, None),
+        RouteOutcome::Success => ("success", None, None, None, false),
         RouteOutcome::RouteFailure {
             class,
             upstream_status,
-        } => ("route_failure", Some(class), None, upstream_status),
+            repeat_within_request,
+        } => (
+            "route_failure",
+            Some(class),
+            None,
+            upstream_status,
+            repeat_within_request,
+        ),
         RouteOutcome::RouteFailureWithRetry {
             class,
             retry_after,
             upstream_status,
+            repeat_within_request,
         } => (
             "route_failure_with_retry",
             Some(class),
             Some(retry_after),
             upstream_status,
+            repeat_within_request,
         ),
-        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None),
+        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None, false),
         RouteOutcome::KeyFailureWithRetry { class, retry_after } => (
             "key_failure_with_retry",
             Some(class),
             Some(retry_after),
             None,
+            false,
         ),
         RouteOutcome::UncertainRouteFailure(class) => {
-            ("uncertain_route_failure", Some(class), None, None)
+            ("uncertain_route_failure", Some(class), None, None, false)
         }
-        RouteOutcome::Cancelled => ("cancelled", None, None, None),
+        RouteOutcome::Cancelled => ("cancelled", None, None, None, false),
     }
 }
 

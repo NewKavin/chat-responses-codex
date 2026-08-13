@@ -238,11 +238,18 @@ pub enum RouteOutcome {
     RouteFailure {
         class: RouteFailureClass,
         upstream_status: Option<u16>,
+        /// Whether this route already recorded a transient-family failure
+        /// earlier in the same downstream request. The health registry then
+        /// resets the cooldown start without escalating the failure step, so
+        /// a request's internal routing rounds cannot amplify a short outage
+        /// into a long pool-wide cooldown (R1).
+        repeat_within_request: bool,
     },
     RouteFailureWithRetry {
         class: RouteFailureClass,
         retry_after: Duration,
         upstream_status: Option<u16>,
+        repeat_within_request: bool,
     },
     KeyFailure(RouteFailureClass),
     KeyFailureWithRetry {
@@ -764,14 +771,23 @@ impl RouteHealthRegistry {
             RouteOutcome::RouteFailure {
                 class,
                 upstream_status,
+                repeat_within_request,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
-                self.observe_route_failure_at(&lease.route, class, None, upstream_status, now);
+                self.observe_route_failure_at(
+                    &lease.route,
+                    class,
+                    None,
+                    upstream_status,
+                    now,
+                    repeat_within_request,
+                );
             }
             RouteOutcome::RouteFailureWithRetry {
                 class,
                 retry_after,
                 upstream_status,
+                repeat_within_request,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 self.observe_route_failure_at(
@@ -780,6 +796,7 @@ impl RouteHealthRegistry {
                     Some(retry_after),
                     upstream_status,
                     now,
+                    repeat_within_request,
                 );
             }
             RouteOutcome::KeyFailure(class) => {
@@ -793,7 +810,7 @@ impl RouteHealthRegistry {
             RouteOutcome::UncertainRouteFailure(class) => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 if !self.reapply_concurrency_probe_delay(&lease, now) {
-                    self.observe_route_failure_at(&lease.route, class, None, None, now);
+                    self.observe_route_failure_at(&lease.route, class, None, None, now, false);
                 }
             }
             RouteOutcome::Cancelled => {
@@ -811,7 +828,7 @@ impl RouteHealthRegistry {
         class: RouteFailureClass,
         retry_after: Option<Duration>,
     ) {
-        self.observe_route_failure_at(route, class, retry_after, None, Instant::now());
+        self.observe_route_failure_at(route, class, retry_after, None, Instant::now(), false);
     }
 
     pub fn clear_route_health(&mut self, route: &RouteHealthKey) {
@@ -882,6 +899,7 @@ impl RouteHealthRegistry {
         retry_after: Option<Duration>,
         upstream_status: Option<u16>,
         now: Instant,
+        repeat_within_request: bool,
     ) {
         if !route_failure_has_cooldown(class) {
             self.clear_route(route, now);
@@ -897,7 +915,13 @@ impl RouteHealthRegistry {
             .routes
             .entry(route.clone())
             .or_insert_with(|| HealthState::new(now));
-        let step = failure_step(state, class, now);
+        let step_suppressed = repeat_within_request
+            && class != RouteFailureClass::EdgeProxyError
+            && state.last_failure_class == Some(class)
+            && state
+                .last_failure_at
+                .is_some_and(|last| now.duration_since(last) <= FAILURE_STREAK_RESET);
+        let step = failure_step(state, class, now, repeat_within_request);
         state.state_generation = state.state_generation.wrapping_add(1).max(1);
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
@@ -920,6 +944,16 @@ impl RouteHealthRegistry {
             _ => local,
         };
         state.cooldown_until = Some(now + cooldown);
+        if step_suppressed {
+            tracing::warn!(
+                route_upstream_id = %route.upstream_id,
+                route_model_slug = %route.runtime_model_slug,
+                failure_class = %class.as_str(),
+                step,
+                step_suppressed = true,
+                "route failure repeated within the same request; cooldown step escalation suppressed"
+            );
+        }
     }
 
     fn observe_key_failure_at(
@@ -940,7 +974,7 @@ impl RouteHealthRegistry {
             .keys
             .entry(key.clone())
             .or_insert_with(|| HealthState::new(now));
-        let step = failure_step(state, class, now);
+        let step = failure_step(state, class, now, false);
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
         state.last_failure_at = Some(now);
@@ -1377,7 +1411,12 @@ pub(super) fn key_failure_has_cooldown(class: RouteFailureClass) -> bool {
 /// cooldown to the 5-minute maximum and stays pinned there (B3).
 const ROUTE_HALF_OPEN_FAILURE_STEP_CAP: u32 = 5;
 
-fn failure_step(state: &HealthState, class: RouteFailureClass, now: Instant) -> u32 {
+fn failure_step(
+    state: &HealthState,
+    class: RouteFailureClass,
+    now: Instant,
+    repeat_within_request: bool,
+) -> u32 {
     if class == RouteFailureClass::EdgeProxyError {
         // Edge proxy pages describe the gateway, not the route: they must
         // never escalate the failure streak or lengthen the cooldown.
@@ -1389,6 +1428,13 @@ fn failure_step(state: &HealthState, class: RouteFailureClass, now: Instant) -> 
         || state.last_failure_class != Some(class)
     {
         1
+    } else if repeat_within_request {
+        // The same downstream request already recorded a transient-family
+        // failure for this route. Reset the cooldown start without
+        // escalating the step: the request's own routing rounds must not
+        // amplify a 2-3s upstream blip into a several-minute pool-wide
+        // cooldown. Independent requests keep escalating normally.
+        state.consecutive_failures.max(1)
     } else {
         let escalated = state.consecutive_failures.saturating_add(1).max(1);
         if state.half_open_generation.is_some() && class != RouteFailureClass::ConcurrencySaturated

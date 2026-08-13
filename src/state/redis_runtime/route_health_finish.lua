@@ -12,6 +12,7 @@ local ttl_seconds = tonumber(ARGV[9])
 local global_capacity = tonumber(ARGV[10])
 local upstream_capacity = tonumber(ARGV[11])
 local failure_status = ARGV[16]
+local repeat_within_request = ARGV[17] == '1'
 
 local committed_result = redis.call('GET', KEYS[8])
 if committed_result then
@@ -26,7 +27,7 @@ local function commit_result(result)
   return result
 end
 
-local cursor = 17
+local cursor = 18
 local route_schedule_count = tonumber(ARGV[cursor])
 cursor = cursor + 1
 local route_schedule = {}
@@ -145,7 +146,8 @@ local function observe(
   exact_retry,
   model_slug,
   protocol,
-  half_open_probe
+  half_open_probe,
+  repeat_within_request
 )
   if not ensure_capacity(state_key, upstream_index, global_index) then
     return false
@@ -155,7 +157,14 @@ local function observe(
   local previous_count = tonumber(redis.call('HGET', state_key, 'failure_count') or '0')
   local step = 1
   if previous_class == failure_class and now_ms - previous_at <= streak_reset_ms then
-    step = math.max(1, previous_count + 1)
+    if repeat_within_request then
+      -- Same downstream request already recorded a transient-family failure
+      -- for this route: reset the cooldown start without escalating the
+      -- step, mirroring failure_step in route_health.rs (R1).
+      step = math.max(1, previous_count)
+    else
+      step = math.max(1, previous_count + 1)
+    end
     if half_open_probe and failure_class ~= 'concurrency_saturated' then
       -- A half-open probe failure must not escalate the streak without
       -- bound (B3): cap the step so the cooldown cannot pin at the
@@ -258,7 +267,8 @@ elseif outcome == 'route_failure' or outcome == 'route_failure_with_retry' then
       KEYS[2], KEYS[4], KEYS[6], class,
       route_schedule, route_schedule_count,
       class == 'concurrency_saturated' and explicit_retry_ms >= 0,
-      ARGV[14], ARGV[15], route_generation ~= ''
+      ARGV[14], ARGV[15], route_generation ~= '',
+      repeat_within_request
     ) then
       return -1
     end
@@ -272,7 +282,8 @@ elseif outcome == 'key_failure' or outcome == 'key_failure_with_retry' then
       clear_state(KEYS[1], KEYS[3], KEYS[5])
     elseif not observe(
       KEYS[1], KEYS[3], KEYS[5], class,
-      key_schedule, key_schedule_count, false, '', '', key_generation ~= ''
+      key_schedule, key_schedule_count, false, '', '', key_generation ~= '',
+      false
     ) then
       return -1
     end
@@ -287,7 +298,8 @@ elseif outcome == 'uncertain_route_failure' then
     elseif not observe(
         KEYS[2], KEYS[4], KEYS[6], class,
         route_schedule, route_schedule_count, false,
-        ARGV[14], ARGV[15], route_generation ~= ''
+        ARGV[14], ARGV[15], route_generation ~= '',
+        false
     ) then
       return -1
     end
