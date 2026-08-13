@@ -200,6 +200,11 @@ Relevant settings (see `Runtime Settings Operations`):
 | `upstream_common_mode_transient_threshold` | 4 | Transient breaker (`TransientServer` / `EdgeProxyError`). Reached → one delayed replay round (≤500ms) before returning 502 `upstream_transient_pool_failure` with `Retry-After`. `0` disables this class. Validated ≤ 64. |
 | `upstream_transient_same_route_retry_enabled` | true | Retry the same route once (200–500ms backoff, honoring upstream `Retry-After` up to 2s) on transient 502/503/504 before entering failover. Only applies before any byte was sent downstream. |
 | `upstream_same_route_retry_enabled` | true | Master switch for the same-route retry above; both switches must be on for the retry to fire. |
+| `upstream_transient_route_cooldown_base_seconds` | 10 | Base cooling time for transient server failures; escalates exponentially with the failure streak. Keep low (2–3) for an aggregated gateway so a short upstream blip recovers fast. |
+| `upstream_transient_route_cooldown_max_seconds` | 300 | Cap on the escalated transient cooldown. Bound it (60 or less) for an aggregated gateway: with `base = 2` and `max = 60`, a real outage settles at roughly 1–3 rounds of escalation instead of minutes. |
+| `upstream_route_exhaustion_retry_max_rounds` | 3 | Routing-round cap for the temporary route-exhaustion retry path. With budget alignment on (default), keep 3: the cap bounds blind retries while the time budget governs evidence-backed aligned waits. If you turn `upstream_route_exhaustion_budget_alignment_enabled` off, raise this to 6 so round count does not bite before the time budget. |
+| `upstream_route_exhaustion_budget_alignment_enabled` | true | When the round cap is hit but a live transient recovery fits the remaining wait budget, grant one final aligned wait before giving up (and never for pure 429-family exhaustions, which are always returned to the client). |
+| `upstream_transient_last_resort_probe_enabled` | true | When a routing round made zero physical attempts because every candidate is cooling, arm the earliest-recovering route as an early half-open probe: the next request itself tests it (single-flight + ≥1s per-route interval). Turns a cooled-down pool into self-healing instead of waiting out the cooldown clock. |
 
 Recommended values for a single aggregated gateway deployment:
 
@@ -213,6 +218,13 @@ Recommended values for a single aggregated gateway deployment:
   (400 semantics) repetition is still a genuine request-shape signal.
 - Keep `upstream_transient_same_route_retry_enabled = true`; it absorbs single
   network glitches without burning routes or feeding the breaker streak.
+- Set `upstream_transient_route_cooldown_base_seconds = 2–3` and
+  `upstream_transient_route_cooldown_max_seconds = 60`. Combined with the
+  in-request step suppression (a request's own routing rounds never escalate a
+  route beyond +1 step), most single-hop blips recover within seconds.
+- Keep both new self-healing switches on (defaults):
+  `upstream_route_exhaustion_budget_alignment_enabled = true` and
+  `upstream_transient_last_resort_probe_enabled = true`.
 
 Troubleshooting:
 
@@ -221,6 +233,22 @@ Troubleshooting:
   upstream hosts failed identically even after the replay round. Check the
   shared egress / aggregated gateway, not the request. `details` include
   `failed_route_count`, `distinct_hosts`, `streak`, `threshold`.
+- Downstream sees `503 upstream_routes_exhausted` (or `429` for a pure
+  rate-limit family): read the error `details` to tell *why* the gateway gave
+  up and how to tune:
+  - `give_up_reason`: `round_cap` — the routing-round cap bit before the wait
+    budget (alignment off / no alignable recovery; raise
+    `upstream_route_exhaustion_retry_max_rounds` or check the alignment
+    switch); `wait_budget` — the next recovery exceeded
+    `upstream_route_exhaustion_retry_max_wait_ms` (raise the budget or lower
+    `upstream_transient_route_cooldown_base_seconds`); `no_recovery` — no
+    route reported a live recovery to wait for; `alignment_exhausted` — the
+    one budget-aligned wait per request was already consumed.
+  - `live_recovery_seconds`: the healthy registry's earliest route recovery
+    (half-open remaining preferred); the client-side `Retry-After` matches it.
+  - `last_resort_probe_attempted`: whether the current request itself was
+    sent as an early half-open probe (true means the pool was fully cooling
+    and the probe reached the upstream).
 - Downstream sees `upstream_request_shape_rejected`: routes rejected the same
   request shape (`RequestRejected`). Inspect the request payload and the
   upstream error in `message`; the gateway deliberately stopped replaying to
