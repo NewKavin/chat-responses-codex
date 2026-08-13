@@ -424,6 +424,11 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub protocols: Vec<UpstreamProtocol>,
     pub supported_models: Vec<String>,
+    /// Per-upstream model mappings (Part B-3): downstream request name ->
+    /// this upstream's own model spelling. Mapped names take precedence over
+    /// plain route-model matching and hide the occupied upstream spelling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_mappings: Vec<UpstreamModelMapping>,
     #[serde(default)]
     pub model_contexts: Vec<ModelContextConfig>,
     #[serde(default)]
@@ -498,6 +503,7 @@ impl Default for UpstreamConfig {
             protocol: UpstreamProtocol::ChatCompletions,
             protocols: vec![UpstreamProtocol::ChatCompletions],
             supported_models: Vec::new(),
+            model_mappings: Vec::new(),
             model_contexts: Vec::new(),
             default_model_context: None,
             request_quota_window_hours: default_upstream_request_quota_window_hours(),
@@ -517,6 +523,19 @@ impl Default for UpstreamConfig {
             dialect_preset: None,
         }
     }
+}
+
+/// Per-upstream model mapping (Part B-3): "downstream name -> this
+/// upstream's own model spelling". All comparison in routing/validation is
+/// canonical (see `state::model_identity`); the stored spellings are never
+/// rewritten on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamModelMapping {
+    /// The spelling this upstream advertises in `supported_models` /
+    /// `api_key_models[].supported_models` (sent to the upstream verbatim).
+    pub upstream_model: String,
+    /// The model name downstream clients see and request with.
+    pub downstream_model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

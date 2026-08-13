@@ -559,6 +559,25 @@ impl AppState {
                                 .collect();
                         }
                     }
+                    if let Some(model_mappings) =
+                        updates.get("model_mappings").and_then(|v| v.as_array())
+                    {
+                        upstream.model_mappings = model_mappings
+                            .iter()
+                            .filter_map(|value| {
+                                let upstream_model = value
+                                    .get("upstream_model")
+                                    .and_then(|v| v.as_str())?;
+                                let downstream_model = value
+                                    .get("downstream_model")
+                                    .and_then(|v| v.as_str())?;
+                                Some(UpstreamModelMapping {
+                                    upstream_model: upstream_model.to_string(),
+                                    downstream_model: downstream_model.to_string(),
+                                })
+                            })
+                            .collect();
+                    }
                     if let Some(protocols) = updates.get("protocols").and_then(Value::as_array) {
                         upstream.protocols = parse_upstream_protocols(protocols);
                     } else if let Some(protocol) = updates.get("protocol").and_then(Value::as_str) {
@@ -715,6 +734,11 @@ impl AppState {
 
                     upstream.normalize_for_storage();
                     if let Err(error) = upstream.validate_configuration() {
+                        return Err(UpstreamMutationError::InvalidInput(error));
+                    }
+                    let alias_registry = self.model_alias_registry();
+                    if let Err(error) = upstream.validate_model_mappings_against_aliases(&alias_registry)
+                    {
                         return Err(UpstreamMutationError::InvalidInput(error));
                     }
 

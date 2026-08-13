@@ -2034,6 +2034,7 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 auto_managed: false,
                 managed_source: None,
                 last_synced_at: 0,
+                model_mappings: vec![],
             }]),
             downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),

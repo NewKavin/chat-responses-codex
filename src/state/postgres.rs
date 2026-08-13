@@ -73,7 +73,8 @@ impl PostgresStateStore {
                  protect_premium_quota, active, failure_count, \
                  auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
                  strip_nonstandard_chat_fields, nonstandard_field_policy, \
-                 COALESCE(remark, ''), continuation_provider_group, dialect_preset \
+                 COALESCE(remark, ''), continuation_provider_group, dialect_preset, \
+                 model_mappings \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -123,6 +124,10 @@ impl PostgresStateStore {
                 remark: row.get::<_, String>(24),
                 continuation_provider_group: row.get::<_, Option<String>>(25),
                 dialect_preset: row.get::<_, Option<String>>(26),
+                model_mappings: row
+                    .get::<_, Option<String>>(27)
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
             });
         }
 
@@ -1124,6 +1129,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         let api_keys_json = serde_json::to_string(&upstream.api_keys).unwrap_or("[]".to_string());
         let api_key_models_json =
             serde_json::to_string(&upstream.api_key_models).unwrap_or("[]".to_string());
+        let model_mappings_json =
+            serde_json::to_string(&upstream.model_mappings).unwrap_or("[]".to_string());
         let params: &[&(dyn ToSql + Sync)] = &[
             &upstream.id,
             &upstream.name,
@@ -1153,8 +1160,9 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &upstream.remark,
             &upstream.continuation_provider_group,
             &upstream.dialect_preset,
+            &model_mappings_json,
         ];
-        const UPSTREAM_COLUMNS: [&str; 28] = [
+        const UPSTREAM_COLUMNS: [&str; 29] = [
             "id",
             "name",
             "base_url",
@@ -1183,6 +1191,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             "remark",
             "continuation_provider_group",
             "dialect_preset",
+            "model_mappings",
         ];
         const UPSTREAM_INSERT_CONFLICT: &str = "ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1211,7 +1220,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 nonstandard_field_policy = EXCLUDED.nonstandard_field_policy,
                 remark = EXCLUDED.remark,
                 continuation_provider_group = EXCLUDED.continuation_provider_group,
-                dialect_preset = EXCLUDED.dialect_preset";
+                dialect_preset = EXCLUDED.dialect_preset,
+                model_mappings = EXCLUDED.model_mappings";
         debug_assert_eq!(UPSTREAM_COLUMNS.len(), params.len());
         let sql = insert_statement("upstreams", &UPSTREAM_COLUMNS, UPSTREAM_INSERT_CONFLICT);
         tx.execute(&sql, params).await.map_err(io_other)?;
@@ -1806,6 +1816,10 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS continuation_provider_group TEXT NULL;
+-- Part B-3: per-upstream model mappings (JSON array of
+-- {upstream_model, downstream_model}); NULL/absent means no mappings.
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS model_mappings TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS downstreams (
     id TEXT PRIMARY KEY,

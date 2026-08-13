@@ -647,6 +647,82 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
     }
 }
 
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_model_mappings() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
+
+    let upstream_json = json!({
+        "id": "up-mapped",
+        "name": "mapped",
+        "base_url": "https://upstream.example",
+        "api_key": "upstream-secret-a",
+        "protocol": "ChatCompletions",
+        "protocols": ["ChatCompletions"],
+        "supported_models": ["gpt-4", "gpt-4o"],
+        "model_mappings": [
+            {
+                "upstream_model": "gpt-4",
+                "downstream_model": "gpt-4-premium"
+            },
+            {
+                "upstream_model": "gpt-4o",
+                "downstream_model": "gpt-4o-std"
+            }
+        ],
+        "default_model_context": null,
+        "model_contexts": [],
+        "request_quota_window_hours": 5,
+        "request_quota_requests": 888,
+        "requests_per_minute": 33,
+        "max_concurrency": 7,
+        "priority": 0,
+        "premium_models": [],
+        "premium_only": false,
+        "protect_premium_quota": false,
+        "active": true,
+        "failure_count": 0
+    });
+    let upstream: UpstreamConfig = serde_json::from_value(upstream_json.clone()).unwrap();
+
+    state
+        .insert_upstream(upstream.clone())
+        .await
+        .expect("should persist upstream rows");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+
+    assert_eq!(snapshot.upstreams.len(), 1);
+    assert_eq!(snapshot.upstreams[0].model_mappings.len(), 2);
+    assert_eq!(snapshot.upstreams[0].model_mappings[0].upstream_model, "gpt-4");
+    assert_eq!(snapshot.upstreams[0].model_mappings[0].downstream_model, "gpt-4-premium");
+    assert_eq!(snapshot.upstreams[0].model_mappings[1].upstream_model, "gpt-4o");
+    assert_eq!(snapshot.upstreams[0].model_mappings[1].downstream_model, "gpt-4o-std");
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
 #[tokio::test]
 async fn postgres_roundtrip_preserves_announcement_state() {
     let _guard = env_lock().lock().await;

@@ -186,3 +186,40 @@ async fn file_roundtrip_preserves_authoritative_empty_key_mapping() {
     );
     assert_eq!(upstream.supported_models, vec!["glm-5.2", "glm-4.7"]);
 }
+
+#[tokio::test]
+async fn file_roundtrip_preserves_model_mappings() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let mut upstream = authoritative_upstream();
+    upstream.model_mappings = vec![
+        chat_responses_codex::state::UpstreamModelMapping {
+            upstream_model: "glm-4.7".into(),
+            downstream_model: "glm-4.7-premium".into(),
+        },
+        chat_responses_codex::state::UpstreamModelMapping {
+            upstream_model: "glm-5.2".into(),
+            downstream_model: "glm-5.2-std".into(),
+        },
+    ];
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            ..PersistedState::default()
+        },
+        &state_path,
+        AppConfig::default(),
+    );
+    state.persist().await.unwrap();
+
+    let reloaded = AppState::load_from_path(&state_path, AppConfig::default())
+        .await
+        .unwrap();
+    let upstream = &reloaded.snapshot().await.upstreams[0];
+
+    assert_eq!(upstream.model_mappings.len(), 2);
+    assert_eq!(upstream.model_mappings[0].upstream_model, "glm-4.7");
+    assert_eq!(upstream.model_mappings[0].downstream_model, "glm-4.7-premium");
+    assert_eq!(upstream.model_mappings[1].upstream_model, "glm-5.2");
+    assert_eq!(upstream.model_mappings[1].downstream_model, "glm-5.2-std");
+}

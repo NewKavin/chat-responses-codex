@@ -285,6 +285,13 @@ impl UpstreamConfig {
                 normalized_string_list(std::mem::take(&mut self.supported_models));
         }
         self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
+        self.model_mappings = std::mem::take(&mut self.model_mappings)
+            .into_iter()
+            .map(|mapping| UpstreamModelMapping {
+                upstream_model: mapping.upstream_model.trim().to_string(),
+                downstream_model: mapping.downstream_model.trim().to_string(),
+            })
+            .collect();
         self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
         self.default_model_context =
             normalized_default_model_context(self.default_model_context.take());
@@ -303,6 +310,7 @@ impl UpstreamConfig {
                 "continuation provider group must be 1-128 printable characters".to_string(),
             );
         }
+        self.validate_model_mappings()?;
         if self.premium_models.is_empty() {
             return Ok(());
         }
@@ -329,6 +337,92 @@ impl UpstreamConfig {
             );
         }
 
+        Ok(())
+    }
+
+    /// Validate per-upstream model mappings (Part B-3, rules 1-4 + 6 from the
+    /// plan): non-empty names, per-upstream unique upstream/downstream names
+    /// (canonical comparison), and no collision between a downstream name and
+    /// an unmapped route model of the same upstream. Rule 5 (global alias
+    /// collision) needs the alias registry and lives in
+    /// [`Self::validate_model_mappings_against_aliases`].
+    pub fn validate_model_mappings(&self) -> Result<(), String> {
+        let mappings = self
+            .model_mappings
+            .iter()
+            .filter_map(|mapping| {
+                let upstream = mapping.upstream_model.trim();
+                let downstream = mapping.downstream_model.trim();
+                (!upstream.is_empty() || !downstream.is_empty())
+                    .then(|| (upstream.to_string(), downstream.to_string()))
+            })
+            .collect::<Vec<_>>();
+        for (index, (upstream, downstream)) in mappings.iter().enumerate() {
+            if upstream.is_empty() {
+                return Err(format!(
+                    "model mapping at index {index} has an empty upstream_model"
+                ));
+            }
+            if downstream.is_empty() {
+                return Err(format!(
+                    "model mapping at index {index} for upstream model '{upstream}' has an empty downstream_model"
+                ));
+            }
+            for (other_index, (other_upstream, other_downstream)) in mappings.iter().enumerate() {
+                if index == other_index {
+                    continue;
+                }
+                if super::models_equivalent(upstream, other_upstream) {
+                    return Err(format!(
+                        "upstream model '{upstream}' is mapped more than once (conflicts with index {other_index} mapping)"
+                    ));
+                }
+                if super::models_equivalent(downstream, other_downstream) {
+                    return Err(format!(
+                        "downstream model '{downstream}' is used by more than one mapping (conflicts with index {other_index}); each downstream name must map to exactly one upstream model"
+                    ));
+                }
+            }
+        }
+        // A mapped downstream name must not collide (canonical) with a
+        // route model that is not itself occupied by a mapping; otherwise the
+        // same name has two sources on this upstream.
+        let occupied_models = mappings
+            .iter()
+            .map(|(upstream, _)| super::canonical_model_id(upstream))
+            .collect::<HashSet<_>>();
+        for (index, (_, downstream)) in mappings.iter().enumerate() {
+            let downstream_key = super::canonical_model_id(downstream);
+            if let Some(collision) = self.route_models().iter().find(|route_model| {
+                !occupied_models.contains(&super::canonical_model_id(route_model))
+                    && super::canonical_model_id(route_model) == downstream_key
+            }) {
+                return Err(format!(
+                    "downstream model '{downstream}' (mapping index {index}) collides with this upstream's own model '{collision}'; pick a different downstream name or map '{collision}' too"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Rule 5: a mapped downstream name must not be an alias in any global
+    /// model alias rule (the entry normalization would rewrite it before it
+    /// can match the mapping).
+    pub fn validate_model_mappings_against_aliases(
+        &self,
+        alias_registry: &super::model_identity::ModelAliasRegistry,
+    ) -> Result<(), String> {
+        for mapping in &self.model_mappings {
+            let downstream = mapping.downstream_model.trim();
+            if downstream.is_empty() {
+                continue;
+            }
+            if let Some(canonical) = alias_registry.resolve_alias(downstream) {
+                return Err(format!(
+                    "model mapping downstream name '{downstream}' is an alias for '{canonical}' in a global rule; use '{canonical}' or remove the global rule"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -423,5 +517,145 @@ impl UpstreamConfig {
         // When explicit model-to-key mappings are configured, a miss means this
         // upstream does not have a usable key for the requested model.
         keys
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::model_identity::{ModelAliasRegistry, ModelAliasRule};
+
+    fn mapping(upstream_model: &str, downstream_model: &str) -> UpstreamModelMapping {
+        UpstreamModelMapping {
+            upstream_model: upstream_model.to_string(),
+            downstream_model: downstream_model.to_string(),
+        }
+    }
+
+    fn mapped_upstream() -> UpstreamConfig {
+        UpstreamConfig {
+            name: "mapped".into(),
+            base_url: "https://example.invalid".into(),
+            api_key: "key-a".into(),
+            supported_models: vec!["gpt-4".into(), "gpt-4o".into()],
+            model_mappings: vec![mapping("gpt-4", "gpt-4-premium")],
+            ..UpstreamConfig::default()
+        }
+    }
+
+    #[test]
+    fn model_mappings_missing_old_config_field_defaults_to_empty() {
+        let upstream: UpstreamConfig = serde_json::from_value(json!({
+            "id": "up-old",
+            "name": "legacy",
+            "base_url": "https://example.invalid",
+            "api_key": "key-a",
+            "protocol": "ChatCompletions",
+            "protocols": ["ChatCompletions"],
+            "supported_models": ["gpt-4"],
+            "active": true
+        }))
+        .unwrap();
+        assert!(upstream.model_mappings.is_empty());
+    }
+
+    #[test]
+    fn model_mappings_roundtrip_through_json() {
+        let upstream = mapped_upstream();
+        let decoded: UpstreamConfig =
+            serde_json::from_value(serde_json::to_value(&upstream).unwrap()).unwrap();
+        assert_eq!(decoded, upstream);
+    }
+
+    #[test]
+    fn model_mappings_validate_valid_configuration() {
+        let upstream = mapped_upstream();
+        assert!(upstream.validate_configuration().is_ok());
+        assert!(upstream
+            .validate_model_mappings_against_aliases(&ModelAliasRegistry::default())
+            .is_ok());
+    }
+
+    #[test]
+    fn model_mappings_reject_empty_upstream_or_downstream() {
+        let upstream = UpstreamConfig {
+            model_mappings: vec![mapping("", "gpt-4-premium")],
+            ..mapped_upstream()
+        };
+        let err = upstream.validate_configuration().unwrap_err();
+        assert!(err.contains("upstream_model"), "message was: {err}");
+
+        let upstream = UpstreamConfig {
+            model_mappings: vec![mapping("gpt-4", "  ")],
+            ..mapped_upstream()
+        };
+        let err = upstream.validate_configuration().unwrap_err();
+        assert!(err.contains("downstream_model"), "message was: {err}");
+    }
+
+    #[test]
+    fn model_mappings_reject_duplicate_upstream_model_canonically() {
+        let upstream = UpstreamConfig {
+            supported_models: vec!["gpt-4".into(), "gpt-4o".into()],
+            model_mappings: vec![mapping("gpt-4", "gpt-4-premium"), mapping("GPT-4", "gpt-4-std")],
+            ..UpstreamConfig::default()
+        };
+        let err = upstream.validate_configuration().unwrap_err();
+        assert!(err.contains("gpt-4"), "message was: {err}");
+    }
+
+    #[test]
+    fn model_mappings_reject_duplicate_downstream_model_canonically() {
+        let upstream = UpstreamConfig {
+            model_mappings: vec![
+                mapping("gpt-4", "gpt-4-premium"),
+                mapping("gpt-4o", "GPT-4-PREMIUM"),
+            ],
+            ..mapped_upstream()
+        };
+        let err = upstream.validate_configuration().unwrap_err();
+        assert!(err.contains("gpt-4-premium"), "message was: {err}");
+    }
+
+    #[test]
+    fn model_mappings_reject_downstream_colliding_with_unmapped_model() {
+        // downstream "gpt-4o" collides with the unmapped route model "gpt-4o".
+        let upstream = UpstreamConfig {
+            model_mappings: vec![mapping("gpt-4", "gpt-4o")],
+            ..mapped_upstream()
+        };
+        let err = upstream.validate_configuration().unwrap_err();
+        assert!(err.contains("gpt-4o"), "message was: {err}");
+    }
+
+    #[test]
+    fn model_mappings_allow_stale_upstream_model_but_reject_alias_downstream() {
+        // upstream_model not in any model list: allowed (validation passes).
+        let stale = UpstreamConfig {
+            model_mappings: vec![mapping("removed-model", "gpt-4-premium")],
+            ..mapped_upstream()
+        };
+        assert!(stale.validate_configuration().is_ok());
+
+        // downstream hitting a global alias would be re-normalized away.
+        let registry = ModelAliasRegistry::from_rules(vec![ModelAliasRule {
+            canonical: "deepseek-v3".into(),
+            aliases: vec!["deepseek-chat".into()],
+        }])
+        .unwrap();
+        let conflicting = UpstreamConfig {
+            model_mappings: vec![mapping("gpt-4", "deepseek-chat")],
+            ..mapped_upstream()
+        };
+        let err = conflicting
+            .validate_model_mappings_against_aliases(&registry)
+            .unwrap_err();
+        assert!(err.contains("deepseek-chat"), "message was: {err}");
+        // Mapping to the rule's canonical is fine.
+        let ok = UpstreamConfig {
+            model_mappings: vec![mapping("gpt-4", "deepseek-v3")],
+            ..mapped_upstream()
+        };
+        assert!(ok.validate_model_mappings_against_aliases(&registry).is_ok());
     }
 }

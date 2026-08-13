@@ -148,7 +148,7 @@ pub use types::{
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
     DownstreamConfig, GlobalContextProfile, ModelContextConfig, NonstandardFieldPolicy,
     PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
-    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
+    UpstreamModelMapping, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -4825,6 +4825,10 @@ impl AppState {
     pub async fn insert_upstream(&self, mut upstream: UpstreamConfig) -> io::Result<()> {
         upstream.normalize_for_storage();
         if let Err(error) = upstream.validate_configuration() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+        }
+        let alias_registry = self.model_alias_registry();
+        if let Err(error) = upstream.validate_model_mappings_against_aliases(&alias_registry) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
         }
 
