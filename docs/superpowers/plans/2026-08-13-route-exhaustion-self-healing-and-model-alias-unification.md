@@ -1,7 +1,19 @@
 # 方案：瞬态 502 路由耗尽自愈优化（Part A）+ 上下游模型名映射归一（Part B）
 
 日期：2026-08-13
-状态：待开发
+状态：Part A 已完成；Part B 待开发
+
+## 任务回填（commits，branch `part-a`）
+
+| 任务 | commit |
+|------|--------|
+| A1 请求内冷却升级抑制 | `7e37973`（feat）+ `a1082ae`（fix 跨轮抑制）+ `a1b8a55`（test 字段计数） |
+| A2 预算对齐的最后等待 | `3e93ba5`（feat） |
+| A3 全冷却时 last-resort 半开探测 | `3441077`（registry/reserve）+ `40c1cf2`（runtime 开关）+ `34ed543`（gateway 集成） |
+| A4 参数与部署文档 | `626b9dc`（DEPLOYMENT.md Intranet 小节） |
+| A5 可观测性 | `0609d1f`（give_up_reason / StreamDiagnostics / dashboard 分类） |
+
+Part B 未动；分支基准为 `73fbdee`（本计划文档落地提交）。
 
 关联报错（内网聚合网关部署，2026-08-12 共模熔断方案落地之后仍出现）：
 
