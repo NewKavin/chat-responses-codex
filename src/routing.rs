@@ -84,14 +84,29 @@ impl UpstreamCandidate {
 
     /// Check if this is a premium model for this upstream
     pub fn is_premium_model(&self, model: &str) -> bool {
-        !self.premium_models.is_empty() && self.premium_models.iter().any(|m| m == model)
+        self.is_premium_model_with(model, true)
+    }
+
+    pub fn is_premium_model_with(&self, model: &str, case_insensitive: bool) -> bool {
+        !self.premium_models.is_empty()
+            && self.premium_models.iter().any(|candidate| {
+                crate::state::models_equivalent_with(candidate, model, case_insensitive)
+            })
     }
 
     /// Check if this upstream should be avoided for non-premium models
     pub fn should_avoid_for_non_premium(&self, model: &str) -> bool {
+        self.should_avoid_for_non_premium_with(model, true)
+    }
+
+    pub fn should_avoid_for_non_premium_with(
+        &self,
+        model: &str,
+        case_insensitive: bool,
+    ) -> bool {
         self.protect_premium_quota
             && !self.premium_models.is_empty()
-            && !self.is_premium_model(model)
+            && !self.is_premium_model_with(model, case_insensitive)
     }
 }
 
@@ -113,12 +128,26 @@ pub fn select_upstream(
     request: &RouteRequest,
     candidates: &[UpstreamCandidate],
 ) -> Result<UpstreamCandidate, RouteError> {
+    select_upstream_with_model_matching(request, candidates, true)
+}
+
+pub fn select_upstream_with_model_matching(
+    request: &RouteRequest,
+    candidates: &[UpstreamCandidate],
+    case_insensitive: bool,
+) -> Result<UpstreamCandidate, RouteError> {
     // Step 1: Filter by protocol and model support
     let supported = candidates
         .iter()
         .filter(|candidate| {
             candidate.protocol == request.protocol
-                && candidate.models.iter().any(|model| model == &request.model)
+                && candidate.models.iter().any(|model| {
+                    crate::state::models_equivalent_with(
+                        model,
+                        &request.model,
+                        case_insensitive,
+                    )
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -130,7 +159,9 @@ pub fn select_upstream(
     // Step 2: Separate into preferred and fallback groups
     let (mut preferred, mut fallback): (Vec<_>, Vec<_>) = supported
         .into_iter()
-        .partition(|candidate| !candidate.should_avoid_for_non_premium(&request.model));
+        .partition(|candidate| {
+            !candidate.should_avoid_for_non_premium_with(&request.model, case_insensitive)
+        });
 
     // Step 3: Try preferred group first
     if !preferred.is_empty() {

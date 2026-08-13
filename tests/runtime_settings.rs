@@ -113,7 +113,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 46);
+    assert_eq!(all.len(), 47);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -132,6 +132,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_transient_same_route_retry_enabled",
         "upstream_route_exhaustion_budget_alignment_enabled",
         "upstream_transient_last_resort_probe_enabled",
+        "model_case_insensitive_matching",
     ] {
         assert!(
             IMMEDIATE_RUNTIME_SETTING_FIELDS.contains(&field),
@@ -144,6 +145,19 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     }
     assert!(!all.contains("jwt_secret"));
     assert!(!all.contains("redis_url"));
+}
+
+#[test]
+fn runtime_settings_round_trip_model_case_insensitive_matching() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    assert!(settings.model_case_insensitive_matching);
+    settings.model_case_insensitive_matching = false;
+
+    let mut config = AppConfig::default();
+    settings.apply_to_app_config(&mut config);
+
+    assert!(!config.model_case_insensitive_matching);
+    assert!(!RuntimeSettings::from_app_config(&config).model_case_insensitive_matching);
 }
 
 #[test]

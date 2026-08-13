@@ -1,6 +1,8 @@
 use chat_responses_codex::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
+use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
+use std::sync::Arc;
 
 #[test]
 fn selects_first_healthy_supported_upstream_and_falls_back() {
@@ -33,4 +35,56 @@ fn rejects_when_no_upstream_supports_requested_model() {
         err,
         RouteError::ModelUnavailable("gpt-4.1-mini".to_string())
     );
+}
+
+#[tokio::test]
+async fn app_state_routing_honors_model_case_matching_switch() {
+    let upstream = UpstreamConfig {
+        id: "upper".into(),
+        name: "upper".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["GLM-4.5".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+
+    for (case_insensitive, should_match) in [(true, true), (false, false)] {
+        let state = AppState::new(
+            PersistedState {
+                upstreams: Arc::new(vec![upstream.clone()]),
+                ..PersistedState::default()
+            },
+            tempfile::tempdir().unwrap().path().join("state.json"),
+            AppConfig {
+                model_case_insensitive_matching: case_insensitive,
+                ..AppConfig::default()
+            },
+        );
+
+        assert_eq!(
+            state
+                .choose_upstream("glm-4.5", UpstreamProtocol::ChatCompletions)
+                .await
+                .is_ok(),
+            should_match
+        );
+    }
+}
+
+#[test]
+fn affinity_keys_honor_model_case_matching_switch() {
+    for (case_insensitive, expected) in [(true, Some("upper")), (false, None)] {
+        let state = AppState::new(
+            PersistedState::default(),
+            tempfile::tempdir().unwrap().path().join("state.json"),
+            AppConfig {
+                model_case_insensitive_matching: case_insensitive,
+                ..AppConfig::default()
+            },
+        );
+        state.set_affinity_upstream("down", "GLM-4.5", "upper", 60);
+
+        assert_eq!(state.get_affinity_upstream("down", "glm-4.5").as_deref(), expected);
+    }
 }

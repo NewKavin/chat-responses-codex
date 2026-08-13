@@ -98,6 +98,10 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 /// instead of failing fast, so a 10s transient cooldown recovers inside the
 /// gateway and Codex never sees a 503.
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
+/// Case-insensitive model matching across routing, key mapping, premium
+/// checks, affinity keys and model list dedup. Disable only when an upstream
+/// genuinely distinguishes two models by case alone.
+pub const DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING: bool = true;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 /// Whether an exhausted request may spend one final budget-aligned wait when
 /// the round cap is hit but a live transient recovery fits the remaining time
@@ -145,6 +149,9 @@ pub struct AppConfig {
     pub routing_affinity_enabled: bool,
     pub routing_affinity_ttl_seconds: u64,
     pub routing_affinity_escape_pressure_ratio: f64,
+    /// Fold model-name casing when matching (route matching, key mapping,
+    /// premium checks, affinity keys, model-list dedup). Default true.
+    pub model_case_insensitive_matching: bool,
     pub model_probe_refresh_interval_seconds: u64,
     pub upstream_model_auto_discovery_enabled: bool,
     pub upstream_model_key_sync_interval_seconds: u64,
@@ -249,6 +256,7 @@ impl Default for AppConfig {
             routing_affinity_enabled: true,
             routing_affinity_ttl_seconds: 180,
             routing_affinity_escape_pressure_ratio: 1.5,
+            model_case_insensitive_matching: DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
             model_probe_refresh_interval_seconds: 15,
             upstream_model_auto_discovery_enabled: false,
             upstream_model_key_sync_interval_seconds: 0,
@@ -919,4 +927,8 @@ pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
 
 pub fn default_model_context_output_reserve() -> u32 {
     2048
+}
+
+pub fn default_model_case_insensitive_matching() -> bool {
+    DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING
 }

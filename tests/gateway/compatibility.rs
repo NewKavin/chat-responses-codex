@@ -70,6 +70,86 @@ async fn basic_models_payload(uri: &str) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn case_variant_models_payload(uri: &str, case_insensitive: bool) -> Value {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![
+                UpstreamConfig {
+                    id: "up-upper".into(),
+                    name: "upper".into(),
+                    base_url: "http://127.0.0.1:9".into(),
+                    api_key: "upper-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["GLM-4.5".into()],
+                    active: true,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "up-lower".into(),
+                    name: "lower".into(),
+                    base_url: "http://127.0.0.1:8".into(),
+                    api_key: "lower-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["glm-4.5".into()],
+                    active: true,
+                    ..Default::default()
+                },
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "test-downstream".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                rate_limit_enabled: false,
+                per_minute_limit: 0,
+                max_concurrency: 0,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        state_path,
+        AppConfig {
+            model_case_insensitive_matching: case_insensitive,
+            ..AppConfig::default()
+        },
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
 #[tokio::test]
 async fn v1_models_endpoint_returns_available_models() {
     let payload = basic_models_payload("/v1/models").await;
@@ -91,6 +171,42 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_format() {
 
     assert!(payload["models"].is_array());
     assert!(payload.get("data").is_none());
+}
+
+#[tokio::test]
+async fn v1_models_catalogs_deduplicate_case_variants_to_canonical_spelling() {
+    let standard = case_variant_models_payload("/v1/models", true).await;
+    assert_eq!(
+        standard["data"],
+        json!([{"id": "glm-4.5", "object": "model"}])
+    );
+
+    let codex = case_variant_models_payload("/v1/models?format=codex", true).await;
+    let models = codex["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["slug"], "glm-4.5");
+    assert_eq!(models[0]["display_name"], "glm-4.5");
+}
+
+#[tokio::test]
+async fn v1_models_catalogs_restore_exact_case_behavior_when_switch_is_disabled() {
+    let standard = case_variant_models_payload("/v1/models", false).await;
+    let standard_ids = standard["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(standard_ids, std::collections::BTreeSet::from(["GLM-4.5", "glm-4.5"]));
+
+    let codex = case_variant_models_payload("/v1/models?format=codex", false).await;
+    let codex_ids = codex["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model["slug"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(codex_ids, std::collections::BTreeSet::from(["GLM-4.5", "glm-4.5"]));
 }
 
 #[tokio::test]

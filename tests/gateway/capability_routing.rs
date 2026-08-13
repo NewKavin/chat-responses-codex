@@ -552,9 +552,15 @@ async fn codex_catalog_keeps_configured_models_without_tool_capability_witness()
 
 #[tokio::test]
 async fn codex_catalog_uses_the_complete_nonempty_downstream_allowlist() {
+    // B1 canonical matching collapses the case-only duplicates the upstream
+    // declares (`MiniMax/MiniMax-M2.7` + `minimax/minimax-m2.7`) into the one
+    // canonical display slug, and the allowlist-only entry is displayed in
+    // canonical form too (no upstream spelling to preserve).
     let live_model = "MiniMax/MiniMax-M2.7";
     let alternate_live_casing = "minimax/minimax-m2.7";
+    let canonical_live = "minimax/minimax-m2.7";
     let allowlist_only_model = "ZhipuAI/GLM-5.1";
+    let canonical_allowlist_only = "zhipuai/glm-5.1";
     let upstream = catalog_upstream("partial-live-catalog", &[live_model, alternate_live_casing]);
     let (_tempdir, state, secret) = catalog_state(
         vec![upstream],
@@ -574,13 +580,11 @@ async fn codex_catalog_uses_the_complete_nonempty_downstream_allowlist() {
 
     assert_eq!(
         slugs,
-        std::collections::BTreeSet::from(
-            [live_model, alternate_live_casing, allowlist_only_model,]
-        )
+        std::collections::BTreeSet::from([canonical_live, canonical_allowlist_only,])
     );
     let conservative = models
         .iter()
-        .find(|model| model["slug"] == allowlist_only_model)
+        .find(|model| model["slug"] == canonical_allowlist_only)
         .expect("allowlist-only model");
     for model in models {
         assert_eq!(model["multi_agent_version"], "v1");
@@ -2816,4 +2820,147 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
         })
     );
     assert!(upgraded.request_state["_gateway_continuation"]["compatibility_contract"].is_object());
+}
+
+#[tokio::test]
+async fn model_catalog_dedups_case_only_duplicates_across_upstreams() {
+    // B1 列表去重：两个上游分别声明 `GLM-4.5` / `glm-4.5`，标准与 codex
+    // 两种 /v1/models 格式都只出现一个条目（无显式规则时显示 canonical 小写）。
+    let (_tempdir, state, secret) = catalog_state(
+        vec![
+            catalog_upstream("up-upper", &["GLM-4.5"]),
+            catalog_upstream("up-lower", &["glm-4.5"]),
+        ],
+        vec![],
+    );
+
+    let standard = get_models(state.clone(), &secret, false).await;
+    let standard_ids = standard["data"]
+        .as_array()
+        .expect("standard /v1/models data array")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let upper_count = standard_ids
+        .iter()
+        .filter(|id| id.as_str() == "GLM-4.5")
+        .count();
+    let lower_count = standard_ids
+        .iter()
+        .filter(|id| id.as_str() == "glm-4.5")
+        .count();
+    assert_eq!(
+        (upper_count, lower_count),
+        (0, 1),
+        "standard catalog must dedup case-only duplicates to canonical lowercase: {standard_ids:?}"
+    );
+
+    let codex = get_models(state.clone(), &secret, true).await;
+    let codex_slugs = codex["models"]
+        .as_array()
+        .expect("codex /v1/models models array")
+        .iter()
+        .filter_map(|entry| entry["slug"].as_str())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(codex_slugs.len(), 1, "codex catalog must dedup: {codex_slugs:?}");
+    assert_eq!(codex_slugs[0], "glm-4.5");
+}
+
+#[tokio::test]
+async fn case_folded_downstream_model_routes_to_upstream_stored_spelling() {
+    // B1 第 1 条：上游声明 `GLM-4.5`，下游请求 `glm-4.5` → 命中该上游，
+    // 发往上游的 payload model 与 RouteHealthKey.runtime_model_slug 均为
+    // 上游存储的原拼写 `GLM-4.5`（绝不小写化、绝不改写存储拼写）。
+    let payload_models = Arc::new(Mutex::new(Vec::<String>::new()));
+    let payload_models_clone = payload_models.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let payload_models = payload_models_clone.clone();
+            async move {
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                payload_models
+                    .lock()
+                    .unwrap()
+                    .push(payload["model"].as_str().unwrap_or_default().to_string());
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-case",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "GLM-4.5",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let mut upstream = catalog_upstream("case-folded-route", &["GLM-4.5"]);
+    upstream.base_url = format!("http://{address}");
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec!["GLM-4.5".into()]);
+
+    // Seed a verified profile so the request actually routes without probing.
+    let key_fingerprint = chat_responses_codex::keys::upstream_key_fingerprint(
+        &upstream.id,
+        &upstream.api_key,
+    );
+    let profile_key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "GLM-4.5",
+        WireProtocol::ChatCompletions,
+    );
+    let mut profile = UpstreamDialectProfile::unknown(profile_key);
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            &key_fingerprint,
+            "GLM-4.5",
+            "GLM-4.5",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile.state = DialectProfileState::Verified;
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "glm-4.5",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        payload_models.lock().unwrap().as_slice(),
+        ["GLM-4.5"],
+        "outbound payload must use the upstream stored spelling"
+    );
 }

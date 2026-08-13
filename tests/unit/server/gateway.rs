@@ -2359,6 +2359,7 @@ fn request_route_capability_cache_overlays_value_and_protocol_hints_exactly() {
         &requested,
         &value_snapshot,
         Some("xhigh"),
+        true,
     );
     assert!(
         !xhigh
@@ -2379,6 +2380,7 @@ fn request_route_capability_cache_overlays_value_and_protocol_hints_exactly() {
         &requested,
         &value_snapshot,
         None,
+        true,
     );
     assert!(
         plain
@@ -2404,6 +2406,7 @@ fn request_route_capability_cache_overlays_value_and_protocol_hints_exactly() {
         &requested,
         &protocol_snapshot,
         None,
+        true,
     );
     assert!(
         !protocol_blocked

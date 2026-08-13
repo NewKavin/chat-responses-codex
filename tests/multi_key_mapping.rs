@@ -1,6 +1,6 @@
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig,
+    ApiKeyModelConfig, AppConfig, AppState, ModelContextConfig, PersistedState, UpstreamConfig,
 };
 use tempfile::tempdir;
 
@@ -98,6 +98,63 @@ fn storage_normalization_clears_legacy_upstream_failure_count() {
     upstream.normalize_for_storage();
 
     assert_eq!(upstream.failure_count, 0);
+}
+
+#[test]
+fn case_insensitive_model_identity_preserves_first_upstream_spelling() {
+    let upstream = UpstreamConfig {
+        supported_models: vec!["GLM-4.5".into(), "glm-4.5".into()],
+        ..UpstreamConfig::default()
+    };
+
+    assert!(upstream.supports_model_with("glm-4.5", true));
+    assert_eq!(
+        upstream.resolved_model_name_with("glm-4.5", true),
+        Some("GLM-4.5".into())
+    );
+    assert_eq!(
+        upstream.resolved_model_name_with("glm-4.5", false),
+        Some("glm-4.5".into())
+    );
+}
+
+#[test]
+fn case_insensitive_model_identity_covers_key_premium_and_context_matching() {
+    let upstream = UpstreamConfig {
+        api_key: "key-a".into(),
+        api_key_models: vec![mapping("key-a", &["GLM-4.5"])],
+        supported_models: vec!["GLM-4.5".into()],
+        premium_models: vec!["GLM-4.5".into()],
+        model_contexts: vec![ModelContextConfig {
+            slug: "GLM-4.5".into(),
+            context_limit: 128_000,
+            output_reserve: 4_096,
+            max_output_tokens: 8_192,
+            context_group: String::new(),
+        }],
+        ..UpstreamConfig::default()
+    };
+
+    assert_eq!(
+        upstream.keys_for_model_with("glm-4.5", true),
+        vec!["key-a"]
+    );
+    assert!(upstream.is_premium_model_request_with("glm-4.5", true));
+    assert_eq!(
+        upstream
+            .context_config_for_model_with("glm-4.5", true)
+            .unwrap()
+            .slug,
+        "GLM-4.5"
+    );
+
+    assert!(upstream
+        .keys_for_model_with("glm-4.5", false)
+        .is_empty());
+    assert!(!upstream.is_premium_model_request_with("glm-4.5", false));
+    assert!(upstream
+        .context_config_for_model_with("glm-4.5", false)
+        .is_none());
 }
 
 #[tokio::test]

@@ -1189,7 +1189,10 @@ async fn run_models_check(
     };
 
     let available_models = state.available_models_for_downstream(secret).await;
-    if available_models.iter().any(|model| model == &body.model) {
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
+    if available_models.iter().any(|model| {
+        crate::state::models_equivalent_with(model, &body.model, case_insensitive)
+    }) {
         TroubleshootingResult {
             id: "models",
             status: TroubleshootingStepStatus::Passed,

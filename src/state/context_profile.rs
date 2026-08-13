@@ -34,7 +34,15 @@ impl GlobalContextProfile {
 
 impl UpstreamConfig {
     pub fn context_config_for_model(&self, model: &str) -> Option<ModelContextConfig> {
-        self.context_config_for_model_with_profile(model, None)
+        self.context_config_for_model_with(model, true)
+    }
+
+    pub fn context_config_for_model_with(
+        &self,
+        model: &str,
+        case_insensitive: bool,
+    ) -> Option<ModelContextConfig> {
+        self.context_config_for_model_with_profile_and_case(model, None, case_insensitive)
     }
 
     pub fn context_config_for_model_with_profile(
@@ -42,13 +50,25 @@ impl UpstreamConfig {
         model: &str,
         profile: Option<&GlobalContextProfile>,
     ) -> Option<ModelContextConfig> {
-        let candidate = self.resolved_model_name(model)?;
+        self.context_config_for_model_with_profile_and_case(model, profile, true)
+    }
+
+    pub fn context_config_for_model_with_profile_and_case(
+        &self,
+        model: &str,
+        profile: Option<&GlobalContextProfile>,
+        case_insensitive: bool,
+    ) -> Option<ModelContextConfig> {
+        let candidate = self.resolved_model_name_with(model, case_insensitive)?;
         for candidate in [candidate, model.trim().to_string()] {
-            if let Some(config) = self
-                .model_contexts
-                .iter()
-                .find(|config| config.slug.trim() == candidate)
-            {
+            let slug_matches = |config: &ModelContextConfig| {
+                if case_insensitive {
+                    super::models_equivalent(&config.slug, &candidate)
+                } else {
+                    config.slug.trim() == candidate
+                }
+            };
+            if let Some(config) = self.model_contexts.iter().find(|config| slug_matches(config)) {
                 return Some(config.clone());
             }
 
@@ -56,7 +76,7 @@ impl UpstreamConfig {
                 if let Some(config) = profile
                     .model_contexts
                     .iter()
-                    .find(|config| config.slug.trim() == candidate)
+                    .find(|config| slug_matches(config))
                 {
                     return Some(config.clone());
                 }
@@ -99,7 +119,26 @@ impl UpstreamConfig {
         minimum_context_limit: u32,
         profile: Option<&GlobalContextProfile>,
     ) -> Option<String> {
-        let current = self.context_config_for_model_with_profile(model, profile)?;
+        self.context_fallback_model_for_with_profile_and_case(
+            model,
+            minimum_context_limit,
+            profile,
+            true,
+        )
+    }
+
+    pub fn context_fallback_model_for_with_profile_and_case(
+        &self,
+        model: &str,
+        minimum_context_limit: u32,
+        profile: Option<&GlobalContextProfile>,
+        case_insensitive: bool,
+    ) -> Option<String> {
+        let current = self.context_config_for_model_with_profile_and_case(
+            model,
+            profile,
+            case_insensitive,
+        )?;
 
         let mut candidate_contexts = HashMap::new();
 
@@ -118,7 +157,7 @@ impl UpstreamConfig {
             return None;
         }
         let current_resolved = self
-            .resolved_model_name(model)
+            .resolved_model_name_with(model, case_insensitive)
             .unwrap_or_else(|| model.to_string());
 
         let mut candidates = candidate_contexts
@@ -132,7 +171,9 @@ impl UpstreamConfig {
 
         for candidate in &candidates {
             if candidate.context_limit >= minimum_context_limit {
-                if let Some(resolved) = self.resolved_model_name(&candidate.slug) {
+                if let Some(resolved) =
+                    self.resolved_model_name_with(&candidate.slug, case_insensitive)
+                {
                     if resolved.trim() != current_resolved.trim() {
                         return Some(resolved);
                     }
@@ -141,7 +182,9 @@ impl UpstreamConfig {
         }
 
         for candidate in candidates {
-            if let Some(resolved) = self.resolved_model_name(&candidate.slug) {
+            if let Some(resolved) =
+                self.resolved_model_name_with(&candidate.slug, case_insensitive)
+            {
                 if resolved.trim() != current_resolved.trim() {
                     return Some(resolved);
                 }

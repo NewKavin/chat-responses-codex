@@ -1521,6 +1521,7 @@ pub(super) async fn send_to_upstream(
         global_context_profile,
         &mut upstream_body,
         &final_upstream_model,
+        runtime_settings.model_case_insensitive_matching,
     );
     if let Some(report) = context_budget_report.as_ref() {
         if let Some(switched_model) = report.fallback_model.as_ref() {

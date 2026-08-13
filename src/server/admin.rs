@@ -656,15 +656,22 @@ pub(super) async fn admin_list_models(
         state.downstream_visible_models().await
     } else {
         let snapshot = state.snapshot().await;
-        let mut models: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for upstream in snapshot.upstreams.iter() {
-            if upstream.active {
-                for model in upstream.route_models() {
-                    models.insert(model);
+        let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
+        let mut seen = std::collections::HashSet::new();
+        let mut models_list = Vec::new();
+        for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
+            for model in upstream.route_models() {
+                let key = if case_insensitive {
+                    crate::state::canonical_model_id(&model)
+                } else {
+                    model.trim().to_string()
+                };
+                if key.is_empty() || !seen.insert(key) {
+                    continue;
                 }
+                models_list.push(model.to_string());
             }
         }
-        let mut models_list: Vec<String> = models.into_iter().collect();
         models_list.sort();
         models_list
     };

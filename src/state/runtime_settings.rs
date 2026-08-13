@@ -1,5 +1,6 @@
 use super::types::{
-    default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
+    default_model_case_insensitive_matching, default_capability_probe_concurrency,
+    default_capability_probe_reasoning_timeout_seconds,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
     default_upstream_route_exhaustion_budget_alignment_enabled,
@@ -27,6 +28,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "routing_affinity_enabled",
     "routing_affinity_ttl_seconds",
     "routing_affinity_escape_pressure_ratio",
+    "model_case_insensitive_matching",
     "upstream_hedge_enabled",
     "upstream_hedge_delay_ms",
     "upstream_hedge_interval_ms",
@@ -88,6 +90,8 @@ pub struct RuntimeSettings {
     pub routing_affinity_enabled: bool,
     pub routing_affinity_ttl_seconds: u64,
     pub routing_affinity_escape_pressure_ratio: f64,
+    #[serde(default = "default_model_case_insensitive_matching")]
+    pub model_case_insensitive_matching: bool,
     pub upstream_hedge_enabled: bool,
     pub upstream_hedge_delay_ms: u64,
     pub upstream_hedge_interval_ms: u64,
@@ -228,6 +232,7 @@ impl RuntimeSettings {
             routing_affinity_enabled: config.routing_affinity_enabled,
             routing_affinity_ttl_seconds: config.routing_affinity_ttl_seconds,
             routing_affinity_escape_pressure_ratio: config.routing_affinity_escape_pressure_ratio,
+            model_case_insensitive_matching: config.model_case_insensitive_matching,
             upstream_hedge_enabled: config.upstream_hedge_enabled,
             upstream_hedge_delay_ms: config.upstream_hedge_delay_ms,
             upstream_hedge_interval_ms: config.upstream_hedge_interval_ms,
@@ -299,6 +304,7 @@ impl RuntimeSettings {
         config.routing_affinity_enabled = self.routing_affinity_enabled;
         config.routing_affinity_ttl_seconds = self.routing_affinity_ttl_seconds;
         config.routing_affinity_escape_pressure_ratio = self.routing_affinity_escape_pressure_ratio;
+        config.model_case_insensitive_matching = self.model_case_insensitive_matching;
         config.upstream_hedge_enabled = self.upstream_hedge_enabled;
         config.upstream_hedge_delay_ms = self.upstream_hedge_delay_ms;
         config.upstream_hedge_interval_ms = self.upstream_hedge_interval_ms;

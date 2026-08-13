@@ -189,14 +189,31 @@ impl UpstreamConfig {
     }
 
     pub fn supports_model(&self, model: &str) -> bool {
-        self.canonical_route_model(model).is_some()
+        self.supports_model_with(model, true)
     }
 
+    pub fn supports_model_with(&self, model: &str, case_insensitive: bool) -> bool {
+        self.canonical_route_model(model, case_insensitive).is_some()
+    }
+
+    /// Resolve the requested model to the upstream's *stored* spelling
+    /// (default: case-insensitive canonical matching). The returned string is
+    /// what the upstream sees on the wire and what
+    /// `RouteHealthKey.runtime_model_slug` / the outbound payload use, so the
+    /// stored casing is preserved exactly.
     pub fn resolved_model_name(&self, model: &str) -> Option<String> {
-        self.canonical_route_model(model)
+        self.resolved_model_name_with(model, true)
+    }
+
+    pub fn resolved_model_name_with(&self, model: &str, case_insensitive: bool) -> Option<String> {
+        self.canonical_route_model(model, case_insensitive)
     }
 
     pub fn is_premium_model_request(&self, model: &str) -> bool {
+        self.is_premium_model_request_with(model, true)
+    }
+
+    pub fn is_premium_model_request_with(&self, model: &str, case_insensitive: bool) -> bool {
         if self.premium_models.is_empty() {
             return false;
         }
@@ -205,8 +222,15 @@ impl UpstreamConfig {
         !model.is_empty()
             && self.premium_models.iter().any(|premium| {
                 let premium = premium.trim();
-                premium == model
-                    || super::codex_subagent_base_model(model).is_some_and(|base| premium == base)
+                if case_insensitive {
+                    super::models_equivalent_with(premium, model, true)
+                        || super::codex_subagent_base_model(model).is_some_and(|base| {
+                            super::models_equivalent_with(premium, base, true)
+                        })
+                } else {
+                    premium == model
+                        || super::codex_subagent_base_model(model).is_some_and(|base| premium == base)
+                }
             })
     }
     pub fn request_quota_window_seconds(&self) -> u64 {
@@ -308,7 +332,7 @@ impl UpstreamConfig {
         Ok(())
     }
 
-    fn canonical_route_model(&self, model: &str) -> Option<String> {
+    fn canonical_route_model(&self, model: &str, case_insensitive: bool) -> Option<String> {
         let model = model.trim();
         if model.is_empty() {
             return None;
@@ -321,15 +345,26 @@ impl UpstreamConfig {
                 .then(|| model.to_string());
         }
 
-        if route_models.iter().any(|candidate| candidate == model) {
-            return Some(model.to_string());
+        if case_insensitive {
+            // The first canonical match wins, including when a later entry is
+            // an exact-case match. This keeps runtime spelling deterministic
+            // when one upstream lists case-only duplicates.
+            if let Some(candidate) = super::find_equivalent_stored(&route_models, model, true) {
+                return Some(candidate.to_string());
+            }
+        } else if let Some(candidate) = super::find_equivalent_stored(&route_models, model, false) {
+            return Some(candidate.to_string());
         }
 
         if let Some(base_model) = super::codex_subagent_base_model(model) {
-            if let Some(candidate) = route_models
-                .iter()
-                .find(|candidate| candidate == &base_model)
-            {
+            let base_matches = |candidate: &&String| {
+                if case_insensitive {
+                    super::models_equivalent_with(candidate, base_model, true)
+                } else {
+                    candidate == &base_model
+                }
+            };
+            if let Some(candidate) = route_models.iter().find(base_matches) {
                 return Some(candidate.clone());
             }
         }
@@ -342,6 +377,10 @@ impl UpstreamConfig {
     }
 
     pub fn keys_for_model(&self, model: &str) -> Vec<String> {
+        self.keys_for_model_with(model, true)
+    }
+
+    pub fn keys_for_model_with(&self, model: &str, case_insensitive: bool) -> Vec<String> {
         let model = model.trim();
         if self.api_key_models.is_empty() {
             return self.available_keys();
@@ -354,11 +393,20 @@ impl UpstreamConfig {
         let mut seen = HashSet::new();
         let current_keys = self.available_keys().into_iter().collect::<HashSet<_>>();
         for mapping in &self.api_key_models {
-            if !mapping
-                .supported_models
-                .iter()
-                .any(|candidate| candidate.trim() == model)
-            {
+            let mapping_matches = if case_insensitive {
+                mapping.supported_models.iter().any(|candidate| {
+                    super::models_equivalent_with(candidate, model, true)
+                        || super::codex_subagent_base_model(model).is_some_and(|base| {
+                            super::models_equivalent_with(candidate, base, true)
+                        })
+                })
+            } else {
+                mapping
+                    .supported_models
+                    .iter()
+                    .any(|candidate| candidate.trim() == model)
+            };
+            if !mapping_matches {
                 continue;
             }
 

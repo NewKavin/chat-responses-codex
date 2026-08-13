@@ -1777,7 +1777,8 @@ async fn admin_compatibility_matrix_runs_for_all_exposed_models() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["downstream_id"], "test");
-    assert_eq!(payload["models"], json!(["GLM-5.1"]));
+    // B1: model lists are deduped/emitted in canonical (lowercase) form.
+    assert_eq!(payload["models"], json!(["glm-5.1"]));
     assert_eq!(
         payload["client_profiles"],
         json!(["codex", "opencode", "hermes"])

@@ -948,7 +948,7 @@ async fn downstream_chat_request_uses_exact_model_name_for_upstream_request_body
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn downstream_chat_request_routes_via_exact_model_name_when_supported_models_are_uppercase() {
+async fn downstream_chat_request_routes_case_insensitively_and_preserves_upstream_model_spelling() {
     with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
@@ -1044,7 +1044,7 @@ async fn downstream_chat_request_routes_via_exact_model_name_when_supported_mode
             .header("Content-Type", "application/json")
             .body(Body::from(
                 json!({
-                    "model": "GLM-5",
+                    "model": "glm-5",
                     "messages": [
                         {"role": "user", "content": "Hello"}
                     ]

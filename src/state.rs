@@ -10,7 +10,8 @@ use crate::keys::{
     verify_downstream_key,
 };
 use crate::routing::{
-    select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
+    select_upstream_with_model_matching, RouteError, RouteRequest, UpstreamCandidate,
+    UpstreamProtocol,
 };
 
 #[path = "state/account_concurrency.rs"]
@@ -44,6 +45,8 @@ mod freekey_sync;
 mod model_discovery;
 #[path = "state/model_key_sync.rs"]
 mod model_key_sync;
+#[path = "state/model_identity.rs"]
+mod model_identity;
 #[path = "state/model_qualification.rs"]
 mod model_qualification;
 #[path = "state/normalize.rs"]
@@ -127,6 +130,10 @@ pub use route_health::{
     ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 use runtime_settings::differing_runtime_setting_fields;
+pub use model_identity::{
+    canonical_model_id, models_equivalent, models_equivalent_with,
+    canonical_subagent_base_model_id, find_equivalent_stored,
+};
 pub use runtime_settings::{
     RuntimeSettings, RuntimeSettingsDocument, RuntimeSettingsResponse, RuntimeSettingsSource,
     RuntimeSettingsUpdate, RuntimeSettingsUpdateError, RuntimeSettingsValidationError,
@@ -147,7 +154,8 @@ pub use types::{
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
@@ -3430,9 +3438,10 @@ impl AppState {
         model: &str,
         protocol: UpstreamProtocol,
     ) -> Result<UpstreamConfig, RouteError> {
-        let selected = select_upstream(
+        let selected = select_upstream_with_model_matching(
             &RouteRequest::new(model, protocol, false),
             &self.upstream_candidates().await,
+            self.runtime_settings().model_case_insensitive_matching,
         )?;
 
         let state = self.inner.lock().await;
@@ -4662,11 +4671,19 @@ impl AppState {
         Ok(())
     }
 
-    fn routing_affinity_key(downstream_id: &str, normalized_model: &str) -> String {
+    fn routing_model_key(&self, model: &str) -> String {
+        if self.runtime_settings().model_case_insensitive_matching {
+            canonical_model_id(model)
+        } else {
+            model.trim().to_string()
+        }
+    }
+
+    fn routing_affinity_key(&self, downstream_id: &str, normalized_model: &str) -> String {
         format!(
             "{}::{}",
             downstream_id,
-            normalized_model.trim().to_ascii_lowercase()
+            self.routing_model_key(normalized_model)
         )
     }
 
@@ -4675,7 +4692,7 @@ impl AppState {
         downstream_id: &str,
         normalized_model: &str,
     ) -> Option<String> {
-        let key = Self::routing_affinity_key(downstream_id, normalized_model);
+        let key = self.routing_affinity_key(downstream_id, normalized_model);
         let mut affinity = self
             .routing_affinity
             .lock()
@@ -4696,7 +4713,7 @@ impl AppState {
         upstream_id: &str,
         ttl_seconds: u64,
     ) {
-        let key = Self::routing_affinity_key(downstream_id, normalized_model);
+        let key = self.routing_affinity_key(downstream_id, normalized_model);
         let expires_at = unix_seconds().saturating_add(ttl_seconds.max(1));
         let mut affinity = self
             .routing_affinity
@@ -4712,7 +4729,7 @@ impl AppState {
     }
 
     pub fn clear_affinity_upstream(&self, downstream_id: &str, normalized_model: &str) {
-        let key = Self::routing_affinity_key(downstream_id, normalized_model);
+        let key = self.routing_affinity_key(downstream_id, normalized_model);
         let mut affinity = self
             .routing_affinity
             .lock()
@@ -4721,6 +4738,7 @@ impl AppState {
     }
 
     fn routing_tie_breaker_key(
+        &self,
         downstream_id: &str,
         normalized_model: &str,
         protocol: UpstreamProtocol,
@@ -4728,7 +4746,7 @@ impl AppState {
         format!(
             "{}::{}::{protocol:?}",
             downstream_id,
-            normalized_model.trim().to_ascii_lowercase()
+            self.routing_model_key(normalized_model)
         )
     }
 
@@ -4738,7 +4756,7 @@ impl AppState {
         normalized_model: &str,
         protocol: UpstreamProtocol,
     ) -> u64 {
-        let key = Self::routing_tie_breaker_key(downstream_id, normalized_model, protocol);
+        let key = self.routing_tie_breaker_key(downstream_id, normalized_model, protocol);
         let mut tie_breakers = self
             .routing_tie_breakers
             .lock()
@@ -5070,19 +5088,28 @@ impl AppState {
             return Vec::new();
         };
         let snapshot = self.routing_snapshot().await;
+        let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
 
-        let mut models = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
             for model in upstream.route_models() {
                 if downstream.model_allowlist.is_empty()
                     || portal_model_is_allowed(&downstream.model_allowlist, &model)
                 {
-                    models.insert(model);
+                    let key = if case_insensitive {
+                        canonical_model_id(&model)
+                    } else {
+                        model.trim().to_string()
+                    };
+                    if key.is_empty() || !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    models.push(key);
                 }
             }
         }
 
-        let mut models = models.into_iter().collect::<Vec<_>>();
         models.sort();
         models
     }
@@ -5093,7 +5120,9 @@ impl AppState {
     /// per-downstream semantics of `available_models_for_downstream`.
     pub async fn downstream_visible_models(&self) -> Vec<String> {
         let snapshot = self.routing_snapshot().await;
-        let mut models = HashSet::new();
+        let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
             for model in upstream.route_models() {
                 if snapshot.downstreams.iter().any(|downstream| {
@@ -5101,11 +5130,18 @@ impl AppState {
                         && (downstream.model_allowlist.is_empty()
                             || portal_model_is_allowed(&downstream.model_allowlist, &model))
                 }) {
-                    models.insert(model);
+                    let key = if case_insensitive {
+                        canonical_model_id(&model)
+                    } else {
+                        model.trim().to_string()
+                    };
+                    if key.is_empty() || !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    models.push(key);
                 }
             }
         }
-        let mut models = models.into_iter().collect::<Vec<_>>();
         models.sort();
         models
     }

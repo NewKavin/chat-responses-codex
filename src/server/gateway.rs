@@ -193,9 +193,11 @@ fn build_request_route_capability_cache(
         requested,
         &RuntimeCapabilityHintSnapshot::default(),
         None,
+        true,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // runtime switch threading; see existing gateways above
 fn build_request_route_capability_cache_with_hints(
     snapshot: &CapabilityRuntimeSnapshot,
     upstreams: &[UpstreamConfig],
@@ -204,16 +206,18 @@ fn build_request_route_capability_cache_with_hints(
     requested: &RequestedFeatures,
     runtime_hints: &RuntimeCapabilityHintSnapshot,
     requested_value: Option<&str>,
+    case_insensitive: bool,
 ) -> BTreeMap<(WireProtocol, String, String), RouteCapabilityEvaluation> {
     let mut cache = BTreeMap::new();
     for upstream in upstreams
         .iter()
-        .filter(|upstream| upstream.active && upstream.supports_model(model))
+        .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
     {
-        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive)
+        else {
             continue;
         };
-        for api_key in route_api_keys(upstream, &runtime_model_slug) {
+        for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
             let key_fingerprint = route_key_fingerprint(upstream, &api_key);
             for protocol in upstream.supported_protocols() {
                 let route_requested = adapt_requested_features_for_protocol(requested, protocol);
@@ -271,8 +275,8 @@ fn build_request_route_capability_cache_with_hints(
     cache
 }
 
-fn route_api_keys(upstream: &UpstreamConfig, model: &str) -> Vec<String> {
-    let keys = upstream.keys_for_model(model);
+fn route_api_keys(upstream: &UpstreamConfig, model: &str, case_insensitive: bool) -> Vec<String> {
+    let keys = upstream.keys_for_model_with(model, case_insensitive);
     if keys.is_empty() && upstream.api_key_models.is_empty() {
         vec![upstream.api_key.clone()]
     } else {
@@ -2445,24 +2449,54 @@ fn codex_conservative_reasoning_metadata() -> CodexReasoningMetadata {
     }
 }
 
-fn codex_catalog_context_window(upstreams: &[UpstreamConfig], model: &str) -> Option<i64> {
+fn codex_catalog_context_window(
+    upstreams: &[UpstreamConfig],
+    model: &str,
+    case_insensitive: bool,
+) -> Option<i64> {
     upstreams
         .iter()
-        .filter(|upstream| upstream.active && upstream.supports_model(model))
-        .filter_map(|upstream| upstream.context_config_for_model(model))
+        .filter(|upstream| {
+            upstream.active && upstream.supports_model_with(model, case_insensitive)
+        })
+        .filter_map(|upstream| upstream.context_config_for_model_with(model, case_insensitive))
         .map(|config| i64::from(config.context_limit))
         .max()
 }
 
-fn codex_exposed_models(upstreams: &[UpstreamConfig], allowlist: &[String]) -> Vec<String> {
+fn codex_exposed_models(
+    upstreams: &[UpstreamConfig],
+    allowlist: &[String],
+    case_insensitive: bool,
+) -> Vec<String> {
+    // Canonical-grouped dedup: one displayed slug per canonical model id.
+    // Without explicit alias rules the display spelling is the canonical
+    // (trimmed, lowercased) form; stored upstream spellings are never
+    // rewritten on the wire.
+    let group_models = |slugs: Vec<String>| -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut grouped = Vec::new();
+        for slug in slugs {
+            let key = if case_insensitive {
+                crate::state::canonical_model_id(&slug)
+            } else {
+                slug.trim().to_string()
+            };
+            if key.is_empty() || !seen.insert(key.clone()) {
+                continue;
+            }
+            grouped.push(key);
+        }
+        grouped
+    };
+
     if allowlist.is_empty() {
-        return upstreams
+        let slugs = upstreams
             .iter()
             .filter(|upstream| upstream.active)
             .flat_map(UpstreamConfig::route_models)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        return group_models(slugs);
     }
 
     let mut allowed_slugs = BTreeMap::new();
@@ -2487,13 +2521,17 @@ fn codex_exposed_models(upstreams: &[UpstreamConfig], allowlist: &[String]) -> V
             matched_allowlist_keys.insert(match_key);
             Some(slug)
         })
-        .collect::<BTreeSet<_>>();
-    for (match_key, slug) in allowed_slugs {
+        .collect::<Vec<_>>();
+    exposed = group_models(exposed);
+    for (match_key, _slug) in allowed_slugs {
         if !matched_allowlist_keys.contains(&match_key) {
-            exposed.insert(slug);
+            // Allowlist-only models have no upstream spelling to preserve:
+            // display them in canonical form like every other entry.
+            exposed.push(match_key);
         }
     }
-    exposed.into_iter().collect()
+    exposed.sort();
+    exposed
 }
 
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
@@ -2509,7 +2547,11 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     let verified_reasoning_levels =
         capability_verified_reasoning_levels_by_model(state, &snapshot.upstreams);
 
-    let model_infos = codex_exposed_models(&snapshot.upstreams, &downstream.model_allowlist)
+    let model_infos = codex_exposed_models(
+        &snapshot.upstreams,
+        &downstream.model_allowlist,
+        state.runtime_settings().model_case_insensitive_matching,
+    )
         .into_iter()
         .map(|slug| {
             let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug);
@@ -2520,7 +2562,13 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                         .context_window
                         .and_then(|limit| i64::try_from(limit).ok())
                 })
-                .or_else(|| codex_catalog_context_window(&snapshot.upstreams, &slug));
+                .or_else(|| {
+                    codex_catalog_context_window(
+                        &snapshot.upstreams,
+                        &slug,
+                        state.runtime_settings().model_case_insensitive_matching,
+                    )
+                });
             let reasoning = verified_reasoning_levels
                 .get(&slug)
                 .map(|levels| codex_reasoning_metadata(levels))
@@ -4324,6 +4372,7 @@ async fn process_gateway_request_inner(
     };
     let model = model_owned.as_str();
     let normalized_model = model;
+    let case_insensitive = runtime_settings.model_case_insensitive_matching;
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let stream_only_recovery_request_safe =
         !request_stream && request_allows_stream_only_recovery(endpoint, &body);
@@ -4609,7 +4658,7 @@ async fn process_gateway_request_inner(
         && routing_snapshot.upstreams.iter().any(|upstream| {
             upstream.active
                 && upstream.supports_protocol(UpstreamProtocol::Responses)
-                && upstream.supports_model(model)
+                && upstream.supports_model_with(model, case_insensitive)
         });
     let chat_only_responses_fallback =
         endpoint == EndpointKind::Responses && !responses_upstream_available;
@@ -4712,6 +4761,7 @@ async fn process_gateway_request_inner(
         &requested_features,
         &runtime_capability_hints,
         inference_strength.as_deref(),
+        case_insensitive,
     );
     let route_capability =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
@@ -4728,12 +4778,12 @@ async fn process_gateway_request_inner(
             for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
                 upstream.active
                     && upstream.id == continuation.profile_key().upstream_id
-                    && upstream.supports_model(model)
+                    && upstream.supports_model_with(model, case_insensitive)
             }) {
-                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                     continue;
                 };
-                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
                     let key_fingerprint = route_key_fingerprint(upstream, &api_key);
                     for protocol in upstream.supported_protocols() {
                         if !continuation.matches_route(upstream, &key_fingerprint, model, protocol)
@@ -4812,12 +4862,12 @@ async fn process_gateway_request_inner(
         if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
             let mut eligible_profiles = Vec::new();
             for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
-                upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
+                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
             }) {
-                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                     continue;
                 };
-                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
                     let key_fingerprint = route_key_fingerprint(upstream, &api_key);
                     for protocol in upstream.supported_protocols() {
                         if route_capability(upstream, &key_fingerprint, protocol)
@@ -4849,7 +4899,7 @@ async fn process_gateway_request_inner(
     let route_profile_constraint_active = continuation_profile_key.is_some();
     let route_matches_profile_constraint =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
-            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                 return false;
             };
             if let Some(continuation) = exact_continuation.as_ref() {
@@ -4975,13 +5025,13 @@ async fn process_gateway_request_inner(
     }
     let required_route_available = if route_profile_constraint_active {
         routing_snapshot.upstreams.iter().any(|upstream| {
-            if !upstream.active || !upstream.supports_model(model) {
+            if !upstream.active || !upstream.supports_model_with(model, case_insensitive) {
                 return false;
             }
-            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                 return false;
             };
-            route_api_keys(upstream, &runtime_model_slug)
+            route_api_keys(upstream, &runtime_model_slug, case_insensitive)
                 .into_iter()
                 .any(|api_key| {
                     let key_fingerprint = route_key_fingerprint(upstream, &api_key);
@@ -5001,7 +5051,7 @@ async fn process_gateway_request_inner(
             } => routing_snapshot.upstreams.iter().any(|upstream| {
                 upstream.active
                     && upstream.id == *upstream_id
-                    && upstream.supports_model(model)
+                    && upstream.supports_model_with(model, case_insensitive)
                     && upstream.supports_protocol(*protocol)
                     && route_capability(upstream, key_fingerprint, *protocol)
                         .is_some_and(|route| route.eligible)
@@ -5010,16 +5060,16 @@ async fn process_gateway_request_inner(
                 let has_configured_route = routing_snapshot
                     .upstreams
                     .iter()
-                    .any(|upstream| upstream.active && upstream.supports_model(model));
+                    .any(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive));
                 !has_configured_route
                     || routing_snapshot.upstreams.iter().any(|upstream| {
-                        if !upstream.active || !upstream.supports_model(model) {
+                        if !upstream.active || !upstream.supports_model_with(model, case_insensitive) {
                             return false;
                         }
-                        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                             return false;
                         };
-                        route_api_keys(upstream, &runtime_model_slug)
+                        route_api_keys(upstream, &runtime_model_slug, case_insensitive)
                             .into_iter()
                             .any(|api_key| {
                                 let key_fingerprint = route_key_fingerprint(upstream, &api_key);
@@ -5079,15 +5129,15 @@ async fn process_gateway_request_inner(
                 for upstream in routing_snapshot
                     .upstreams
                     .iter()
-                    .filter(|upstream| upstream.active && upstream.supports_model(model))
+                    .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
                 {
-                    let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                    let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                         continue;
                     };
                     if runtime_model_slug != profile_key.runtime_model_slug {
                         continue;
                     }
-                    for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                    for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
                         let key_fingerprint = route_key_fingerprint(upstream, &api_key);
                         if key_fingerprint != profile_key.key_fingerprint {
                             continue;
@@ -5203,7 +5253,7 @@ async fn process_gateway_request_inner(
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
             upstream.active
                 && upstream.supports_protocol(protocol)
-                && upstream.supports_model(model)
+                && upstream.supports_model_with(model, case_insensitive)
                 && route_matches_profile_constraint(upstream, key_fingerprint, protocol)
                 && (matches!(&claude_replay_route, ClaudeThinkingReplayRoute::NoReplay)
                     || matches!(
@@ -5220,10 +5270,10 @@ async fn process_gateway_request_inner(
                     .is_some_and(|route| route.eligible)
         };
     let upstream_has_candidate_route = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
             return false;
         };
-        route_api_keys(upstream, &runtime_model_slug)
+        route_api_keys(upstream, &runtime_model_slug, case_insensitive)
             .into_iter()
             .any(|api_key| {
                 let key_fingerprint = route_key_fingerprint(upstream, &api_key);
@@ -5240,10 +5290,10 @@ async fn process_gateway_request_inner(
         let mut miss_tiers = std::collections::BTreeSet::new();
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                     continue;
                 };
-                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
                     let key_fingerprint = route_key_fingerprint(upstream, &api_key);
                     if route_is_candidate(upstream, &key_fingerprint, protocol) {
                         if let Some(route) = route_capability(upstream, &key_fingerprint, protocol)
@@ -5287,14 +5337,14 @@ async fn process_gateway_request_inner(
             .upstreams
             .iter()
             .any(|upstream| {
-                upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
+                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
             })
             .then(|| upstream_id.to_string())
     } else if runtime_settings.routing_affinity_enabled {
         match state.get_affinity_upstream(&downstream.id, normalized_model) {
             Some(upstream_id)
                 if routing_snapshot.upstreams.iter().any(|upstream| {
-                    upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
+                    upstream.active && upstream.id == upstream_id && upstream.supports_model_with(model, case_insensitive)
                 }) =>
             {
                 Some(upstream_id)
@@ -5337,10 +5387,10 @@ async fn process_gateway_request_inner(
 
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive) else {
                     continue;
                 };
-                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
                     let key_fingerprint = route_key_fingerprint(upstream, &api_key);
                     if !route_is_candidate(upstream, &key_fingerprint, protocol) {
                         continue;
@@ -5361,8 +5411,8 @@ async fn process_gateway_request_inner(
 
         'candidate_passes: for (optional_miss_tier, protocol) in candidate_passes.iter().copied() {
             let upstream_optional_misses = |upstream: &UpstreamConfig| {
-                let runtime_model_slug = upstream.resolved_model_name(model)?;
-                route_api_keys(upstream, &runtime_model_slug)
+                let runtime_model_slug = upstream.resolved_model_name_with(model, case_insensitive)?;
+                route_api_keys(upstream, &runtime_model_slug, case_insensitive)
                     .into_iter()
                     .filter_map(|api_key| {
                         let key_fingerprint = route_key_fingerprint(upstream, &api_key);
@@ -5387,7 +5437,7 @@ async fn process_gateway_request_inner(
                 .collect::<Vec<_>>();
             let mut deprioritized_upstreams = Vec::new();
             upstreams.retain(|upstream| {
-                let is_non_premium_request = !upstream.is_premium_model_request(model);
+                let is_non_premium_request = !upstream.is_premium_model_request_with(model, case_insensitive);
                 let should_deprioritize = upstream.protect_premium_quota
                     && !upstream.premium_models.is_empty()
                     && is_non_premium_request;
@@ -5608,7 +5658,7 @@ async fn process_gateway_request_inner(
                     upstream.request_quota_requests,
                     request_cost,
                     upstream.protect_premium_quota,
-                    upstream.is_premium_model_request(model)
+                    upstream.is_premium_model_request_with(model, case_insensitive)
                 )
             })
             .collect::<Vec<_>>();
@@ -5632,11 +5682,14 @@ async fn process_gateway_request_inner(
                 let request_cost = 1.0_f64;
                 let minute_cost = runtime.minute_cost + request_cost;
                 let five_hour_cost = runtime.five_hour_cost + request_cost;
-                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                let Some(runtime_model_slug) =
+                    upstream.resolved_model_name_with(model, case_insensitive)
+                else {
                     continue;
                 };
-                let mut candidate_keys = route_api_keys(&upstream, &runtime_model_slug)
-                    .into_iter()
+                let mut candidate_keys =
+                    route_api_keys(&upstream, &runtime_model_slug, case_insensitive)
+                        .into_iter()
                     .filter(|api_key| {
                         let key_fingerprint = route_key_fingerprint(&upstream, api_key);
                         let (route_health_key, _) = route_health_keys(
@@ -6166,10 +6219,14 @@ async fn process_gateway_request_inner(
                                     .iter()
                                     .skip(upstream_index + 1)
                                     .filter_map(|candidate| {
-                                        let runtime_model_slug =
-                                            candidate.resolved_model_name(model)?;
-                                        route_api_keys(candidate, &runtime_model_slug)
-                                            .into_iter()
+                                        let runtime_model_slug = candidate
+                                            .resolved_model_name_with(model, case_insensitive)?;
+                                        route_api_keys(
+                                            candidate,
+                                            &runtime_model_slug,
+                                            case_insensitive,
+                                        )
+                                        .into_iter()
                                             .find_map(|api_key| {
                                                 let key_fingerprint =
                                                     route_key_fingerprint(candidate, &api_key);
@@ -6512,7 +6569,7 @@ async fn process_gateway_request_inner(
                                         .find(|candidate| candidate.id == selected_upstream_id)
                                     {
                                         if let Some(selected_runtime_model) =
-                                            selected_upstream.resolved_model_name(model)
+                                            selected_upstream.resolved_model_name_with(model, case_insensitive)
                                         {
                                             clear_runtime_capability_hints_for_success(
                                                 &state,
