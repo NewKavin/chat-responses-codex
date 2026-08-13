@@ -2451,3 +2451,81 @@ async fn mixed_credentials_and_short_temporary_retries_only_the_temporary_route(
         "the credential-blocked route must stay cooling in round two"
     );
 }
+
+#[tokio::test]
+async fn a1_same_route_failures_across_rounds_keep_step_flat() {
+    // A1 acceptance (test requirement #1): one downstream request failing on
+    // the same route across three routing rounds must only escalate the
+    // failure step once.  With the suppression spanning rounds the terminal
+    // retry hint stays at the base cooldown (~1.6-2.4s -> "2s" or "3s");
+    // without it every round doubles the cooldown up to the 4s cap ("4s")
+    // and the total wait grows beyond the base-cooldown bound.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_route_cooldown_base_seconds: 2,
+            upstream_transient_route_cooldown_max_seconds: 4,
+            upstream_route_exhaustion_retry_max_wait_ms: 30_000,
+            upstream_route_exhaustion_retry_max_rounds: 3,
+            upstream_route_exhaustion_budget_alignment_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("round-capped retry must terminate")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    let message = payload["error"]["message"].as_str().unwrap();
+    let retry_seconds = message
+        .split("please try again in ")
+        .nth(1)
+        .and_then(|tail| tail.split('s').next())
+        .and_then(|value| value.parse::<u32>().ok())
+        .expect("terminal message must carry a retry hint in seconds");
+    assert!(
+        retry_seconds <= 3,
+        "step must stay flat at the base cooldown across rounds, got {retry_seconds}s in: {message}"
+    );
+    // Three rounds x (first attempt + in-place same-route retry).
+    assert_eq!(hits.load(Ordering::SeqCst), 6);
+    assert!(
+        elapsed < std::time::Duration::from_secs(9),
+        "three base-cooldown waits must stay below 9s, took {elapsed:?}"
+    );
+}

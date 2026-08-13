@@ -648,6 +648,56 @@ fn request_route_attempts_start_each_round_fresh_and_share_physical_send_count()
 }
 
 #[test]
+fn transient_failure_suppression_spans_routing_rounds() {
+    // A1: a route that failed earlier in the same downstream request stays
+    // suppressed in later routing rounds (fresh per-round ledgers), so the
+    // request contributes at most one failure step per route.
+    let round_one = RequestRouteAttempts::default();
+    let aggregate = tracked_aggregate();
+    let route = tracked_route("fingerprint-suppression");
+    round_one.register_eligible(aggregate.clone(), route.clone());
+    round_one.record_physical_attempt(route.clone());
+    round_one.record_failure(
+        &route,
+        FailureClass::TransientServer,
+        Some(Duration::from_secs(7)),
+    );
+    assert!(round_one.has_transient_failure_for(&route));
+
+    let round_two = round_one.next_round();
+    assert!(round_two.ledger_snapshot().is_empty());
+    assert!(
+        round_two.has_transient_failure_for(&route),
+        "in-request suppression must span routing rounds, not just one round ledger"
+    );
+
+    // A different route that only appears in round two is not suppressed.
+    round_two.register_eligible(aggregate, route.clone());
+    let other = tracked_route("fingerprint-other");
+    round_two.register_eligible(tracked_aggregate(), other.clone());
+    round_two.record_physical_attempt(other.clone());
+    assert!(!round_two.has_transient_failure_for(&other));
+}
+
+#[test]
+fn rate_limit_failures_never_suppress_a_later_transient_failure() {
+    // The request-scoped suppression set only tracks the transient family;
+    // a 429-family failure on the same route must not mark it "already seen"
+    // (B3 stays untouched: rate-limit failures are never swallowed).
+    let attempts = RequestRouteAttempts::default();
+    let aggregate = tracked_aggregate();
+    let route = tracked_route("fingerprint-rate-limited");
+    attempts.register_eligible(aggregate, route.clone());
+    attempts.record_physical_attempt(route.clone());
+    attempts.record_failure(
+        &route,
+        FailureClass::RateLimited,
+        Some(Duration::from_secs(7)),
+    );
+    assert!(!attempts.has_transient_failure_for(&route));
+}
+
+#[test]
 fn direct_hedge_send_count_does_not_change_round_route_selection() {
     let attempts = RequestRouteAttempts::default();
     let route = tracked_route("fingerprint-direct-hedge");

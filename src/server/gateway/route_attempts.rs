@@ -162,6 +162,13 @@ pub(super) struct RequestRouteAttempts {
     tracker: Arc<Mutex<RequestRouteTracker>>,
     ledger: Arc<Mutex<AttemptLedger>>,
     metrics: Arc<RequestAttemptMetrics>,
+    /// Anonymous route ids that already recorded a transient-family physical
+    /// failure anywhere in this downstream request.  Unlike the per-round
+    /// ledger this set survives `next_round`, so A1 cooldown-step suppression
+    /// really spans the whole request: routing rounds of one request must not
+    /// amplify a short upstream blip, while independent requests keep
+    /// escalating normally.
+    transient_failed_routes: Arc<Mutex<HashSet<String>>>,
     routing_round: u32,
 }
 
@@ -171,6 +178,7 @@ impl Default for RequestRouteAttempts {
             tracker: Arc::new(Mutex::new(RequestRouteTracker::default())),
             ledger: Arc::new(Mutex::new(AttemptLedger::default())),
             metrics: Arc::new(RequestAttemptMetrics::default()),
+            transient_failed_routes: Arc::new(Mutex::new(HashSet::new())),
             routing_round: 1,
         }
     }
@@ -225,6 +233,7 @@ impl RequestRouteAttempts {
             tracker: Arc::new(Mutex::new(RequestRouteTracker::default())),
             ledger: Arc::new(Mutex::new(AttemptLedger::default())),
             metrics: self.metrics.clone(),
+            transient_failed_routes: self.transient_failed_routes.clone(),
             routing_round: self.routing_round.saturating_add(1),
         }
     }
@@ -248,13 +257,25 @@ impl RequestRouteAttempts {
         if !self.tracker().record_failure(route, class, retry_after) {
             return;
         }
+        let route_id = anonymous_route_id(
+            &route.upstream_id,
+            &route.key_fingerprint,
+            &route.runtime_model_slug,
+            route.protocol,
+        );
+        if matches!(
+            class,
+            FailureClass::TransientServer
+                | FailureClass::EdgeProxyError
+                | FailureClass::CapacityUnavailable
+        ) {
+            self.transient_failed_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(route_id.clone());
+        }
         self.ledger().record(AttemptFailure {
-            route_id: anonymous_route_id(
-                &route.upstream_id,
-                &route.key_fingerprint,
-                &route.runtime_model_slug,
-                route.protocol,
-            ),
+            route_id,
             upstream_status,
             class,
             retry_after,
@@ -278,15 +299,10 @@ impl RequestRouteAttempts {
             &route.runtime_model_slug,
             route.protocol,
         );
-        self.ledger().failures.iter().any(|failure| {
-            failure.route_id == route_id
-                && matches!(
-                    failure.class,
-                    FailureClass::TransientServer
-                        | FailureClass::EdgeProxyError
-                        | FailureClass::CapacityUnavailable
-                )
-        })
+        self.transient_failed_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&route_id)
     }
 
     pub fn take_newly_exhausted(&self) -> Vec<RouteSetObservation> {
