@@ -53,7 +53,7 @@
             <el-button type="primary" :icon="Plus" @click="openAddMapping">添加映射</el-button>
           </div>
 
-          <el-table :data="filteredMappingRows" stripe border>
+          <el-table :data="pagedMappingRows" stripe border>
             <el-table-column label="上游账号" min-width="180">
               <template #default="{ row }">
                 <span class="upstream-name">{{ row.upstreamName }}</span>
@@ -88,6 +88,17 @@
               </template>
             </el-table-column>
           </el-table>
+
+          <div v-if="filteredMappingRows.length > 0" class="mapping-table-pagination">
+            <el-pagination
+              v-model:current-page="mappingPage"
+              v-model:page-size="mappingPageSize"
+              :total="filteredMappingRows.length"
+              :page-sizes="[10, 20, 50, 100]"
+              layout="total, sizes, prev, pager, next"
+              background
+            />
+          </div>
 
           <el-empty
             v-if="mappingRows.length === 0 && !loadingUpstreams"
@@ -386,7 +397,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, reactive, nextTick, computed } from 'vue'
+import { onMounted, ref, reactive, nextTick, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { RefreshCw, Plus, Edit, Trash2, Search } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
@@ -420,6 +431,8 @@ const loadingUpstreams = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
 const filterUpstreamId = ref('')
 const mappingSearch = ref('')
+const mappingPage = ref(1)
+const mappingPageSize = ref(20)
 
 const mappingDialogVisible = ref(false)
 const mappingDialogMode = ref<'add' | 'edit'>('add')
@@ -477,6 +490,26 @@ const filteredMappingRows = computed<MappingRow[]>(() => {
     )
   })
 })
+
+/** 客户端切片分页：映射数据一次性全量拉取，表格只渲染当前页 */
+const pagedMappingRows = computed<MappingRow[]>(() => {
+  const start = (mappingPage.value - 1) * mappingPageSize.value
+  return filteredMappingRows.value.slice(start, start + mappingPageSize.value)
+})
+
+// 筛选条件变化时回到第一页
+watch([filterUpstreamId, mappingSearch], () => {
+  mappingPage.value = 1
+})
+
+// 删除映射导致行数减少时，页码自动回落到有效范围
+watch(
+  () => filteredMappingRows.value.length,
+  () => {
+    const maxPage = Math.max(1, Math.ceil(filteredMappingRows.value.length / mappingPageSize.value))
+    if (mappingPage.value > maxPage) mappingPage.value = maxPage
+  },
+)
 
 const mappingModelOptions = computed<string[]>(() => {
   const upstream = upstreams.value.find(u => u.id === mappingUpstreamId.value)
@@ -796,6 +829,12 @@ onMounted(() => {
 
 .model-mappings-tabs {
   margin-top: 8px;
+}
+
+.mapping-table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 /* 映射表格（Tab 1） */
