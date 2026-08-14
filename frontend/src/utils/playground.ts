@@ -181,6 +181,8 @@ export const parseGatewayModels = (response: unknown): string[] => {
   return [...models]
 }
 
+const canonicalKey = (model: string) => model.trim().toLowerCase()
+
 export const selectPlayableModels = (
   allowlist: string[],
   response: GatewayModelResponse
@@ -188,13 +190,20 @@ export const selectPlayableModels = (
   const live = parseGatewayModels(response)
   if (allowlist.length === 0) return live
 
-  const liveSet = new Set(live)
+  // Case-insensitive intersection: the gateway's /v1/models folds display
+  // names to lowercase, while an allowlist may carry the original spelling
+  // (e.g. "MiniMax-M2.7"). Match on the canonical key but keep the
+  // allowlist's spelling and order so the operator's label is what the
+  // playground shows and sends (the gateway routes canonically).
+  const liveKeys = new Set(live.map(canonicalKey))
   const seen = new Set<string>()
   return allowlist
     .map(model => model.trim())
     .filter(model => {
-      if (!model || !liveSet.has(model) || seen.has(model)) return false
-      seen.add(model)
+      if (!model) return false
+      const key = canonicalKey(model)
+      if (!liveKeys.has(key) || seen.has(key)) return false
+      seen.add(key)
       return true
     })
 }

@@ -40,6 +40,26 @@ describe('playground live model selection', () => {
     ])
   })
 
+  it('matches allowlist to live catalog case-insensitively', () => {
+    // Gateway folds display names to lowercase; the allowlist may carry the
+    // original spelling (e.g. "MiniMax-M2.7"). The allowlist spelling wins.
+    expect(
+      selectPlayableModels(
+        ['MiniMax-M2.7', 'DeepSeek-V4-Flash'],
+        { data: [{ id: 'minimax-m2.7' }, { id: 'deepseek-v4-flash' }] }
+      )
+    ).toEqual(['MiniMax-M2.7', 'DeepSeek-V4-Flash'])
+  })
+
+  it('does not duplicate mixed-case allowlist entries for one live model', () => {
+    expect(
+      selectPlayableModels(
+        ['gpt-4', 'GPT-4'],
+        { data: [{ id: 'gpt-4' }] }
+      )
+    ).toEqual(['gpt-4'])
+  })
+
   it('never accepts historical model statistics as an input', () => {
     expect(selectPlayableModels(['stale-model'], { data: [] })).toEqual([])
   })
