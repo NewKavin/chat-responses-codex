@@ -609,25 +609,6 @@ impl GatewayError {
                     "retry_after_seconds": retry_after_seconds,
                 })),
             ),
-            DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-                retry_after_seconds,
-                limit,
-                used,
-            } => Self::classified(
-                StatusCode::TOO_MANY_REQUESTS,
-                "downstream daily token quota exceeded",
-                "gateway_quota_exceeded",
-                "gateway_daily_token_quota_exceeded",
-                "gateway_daily_token_quota_exceeded",
-                Some(retry_after_seconds),
-                Some(json!({
-                    "scope": "gateway",
-                    "quota": "daily_tokens",
-                    "limit": limit,
-                    "used": used,
-                    "retry_after_seconds": retry_after_seconds,
-                })),
-            ),
             DownstreamAdmissionRejection::DailyCostQuotaExceeded {
                 retry_after_seconds,
                 limit,
@@ -642,25 +623,6 @@ impl GatewayError {
                 Some(json!({
                     "scope": "gateway",
                     "quota": "daily_cost",
-                    "limit": limit,
-                    "used": used,
-                    "retry_after_seconds": retry_after_seconds,
-                })),
-            ),
-            DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
-                retry_after_seconds,
-                limit,
-                used,
-            } => Self::classified(
-                StatusCode::TOO_MANY_REQUESTS,
-                "downstream monthly token quota exceeded",
-                "gateway_quota_exceeded",
-                "gateway_monthly_token_quota_exceeded",
-                "gateway_monthly_token_quota_exceeded",
-                Some(retry_after_seconds),
-                Some(json!({
-                    "scope": "gateway",
-                    "quota": "monthly_tokens",
                     "limit": limit,
                     "used": used,
                     "retry_after_seconds": retry_after_seconds,

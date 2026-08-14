@@ -654,12 +654,8 @@ impl DownstreamConfig {
             && self.request_quota_requests.is_some()
     }
 
-    pub fn uses_token_quota(&self) -> bool {
-        self.daily_token_limit.is_some() || self.monthly_token_limit.is_some()
-    }
-
     /// Returns the billing mode: "request" (per-request quota) or "token"
-    /// (daily rolling token quota).
+    /// (cost billing; the daily rolling window enforces the cost limit).
     pub fn billing_mode(&self) -> &str {
         if self.billing_mode == "token" {
             "token"
@@ -668,7 +664,8 @@ impl DownstreamConfig {
         }
     }
 
-    /// True when this downstream is configured for token-based daily quota.
+    /// True when this downstream is configured for cost-based daily quota
+    /// (billing_mode "token"; the raw token limit itself is deprecated).
     pub fn token_billing_mode(&self) -> bool {
         self.billing_mode() == "token"
     }

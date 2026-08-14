@@ -690,15 +690,20 @@ impl PostgresStateStore {
         let now = unix_seconds();
         let today_start = u64_to_i64((now / 86_400) * 86_400);
         let month_start = u64_to_i64(current_month_start(now));
+        let rolling_24h_start = u64_to_i64(now.saturating_sub(24 * 60 * 60 - 1));
         let sum_sql = "SELECT
                  COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $2), 0)::BIGINT,
                  COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $3), 0)::BIGINT,
                  COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= $2), 0)::BIGINT,
-                 COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= $3), 0)::BIGINT
+                 COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= $3), 0)::BIGINT,
+                 COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= $4), 0)::BIGINT
              FROM usage_logs
              WHERE downstream_key_id = $1";
         let usage_row = conn
-            .query_one(sum_sql, &[&downstream_id, &today_start, &month_start])
+            .query_one(
+                sum_sql,
+                &[&downstream_id, &today_start, &month_start, &rolling_24h_start],
+            )
             .await
             .map_err(io_other)?;
 
@@ -708,6 +713,7 @@ impl PostgresStateStore {
             month_tokens: i64_to_u64(usage_row.get::<_, i64>(1)),
             today_cost_cents: i64_to_u64(usage_row.get::<_, i64>(2)),
             month_cost_cents: i64_to_u64(usage_row.get::<_, i64>(3)),
+            cost_used_24h_cents: i64_to_u64(usage_row.get::<_, i64>(4)),
             total_models,
             active_models: i64_to_usize(active_models),
         }))

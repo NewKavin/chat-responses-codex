@@ -787,7 +787,8 @@ async fn test_portal_quota_returns_detailed_quota_info() {
 
     assert!(result["per_minute_limit"].is_object());
     assert!(result["request_quota"].is_object());
-    assert!(result["token_quota"].is_object());
+    assert!(result["cost_quota"].is_object());
+    assert!(result["token_quota"].is_null(), "token quota must no longer exist");
 }
 
 #[tokio::test]
@@ -2037,7 +2038,7 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
     assert_eq!(cost_daily["limit_cents"], 3000);
     assert_eq!(cost_daily["remaining_cents"], 2873);
     assert_eq!(cost_daily["percentage"], 127.0 / 3000.0 * 100.0);
-    assert_eq!(result["cost_summary"]["today_cents"], 127);
+    assert_eq!(result["cost_summary"]["last_24h_cents"], 127);
     assert_eq!(result["cost_summary"]["this_month_cents"], 127);
     assert!(
         result["quota_summary"]["token_daily"].is_null(),

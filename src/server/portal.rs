@@ -134,35 +134,10 @@ pub(super) async fn portal_overview(
                 .into_response()
         }
     };
-    let token_daily = downstream.daily_token_limit.map(|limit| {
-        let used = summary.today_tokens;
-        json!({
-            "used": used,
-            "limit": limit,
-            "remaining": limit.saturating_sub(used),
-            "percentage": if limit > 0 {
-                (used as f64 / limit as f64) * 100.0
-            } else {
-                0.0
-            },
-        })
-    });
-    let token_monthly = downstream.monthly_token_limit.map(|limit| {
-        let used = summary.month_tokens;
-        json!({
-            "used": used,
-            "limit": limit,
-            "remaining": limit.saturating_sub(used),
-            "percentage": if limit > 0 {
-                (used as f64 / limit as f64) * 100.0
-            } else {
-                0.0
-            },
-        })
-    });
-
+    // Token limits are no longer enforced; the daily cost quota is measured
+    // on the same rolling 24h window as admission.
     let cost_daily = downstream.daily_cost_limit().map(|limit| {
-        let used = summary.today_cost_cents;
+        let used = summary.cost_used_24h_cents;
         json!({
             "used_cents": used,
             "limit_cents": limit,
@@ -177,8 +152,6 @@ pub(super) async fn portal_overview(
 
     let quota_summary = json!({
         "request_quota": request_quota,
-        "token_daily": token_daily,
-        "token_monthly": token_monthly,
         "cost_daily": cost_daily,
     });
 
@@ -188,7 +161,7 @@ pub(super) async fn portal_overview(
     });
 
     let cost_summary = json!({
-        "today_cents": summary.today_cost_cents,
+        "last_24h_cents": summary.cost_used_24h_cents,
         "this_month_cents": summary.month_cost_cents,
     });
 
@@ -247,7 +220,7 @@ pub(super) async fn portal_quota(
     let per_minute_limit = state.compute_per_minute_usage(&downstream_id).await;
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let now = unix_seconds();
-    let token_usage = state.compute_token_usage(&downstream_id, now).await;
+    let cost_usage = state.compute_cost_usage(&downstream_id, now).await;
     let model_contexts = state.compute_portal_model_context_limits(downstream).await;
     let model_contexts_json: serde_json::Map<String, Value> = model_contexts
         .into_iter()
@@ -265,9 +238,8 @@ pub(super) async fn portal_quota(
     Json(json!({
         "per_minute_limit": per_minute_limit,
         "request_quota": request_quota,
-        "token_quota": {
-            "daily": token_usage.daily,
-            "monthly": token_usage.monthly,
+        "cost_quota": {
+            "daily": cost_usage.daily,
         },
         "model_allowlist": downstream.model_allowlist,
         "ip_allowlist": downstream.ip_allowlist,

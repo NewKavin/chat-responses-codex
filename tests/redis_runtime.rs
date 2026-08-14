@@ -1553,32 +1553,31 @@ async fn redis_account_state_ttl_covers_long_explicit_retry_after() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
-async fn redis_downstream_token_usage_is_shared() {
+async fn redis_downstream_cost_usage_is_shared() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
-    let mut downstream = redis_test_downstream("shared-token-limit");
+    let mut downstream = redis_test_downstream("shared-cost-limit");
     downstream.per_minute_limit = 60;
-    downstream.daily_token_limit = Some(10);
     downstream.billing_mode = "token".into();
-
+    downstream.input_token_price_per_million_cents = Some(1_000_000);
+    downstream.output_token_price_per_million_cents = Some(1_000_000);
+    downstream.daily_cost_limit_cents = Some(10);
+    // Legacy raw token limit fields are ignored; only cost billing enforces
+    // the daily rolling window.
+    downstream.daily_token_limit = Some(1);
     first.insert_downstream(downstream.clone()).await.unwrap();
 
-    first
-        .append_usage_log(redis_test_usage_log(
-            "redis-token-event",
-            &downstream.id,
-            10,
-        ))
-        .await
-        .unwrap();
+    let mut log = redis_test_usage_log("redis-cost-event", &downstream.id, 10);
+    log.total_cost_cents = Some(10);
+    first.append_usage_log(log).await.unwrap();
 
     let rejection = second
         .reserve_downstream_request(&downstream)
         .await
-        .expect_err("the second coordinator must observe shared token usage");
+        .expect_err("the second coordinator must observe shared cost usage");
     assert!(matches!(
         rejection,
-        DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+        DownstreamAdmissionRejection::DailyCostQuotaExceeded {
             limit: 10,
             used: 10,
             ..
@@ -1616,51 +1615,56 @@ async fn redis_request_quota_mode_does_not_apply_token_limits() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
-async fn redis_token_retry_after_waits_until_enough_tokens_expire() {
+async fn redis_cost_retry_after_waits_until_window_expires() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
-    let mut downstream = redis_test_downstream("token-retry-after");
+    let mut downstream = redis_test_downstream("cost-retry-after");
     downstream.per_minute_limit = 60;
-    downstream.daily_token_limit = Some(100);
     downstream.billing_mode = "token".into();
+    downstream.input_token_price_per_million_cents = Some(1_000_000);
+    downstream.output_token_price_per_million_cents = Some(1_000_000);
+    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
 
-    first
-        .append_usage_log(redis_test_usage_log("small-old-event", &downstream.id, 1))
-        .await
-        .unwrap();
+    let mut small = redis_test_usage_log("small-old-event", &downstream.id, 1);
+    small.total_cost_cents = Some(1);
+    first.append_usage_log(small).await.unwrap();
     tokio::time::sleep(Duration::from_millis(1_100)).await;
-    first
-        .append_usage_log(redis_test_usage_log("large-new-event", &downstream.id, 100))
-        .await
-        .unwrap();
+    let mut large = redis_test_usage_log("large-new-event", &downstream.id, 100);
+    large.total_cost_cents = Some(100);
+    first.append_usage_log(large).await.unwrap();
 
     let rejection = second
         .reserve_downstream_request(&downstream)
         .await
-        .expect_err("the daily token quota must be exhausted");
+        .expect_err("the daily cost quota must be exhausted");
     assert!(matches!(
         rejection,
-        DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+        DownstreamAdmissionRejection::DailyCostQuotaExceeded {
             retry_after_seconds,
             limit: 100,
             used: 101,
-        } if retry_after_seconds >= 86_400
+        } if retry_after_seconds >= 86_000
     ));
 }
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
-async fn redis_daily_token_keys_use_daily_retention() {
+async fn redis_legacy_token_limit_without_prices_writes_no_window() {
     let config = redis_test_config();
     let (first, _second, _directory) = redis_test_states(&config).await;
-    let mut downstream = redis_test_downstream("daily-token-retention");
+    let mut downstream = redis_test_downstream("legacy-token-no-window");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
     downstream.billing_mode = "token".into();
+    // No prices: not cost billing, so no daily window key is written at all.
     first.insert_downstream(downstream.clone()).await.unwrap();
     first
-        .append_usage_log(redis_test_usage_log("daily-retention", &downstream.id, 1))
+        .append_usage_log(redis_test_usage_log(
+            "legacy-no-window",
+            &downstream.id,
+            1,
+        ))
         .await
         .unwrap();
 
@@ -1669,12 +1673,12 @@ async fn redis_daily_token_keys_use_daily_retention() {
         "{}:v1:downstream:{{{identity}}}:tokens",
         config.redis_key_prefix
     );
-    let response = redis_test_command(&config, &["TTL".into(), token_key]).await;
-    let ttl = response
-        .strip_prefix(':')
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .expect("TTL must return an integer");
-    assert!(ttl > 86_000 && ttl <= 86_460, "unexpected daily TTL: {ttl}");
+    let response = redis_test_command(&config, &["EXISTS".into(), token_key]).await;
+    assert_eq!(
+        redis_integer(&response),
+        0,
+        "legacy token limit without prices must not write a cost window"
+    );
 }
 
 #[tokio::test]

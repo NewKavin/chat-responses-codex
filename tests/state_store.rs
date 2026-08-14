@@ -505,13 +505,11 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
 
     let snapshot = state.snapshot().await;
     let summary = build_downstream_usage_summary(&snapshot, "downstream-2", now).unwrap();
-    let token_usage = state.compute_token_usage("downstream-2", now).await;
 
     assert_eq!(summary.downstream_id, "downstream-2");
     assert_eq!(summary.today_tokens, 220);
     assert_eq!(summary.month_tokens, 220);
-    assert_eq!(summary.today_tokens, token_usage.daily.unwrap().used);
-    assert_eq!(summary.month_tokens, token_usage.monthly.unwrap().used);
+    assert_eq!(summary.cost_used_24h_cents, 0, "no cost cents recorded for these logs");
     assert_eq!(summary.total_models, 2);
     assert_eq!(summary.active_models, 1);
 }
@@ -869,6 +867,7 @@ async fn query_usage_logs_page_uses_store_result_when_available() {
                 month_tokens: 2,
                 today_cost_cents: 0,
                 month_cost_cents: 0,
+                cost_used_24h_cents: 0,
                 total_models: 3,
                 active_models: 4,
             },
@@ -893,6 +892,7 @@ async fn downstream_usage_summary_uses_store_result_when_available() {
         month_tokens: 22,
         today_cost_cents: 0,
         month_cost_cents: 0,
+        cost_used_24h_cents: 0,
         total_models: 33,
         active_models: 44,
     };
@@ -973,6 +973,7 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 month_tokens: 0,
                 today_cost_cents: 0,
                 month_cost_cents: 0,
+                cost_used_24h_cents: 0,
                 total_models: 1,
                 active_models: 0,
             },
@@ -1044,6 +1045,7 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 month_tokens: 0,
                 today_cost_cents: 0,
                 month_cost_cents: 0,
+                cost_used_24h_cents: 0,
                 total_models: 1,
                 active_models: 0,
             },

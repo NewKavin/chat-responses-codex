@@ -6,7 +6,7 @@ use chat_responses_codex::state::{
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
+async fn downstream_legacy_token_limit_is_no_longer_enforced() {
     let tempdir = tempdir().unwrap();
     let downstream_key = generate_downstream_key("gw");
     let now = unix_seconds();
@@ -76,19 +76,13 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
     let downstream = state.snapshot().await.downstreams[0].clone();
     let admission = state.reserve_downstream_request(&downstream).await;
 
-    let rejection = admission.expect_err("daily token quota should reject exhausted keys");
     assert!(
-        matches!(
-            rejection,
-            DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-                limit: 10,
-                used: 10,
-                ..
-            }
-        ),
-        "unexpected admission rejection: {rejection:?}"
+        admission.is_ok(),
+        "raw daily token limits are deprecated and must not reject requests"
     );
 }
+
+
 
 #[tokio::test]
 async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhausted() {
@@ -671,7 +665,7 @@ async fn downstream_token_mode_ignores_request_window_quota() {
 }
 
 #[tokio::test]
-async fn downstream_token_daily_window_slides_after_24h() {
+async fn downstream_cost_daily_window_slides_after_24h() {
     let tempdir = tempdir().unwrap();
     let downstream_key = generate_downstream_key("gw");
     let now = unix_seconds();
@@ -688,11 +682,11 @@ async fn downstream_token_daily_window_slides_after_24h() {
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
-                daily_token_limit: Some(10),
+                daily_token_limit: None,
                 monthly_token_limit: None,
-                input_token_price_per_million_cents: None,
+                input_token_price_per_million_cents: Some(1_000_000),
                 output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
+                daily_cost_limit_cents: Some(10),
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -722,7 +716,7 @@ async fn downstream_token_daily_window_slides_after_24h() {
                 prompt_tokens: 4,
                 completion_tokens: 6,
                 total_tokens: 10,
-                total_cost_cents: None,
+                total_cost_cents: Some(10),
                 first_token_latency_ms: None,
                 latency_ms: 12,
                 created_at: now.saturating_sub(25 * 3600),
@@ -745,6 +739,181 @@ async fn downstream_token_daily_window_slides_after_24h() {
         "consumption older than 24h must slide out of the rolling daily window"
     );
 }
+
+#[tokio::test]
+async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs() {
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let now = unix_seconds();
+
+    // Window is rebuilt from usage logs at startup. Rejected (429) and
+    // rolled-back (5xx) requests must not consume quota slots; admitted
+    // client errors (400) keep theirs, matching the live window.
+    let logs: Vec<UsageLog> = [
+        (200, "admitted"),
+        (429, "rejected"),
+        (503, "rolled-back"),
+        (400, "client-error"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, (status, suffix))| UsageLog {
+        id: format!("log-{index}").into(),
+        downstream_key_id: "down-1".into(),
+        upstream_key_id: "up-1".into(),
+        downstream_name: None,
+        upstream_name: None,
+        endpoint: "/v1/chat/completions".into(),
+        model: "gpt-4.1-mini".into(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: None,
+        user_agent: None,
+        request_id: format!("REQ-{suffix}").into(),
+        status_code: *status,
+        wire_status_code: 0,
+        stream_diagnostics: None,
+        error_message: None,
+        error_category: None,
+        prompt_tokens: 4,
+        completion_tokens: 6,
+        total_tokens: 10,
+        total_cost_cents: None,
+        first_token_latency_ms: None,
+        latency_ms: 12,
+        created_at: now,
+        compatibility: None,
+    })
+    .collect();
+
+    let state = AppState::new(
+        PersistedState {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Replay".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: Some(1),
+                request_quota_requests: Some(2),
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: logs,
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let downstream = state.snapshot().await.downstreams[0].clone();
+
+    // 2 admitted slots remain in the window after filtering (200 + 400).
+    let usage = state.compute_request_quota_usage(&downstream).await.unwrap();
+    assert_eq!(usage.used, 2, "rejected/rolled-back logs must not count as used");
+
+    // Window full (2/2): a new request is rejected.
+    let admission = state.reserve_downstream_request(&downstream).await;
+    assert!(
+        matches!(
+            admission,
+            Err(DownstreamAdmissionRejection::RequestQuotaExceeded {
+                limit: 2,
+                used: 2,
+                ..
+            })
+        ),
+        "replayed admitted logs must fill the request window, got {admission:?}"
+    );
+}
+
+#[tokio::test]
+async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let now = unix_seconds();
+
+    // The same log id (same request) may appear in both usage_logs and
+    // archived logs after a snapshot: replay must dedupe by id.
+    let mut logs: Vec<UsageLog> = (0..3)
+        .map(|index| UsageLog {
+            id: format!("log-{index}").into(),
+            downstream_key_id: "down-1".into(),
+            upstream_key_id: "up-1".into(),
+            downstream_name: None,
+            upstream_name: None,
+            endpoint: "/v1/chat/completions".into(),
+            model: "gpt-4.1-mini".into(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            request_id: format!("REQ-{index}").into(),
+            status_code: 200,
+            wire_status_code: 0,
+            stream_diagnostics: None,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 4,
+            completion_tokens: 6,
+            total_tokens: 10,
+            total_cost_cents: None,
+            first_token_latency_ms: None,
+            latency_ms: 12,
+            created_at: now,
+            compatibility: None,
+        })
+        .collect();
+    logs.push(logs[0].clone());
+
+    let state = AppState::new(
+        PersistedState {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Replay Dedupe".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: Some(1),
+                request_quota_requests: Some(100),
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: logs,
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let downstream = state.snapshot().await.downstreams[0].clone();
+    let usage = state.compute_request_quota_usage(&downstream).await.unwrap();
+    assert_eq!(usage.used, 3, "duplicate log ids must be collapsed on replay");
+}
+
+
 
 #[tokio::test]
 async fn downstream_billing_mode_defaults_to_request_when_absent() {

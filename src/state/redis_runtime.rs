@@ -323,18 +323,11 @@ impl RedisRuntimeCoordinator {
         } else {
             0
         };
-        // Token billing mode: only the daily rolling window is enforced.
-        // Cost billing (token mode + price + cost limit) uses the cost limit
-        // in cents; otherwise falls back to the raw token limit.
-        let daily_limit = if downstream.token_billing_mode() {
-            downstream
-                .daily_cost_limit()
-                .or(downstream.daily_token_limit)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let monthly_limit = 0;
+        // Only cost billing (token mode + prices + daily cost limit) enforces
+        // a daily rolling window, measured in cents. Raw token limits are no
+        // longer enforced. The monthly token window is unused (always 0).
+        let daily_limit = downstream.daily_cost_limit().unwrap_or(0);
+        let monthly_limit = 0u64;
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -361,9 +354,7 @@ impl RedisRuntimeCoordinator {
             })
             .await
             .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
-        parse_downstream_reservation(result).map_err(|error| {
-            classify_cost_quota(error, downstream.daily_cost_limit())
-        })
+        parse_downstream_reservation(result)
     }
 
     pub(super) async fn rollback_downstream_request(
@@ -411,18 +402,11 @@ impl RedisRuntimeCoordinator {
         } else {
             0
         };
-        // Token billing mode: only the daily rolling window is enforced.
-        // Cost billing (token mode + price + cost limit) uses the cost limit
-        // in cents; otherwise falls back to the raw token limit.
-        let daily_limit = if downstream.token_billing_mode() {
-            downstream
-                .daily_cost_limit()
-                .or(downstream.daily_token_limit)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let monthly_limit = 0;
+        // Only cost billing (token mode + prices + daily cost limit) enforces
+        // a daily rolling window, measured in cents. Raw token limits are no
+        // longer enforced. The monthly token window is unused (always 0).
+        let daily_limit = downstream.daily_cost_limit().unwrap_or(0);
+        let monthly_limit = 0u64;
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -455,9 +439,7 @@ impl RedisRuntimeCoordinator {
             })
             .await
             .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
-        parse_downstream_admission(result).map_err(|error| {
-            classify_cost_quota(error, downstream.daily_cost_limit())
-        })
+        parse_downstream_admission(result)
     }
 
     pub(super) async fn record_downstream_tokens(
@@ -2580,6 +2562,7 @@ fn route_health_retention_ttl_seconds(cooldown: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        parse_downstream_admission, parse_downstream_reservation,
         parse_downstream_runtime_counts, parse_health_state_snapshot,
         parse_route_health_finish_result, parse_route_health_observe_result,
         parse_route_health_reservation, route_health_redis_key, route_health_retention_ttl_seconds,
@@ -2589,43 +2572,37 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn classify_cost_quota_reclassifies_daily_exhaustion_for_cost_mode() {
-        let token = DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-            retry_after_seconds: 3600,
-            limit: 10,
-            used: 10,
-        };
-        // cost mode -> reclassified
-        let classified = classify_cost_quota(token.clone(), Some(10));
-        assert!(
-            matches!(
-                classified,
-                DownstreamAdmissionRejection::DailyCostQuotaExceeded {
-                    retry_after_seconds: 3600,
-                    limit: 10,
-                    used: 10,
-                }
-            ),
-            "cost-mode exhaustion must be reclassified as a cost rejection"
-        );
-        // token mode -> untouched
-        let untouched = classify_cost_quota(token.clone(), None);
+    #[test]
+    fn parse_daily_exhaustion_maps_to_cost_rejection() {
+        let parsed = parse_downstream_reservation(vec![3, 10, 10, 3600]);
         assert!(matches!(
-            untouched,
-            DownstreamAdmissionRejection::DailyTokenQuotaExceeded { .. }
-        ));
-        // non-quota rejections pass through unchanged
-        let other = classify_cost_quota(
-            DownstreamAdmissionRejection::PerMinuteLimitExceeded {
-                retry_after_seconds: 5,
+            parsed,
+            Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                retry_after_seconds: 3600,
                 limit: 10,
                 used: 10,
-            },
-            Some(10),
-        );
+            })
+        ));
+        let admitted = parse_downstream_admission(vec![3, 10, 10, 3600]);
         assert!(matches!(
-            other,
-            DownstreamAdmissionRejection::PerMinuteLimitExceeded { .. }
+            admitted,
+            Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                retry_after_seconds: 3600,
+                limit: 10,
+                used: 10,
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_unknown_tags_surface_runtime_unavailable() {
+        assert!(matches!(
+            parse_downstream_reservation(vec![4, 1, 1, 1]),
+            Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)
+        ));
+        assert!(matches!(
+            parse_downstream_admission(vec![4, 1, 1, 1]),
+            Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)
         ));
     }
 
@@ -2774,32 +2751,6 @@ fn stable_identity(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
-/// The Redis scripts fold both cost and token daily limits into a single
-/// `daily_limit` input and report either as tag 3, so the parsed rejection
-/// carries no billing-mode information. The caller knows the downstream
-/// configuration and reclassifies cost-mode rejections here so the gateway
-/// error mapping can emit the correct code/message (cost, not token).
-fn classify_cost_quota(
-    error: DownstreamAdmissionRejection,
-    daily_cost_limit: Option<u64>,
-) -> DownstreamAdmissionRejection {
-    match (error, daily_cost_limit.is_some()) {
-        (
-            DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-                retry_after_seconds,
-                limit,
-                used,
-            },
-            true,
-        ) => DownstreamAdmissionRejection::DailyCostQuotaExceeded {
-            retry_after_seconds,
-            limit,
-            used,
-        },
-        (other, _) => other,
-    }
-}
-
 fn parse_downstream_reservation(result: Vec<i64>) -> Result<(), DownstreamAdmissionRejection> {
     let tag = result.first().copied().unwrap_or(-1);
     let used = result.get(1).copied().unwrap_or_default().max(0) as u64;
@@ -2818,12 +2769,7 @@ fn parse_downstream_reservation(result: Vec<i64>) -> Result<(), DownstreamAdmiss
             used: used.min(u64::from(u32::MAX)) as u32,
             window_seconds: result.get(4).copied().unwrap_or_default().max(0) as u64,
         }),
-        3 => Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-            retry_after_seconds,
-            limit,
-            used,
-        }),
-        4 => Err(DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
+        3 => Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
             retry_after_seconds,
             limit,
             used,
@@ -2850,12 +2796,7 @@ fn parse_downstream_admission(result: Vec<i64>) -> Result<(), DownstreamAdmissio
             used: used.min(u64::from(u32::MAX)) as u32,
             window_seconds: result.get(4).copied().unwrap_or_default().max(0) as u64,
         }),
-        3 => Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-            retry_after_seconds,
-            limit,
-            used,
-        }),
-        4 => Err(DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
+        3 => Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
             retry_after_seconds,
             limit,
             used,

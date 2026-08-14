@@ -2,7 +2,7 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     default_upstream_max_concurrency, default_upstream_request_quota_requests,
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
-    DownstreamConfig, NonstandardFieldPolicy, UpstreamConfig,
+    DownstreamConfig, UpstreamConfig,
 };
 use serde::{Deserialize, Serialize};
 

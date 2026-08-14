@@ -167,8 +167,8 @@ pub use types::{
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
 };
 pub use usage::{
-    portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,
-    TokenUsage,
+    portal_model_is_allowed, CostUsage, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage,
+    TokenQuota,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -3992,21 +3992,26 @@ impl AppState {
         &self,
         log: &UsageLog,
     ) -> Result<(), RuntimeCoordinationError> {
+        // Rejected (429) and rolled-back (>=500) requests never consume quota;
+        // keep the live cost window on the same counting rule as the replay
+        // windows so live and replayed totals match.
+        if log.status_code == 429 || log.status_code >= 500 {
+            return Ok(());
+        }
         let event = {
             let state = self.inner.lock().await;
             state
                 .downstreams
                 .iter()
                 .find(|downstream| downstream.id == log.downstream_key_id)
-                .filter(|downstream| {
-                    downstream.rate_limit_enabled && downstream.token_billing_mode()
-                })
+                .filter(|downstream| downstream.rate_limit_enabled && downstream.cost_billing_mode())
                 .map(|downstream| {
-                    let value = if downstream.cost_billing_mode() {
+                    // Prefer the billed amount recorded at request end so the
+                    // live window matches the replay window (which reads
+                    // total_cost_cents from usage logs).
+                    let value = log.total_cost_cents.unwrap_or_else(|| {
                         downstream.cost_for_tokens(log.prompt_tokens, log.completion_tokens)
-                    } else {
-                        log.total_tokens
-                    };
+                    });
                     (downstream_token_retention_seconds(downstream), value)
                 })
         };
@@ -4333,7 +4338,11 @@ impl AppState {
             }
         }
 
-        if downstream.token_billing_mode() {
+        // Cost billing (token mode + prices + daily cost limit) enforces a
+        // rolling 24h cost window. Raw token quotas (daily/monthly token
+        // limits) are no longer enforced: only request-count and cost limits
+        // apply.
+        if let Some(daily_cost_limit) = downstream.daily_cost_limit() {
             let mut token_windows = self.downstream_token_windows.lock().await;
             let token_window = token_windows
                 .entry(downstream.id.clone())
@@ -4349,60 +4358,31 @@ impl AppState {
                 }
             }
 
-            if let Some(daily_cost_limit) = downstream.daily_cost_limit() {
-                let daily_used = token_window
-                    .iter()
-                    .filter(|event| {
-                        event.created_at
-                            >= now.saturating_sub(
-                                DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
-                            )
-                    })
-                    .map(|event| event.tokens)
-                    .sum::<u64>();
-                if daily_used >= daily_cost_limit.max(1) {
-                    let retry_after_seconds = downstream_token_retry_after_seconds(
-                        token_window,
-                        now,
-                        DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
-                        daily_used
-                            .saturating_add(1)
-                            .saturating_sub(daily_cost_limit.max(1)),
-                    )
-                    .max(1);
-                    return Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
-                        retry_after_seconds,
-                        limit: daily_cost_limit.max(1),
-                        used: daily_used,
-                    });
-                }
-            } else if let Some(daily_token_limit) = downstream.daily_token_limit {
-                let daily_used = token_window
-                    .iter()
-                    .filter(|event| {
-                        event.created_at
-                            >= now.saturating_sub(
-                                DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
-                            )
-                    })
-                    .map(|event| event.tokens)
-                    .sum::<u64>();
-                if daily_used >= daily_token_limit.max(1) {
-                    let retry_after_seconds = downstream_token_retry_after_seconds(
-                        token_window,
-                        now,
-                        DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
-                        daily_used
-                            .saturating_add(1)
-                            .saturating_sub(daily_token_limit.max(1)),
-                    )
-                    .max(1);
-                    return Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-                        retry_after_seconds,
-                        limit: daily_token_limit.max(1),
-                        used: daily_used,
-                    });
-                }
+            let daily_used = token_window
+                .iter()
+                .filter(|event| {
+                    event.created_at
+                        >= now.saturating_sub(
+                            DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
+                        )
+                })
+                .map(|event| event.tokens)
+                .sum::<u64>();
+            if daily_used >= daily_cost_limit.max(1) {
+                let retry_after_seconds = downstream_token_retry_after_seconds(
+                    token_window,
+                    now,
+                    DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
+                    daily_used
+                        .saturating_add(1)
+                        .saturating_sub(daily_cost_limit.max(1)),
+                )
+                .max(1);
+                return Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                    retry_after_seconds,
+                    limit: daily_cost_limit.max(1),
+                    used: daily_used,
+                });
             }
         }
 
@@ -6413,17 +6393,7 @@ pub enum DownstreamAdmissionRejection {
         used: u32,
         window_seconds: u64,
     },
-    DailyTokenQuotaExceeded {
-        retry_after_seconds: u64,
-        limit: u64,
-        used: u64,
-    },
     DailyCostQuotaExceeded {
-        retry_after_seconds: u64,
-        limit: u64,
-        used: u64,
-    },
-    MonthlyTokenQuotaExceeded {
         retry_after_seconds: u64,
         limit: u64,
         used: u64,
@@ -6446,15 +6416,7 @@ impl DownstreamAdmissionRejection {
                 retry_after_seconds,
                 ..
             }
-            | DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
-                retry_after_seconds,
-                ..
-            }
             | DownstreamAdmissionRejection::DailyCostQuotaExceeded {
-                retry_after_seconds,
-                ..
-            }
-            | DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
                 retry_after_seconds,
                 ..
             } => (*retry_after_seconds).max(1),

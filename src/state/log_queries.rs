@@ -63,6 +63,8 @@ pub struct DownstreamUsageSummary {
     pub month_tokens: u64,
     pub today_cost_cents: u64,
     pub month_cost_cents: u64,
+    /// Cost (cents) consumed in the same rolling 24h window used by admission.
+    pub cost_used_24h_cents: u64,
     pub total_models: usize,
     pub active_models: usize,
 }
@@ -206,6 +208,13 @@ pub fn build_downstream_usage_summary(
         .filter(|log| log.created_at >= month_start)
         .filter_map(|log| log.total_cost_cents)
         .sum();
+    let rolling_24h_start =
+        now.saturating_sub(crate::state::usage::DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS - 1);
+    let cost_used_24h_cents = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= rolling_24h_start)
+        .filter_map(|log| log.total_cost_cents)
+        .sum();
 
     let total_models = if !downstream.model_allowlist.is_empty() {
         downstream
@@ -237,6 +246,7 @@ pub fn build_downstream_usage_summary(
         month_tokens,
         today_cost_cents,
         month_cost_cents,
+        cost_used_24h_cents,
         total_models,
         active_models,
     })

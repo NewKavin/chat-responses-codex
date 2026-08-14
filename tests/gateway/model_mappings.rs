@@ -296,7 +296,7 @@ async fn mapped_routes_fold_case_and_stack_after_global_alias_normalization() {
     );
 
     // Global alias normalizes first, then the mapping resolves (3.3 order).
-    let (status, payload) = send_chat_request(&app, &secret, "deepseek-chat").await;
+    let (status, _payload) = send_chat_request(&app, &secret, "deepseek-chat").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         recorded.lock().unwrap().as_slice(),

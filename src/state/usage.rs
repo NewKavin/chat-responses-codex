@@ -23,9 +23,8 @@ pub struct RequestQuotaUsage {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TokenUsage {
+pub struct CostUsage {
     pub daily: Option<TokenQuota>,
-    pub monthly: Option<TokenQuota>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,11 +69,24 @@ pub(super) struct DownstreamRequestEvent {
 
 pub(super) const DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 
+/// Whether a usage log counts toward the downstream request quota.
+///
+/// Admission-counted requests are those that were admitted and not rolled
+/// back: quota rejections (429) and upstream failures that were rolled back
+/// (5xx, upstream 429) must not consume quota slots. Non-quota 4xx client
+/// errors were admitted and keep their slot, matching the live window.
+pub(super) fn is_request_quota_counted(log: &UsageLog) -> bool {
+    log.status_code != 429 && log.status_code < 500
+}
+
 pub(super) fn build_downstream_request_windows(
     logs: &[UsageLog],
 ) -> HashMap<String, VecDeque<DownstreamRequestEvent>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
+        if !is_request_quota_counted(&log) {
+            continue;
+        }
         windows
             .entry(log.downstream_key_id.clone())
             .or_insert_with(VecDeque::new)
@@ -92,6 +104,9 @@ pub(super) fn build_downstream_token_windows(
 ) -> HashMap<String, VecDeque<DownstreamTokenEvent>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
+        if !is_request_quota_counted(&log) {
+            continue;
+        }
         let cost_billed = downstreams.iter().any(|downstream| {
             downstream.id == log.downstream_key_id && downstream.cost_billing_mode()
         });
@@ -132,10 +147,10 @@ pub(super) fn normalized_usage_logs(logs: &[UsageLog]) -> Vec<UsageLog> {
 }
 
 pub(super) fn downstream_token_retention_seconds(downstream: &DownstreamConfig) -> u64 {
-    // Cost-billed downstreams (token mode + price + daily cost limit) have no
-    // token limit, but their rolling window is still daily: the Redis token
-    // store holds cents rather than raw tokens.
-    if downstream.daily_token_limit.is_some() || downstream.cost_billing_mode() {
+    // Only cost-billed downstreams maintain a rolling daily window; the Redis
+    // token store holds cents rather than raw tokens. Raw token limits are
+    // deprecated and no longer enforced.
+    if downstream.cost_billing_mode() {
         DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS
     } else {
         60
@@ -275,7 +290,9 @@ impl AppState {
             .usage_logs
             .iter()
             .filter(|log| {
-                log.downstream_key_id == downstream_id && log.created_at >= one_minute_ago
+                log.downstream_key_id == downstream_id
+                    && log.created_at >= one_minute_ago
+                    && is_request_quota_counted(log)
             })
             .count() as u32;
 
@@ -323,11 +340,14 @@ impl AppState {
         };
         let used_from_logs = {
             let snapshot = self.snapshot().await;
-            snapshot
-                .usage_logs
+            // Replay the same deduplicated view the window uses so duplicate
+            // usage-log ids are counted once.
+            normalized_usage_logs(&snapshot.usage_logs)
                 .iter()
                 .filter(|log| {
-                    log.downstream_key_id == downstream.id && log.created_at >= window_start
+                    log.downstream_key_id == downstream.id
+                        && log.created_at >= window_start
+                        && is_request_quota_counted(log)
                 })
                 .count() as u32
         };
@@ -350,53 +370,28 @@ impl AppState {
         })
     }
 
-    pub async fn compute_token_usage(&self, downstream_id: &str, now: u64) -> TokenUsage {
+    pub async fn compute_cost_usage(&self, downstream_id: &str, now: u64) -> CostUsage {
         let snapshot = self.snapshot().await;
 
-        let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
+        let downstream = snapshot
+            .downstreams
+            .iter()
+            .find(|d| d.id == downstream_id)
+            .and_then(|d| d.daily_cost_limit());
 
-        // Cost-billed downstreams report the daily quota in cents (费用分);
-        // plain token-billed downstreams keep the raw token count.
-        let cost_billed = downstream.map(|d| d.cost_billing_mode()).unwrap_or(false);
-        let daily_limit = downstream.and_then(|d| {
-            if cost_billed {
-                d.daily_cost_limit()
-            } else {
-                d.daily_token_limit
-            }
-        });
-        let monthly_limit = downstream.and_then(|d| d.monthly_token_limit);
-
-        // Daily quota uses the same rolling 24h window as admission.
+        // The daily cost quota uses the same rolling 24h window as admission,
+        // measured in cents.
         let daily_start =
             now.saturating_sub(DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1));
 
-        let month_start = {
-            use std::time::UNIX_EPOCH;
-            let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
-            let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
-            let first_of_month = datetime.date_naive().with_day(1).unwrap();
-            first_of_month
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp() as u64
-        };
-
-        let daily = if let Some(limit) = daily_limit {
+        let daily = if let Some(limit) = downstream {
             let used: u64 = snapshot
                 .usage_logs
                 .iter()
                 .filter(|log| {
                     log.downstream_key_id == downstream_id && log.created_at >= daily_start
                 })
-                .map(|log| {
-                    if cost_billed {
-                        log.total_cost_cents.unwrap_or(0)
-                    } else {
-                        log.total_tokens
-                    }
-                })
+                .map(|log| log.total_cost_cents.unwrap_or(0))
                 .sum();
 
             let percentage = if limit > 0 {
@@ -417,35 +412,7 @@ impl AppState {
             None
         };
 
-        let monthly = if let Some(limit) = monthly_limit {
-            let used: u64 = snapshot
-                .usage_logs
-                .iter()
-                .filter(|log| {
-                    log.downstream_key_id == downstream_id && log.created_at >= month_start
-                })
-                .map(|log| log.total_tokens)
-                .sum();
-
-            let percentage = if limit > 0 {
-                (used as f64 / limit as f64) * 100.0
-            } else {
-                0.0
-            };
-
-            let remaining = limit.saturating_sub(used);
-
-            Some(TokenQuota {
-                used,
-                limit,
-                remaining,
-                percentage,
-            })
-        } else {
-            None
-        };
-
-        TokenUsage { daily, monthly }
+        CostUsage { daily }
     }
 
     pub async fn compute_daily_stats(&self, downstream_id: &str, days: usize) -> Vec<DailyStats> {

@@ -675,7 +675,7 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
 }
 
 #[tokio::test]
-async fn downstream_daily_token_quota_error_has_safe_code_and_log_category() {
+async fn downstream_legacy_token_limit_does_not_reject() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let downstream_key = generate_downstream_key("gw");
@@ -719,14 +719,16 @@ async fn downstream_daily_token_quota_error_has_safe_code_and_log_category() {
             "prompt_tokens": 4,
             "completion_tokens": 6,
             "total_tokens": 10,
+            "total_cost_cents": null,
+            "first_token_latency_ms": null,
             "latency_ms": 12,
             "created_at": now
         }]
     }))
     .unwrap();
-    let state = AppState::new(state, state_path, AppConfig::default());
+    let app_state = AppState::new(state, state_path, AppConfig::default());
 
-    let app = build_router(state.clone());
+    let app = build_router(app_state.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -749,33 +751,17 @@ async fn downstream_daily_token_quota_error_has_safe_code_and_log_category() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let retry_after = response
-        .headers()
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or_default();
-    assert!(retry_after > 0, "Retry-After should be present");
+    assert_ne!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a raw token limit (10/10 consumed) must no longer reject requests"
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
+    assert_ne!(
         payload["error"]["code"],
-        "gateway_daily_token_quota_exceeded"
-    );
-    assert_eq!(payload["error"]["details"]["quota"], "daily_tokens");
-    assert_eq!(payload["error"]["details"]["limit"], 10);
-    assert_eq!(payload["error"]["details"]["used"], 10);
-
-    let snapshot = state.snapshot().await;
-    let log = snapshot
-        .usage_logs
-        .iter()
-        .find(|log| log.request_id != "REQ-1")
-        .expect("quota rejection should be logged");
-    assert_eq!(
-        log.error_category.as_deref(),
-        Some("gateway_daily_token_quota_exceeded")
+        "gateway_daily_token_quota_exceeded",
+        "legacy token-limit rows must not emit the token quota error"
     );
 }
 

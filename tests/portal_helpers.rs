@@ -3,7 +3,7 @@
 //! This test suite covers the computation functions in AppState:
 //! - compute_per_minute_usage
 //! - compute_request_quota_usage
-//! - compute_token_usage
+//! - compute_cost_usage
 //! - compute_daily_stats
 //! - compute_model_stats
 
@@ -14,10 +14,8 @@ use chat_responses_codex::state::{
     log_queries::build_downstream_usage_summary, AppConfig, AppState, DeploymentCalendar,
     DownstreamConfig, PersistedState, UsageLog,
 };
-use chrono::Datelike;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::time::{Duration, UNIX_EPOCH};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -26,16 +24,6 @@ fn unique_state_path() -> PathBuf {
     PathBuf::from(format!("/tmp/test_state_portal_helpers_{unique}.json"))
 }
 
-fn utc_month_start(timestamp: u64) -> u64 {
-    let dt = UNIX_EPOCH + Duration::from_secs(timestamp);
-    let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
-    let first_of_month = datetime.date_naive().with_day(1).unwrap();
-    first_of_month
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp() as u64
-}
 
 fn stable_today_noon() -> u64 {
     // Use the same calendar logic as the server's default deployment timezone (Asia/Shanghai)
@@ -46,9 +34,6 @@ fn stable_today_noon() -> u64 {
     today.start_time + 12 * 60 * 60 // noon in Shanghai
 }
 
-fn stable_month_noon() -> u64 {
-    utc_month_start(chat_responses_codex::state::unix_seconds()) + 5 * 86_400 + 12 * 60 * 60
-}
 
 /// Helper function to create a test AppState with usage logs
 fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
@@ -80,6 +65,46 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+        }]),
+        usage_logs: logs,
+        announcement: None,
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
+            model_aliases: vec![],
+    };
+
+    AppState::new(state, unique_state_path(), config)
+}
+
+/// Helper to create a cost-billed test state (token mode + prices + daily cost
+/// limit in cents).
+fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+
+    let state = PersistedState {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+            id: "downstream-1".to_string(),
+            name: "Cost Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            input_token_price_per_million_cents: Some(1000),
+            output_token_price_per_million_cents: Some(3000),
+            daily_cost_limit_cents: Some(3000),
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+            billing_mode: "token".into(),
         }]),
         usage_logs: logs,
         announcement: None,
@@ -364,8 +389,15 @@ async fn test_compute_request_quota_usage_counts_reserved_requests() {
 // Token Usage Tests
 // ============================================================================
 
+
+
+
+
+
+
+// ============================================================================
 #[tokio::test]
-async fn test_compute_token_usage_calculates_daily_usage() {
+async fn test_compute_cost_usage_calculates_rolling_24h_usage() {
     let now = stable_today_noon();
 
     let logs = vec![
@@ -390,10 +422,10 @@ async fn test_compute_token_usage_calculates_daily_usage() {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
-            total_cost_cents: None,
+            total_cost_cents: Some(127),
             first_token_latency_ms: None,
             latency_ms: 500,
-            created_at: now - 600, // 10 minutes ago (today)
+            created_at: now - 600, // 10 minutes ago
             compatibility: None,
         },
         UsageLog {
@@ -417,33 +449,33 @@ async fn test_compute_token_usage_calculates_daily_usage() {
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
-            total_cost_cents: None,
+            total_cost_cents: Some(73),
             first_token_latency_ms: None,
             latency_ms: 300,
-            created_at: now - 300, // 5 minutes ago (today)
+            created_at: now - 300, // 5 minutes ago
             compatibility: None,
         },
     ];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_cost_state_with_logs(logs);
 
-    let usage = state.compute_token_usage("downstream-1", now).await;
+    let usage = state.compute_cost_usage("downstream-1", now).await;
 
     assert!(usage.daily.is_some());
     let daily = usage.daily.unwrap();
-    assert_eq!(daily.used, 225); // 150 + 75
-    assert_eq!(daily.limit, 10000);
-    assert_eq!(daily.remaining, 9775);
-    assert_eq!(daily.percentage, 2.25);
+    assert_eq!(daily.used, 200); // 127 + 73 cents
+    assert_eq!(daily.limit, 3000);
+    assert_eq!(daily.remaining, 2800);
+    assert!((daily.percentage - 200.0 / 3000.0 * 100.0).abs() < 0.001);
 }
 
 #[tokio::test]
-async fn test_compute_token_usage_calculates_monthly_usage() {
-    let now = stable_month_noon();
+async fn test_compute_cost_usage_slides_after_24h() {
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
-            id: "log-1".to_string(),
+            id: "log-old".to_string(),
             downstream_key_id: "downstream-1".to_string(),
             downstream_name: None,
             upstream_name: None,
@@ -454,7 +486,7 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             request_count: None,
             user_agent: None,
             model: "gpt-4".to_string(),
-            request_id: "req-1".to_string(),
+            request_id: "req-old".to_string(),
             status_code: 200,
             wire_status_code: 0,
             stream_diagnostics: None,
@@ -463,14 +495,14 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             prompt_tokens: 1000,
             completion_tokens: 500,
             total_tokens: 1500,
-            total_cost_cents: None,
+            total_cost_cents: Some(1500),
             first_token_latency_ms: None,
             latency_ms: 500,
-            created_at: now - 86400, // 1 day ago (this month)
+            created_at: now - 90 * 3600, // 90h ago: outside the rolling 24h
             compatibility: None,
         },
         UsageLog {
-            id: "log-2".to_string(),
+            id: "log-recent".to_string(),
             downstream_key_id: "downstream-1".to_string(),
             downstream_name: None,
             upstream_name: None,
@@ -481,7 +513,7 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             request_count: None,
             user_agent: None,
             model: "gpt-4".to_string(),
-            request_id: "req-2".to_string(),
+            request_id: "req-recent".to_string(),
             status_code: 200,
             wire_status_code: 0,
             stream_diagnostics: None,
@@ -490,28 +522,26 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             prompt_tokens: 500,
             completion_tokens: 250,
             total_tokens: 750,
-            total_cost_cents: None,
+            total_cost_cents: Some(750),
             first_token_latency_ms: None,
             latency_ms: 300,
-            created_at: now - 172800, // 2 days ago (this month)
+            created_at: now - 3600, // 1h ago
             compatibility: None,
         },
     ];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_cost_state_with_logs(logs);
 
-    let usage = state.compute_token_usage("downstream-1", now).await;
+    let usage = state.compute_cost_usage("downstream-1", now).await;
 
-    assert!(usage.monthly.is_some());
-    let monthly = usage.monthly.unwrap();
-    assert_eq!(monthly.used, 2250); // 1500 + 750
-    assert_eq!(monthly.limit, 100000);
-    assert_eq!(monthly.remaining, 97750);
-    assert_eq!(monthly.percentage, 2.25);
+    let daily = usage.daily.unwrap();
+    assert_eq!(daily.used, 750, "only events inside the rolling 24h window count");
+    assert_eq!(daily.limit, 3000);
+    assert_eq!(daily.remaining, 2250);
 }
 
 #[tokio::test]
-async fn test_compute_token_usage_remaining_calculation() {
+async fn test_compute_cost_usage_remaining_calculation() {
     let now = stable_today_noon();
 
     let logs = vec![
@@ -533,10 +563,10 @@ async fn test_compute_token_usage_remaining_calculation() {
             stream_diagnostics: None,
             error_message: None,
             error_category: None,
-            prompt_tokens: 800,
-            completion_tokens: 150,
-            total_tokens: 950,
-            total_cost_cents: None,
+            prompt_tokens: 400,
+            completion_tokens: 50,
+            total_tokens: 450,
+            total_cost_cents: Some(950),
             first_token_latency_ms: None,
             latency_ms: 500,
             created_at: now - 600,
@@ -563,7 +593,7 @@ async fn test_compute_token_usage_remaining_calculation() {
             prompt_tokens: 400,
             completion_tokens: 50,
             total_tokens: 450,
-            total_cost_cents: None,
+            total_cost_cents: Some(1050),
             first_token_latency_ms: None,
             latency_ms: 300,
             created_at: now - 300,
@@ -571,23 +601,18 @@ async fn test_compute_token_usage_remaining_calculation() {
         },
     ];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_cost_state_with_logs(logs);
 
-    let usage = state.compute_token_usage("downstream-1", now).await;
+    let usage = state.compute_cost_usage("downstream-1", now).await;
 
     let daily = usage.daily.unwrap();
-    assert_eq!(daily.used, 1400);
-    assert_eq!(daily.limit, 10000);
-    assert_eq!(daily.remaining, 8600);
-
-    let monthly = usage.monthly.unwrap();
-    assert_eq!(monthly.used, 1400);
-    assert_eq!(monthly.limit, 100000);
-    assert_eq!(monthly.remaining, 98600);
+    assert_eq!(daily.used, 2000);
+    assert_eq!(daily.limit, 3000);
+    assert_eq!(daily.remaining, 1000);
 }
 
 #[tokio::test]
-async fn test_compute_token_usage_remaining_saturates_at_zero() {
+async fn test_compute_cost_usage_remaining_saturates_at_zero() {
     let now = stable_today_noon();
 
     let logs = vec![UsageLog {
@@ -612,25 +637,25 @@ async fn test_compute_token_usage_remaining_saturates_at_zero() {
         prompt_tokens: 5000,
         completion_tokens: 6000,
         total_tokens: 11000,
-        total_cost_cents: None,
+        total_cost_cents: Some(9999),
         first_token_latency_ms: None,
         latency_ms: 500,
         created_at: now - 3600,
     }];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_cost_state_with_logs(logs);
 
-    let usage = state.compute_token_usage("downstream-1", now).await;
+    let usage = state.compute_cost_usage("downstream-1", now).await;
 
     let daily = usage.daily.unwrap();
-    assert_eq!(daily.used, 11000);
-    assert_eq!(daily.limit, 10000);
+    assert_eq!(daily.used, 9999);
+    assert_eq!(daily.limit, 3000);
     assert_eq!(daily.remaining, 0);
-    assert!((daily.percentage - 110.0).abs() < 0.01);
+    assert!((daily.percentage - 9999.0 / 3000.0 * 100.0).abs() < 0.01);
 }
 
 #[tokio::test]
-async fn test_compute_token_usage_matches_summary_path() {
+async fn test_compute_cost_usage_matches_summary_path() {
     let now = stable_today_noon();
 
     let logs = vec![
@@ -655,7 +680,7 @@ async fn test_compute_token_usage_matches_summary_path() {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
-            total_cost_cents: None,
+            total_cost_cents: Some(127),
             first_token_latency_ms: None,
             latency_ms: 500,
             created_at: now - 3600,
@@ -682,7 +707,7 @@ async fn test_compute_token_usage_matches_summary_path() {
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
-            total_cost_cents: None,
+            total_cost_cents: Some(73),
             first_token_latency_ms: None,
             latency_ms: 300,
             created_at: now - 7200,
@@ -690,23 +715,20 @@ async fn test_compute_token_usage_matches_summary_path() {
         },
     ];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_cost_state_with_logs(logs);
     let snapshot = state.snapshot().await;
     let summary = build_downstream_usage_summary(&snapshot, "downstream-1", now).unwrap();
-    let quota = state.compute_token_usage("downstream-1", now).await;
+    let quota = state.compute_cost_usage("downstream-1", now).await;
 
     assert_eq!(
-        summary.today_tokens,
-        quota.daily.map(|q| q.used).unwrap_or(0)
-    );
-    assert_eq!(
-        summary.month_tokens,
-        quota.monthly.map(|q| q.used).unwrap_or(0)
+        summary.cost_used_24h_cents,
+        quota.daily.map(|q| q.used).unwrap_or(0),
+        "summary rolling-24h cost must match the quota window"
     );
 }
 
 #[tokio::test]
-async fn test_portal_overview_token_summary_matches_quota_summary() {
+async fn test_portal_overview_cost_quota_matches_24h_summary() {
     let now = stable_today_noon();
 
     let logs = vec![
@@ -731,7 +753,7 @@ async fn test_portal_overview_token_summary_matches_quota_summary() {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
-            total_cost_cents: None,
+            total_cost_cents: Some(127),
             first_token_latency_ms: None,
             latency_ms: 500,
             created_at: now - 3600,
@@ -758,7 +780,7 @@ async fn test_portal_overview_token_summary_matches_quota_summary() {
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
-            total_cost_cents: None,
+            total_cost_cents: Some(73),
             first_token_latency_ms: None,
             latency_ms: 300,
             created_at: now - 7200,
@@ -766,7 +788,7 @@ async fn test_portal_overview_token_summary_matches_quota_summary() {
         },
     ];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_cost_state_with_logs(logs);
     let portal_key = state.snapshot().await.downstreams[0]
         .plaintext_key
         .clone()
@@ -794,16 +816,20 @@ async fn test_portal_overview_token_summary_matches_quota_summary() {
     let result: Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(
-        result["quota_summary"]["token_daily"]["used"],
-        result["token_summary"]["today"]
+        result["quota_summary"]["cost_daily"]["used_cents"],
+        result["cost_summary"]["last_24h_cents"]
     );
-    assert_eq!(
-        result["quota_summary"]["token_monthly"]["used"],
-        result["token_summary"]["this_month"]
+    assert!(
+        result["quota_summary"]["token_daily"].is_null(),
+        "token daily quota must no longer be exposed"
+    );
+    assert!(
+        result["quota_summary"]["token_monthly"].is_null(),
+        "token monthly quota must no longer be exposed"
     );
 }
 
-// ============================================================================
+
 // Daily Stats Tests
 // ============================================================================
 
