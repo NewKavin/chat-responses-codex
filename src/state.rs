@@ -51,6 +51,8 @@ pub mod model_identity;
 mod model_qualification;
 #[path = "state/normalize.rs"]
 mod normalize;
+
+pub use normalize::DownstreamModelEntry;
 #[path = "state/route_health.rs"]
 mod route_health;
 #[path = "state/runtime_settings.rs"]
@@ -5153,12 +5155,18 @@ impl AppState {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for model in upstream.effective_downstream_models() {
+            for entry in upstream.effective_downstream_models_detailed() {
+                let model = entry.model.as_str();
                 if downstream.model_allowlist.is_empty()
                     || portal_model_is_allowed(&downstream.model_allowlist, &model)
                 {
-                    // B2: resolve through alias rules first, then fall back to B1 case-folding
-                    let display_name = if let Some(canonical) = alias_registry.resolve_alias(&model) {
+                    // Admin-picked per-upstream mapping labels are exposed
+                    // verbatim (the operator typed them); everything else
+                    // resolves through alias rules first, then falls back to
+                    // B1 case-folding for display.
+                    let display_name = if entry.from_mapping {
+                        model.trim().to_string()
+                    } else if let Some(canonical) = alias_registry.resolve_alias(&model) {
                         canonical.to_string()
                     } else if case_insensitive {
                         canonical_model_id(&model)
@@ -5196,14 +5204,18 @@ impl AppState {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for model in upstream.effective_downstream_models() {
+            for entry in upstream.effective_downstream_models_detailed() {
+                let model = entry.model.as_str();
                 if snapshot.downstreams.iter().any(|downstream| {
                     downstream.active
                         && (downstream.model_allowlist.is_empty()
                             || portal_model_is_allowed(&downstream.model_allowlist, &model))
                 }) {
-                    // B2: resolve through alias rules first, then fall back to B1 case-folding
-                    let display_name = if let Some(canonical) = alias_registry.resolve_alias(&model) {
+                    // Admin-picked per-upstream mapping labels are exposed
+                    // verbatim (see available_models_for_downstream).
+                    let display_name = if entry.from_mapping {
+                        model.trim().to_string()
+                    } else if let Some(canonical) = alias_registry.resolve_alias(&model) {
                         canonical.to_string()
                     } else if case_insensitive {
                         canonical_model_id(&model)

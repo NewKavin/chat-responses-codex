@@ -616,6 +616,19 @@ impl UpstreamConfig {
     /// display + canonical dedup pipeline on top of this set, exactly like
     /// they do for `route_models()` today.
     pub fn effective_downstream_models(&self) -> Vec<String> {
+        self.effective_downstream_models_detailed()
+            .into_iter()
+            .map(|entry| entry.model)
+            .collect()
+    }
+
+    /// Like [`Self::effective_downstream_models`] but keeps per-entry
+    /// provenance: `from_mapping` marks names that come from a per-upstream
+    /// model mapping (admin-picked downstream spelling). Mapping names are
+    /// displayed verbatim — they are explicit operator labels and must never
+    /// be case-folded — while unmapped route models keep the existing
+    /// alias/canonical display pipeline.
+    pub fn effective_downstream_models_detailed(&self) -> Vec<DownstreamModelEntry> {
         let route_models = self.route_models();
         let mut models = Vec::new();
         for mapping in &self.model_mappings {
@@ -629,7 +642,10 @@ impl UpstreamConfig {
                 // skip until the stored spelling is restored.
                 continue;
             }
-            models.push(downstream.to_string());
+            models.push(DownstreamModelEntry {
+                model: downstream.to_string(),
+                from_mapping: true,
+            });
         }
         let occupied = self
             .model_mappings
@@ -640,10 +656,25 @@ impl UpstreamConfig {
             if occupied.contains(&super::canonical_model_id(candidate)) {
                 continue;
             }
-            models.push(candidate.clone());
+            models.push(DownstreamModelEntry {
+                model: candidate.clone(),
+                from_mapping: false,
+            });
         }
         models
     }
+}
+
+/// A single downstream-facing model name surfaced by an upstream, with
+/// provenance for display decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownstreamModelEntry {
+    /// The downstream-facing model name (stored spelling; never rewritten).
+    pub model: String,
+    /// `true` when this name is an admin-picked per-upstream mapping label
+    /// and must be displayed verbatim; `false` for unmapped route models
+    /// (which keep the canonical/alias display pipeline).
+    pub from_mapping: bool,
 }
 
 #[cfg(test)]
@@ -868,6 +899,52 @@ mod tests {
         assert_eq!(
             upstream.effective_downstream_models(),
             vec!["gpt-4".to_string(), "gpt-4o".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_mappings_detailed_flags_mapping_labels() {
+        let upstream = mapped_upstream();
+        let detailed = upstream.effective_downstream_models_detailed();
+        assert_eq!(
+            detailed,
+            vec![
+                DownstreamModelEntry {
+                    model: "gpt-4-premium".into(),
+                    from_mapping: true,
+                },
+                DownstreamModelEntry {
+                    model: "gpt-4o".into(),
+                    from_mapping: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn model_mappings_detailed_preserves_mapping_casing() {
+        // The admin-typed downstream label keeps its exact spelling even
+        // when it differs from the canonical folded form.
+        let mut upstream = mapped_upstream();
+        upstream.model_mappings = vec![mapping("gpt-4", "GPT-4-Premium")];
+        let detailed = upstream.effective_downstream_models_detailed();
+        assert_eq!(
+            detailed
+                .iter()
+                .find(|entry| entry.from_mapping)
+                .map(|entry| entry.model.as_str()),
+            Some("GPT-4-Premium")
+        );
+        // Unmapped route models keep their stored spelling in the detailed
+        // view too (display pipeline decides folding).
+        upstream.supported_models = vec!["gpt-4".into(), "DeepSeek-Chat".into()];
+        let detailed = upstream.effective_downstream_models_detailed();
+        assert_eq!(
+            detailed
+                .iter()
+                .find(|entry| !entry.from_mapping)
+                .map(|entry| entry.model.as_str()),
+            Some("DeepSeek-Chat")
         );
     }
 }

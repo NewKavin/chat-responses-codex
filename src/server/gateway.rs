@@ -21,8 +21,8 @@ use crate::state::{
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings, StreamDiagnostics,
-    UpstreamConfig, UpstreamRequestLease, UsageLog,
+    DownstreamModelEntry, RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings,
+    StreamDiagnostics, UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
@@ -2481,11 +2481,14 @@ fn codex_exposed_models(
     // Canonical-grouped dedup: one displayed slug per canonical model id.
     // Without explicit alias rules the display spelling is the canonical
     // (trimmed, lowercased) form; stored upstream spellings are never
-    // rewritten on the wire.
-    let group_models = |slugs: Vec<String>| -> Vec<String> {
+    // rewritten on the wire. Admin-picked per-upstream mapping labels are
+    // the exception: they are exposed verbatim (the operator typed them),
+    // see DownstreamModelEntry::from_mapping.
+    let group_models = |entries: Vec<DownstreamModelEntry>| -> Vec<String> {
         let mut seen = std::collections::BTreeSet::new();
         let mut grouped = Vec::new();
-        for slug in slugs {
+        for entry in entries {
+            let slug = entry.model;
             let key = if case_insensitive {
                 crate::state::canonical_model_id(&slug)
             } else {
@@ -2494,7 +2497,11 @@ fn codex_exposed_models(
             if key.is_empty() || !seen.insert(key.clone()) {
                 continue;
             }
-            grouped.push(key);
+            if entry.from_mapping {
+                grouped.push(slug.trim().to_string());
+            } else {
+                grouped.push(key);
+            }
         }
         grouped
     };
@@ -2503,7 +2510,7 @@ fn codex_exposed_models(
         let slugs = upstreams
             .iter()
             .filter(|upstream| upstream.active)
-            .flat_map(UpstreamConfig::effective_downstream_models)
+            .flat_map(UpstreamConfig::effective_downstream_models_detailed)
             .collect::<Vec<_>>();
         return group_models(slugs);
     }
@@ -2518,20 +2525,21 @@ fn codex_exposed_models(
         }
     }
     let mut matched_allowlist_keys = BTreeSet::new();
-    let mut exposed = upstreams
-        .iter()
-        .filter(|upstream| upstream.active)
-        .flat_map(UpstreamConfig::effective_downstream_models)
-        .filter_map(|slug| {
-            let match_key = slug.trim().to_ascii_lowercase();
-            if match_key.is_empty() || !allowed_slugs.contains_key(&match_key) {
-                return None;
-            }
-            matched_allowlist_keys.insert(match_key);
-            Some(slug)
-        })
-        .collect::<Vec<_>>();
-    exposed = group_models(exposed);
+    let mut exposed: Vec<String> = group_models(
+        upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .flat_map(UpstreamConfig::effective_downstream_models_detailed)
+            .filter_map(|entry| {
+                let match_key = entry.model.trim().to_ascii_lowercase();
+                if match_key.is_empty() || !allowed_slugs.contains_key(&match_key) {
+                    return None;
+                }
+                matched_allowlist_keys.insert(match_key);
+                Some(entry)
+            })
+            .collect::<Vec<_>>(),
+    );
     for (match_key, _slug) in allowed_slugs {
         if !matched_allowlist_keys.contains(&match_key) {
             // Allowlist-only models have no upstream spelling to preserve:
