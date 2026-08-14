@@ -191,3 +191,26 @@ CRUD（`GET /admin/upstreams`、上游更新端点）自动携带；前端读列
    usage/premium 键归属）——这是本功能真正的难点；
 5. 「保留旧 API 3 个版本」「sqlx migrate run」等章节为模板残留，不适用；
 6. 文件名 "B-1" 与主方案 Part B-1（canonical 归一）撞名，易混淆。
+
+## 七、上线后评审遗留（M6，待开发）
+
+2026-08-14 对 M1-M5 实现的评审结论：五个任务与本方案一致，测试齐全（评审记录见当日会话）。
+唯一实质缺口：**3.2 规则 5 的校验是单向的**——
+
+- 上游保存方向已拦截：insert（`src/state.rs:4825-4833`）与 PATCH 合并路径
+  （`src/state/freekey_sync.rs:735-741`）都会调 `validate_model_mappings_against_aliases`；
+- 反方向缺失：`update_model_aliases`（`src/state.rs:2933-2959`）保存全局规则时
+  **不检查既有上游映射**。先配映射 `gpt-4 → gpt-4-premium`，再在「全局规则」tab
+  加一条 `aliases: ["gpt-4-premium"]` 可以保存成功；此后入口归一
+  （`gateway.rs:4383`）会把请求改写成该规则的 canonical，映射永远匹配不上，
+  **静默失效**且无任何报错。
+
+### M6 任务
+
+`update_model_aliases` 在 `ModelAliasRegistry::from_rules` 成功后、持久化前，
+遍历当前全部上游执行 `validate_model_mappings_against_aliases(&new_registry)`，
+任一冲突即拒绝整次保存；错误消息含：冲突上游名、映射的 `downstream_model`、
+规则的 canonical，并提示「删除该映射或改用其它 alias」。
+
+测试：先存映射再存冲突全局规则 → 拒绝且消息含三要素；不冲突的规则正常保存；
+先存全局规则再存冲突映射 → 既有方向回归（仍拒绝）；`rtk cargo test alias` 全绿。
