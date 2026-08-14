@@ -48,8 +48,6 @@ export const errorCategoryGroups: ErrorCategoryGroup[] = [
       { value: 'gateway_per_minute_limit_exceeded', label: '分钟请求限额' },
       { value: 'gateway_request_quota_exceeded', label: '窗口请求限额' },
       { value: 'gateway_daily_cost_quota_exceeded', label: '日金额限额' },
-      { value: 'gateway_daily_token_quota_exceeded', label: '日 Token 限额' },
-      { value: 'gateway_monthly_token_quota_exceeded', label: '月 Token 限额' },
       { value: 'gateway_concurrency_full', label: '下游并发已满' }
     ]
   },

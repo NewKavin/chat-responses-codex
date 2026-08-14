@@ -3,7 +3,7 @@
     <header class="crc-page-header">
       <div>
         <h1 class="crc-page-title">限额详情</h1>
-        <p class="crc-page-description">查看当前下游的请求窗口、Token 配额与访问白名单。</p>
+        <p class="crc-page-description">查看当前下游的请求窗口、金额配额与访问白名单。</p>
       </div>
     </header>
 
@@ -17,21 +17,13 @@
           </div>
           <GaugeRing :value="formatPercentageTwoDecimals(data.request_quota.percentage)" :size="86" />
         </article>
-        <article v-if="data.token_quota?.daily" class="quota-summary-item crc-surface">
+        <article v-if="data.cost_quota?.daily" class="quota-summary-item crc-surface">
           <div class="quota-summary-item__main">
-            <span class="quota-summary-item__label">每日 Token</span>
-            <strong>{{ data.token_quota.daily.used.toLocaleString() }}<i> / {{ data.token_quota.daily.limit.toLocaleString() }}</i></strong>
-            <small>剩余 {{ data.token_quota.daily.remaining.toLocaleString() }}</small>
+            <span class="quota-summary-item__label">每日金额</span>
+            <strong>{{ formatMoney(data.cost_quota.daily.used_cents) }}<i> / {{ formatMoney(data.cost_quota.daily.limit_cents) }}</i></strong>
+            <small>剩余 {{ formatMoney(data.cost_quota.daily.remaining_cents) }}</small>
           </div>
-          <GaugeRing :value="formatPercentageTwoDecimals(data.token_quota.daily.percentage)" :size="86" />
-        </article>
-        <article v-if="data.token_quota?.monthly" class="quota-summary-item crc-surface">
-          <div class="quota-summary-item__main">
-            <span class="quota-summary-item__label">每月 Token</span>
-            <strong>{{ data.token_quota.monthly.used.toLocaleString() }}<i> / {{ data.token_quota.monthly.limit.toLocaleString() }}</i></strong>
-            <small>剩余 {{ data.token_quota.monthly.remaining.toLocaleString() }}</small>
-          </div>
-          <GaugeRing :value="formatPercentageTwoDecimals(data.token_quota.monthly.percentage)" :size="86" />
+          <GaugeRing :value="formatPercentageTwoDecimals(data.cost_quota.daily.percentage)" :size="86" />
         </article>
       </section>
 
@@ -53,39 +45,21 @@
         />
       </section>
 
-      <section v-if="data.token_quota?.daily" class="quota-detail-section">
+      <section v-if="data.cost_quota?.daily" class="quota-detail-section">
         <div class="quota-detail-heading">
-          <p class="crc-eyebrow">QUOTA // DAILY TOKENS</p>
-          <h2>每日 Token 配额</h2>
-          <span>当日累计</span>
+          <p class="crc-eyebrow">QUOTA // DAILY COST</p>
+          <h2>每日金额配额</h2>
+          <span>近 24 小时滚动累计</span>
         </div>
         <div class="quota-detail-metrics">
-          <div><span>配额限制</span><strong>{{ data.token_quota.daily.limit.toLocaleString() }}</strong></div>
-          <div><span>已使用</span><strong>{{ data.token_quota.daily.used.toLocaleString() }}</strong></div>
-          <div><span>剩余</span><strong>{{ data.token_quota.daily.remaining.toLocaleString() }}</strong></div>
+          <div><span>配额限制</span><strong>{{ formatMoney(data.cost_quota.daily.limit_cents) }}</strong></div>
+          <div><span>已使用</span><strong>{{ formatMoney(data.cost_quota.daily.used_cents) }}</strong></div>
+          <div><span>剩余</span><strong>{{ formatMoney(data.cost_quota.daily.remaining_cents) }}</strong></div>
         </div>
         <el-progress
-          :percentage="formatPercentageTwoDecimals(data.token_quota.daily.percentage)"
+          :percentage="formatPercentageTwoDecimals(data.cost_quota.daily.percentage)"
           :format="formatPercentageLabel"
-          :color="getQuotaStatusColor(data.token_quota.daily.percentage)"
-        />
-      </section>
-
-      <section v-if="data.token_quota?.monthly" class="quota-detail-section">
-        <div class="quota-detail-heading">
-          <p class="crc-eyebrow">QUOTA // MONTHLY TOKENS</p>
-          <h2>每月 Token 配额</h2>
-          <span>本月累计</span>
-        </div>
-        <div class="quota-detail-metrics">
-          <div><span>配额限制</span><strong>{{ data.token_quota.monthly.limit.toLocaleString() }}</strong></div>
-          <div><span>已使用</span><strong>{{ data.token_quota.monthly.used.toLocaleString() }}</strong></div>
-          <div><span>剩余</span><strong>{{ data.token_quota.monthly.remaining.toLocaleString() }}</strong></div>
-        </div>
-        <el-progress
-          :percentage="formatPercentageTwoDecimals(data.token_quota.monthly.percentage)"
-          :format="formatPercentageLabel"
-          :color="getQuotaStatusColor(data.token_quota.monthly.percentage)"
+          :color="getQuotaStatusColor(data.cost_quota.daily.percentage)"
         />
       </section>
 
@@ -132,9 +106,8 @@ import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
 const loading = ref(false)
 const data = ref<PortalQuota>({
   request_quota: undefined,
-  token_quota: {
-    daily: undefined,
-    monthly: undefined
+  cost_quota: {
+    daily: undefined
   },
   model_allowlist: [],
   ip_allowlist: []
@@ -176,6 +149,8 @@ const modelEmptyDescription = computed(() => {
   return '未发现可用模型'
 })
 
+const formatMoney = (cents: number) => `¥${((cents || 0) / 100).toFixed(2)}`
+
 const getQuotaStatusColor = (percentage: number) => {
   if (percentage >= 90) return 'var(--crc-danger)'
   if (percentage >= 70) return 'var(--crc-warning)'
@@ -192,7 +167,7 @@ const loadData = async () => {
     const responseData = response.data as PortalQuota
     data.value = {
       request_quota: responseData.request_quota,
-      token_quota: responseData.token_quota,
+      cost_quota: responseData.cost_quota,
       model_allowlist: responseData.model_allowlist || [],
       ip_allowlist: responseData.ip_allowlist || [],
       model_contexts: responseData.model_contexts

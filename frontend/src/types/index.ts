@@ -184,6 +184,8 @@ export interface DownstreamUsage {
   month_tokens: number
   today_cost_cents: number
   month_cost_cents: number
+  /** 滚动 24 小时金额（分），与准入限额同一窗口。 */
+  cost_used_24h_cents: number
   total_models: number
   active_models: number
 }
@@ -302,8 +304,6 @@ export interface CostDailyQuota {
 export interface PortalOverview {
   quota_summary: {
     request_quota?: RequestQuotaUsage
-    token_daily?: TokenQuota
-    token_monthly?: TokenQuota
     cost_daily?: CostDailyQuota
   }
   token_summary: {
@@ -311,7 +311,7 @@ export interface PortalOverview {
     this_month: number
   }
   cost_summary: {
-    today_cents: number
+    last_24h_cents: number
     this_month_cents: number
   }
   model_summary: {
@@ -338,9 +338,8 @@ export interface ModelContextEntry {
 
 export interface PortalQuota {
   request_quota?: RequestQuotaUsage
-  token_quota?: {
-    daily?: TokenQuota
-    monthly?: TokenQuota
+  cost_quota?: {
+    daily?: CostDailyQuota
   }
   model_allowlist: string[]
   ip_allowlist: string[]

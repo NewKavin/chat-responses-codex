@@ -71,11 +71,7 @@
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
             <span v-else-if="isCostRow(row)">
               <el-tag type="danger" size="small">金额计费</el-tag>
-              余额 {{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.today_cost_cents ?? 0))) }}
-            </span>
-            <span v-else-if="row.billing_mode === 'token'">
-              <el-tag type="warning" size="small">Token 计费</el-tag>
-              {{ formatTokenLimit(row.daily_token_limit) }}/日
+              余额 {{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.cost_used_24h_cents ?? 0))) }}
             </span>
             <span v-else>
               <el-tag size="small">按次数</el-tag>
@@ -708,13 +704,6 @@ const handleDelete = async (row: DownstreamConfig) => {
 
 const formatMoney = (cents: number) => `¥${(cents / 100).toFixed(2)}`
 
-const formatTokenLimit = (limit?: number) => {
-  if (!limit) return '未设置'
-  if (limit >= 1_000_000_000) return `${(limit / 1_000_000_000).toFixed(1)}B`
-  if (limit >= 1_000_000) return `${(limit / 1_000_000).toFixed(1)}M`
-  if (limit >= 1_000) return `${(limit / 1_000).toFixed(1)}K`
-  return String(limit)
-}
 
 // 按金额计费：token 模式 + 至少一个单价 + 每日金额上限同时配置才生效。
 const isCostRow = (row: DownstreamConfig) =>

@@ -37,7 +37,8 @@ describe('error category display', () => {
   it('keeps gateway quota and upstream categories available', () => {
     const values = errorCategoryGroups.flatMap(group => group.options.map(option => option.value))
     expect(values).toContain('gateway_access_denied')
-    expect(values).toContain('gateway_daily_token_quota_exceeded')
+    expect(values).toContain('gateway_daily_cost_quota_exceeded')
+    expect(values).not.toContain('gateway_daily_token_quota_exceeded')
     expect(values).toContain('upstream_temporary_unavailable')
     expect(values).toContain('stream_processing_error')
     expect(values).toContain('stream_idle_timeout')
@@ -46,7 +47,8 @@ describe('error category display', () => {
 
   it('formats known and unknown categories', () => {
     expect(formatErrorCategory('gateway_access_denied')).toBe('访问被拒绝')
-    expect(formatErrorCategory('gateway_daily_token_quota_exceeded')).toBe('日 Token 限额')
+    expect(formatErrorCategory('gateway_daily_cost_quota_exceeded')).toBe('日金额限额')
+    expect(formatErrorCategory('gateway_daily_token_quota_exceeded')).toBe('gateway_daily_token_quota_exceeded')
     expect(formatErrorCategory('stream_processing_error')).toBe('流式处理错误')
     expect(formatErrorCategory('stream_upstream_incomplete_eof')).toBe('上游流未完整结束')
     expect(formatErrorCategory('custom_error')).toBe('custom_error')
@@ -57,7 +59,7 @@ describe('error category display', () => {
     const summary = buildVisibleLogSummary([
       { status_code: 200, error_category: '' },
       { status_code: 403, error_category: 'gateway_access_denied' },
-      { status_code: 429, error_category: 'gateway_daily_token_quota_exceeded' },
+      { status_code: 429, error_category: 'gateway_daily_cost_quota_exceeded' },
       { status_code: 503, error_category: 'upstream_temporary_unavailable' },
       { status_code: 500, error_category: 'stream_processing_error' },
       { status_code: 504, error_category: 'stream_idle_timeout' }
@@ -73,7 +75,7 @@ describe('error category display', () => {
 
   it('counts categorized rows as failures even when status is successful', () => {
     const summary = buildVisibleLogSummary([
-      { status_code: 200, error_category: 'gateway_daily_token_quota_exceeded' }
+      { status_code: 200, error_category: 'gateway_daily_cost_quota_exceeded' }
     ])
 
     expect(summary.failed).toBe(1)

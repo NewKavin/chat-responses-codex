@@ -78,7 +78,7 @@ describe('troubleshooting utils', () => {
   })
 
   it('maps quota and upstream categories to user actions', () => {
-    expect(getTroubleshootingSuggestion('gateway_daily_token_quota_exceeded')).toContain('Token 限额')
+    expect(getTroubleshootingSuggestion('gateway_daily_cost_quota_exceeded')).toContain('滚动金额限额')
     expect(getTroubleshootingSuggestion('upstream_rate_limited')).toContain('上游限流')
     expect(getTroubleshootingSuggestion('stream_idle_timeout')).toContain('流式')
     const incompleteEof = getTroubleshootingSuggestion('stream_upstream_incomplete_eof')

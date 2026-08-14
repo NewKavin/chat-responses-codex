@@ -354,6 +354,9 @@ export const adminApi = {
     ids: string[]
     billing_mode?: 'request' | 'token'
     daily_token_limit?: number | null
+    daily_cost_limit_cents?: number | null
+    input_token_price_per_million_cents?: number | null
+    output_token_price_per_million_cents?: number | null
     request_quota_window_hours?: number | null
     request_quota_requests?: number | null
   }) => adminHttp.post<{ updated: number; failed: Array<{ id: string; error: string }> }>(

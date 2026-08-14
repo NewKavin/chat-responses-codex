@@ -129,7 +129,7 @@ describe('portal runtime concurrency display', () => {
     expect(overview).toContain('cost_daily')
     expect(overview).toContain('formatMoney')
     expect(overview).toContain('cost_summary')
-    expect(overview).toContain('今日金额')
+    expect(overview).toContain('近 24 小时金额')
     expect(overview).toContain('本月金额')
   })
 

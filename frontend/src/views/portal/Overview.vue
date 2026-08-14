@@ -86,34 +86,14 @@
         </p>
       </article>
 
-      <article v-if="data.quota_summary.token_monthly" class="quota-summary-item crc-surface">
-        <div class="quota-summary-head">
-          <span class="quota-summary-icon"><CalendarRange :size="14" :stroke-width="1.8" /></span>
-          <span class="quota-summary-label">每月 Token</span>
-          <span class="quota-summary-meta">MONTHLY</span>
-        </div>
-        <div class="quota-summary-value-row">
-          <strong>{{ formatCompact(data.quota_summary.token_monthly.used) }}</strong>
-          <span>/ {{ formatCompact(data.quota_summary.token_monthly.limit) }}</span>
-        </div>
-        <el-progress
-          :percentage="formatPct(data.quota_summary.token_monthly.percentage)"
-          :color="getQuotaStatusColor(data.quota_summary.token_monthly.percentage)"
-          :show-text="false"
-          :stroke-width="6"
-        />
-        <p class="quota-summary-foot">
-          剩余 {{ formatCompact(data.quota_summary.token_monthly.remaining) }} · {{ formatPct(data.quota_summary.token_monthly.percentage) }}%
-        </p>
-      </article>
     </section>
 
     <section class="overview-meta-grid crc-stagger">
       <template v-if="isCostBilling">
         <article class="overview-meta-item crc-surface">
           <span class="overview-meta-icon"><Activity :size="14" :stroke-width="1.8" /></span>
-          <span class="overview-meta-label">今日金额</span>
-          <strong>{{ formatMoney(data.cost_summary.today_cents) }}</strong>
+          <span class="overview-meta-label">近 24 小时金额</span>
+          <strong>{{ formatMoney(data.cost_summary.last_24h_cents) }}</strong>
         </article>
         <article class="overview-meta-item crc-surface">
           <span class="overview-meta-icon"><CalendarDays :size="14" :stroke-width="1.8" /></span>
@@ -242,31 +222,31 @@
           </section>
         </el-collapse-item>
 
-        <el-collapse-item name="monthly" v-if="quotaData.token_quota?.monthly">
+        <el-collapse-item name="cost" v-if="quotaData.cost_quota?.daily">
           <template #title>
             <div class="quota-detail-title-row">
-              <span>每月 Token 配额</span>
-              <span class="quota-detail-title-meta">本月累计</span>
+              <span>每日金额配额</span>
+              <span class="quota-detail-title-meta">近 24 小时滚动</span>
             </div>
           </template>
           <section class="quota-detail-section">
             <div class="quota-detail-metrics">
               <div class="quota-detail-metric">
                 <span>配额限制</span>
-                <strong>{{ quotaData.token_quota.monthly.limit.toLocaleString() }}</strong>
+                <strong>{{ formatMoney(quotaData.cost_quota.daily.limit_cents) }}</strong>
               </div>
               <div class="quota-detail-metric">
                 <span>已使用</span>
-                <strong>{{ quotaData.token_quota.monthly.used.toLocaleString() }}</strong>
+                <strong>{{ formatMoney(quotaData.cost_quota.daily.used_cents) }}</strong>
               </div>
               <div class="quota-detail-metric">
                 <span>剩余</span>
-                <strong>{{ quotaData.token_quota.monthly.remaining.toLocaleString() }}</strong>
+                <strong>{{ formatMoney(quotaData.cost_quota.daily.remaining_cents) }}</strong>
               </div>
             </div>
             <el-progress
-              :percentage="formatPct(quotaData.token_quota.monthly.percentage)"
-              :color="getQuotaStatusColor(quotaData.token_quota.monthly.percentage)"
+              :percentage="formatPct(quotaData.cost_quota.daily.percentage)"
+              :color="getQuotaStatusColor(quotaData.cost_quota.daily.percentage)"
             />
           </section>
         </el-collapse-item>
@@ -312,7 +292,6 @@ import {
   Activity,
   Boxes,
   CalendarDays,
-  CalendarRange,
   Clock3,
   Gauge,
   KeyRound,
@@ -337,33 +316,29 @@ import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
 const data = ref<PortalOverview>({
   quota_summary: {
     request_quota: undefined,
-    token_daily: undefined,
-    token_monthly: undefined,
     cost_daily: undefined
   },
   token_summary: { today: 0, this_month: 0 },
-  cost_summary: { today_cents: 0, this_month_cents: 0 },
+  cost_summary: { last_24h_cents: 0, this_month_cents: 0 },
   model_summary: { total_models: 0, active_models: 0 },
   concurrency: { available: false, limit: 0, updated_at: 0 }
 })
 
 const quotaData = ref<PortalQuota>({
   request_quota: undefined,
-  token_quota: { daily: undefined, monthly: undefined },
+  cost_quota: { daily: undefined },
   model_allowlist: [],
   ip_allowlist: []
 })
 const quotaLoading = ref(false)
 const availableModelSlugs = ref<string[]>([])
 const modelLoadError = ref('')
-const activeDetail = ref(['request', 'monthly', 'models', 'ips'])
+const activeDetail = ref(['request', 'cost', 'models', 'ips'])
 const overviewLoaded = ref(false)
 
 const hasQuotaSummary = computed(() =>
   Boolean(
-    data.value.quota_summary.request_quota ||
-      data.value.quota_summary.token_monthly ||
-      data.value.quota_summary.cost_daily
+    data.value.quota_summary.request_quota || data.value.quota_summary.cost_daily
   )
 )
 
@@ -381,7 +356,6 @@ const concurrencyUsagePct = computed(() => {
 const heroGauges = computed(() => {
   const gauges: Array<{ label: string; sub: string; pct: number }> = []
   const request = data.value.quota_summary.request_quota
-  const monthly = data.value.quota_summary.token_monthly
   if (request) {
     gauges.push({
       label: '请求配额',
@@ -389,12 +363,9 @@ const heroGauges = computed(() => {
       pct: formatPct(request.percentage)
     })
   }
-  if (monthly) {
-    gauges.push({ label: '每月 TOKEN', sub: '本月累计', pct: formatPct(monthly.percentage) })
-  }
   const costDaily = data.value.quota_summary.cost_daily
   if (costDaily) {
-    gauges.push({ label: '每日金额', sub: '当日累计', pct: formatPct(costDaily.percentage) })
+    gauges.push({ label: '每日金额', sub: '近24h滚动', pct: formatPct(costDaily.percentage) })
   }
   return gauges
 })
@@ -463,7 +434,7 @@ const loadQuotaDetail = async () => {
     const payload = response.data as PortalQuota
     quotaData.value = {
       request_quota: payload.request_quota,
-      token_quota: payload.token_quota,
+      cost_quota: payload.cost_quota,
       model_allowlist: payload.model_allowlist || [],
       ip_allowlist: payload.ip_allowlist || [],
       model_contexts: payload.model_contexts

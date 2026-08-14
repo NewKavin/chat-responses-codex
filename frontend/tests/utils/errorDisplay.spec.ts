@@ -29,9 +29,9 @@ describe('errorDisplay', () => {
       extractReadableErrorMessage({
         status: 429,
         statusText: 'Too Many Requests',
-        bodyText: '{"error":{"message":"日 Token 限额已用尽","code":"gateway_daily_token_quota_exceeded"}}'
+        bodyText: '{"error":{"message":"日金额限额已用尽","code":"gateway_daily_cost_quota_exceeded"}}'
       })
-    ).toBe('429 Too Many Requests：日 Token 限额已用尽（gateway_daily_token_quota_exceeded）')
+    ).toBe('429 Too Many Requests：日金额限额已用尽（gateway_daily_cost_quota_exceeded）')
   })
 
   it('extracts top-level structured object messages', () => {
