@@ -1957,7 +1957,7 @@ async fn execute_pg_sql(database_url: &str, sql: &str) {
 async fn reset_test_database_async(database_url: &str) {
     execute_pg_sql(
         database_url,
-        "TRUNCATE TABLE response_history, usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
+        "TRUNCATE TABLE response_history, usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings, model_aliases RESTART IDENTITY",
     )
     .await;
 }
@@ -2052,7 +2052,7 @@ fn reset_test_database(database_url: &str) {
             "-v",
             "ON_ERROR_STOP=1",
             "-c",
-            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
+            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings, model_aliases RESTART IDENTITY",
         ])
         .output()
         .expect("psql should run");

@@ -126,8 +126,10 @@ impl ModelAliasRegistry {
     /// - No canonical name is also an alias in another rule
     /// - No empty strings
     pub fn from_rules(rules: Vec<ModelAliasRule>) -> Result<Self, String> {
-        let mut alias_to_canonical = std::collections::HashMap::new();
-        let mut seen_canonicals = std::collections::HashSet::new();
+        let mut alias_to_canonical: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut seen_canonicals: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for rule in &rules {
             rule.validate_self()?;
@@ -165,10 +167,16 @@ impl ModelAliasRegistry {
                 }
 
                 if let Some(existing_canonical) = alias_to_canonical.get(&alias_key) {
-                    return Err(format!(
-                        "alias '{}' appears in multiple rules: '{}' and '{}'",
-                        alias, existing_canonical, rule.canonical
-                    ));
+                    // Within-rule duplicates (same spelling, different casing)
+                    // are harmless: they resolve to the same canonical. Only
+                    // cross-rule conflicts are rejected.
+                    if canonical_model_id(existing_canonical) != canonical_key {
+                        return Err(format!(
+                            "alias '{}' appears in multiple rules: '{}' and '{}'",
+                            alias, existing_canonical, rule.canonical
+                        ));
+                    }
+                    continue;
                 }
 
                 alias_to_canonical.insert(alias_key, rule.canonical.clone());

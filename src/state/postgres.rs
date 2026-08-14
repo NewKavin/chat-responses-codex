@@ -8,6 +8,7 @@ use super::{
     ResponseHistoryEntry, RuntimeSettingsDocument, UpstreamConfig, UpstreamProtocol, UsageLog,
     UsageLogPage, UsageLogQuery,
 };
+use crate::state::model_identity::ModelAliasRule;
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
     WireProtocol,
@@ -305,6 +306,18 @@ impl PostgresStateStore {
             .transpose()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
+        let model_aliases = conn
+            .query_opt(
+                "SELECT document FROM model_aliases WHERE singleton_id = 'default'",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+            .map(|row| serde_json::from_str::<Vec<ModelAliasRule>>(&row.get::<_, String>(0)))
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .unwrap_or_default();
+
         Ok(PersistedState {
             upstreams: Arc::new(upstreams),
             downstreams: Arc::new(downstreams),
@@ -312,7 +325,7 @@ impl PostgresStateStore {
             usage_logs,
             announcement,
             runtime_settings,
-            model_aliases: vec![],
+            model_aliases,
         })
     }
 
@@ -1018,7 +1031,33 @@ async fn sync_config_tables(tx: &Transaction<'_>, state: &PersistedState) -> io:
     sync_downstreams(tx, &state.downstreams).await?;
     sync_global_context_profiles(tx, &state.global_context_profiles).await?;
     sync_announcements(tx, &state.announcement).await?;
-    sync_runtime_settings(tx, &state.runtime_settings).await
+    sync_runtime_settings(tx, &state.runtime_settings).await?;
+    sync_model_aliases(tx, &state.model_aliases).await
+}
+
+async fn sync_model_aliases(tx: &Transaction<'_>, rules: &[ModelAliasRule]) -> io::Result<()> {
+    if rules.is_empty() {
+        tx.execute(
+            "DELETE FROM model_aliases WHERE singleton_id = 'default'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?;
+        return Ok(());
+    }
+    let encoded = serde_json::to_string(rules).map_err(io_other)?;
+    let updated_at = u64_to_i64(unix_seconds());
+    tx.execute(
+        "INSERT INTO model_aliases (singleton_id, document, updated_at)
+         VALUES ('default', $1, $2)
+         ON CONFLICT (singleton_id) DO UPDATE SET
+             document = EXCLUDED.document,
+             updated_at = EXCLUDED.updated_at",
+        &[&encoded, &updated_at],
+    )
+    .await
+    .map_err(io_other)?;
+    Ok(())
 }
 
 async fn sync_runtime_settings(
@@ -1891,6 +1930,14 @@ CREATE TABLE IF NOT EXISTS app_announcements (
 );
 
 CREATE TABLE IF NOT EXISTS runtime_settings (
+    singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),
+    document TEXT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- B2: global model alias rules (canonical + case-variant aliases). Same
+-- singleton-document pattern as runtime_settings / capability_configuration.
+CREATE TABLE IF NOT EXISTS model_aliases (
     singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),
     document TEXT NOT NULL,
     updated_at BIGINT NOT NULL
