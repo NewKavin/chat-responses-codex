@@ -494,8 +494,9 @@ const loadProbeModelScope = async () => {
   loadingProbeModels.value = true
   probeModelScopeLoadFailed.value = false
   try {
-    const { data: visible } = await adminApi.getModels({ scope: 'visible' })
-    const models = visible.models
+    // 管理员视图：探测范围覆盖网关全部下游模型（不做下游 key 可见性过滤）
+    const { data: modelsData } = await adminApi.getModels()
+    const models = modelsData.models
     if (isUnmounted) return
     probeScopeModels.value = models
     selectedProbeModels.value = []
