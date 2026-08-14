@@ -632,7 +632,7 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     assert!(body.contains("\"output\":[]"));
     assert!(body.contains("\"usage\":null"));
     assert!(
-        body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\"}"),
+        body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\",\"retry_after_seconds\":null}"),
         "unexpected SSE body: {body}"
     );
     assert!(body.contains("\"sequence_number\":4"));

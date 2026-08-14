@@ -89,6 +89,7 @@ fn early_keepalive_stream(
                                         "stream_processing_error",
                                         json!({ "scope": "gateway" }),
                                         1,
+                                        None,
                                     )), EarlyStreamState::Done))
                                 }
                             }
@@ -156,6 +157,20 @@ enum EarlyStreamState {
     Done,
 }
 
+/// Appends the OpenAI-style retry phrasing to a client-facing message when
+/// the error carries retry-after information. On the SSE path the message is
+/// the only carrier (no Retry-After header reaches the client once streaming
+/// has started), and codex-style clients parse this phrase for an automatic
+/// retry delay. The check keeps already-decorated messages idempotent.
+fn decorate_retry_hint(message: &str, retry_after_seconds: Option<u64>) -> String {
+    match retry_after_seconds {
+        Some(seconds) if !message.contains("please try again in") => {
+            format!("{message}; please try again in {seconds}s")
+        }
+        _ => message.to_string(),
+    }
+}
+
 /// Build an SSE error frame.
 fn sse_error_frame(
     message: &str,
@@ -163,7 +178,9 @@ fn sse_error_frame(
     code: &str,
     category: &str,
     details: Value,
+    retry_after_seconds: Option<u64>,
 ) -> Bytes {
+    let message = decorate_retry_hint(message, retry_after_seconds);
     let error_json = json!({
         "error": {
             "message": message,
@@ -172,6 +189,7 @@ fn sse_error_frame(
             "code": code,
             "category": category,
             "details": details,
+            "retry_after_seconds": retry_after_seconds,
         }
     });
     Bytes::from(format!("data: {}\n\ndata: [DONE]\n\n", error_json))
@@ -184,6 +202,7 @@ fn sse_gateway_error_frame(error: &GatewayError) -> Bytes {
         error.error_code(),
         error.error_category(),
         error.safe_details(),
+        error.retry_after_seconds(),
     )
 }
 
@@ -205,11 +224,12 @@ fn sse_error_frame_for_endpoint(
     category: &str,
     details: Value,
     responses_sequence_number: u64,
+    retry_after_seconds: Option<u64>,
 ) -> Bytes {
-    let message = client_error_message(code, message);
+    let message = decorate_retry_hint(&client_error_message(code, message), retry_after_seconds);
     match endpoint {
         EndpointKind::ChatCompletions => {
-            sse_error_frame(&message, error_type, code, category, details)
+            sse_error_frame(&message, error_type, code, category, details, retry_after_seconds)
         }
         EndpointKind::Responses => {
             let failed = json!({
@@ -224,6 +244,7 @@ fn sse_error_frame_for_endpoint(
                     "error": {
                         "code": code,
                         "message": message,
+                        "retry_after_seconds": retry_after_seconds,
                     },
                     "incomplete_details": Value::Null,
                     "instructions": Value::Null,
@@ -258,6 +279,7 @@ fn sse_error_frame_for_endpoint(
                 "sequence_number": responses_sequence_number.saturating_add(1),
                 "category": category,
                 "details": details,
+                "retry_after_seconds": retry_after_seconds,
             });
             Bytes::from(format!(
                 "event: response.failed\ndata: {failed}\n\nevent: error\ndata: {error}\n\ndata: [DONE]\n\n"
@@ -282,6 +304,7 @@ fn sse_gateway_error_frame_for_endpoint(
         error.error_category(),
         error.safe_details(),
         responses_sequence_number,
+        error.retry_after_seconds(),
     )
 }
 
@@ -2381,6 +2404,7 @@ mod diagnostic_tests {
             "stream_processing_error",
             json!({"scope": "gateway"}),
             0,
+            None,
         );
         let frame = std::str::from_utf8(&frame).expect("Chat SSE frame");
 
@@ -2388,6 +2412,78 @@ mod diagnostic_tests {
             "\"message\":\"[stream_processing_error] request processing channel closed\""
         ));
         assert_eq!(frame.matches("[stream_processing_error]").count(), 1);
+    }
+
+    #[test]
+    fn sse_error_frame_appends_retry_hint_and_structured_field_on_both_endpoints() {
+        for endpoint in [EndpointKind::ChatCompletions, EndpointKind::Responses] {
+            let frame = sse_error_frame_for_endpoint(
+                endpoint,
+                "downstream daily token quota exceeded",
+                "invalid_request_error",
+                "gateway_daily_token_quota_exceeded",
+                "gateway_quota_exceeded",
+                json!({"limit": 1000, "used": 1001, "retry_after_seconds": 3600}),
+                7,
+                Some(3600),
+            );
+            let frame = std::str::from_utf8(&frame).expect("frame must be UTF-8");
+            assert!(
+                frame.contains(
+                    "\"message\":\"[gateway_daily_token_quota_exceeded] downstream daily token quota exceeded; please try again in 3600s\""
+                ),
+                "unexpected frame: {frame}"
+            );
+            assert!(
+                frame.contains("\"retry_after_seconds\":3600"),
+                "structured retry field missing in frame: {frame}"
+            );
+            assert!(
+                frame.contains("\"details\":{\"limit\":1000,\"retry_after_seconds\":3600,\"used\":1001}"),
+                "details must keep its own retry_after_seconds: {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn sse_error_frame_retry_hint_stays_idempotent_for_exhausted_routes() {
+        let frame = sse_error_frame(
+            "all eligible upstream routes are temporarily unavailable; please try again in 14s",
+            "upstream_error",
+            "upstream_routes_exhausted",
+            "upstream_routes_exhausted",
+            json!({}),
+            Some(14),
+        );
+        let frame = std::str::from_utf8(&frame).expect("frame must be UTF-8");
+        assert_eq!(
+            frame.matches("please try again in").count(),
+            1,
+            "already-decorated message must not be decorated twice: {frame}"
+        );
+    }
+
+    #[test]
+    fn sse_gateway_error_frame_carries_quota_retry_hint_from_gateway_error() {
+        let error = GatewayError::classified(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "downstream daily token quota exceeded",
+            "invalid_request_error",
+            "gateway_daily_token_quota_exceeded",
+            "gateway_daily_token_quota_exceeded",
+            Some(3600),
+            Some(json!({"scope": "gateway", "quota": "daily_tokens"})),
+        );
+        let frame = sse_gateway_error_frame(&error);
+        let frame = std::str::from_utf8(&frame).expect("frame must be UTF-8");
+        assert!(
+            frame.contains("please try again in 3600s"),
+            "quota SSE frame must carry a retry hint: {frame}"
+        );
+        assert!(
+            frame.contains("\"retry_after_seconds\":3600"),
+            "quota SSE frame must carry the structured field: {frame}"
+        );
     }
 
     #[derive(Clone, Default)]
