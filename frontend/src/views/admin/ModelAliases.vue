@@ -432,7 +432,7 @@ const upstreams = ref<UpstreamConfig[]>([])
 const filterUpstreamId = ref('')
 const mappingSearch = ref('')
 const mappingPage = ref(1)
-const mappingPageSize = ref(20)
+const mappingPageSize = ref(10)
 
 const mappingDialogVisible = ref(false)
 const mappingDialogMode = ref<'add' | 'edit'>('add')
