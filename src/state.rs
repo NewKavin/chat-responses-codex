@@ -4370,7 +4370,7 @@ impl AppState {
                             .saturating_sub(daily_cost_limit.max(1)),
                     )
                     .max(1);
-                    return Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                    return Err(DownstreamAdmissionRejection::DailyCostQuotaExceeded {
                         retry_after_seconds,
                         limit: daily_cost_limit.max(1),
                         used: daily_used,
@@ -6418,6 +6418,11 @@ pub enum DownstreamAdmissionRejection {
         limit: u64,
         used: u64,
     },
+    DailyCostQuotaExceeded {
+        retry_after_seconds: u64,
+        limit: u64,
+        used: u64,
+    },
     MonthlyTokenQuotaExceeded {
         retry_after_seconds: u64,
         limit: u64,
@@ -6442,6 +6447,10 @@ impl DownstreamAdmissionRejection {
                 ..
             }
             | DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                retry_after_seconds,
+                ..
+            }
+            | DownstreamAdmissionRejection::DailyCostQuotaExceeded {
                 retry_after_seconds,
                 ..
             }

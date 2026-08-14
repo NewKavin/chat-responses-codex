@@ -87,6 +87,9 @@ export const getMatrixCheckStatusMeta = (check: { id: string; passed: boolean })
 
 export const getTroubleshootingSuggestion = (category?: string | null) => {
   if (!category) return '继续查看该诊断项的 HTTP 状态、耗时和详细说明。'
+  if (category === 'gateway_daily_cost_quota_exceeded') {
+    return '日金额限额已达到；等待额度恢复或联系管理员调整下游限额。'
+  }
   if (category === 'gateway_daily_token_quota_exceeded') {
     return '日 Token 限额已达到；等待额度恢复或联系管理员调整下游限额。'
   }

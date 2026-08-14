@@ -4136,6 +4136,7 @@ fn trusted_diagnostic_error_category(category: &str) -> bool {
             | "gateway_auth_invalid"
             | "gateway_capability_policy_invalid"
             | "gateway_concurrency_full"
+            | "gateway_daily_cost_quota_exceeded"
             | "gateway_daily_token_quota_exceeded"
             | "gateway_diagnostic_error"
             | "gateway_downstream_key_unavailable"

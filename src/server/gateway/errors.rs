@@ -628,6 +628,25 @@ impl GatewayError {
                     "retry_after_seconds": retry_after_seconds,
                 })),
             ),
+            DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                retry_after_seconds,
+                limit,
+                used,
+            } => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                "downstream daily cost quota exceeded",
+                "gateway_quota_exceeded",
+                "gateway_daily_cost_quota_exceeded",
+                "gateway_daily_cost_quota_exceeded",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "quota": "daily_cost",
+                    "limit": limit,
+                    "used": used,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            ),
             DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
                 retry_after_seconds,
                 limit,

@@ -779,6 +779,112 @@ async fn downstream_daily_token_quota_error_has_safe_code_and_log_category() {
     );
 }
 
+#[tokio::test]
+async fn downstream_daily_cost_quota_error_uses_cost_code_and_message() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let now = chat_responses_codex::state::unix_seconds();
+    let state: PersistedState = serde_json::from_value(json!({
+        "upstreams": [{
+            "id": "up-1",
+            "name": "primary",
+            "base_url": "http://127.0.0.1:9",
+            "api_key": "upstream-secret",
+            "protocol": "ChatCompletions",
+            "protocols": ["ChatCompletions"],
+            "supported_models": ["gpt-4.1-mini"],
+            "active": true,
+            "failure_count": 0
+        }],
+        "downstreams": [{
+            "id": "down-cost",
+            "name": "team-cost",
+            "hash": downstream_key.hash.clone(),
+            "plaintext_key": downstream_key.plaintext.clone(),
+            "model_allowlist": ["gpt-4.1-mini"],
+            "rate_limit_enabled": true,
+            "per_minute_limit": 60,
+            "max_concurrency": 10,
+            "daily_token_limit": null,
+            "monthly_token_limit": null,
+            "input_token_price_per_million_cents": 100000,
+            "output_token_price_per_million_cents": 100000,
+            "daily_cost_limit_cents": 10,
+            "billing_mode": "token",
+            "ip_allowlist": [],
+            "expires_at": null,
+            "active": true
+        }],
+        "usage_logs": [{
+            "id": "log-cost-1",
+            "downstream_key_id": "down-cost",
+            "upstream_key_id": "up-1",
+            "endpoint": "/v1/chat/completions",
+            "model": "gpt-4.1-mini",
+            "request_id": "REQ-COST-1",
+            "status_code": 200,
+            "prompt_tokens": 100,
+            "completion_tokens": 0,
+            "total_tokens": 100,
+            "total_cost_cents": 10,
+            "latency_ms": 12,
+            "created_at": now
+        }]
+    }))
+    .unwrap();
+    let state = AppState::new(state, state_path, AppConfig::default());
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"]["code"],
+        "gateway_daily_cost_quota_exceeded"
+    );
+    assert_eq!(
+        payload["error"]["message"],
+        "[gateway_daily_cost_quota_exceeded] downstream daily cost quota exceeded"
+    );
+    assert_eq!(payload["error"]["details"]["quota"], "daily_cost");
+    assert_eq!(payload["error"]["details"]["limit"], 10);
+    assert_eq!(payload["error"]["details"]["used"], 10);
+
+    let snapshot = state.snapshot().await;
+    let log = snapshot
+        .usage_logs
+        .iter()
+        .find(|log| log.request_id != "REQ-COST-1")
+        .expect("quota rejection should be logged");
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("gateway_daily_cost_quota_exceeded")
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn downstream_chat_request_uses_exact_model_name_for_upstream_request_body() {
     with_proxy_env_cleared(|| async move {

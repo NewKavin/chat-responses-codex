@@ -361,7 +361,9 @@ impl RedisRuntimeCoordinator {
             })
             .await
             .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
-        parse_downstream_reservation(result)
+        parse_downstream_reservation(result).map_err(|error| {
+            classify_cost_quota(error, downstream.daily_cost_limit())
+        })
     }
 
     pub(super) async fn rollback_downstream_request(
@@ -453,7 +455,9 @@ impl RedisRuntimeCoordinator {
             })
             .await
             .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
-        parse_downstream_admission(result)
+        parse_downstream_admission(result).map_err(|error| {
+            classify_cost_quota(error, downstream.daily_cost_limit())
+        })
     }
 
     pub(super) async fn record_downstream_tokens(
@@ -2585,6 +2589,47 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn classify_cost_quota_reclassifies_daily_exhaustion_for_cost_mode() {
+        let token = DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+            retry_after_seconds: 3600,
+            limit: 10,
+            used: 10,
+        };
+        // cost mode -> reclassified
+        let classified = classify_cost_quota(token.clone(), Some(10));
+        assert!(
+            matches!(
+                classified,
+                DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                    retry_after_seconds: 3600,
+                    limit: 10,
+                    used: 10,
+                }
+            ),
+            "cost-mode exhaustion must be reclassified as a cost rejection"
+        );
+        // token mode -> untouched
+        let untouched = classify_cost_quota(token.clone(), None);
+        assert!(matches!(
+            untouched,
+            DownstreamAdmissionRejection::DailyTokenQuotaExceeded { .. }
+        ));
+        // non-quota rejections pass through unchanged
+        let other = classify_cost_quota(
+            DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+                retry_after_seconds: 5,
+                limit: 10,
+                used: 10,
+            },
+            Some(10),
+        );
+        assert!(matches!(
+            other,
+            DownstreamAdmissionRejection::PerMinuteLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
     fn route_health_redis_keys_share_one_cluster_slot() {
         let keys = [
             route_health_redis_key("prefix", "route:a"),
@@ -2727,6 +2772,32 @@ mod tests {
 
 fn stable_identity(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// The Redis scripts fold both cost and token daily limits into a single
+/// `daily_limit` input and report either as tag 3, so the parsed rejection
+/// carries no billing-mode information. The caller knows the downstream
+/// configuration and reclassifies cost-mode rejections here so the gateway
+/// error mapping can emit the correct code/message (cost, not token).
+fn classify_cost_quota(
+    error: DownstreamAdmissionRejection,
+    daily_cost_limit: Option<u64>,
+) -> DownstreamAdmissionRejection {
+    match (error, daily_cost_limit.is_some()) {
+        (
+            DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                retry_after_seconds,
+                limit,
+                used,
+            },
+            true,
+        ) => DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+            retry_after_seconds,
+            limit,
+            used,
+        },
+        (other, _) => other,
+    }
 }
 
 fn parse_downstream_reservation(result: Vec<i64>) -> Result<(), DownstreamAdmissionRejection> {

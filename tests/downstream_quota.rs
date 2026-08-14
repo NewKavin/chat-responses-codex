@@ -91,6 +91,91 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
 }
 
 #[tokio::test]
+async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhausted() {
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let now = unix_seconds();
+
+    let state = AppState::new(
+        PersistedState {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-cost".into(),
+                name: "Team Cost".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                // $10 per 1M input tokens: 100 input tokens == 10 cents.
+                input_token_price_per_million_cents: Some(1_000_000),
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: Some(10),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "token".into(),
+            }]),
+            usage_logs: vec![UsageLog {
+                id: "log-cost-1".into(),
+                downstream_key_id: "down-cost".into(),
+                upstream_key_id: "up-1".into(),
+                downstream_name: None,
+                upstream_name: None,
+                endpoint: "/v1/chat/completions".into(),
+                model: "gpt-4.1-mini".into(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "REQ-COST-1".into(),
+                status_code: 200,
+                wire_status_code: 0,
+                stream_diagnostics: None,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 100,
+                completion_tokens: 0,
+                total_tokens: 100,
+                total_cost_cents: Some(10),
+                first_token_latency_ms: None,
+                latency_ms: 12,
+                created_at: now,
+                compatibility: None,
+            }],
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let downstream = state.snapshot().await.downstreams[0].clone();
+    let admission = state.reserve_downstream_request(&downstream).await;
+
+    let rejection =
+        admission.expect_err("daily cost quota should reject exhausted keys as a cost variant");
+    assert!(
+        matches!(
+            rejection,
+            DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                limit: 10,
+                used: 10,
+                ..
+            }
+        ),
+        "cost-mode exhaustion must map to the cost variant, got {rejection:?}"
+    );
+}
+
+#[tokio::test]
 async fn downstream_request_rollback_is_exact_and_idempotent() {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
