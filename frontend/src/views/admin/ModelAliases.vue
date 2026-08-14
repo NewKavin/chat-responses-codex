@@ -81,10 +81,12 @@
                 <el-tag v-else type="success" size="small">生效</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="160" align="center">
+            <el-table-column label="操作" width="200" align="center">
               <template #default="{ row }">
-                <el-button :icon="Edit" size="small" @click="openEditMapping(row)">编辑</el-button>
-                <el-button :icon="Trash2" size="small" type="danger" @click="handleDeleteMapping(row)">删除</el-button>
+                <div class="mapping-row-actions">
+                  <el-button :icon="Edit" size="small" @click="openEditMapping(row)">编辑</el-button>
+                  <el-button :icon="Trash2" size="small" type="danger" @click="handleDeleteMapping(row)">删除</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -819,7 +821,8 @@ onMounted(() => {
 
 <style scoped>
 .model-aliases-page {
-  max-width: 1600px;
+  width: 100%;
+  max-width: none;
 }
 
 .header-actions {
@@ -835,6 +838,13 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 14px;
+}
+
+.mapping-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 /* 映射表格（Tab 1） */
