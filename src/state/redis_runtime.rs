@@ -2581,7 +2581,8 @@ mod tests {
         parse_route_health_reservation, route_health_redis_key, route_health_retention_ttl_seconds,
     };
     use crate::capabilities::WireProtocol;
-    use crate::state::{KeyHealthKey, RouteHealthKey};
+    use crate::state::{KeyHealthKey, RouteAvailability, RouteFailureClass, RouteHealthKey};
+    use std::time::Duration;
 
     #[test]
     fn route_health_redis_keys_share_one_cluster_slot() {

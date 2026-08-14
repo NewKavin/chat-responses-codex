@@ -310,7 +310,7 @@ mod tests {
             Some("GLM-4.5")
         );
         assert_eq!(find_equivalent_stored(&stored, "missing", true), None);
-        assert_eq!(find_equivalent_stored(&stored, "glm-4.5", false), None);
+        assert_eq!(find_equivalent_stored(&stored, "Glm-4.5", false), None);
         assert_eq!(find_equivalent_stored(&stored, " ", true), None);
     }
 

@@ -2,7 +2,7 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     default_upstream_max_concurrency, default_upstream_request_quota_requests,
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
-    DownstreamConfig, UpstreamConfig,
+    DownstreamConfig, NonstandardFieldPolicy, UpstreamConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -523,7 +523,10 @@ mod tests {
             auto_managed: false,
             managed_source: None,
             last_synced_at: 0,
-            strip_nonstandard_chat_fields: false,
+            strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,
+            continuation_provider_group: None,
+            dialect_preset: None,
+            model_mappings: vec![],
             remark: String::new(),
         }
     }

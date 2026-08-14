@@ -681,6 +681,7 @@ pub struct DownstreamModelEntry {
 mod tests {
     use super::*;
     use crate::state::model_identity::{ModelAliasRegistry, ModelAliasRule};
+    use serde_json::json;
 
     fn mapping(upstream_model: &str, downstream_model: &str) -> UpstreamModelMapping {
         UpstreamModelMapping {
