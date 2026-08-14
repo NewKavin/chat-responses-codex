@@ -116,7 +116,7 @@
         <el-dialog
           v-model="mappingDialogVisible"
           :title="mappingDialogMode === 'edit' ? '编辑模型映射' : '添加模型映射'"
-          width="560px"
+          width="760px"
           :close-on-click-modal="false"
           @close="handleMappingDialogClose"
         >
