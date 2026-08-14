@@ -2106,6 +2106,29 @@ fn chat_stream_canonicalizer_synthesizes_stop_at_eof_after_text_output() {
 }
 
 #[test]
+fn chat_stream_canonicalizer_treats_empty_finish_reason_as_absent() {
+    // Some proxies (e.g. ai.121628.xyz) emit `"finish_reason":""` on every
+    // intermediate chunk. It must not be treated as a terminal: no error, and
+    // the canonical chunk carries null so downstream never sees a fake stop.
+    let mut canonicalizer = ChatStreamCanonicalizer::new("chatcmpl-empty-fr", "opaque", 1);
+    let events = canonicalizer
+        .push(json!({
+            "choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": ""}]
+        }))
+        .expect("empty finish_reason chunk must be accepted");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["choices"][0]["finish_reason"], Value::Null);
+
+    let terminal = canonicalizer
+        .push(json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        }))
+        .expect("real terminal must be accepted");
+    assert_eq!(terminal[0]["choices"][0]["finish_reason"], "stop");
+    assert!(canonicalizer.finish_after_done().is_ok());
+}
+
+#[test]
 fn chat_stream_canonicalizer_normalizes_null_delta_to_empty_object() {
     let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
     let events = canonicalizer

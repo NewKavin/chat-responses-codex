@@ -183,7 +183,12 @@ impl ChatStreamCanonicalizer {
             }
 
             let finish_reason = choice.entry("finish_reason").or_insert(Value::Null).clone();
-            if !finish_reason.is_null() {
+            // Some proxies emit "" on intermediate chunks; treat it exactly
+            // like an absent finish_reason and normalize it to null so
+            // downstream clients never mistake it for a terminal.
+            if finish_reason.as_str().is_some_and(|value| value.is_empty()) {
+                choice.insert("finish_reason".into(), Value::Null);
+            } else if !finish_reason.is_null() {
                 let finish_reason = finish_reason.as_str().ok_or_else(Self::invalid_stream)?;
                 let normalized = self.normalize_finish_reason(canonical_index, finish_reason)?;
                 if !self.terminal_indices.insert(canonical_index) {
