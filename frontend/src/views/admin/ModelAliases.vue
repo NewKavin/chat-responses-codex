@@ -51,9 +51,25 @@
               </template>
             </el-input>
             <el-button type="primary" :icon="Plus" @click="openAddMapping">添加映射</el-button>
+            <el-button type="warning" plain :icon="ListPlus" @click="openBatchAdd">批量添加</el-button>
+            <el-button
+              type="danger"
+              plain
+              :icon="Trash2"
+              :disabled="selectedMappingRows.length === 0"
+              @click="handleBatchDelete"
+            >
+              删除选中（{{ selectedMappingRows.length }}）
+            </el-button>
           </div>
 
-          <el-table :data="pagedMappingRows" stripe border>
+          <el-table
+            :data="pagedMappingRows"
+            stripe
+            border
+            @selection-change="handleMappingSelectionChange"
+          >
+            <el-table-column type="selection" width="44" />
             <el-table-column label="上游账号" min-width="180">
               <template #default="{ row }">
                 <span class="upstream-name">{{ row.upstreamName }}</span>
@@ -204,6 +220,104 @@
               @click="handleMappingDialogConfirm"
             >
               确定
+            </el-button>
+          </template>
+        </el-dialog>
+
+        <!-- 批量添加映射对话框：选上游 → 多选模型 → 逐行/批处理下游名称 -->
+        <el-dialog
+          v-model="batchDialogVisible"
+          title="批量添加模型映射"
+          width="860px"
+          :close-on-click-modal="false"
+          @close="handleBatchDialogClose"
+        >
+          <el-form label-position="top">
+            <el-form-item label="上游账号">
+              <el-select
+                v-model="batchUpstreamId"
+                placeholder="选择要配置映射的上游账号"
+                filterable
+                style="width: 100%"
+                :disabled="savingBatch"
+                @change="handleBatchUpstreamChange"
+              >
+                <el-option
+                  v-for="upstream in upstreams"
+                  :key="upstream.id"
+                  :label="`${upstream.name}（${upstream.supported_models.length} 个模型）`"
+                  :value="upstream.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-form>
+
+          <div v-if="batchUpstreamId" class="batch-models-panel">
+            <div class="batch-panel-toolbar">
+              <el-checkbox
+                :model-value="allBatchModelsSelected"
+                :indeterminate="someBatchModelsSelected"
+                @change="handleBatchToggleAll"
+              >
+                全选（{{ batchModelOptions.length }} 个未映射模型）
+              </el-checkbox>
+              <div class="batch-bulk-ops">
+                <span class="batch-bulk-label">下游名称批处理：</span>
+                <el-input
+                  v-model="batchPrefix"
+                  placeholder="统一前缀"
+                  style="width: 140px"
+                  @keyup.enter="applyBatchAffix('prefix')"
+                />
+                <el-input
+                  v-model="batchSuffix"
+                  placeholder="统一后缀"
+                  style="width: 140px"
+                  @keyup.enter="applyBatchAffix('suffix')"
+                />
+                <el-button size="small" @click="applyBatchAffix('prefix')">应用前缀</el-button>
+                <el-button size="small" @click="applyBatchAffix('suffix')">应用后缀</el-button>
+                <el-button size="small" @click="resetBatchDownstreamNames">重置为模型名</el-button>
+              </div>
+            </div>
+
+            <el-table
+              :data="batchModelOptions"
+              max-height="360"
+              border
+              @selection-change="batchSelectionChange"
+            >
+              <el-table-column type="selection" width="44" />
+              <el-table-column label="上游模型名称" min-width="220">
+                <template #default="{ row }">
+                  <span class="mono-cell">{{ row }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="下游模型名称（按需修改大小写/名称）" min-width="280">
+                <template #default="{ row }">
+                  <el-input
+                    v-model="batchDownstreamNames[row]"
+                    placeholder="默认与上游模型名一致"
+                    maxlength="100"
+                    :disabled="savingBatch"
+                  />
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="form-help-text" style="margin-top: 8px">
+              下游名称默认保留上游模型原拼写（不会自动转换大小写）；已映射的模型不可重复勾选。确认后一次性保存到该上游。
+            </div>
+          </div>
+
+          <template #footer>
+            <el-button :disabled="savingBatch" @click="batchDialogVisible = false">取消</el-button>
+            <el-button
+              type="primary"
+              :loading="savingBatch"
+              :disabled="batchSelectedModels.length === 0"
+              @click="handleBatchConfirm"
+            >
+              批量保存（{{ batchSelectedModels.length }} 条）
             </el-button>
           </template>
         </el-dialog>
@@ -401,7 +515,7 @@
 <script setup lang="ts">
 import { onMounted, ref, reactive, nextTick, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { RefreshCw, Plus, Edit, Trash2, Search } from '@lucide/vue'
+import { RefreshCw, Plus, Edit, Trash2, Search, ListPlus } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { ModelAliasRule, UpstreamConfig, UpstreamModelMapping } from '@/types'
 
@@ -443,6 +557,16 @@ const mappingUpstreamId = ref('')
 const mappingUpstreamModel = ref('')
 const mappingDownstream = ref('')
 const savingMapping = ref(false)
+
+// ---------------------------------------------------------------- 批量操作
+const batchDialogVisible = ref(false)
+const batchUpstreamId = ref('')
+const batchPrefix = ref('')
+const batchSuffix = ref('')
+const batchDownstreamNames = ref<Record<string, string>>({})
+const batchSelectedModels = ref<string[]>([])
+const savingBatch = ref(false)
+const selectedMappingRows = ref<MappingRow[]>([])
 
 const canonical = (model: string) => model.trim().toLowerCase()
 
@@ -636,6 +760,187 @@ const handleDeleteMapping = async (row: MappingRow) => {
     const message =
       error.response?.data?.error?.message || error.response?.data?.message || error.message || '删除失败'
     ElMessage.error('删除失败: ' + message)
+  } finally {
+    savingMapping.value = false
+  }
+}
+
+// ---------------------------------------------------------------- 批量添加
+const batchModelOptions = computed<string[]>(() => {
+  const upstream = upstreams.value.find(u => u.id === batchUpstreamId.value)
+  if (!upstream) return []
+  const models = upstreamModelList(upstream)
+  const mapped = new Set(
+    (upstream.model_mappings || []).map(mapping => canonical(mapping.upstream_model))
+  )
+  return models.filter(model => !mapped.has(canonical(model)))
+})
+
+const batchSelectedCanonical = computed(() => new Set(batchSelectedModels.value.map(canonical)))
+
+const allBatchModelsSelected = computed(
+  () =>
+    batchModelOptions.value.length > 0 &&
+    batchModelOptions.value.every(model => batchSelectedCanonical.value.has(canonical(model)))
+)
+
+const someBatchModelsSelected = computed(
+  () =>
+    batchSelectedModels.value.length > 0 &&
+    !allBatchModelsSelected.value
+)
+
+const openBatchAdd = () => {
+  batchDialogVisible.value = true
+  batchUpstreamId.value = ''
+  batchPrefix.value = ''
+  batchSuffix.value = ''
+  batchDownstreamNames.value = {}
+  batchSelectedModels.value = []
+}
+
+const handleBatchDialogClose = () => {
+  if (savingBatch.value) return
+  batchUpstreamId.value = ''
+  batchDownstreamNames.value = {}
+  batchSelectedModels.value = []
+  batchPrefix.value = ''
+  batchSuffix.value = ''
+}
+
+const handleBatchUpstreamChange = () => {
+  // 每个未映射模型默认使用其原拼写作下游名：填啥就是啥，不转换大小写。
+  batchDownstreamNames.value = {}
+  for (const model of batchModelOptions.value) {
+    batchDownstreamNames.value[model] = model
+  }
+  batchSelectedModels.value = []
+}
+
+const handleBatchToggleAll = (checked: boolean | string | number) => {
+  if (checked) {
+    batchSelectedModels.value = [...batchModelOptions.value]
+  } else {
+    batchSelectedModels.value = []
+  }
+}
+
+const batchSelectionChange = (rows: string[]) => {
+  batchSelectedModels.value = rows
+}
+
+const applyBatchAffix = (kind: 'prefix' | 'suffix') => {
+  const affix = (kind === 'prefix' ? batchPrefix.value : batchSuffix.value).trim()
+  if (!affix) {
+    ElMessage.warning(kind === 'prefix' ? '请先输入统一前缀' : '请先输入统一后缀')
+    return
+  }
+  let applied = 0
+  for (const model of batchSelectedModels.value) {
+    const current = batchDownstreamNames.value[model] ?? model
+    const next = kind === 'prefix' ? affix + current : current + affix
+    if (next !== current) {
+      batchDownstreamNames.value[model] = next
+      applied++
+    }
+  }
+  if (applied > 0) ElMessage.success(`已为 ${applied} 个选中模型应用${kind === 'prefix' ? '前缀' : '后缀'}`)
+}
+
+const resetBatchDownstreamNames = () => {
+  for (const model of batchSelectedModels.value) {
+    batchDownstreamNames.value[model] = model
+  }
+  ElMessage.success('已重置为上游模型原拼写')
+}
+
+const handleBatchConfirm = async () => {
+  const upstream = upstreams.value.find(u => u.id === batchUpstreamId.value)
+  if (!upstream) return
+  const pending = batchSelectedModels.value
+    .filter(model => !!batchDownstreamNames.value[model]?.trim())
+    .map(model => ({
+      upstream_model: model,
+      downstream_model: batchDownstreamNames.value[model].trim()
+    }))
+  if (pending.length === 0) {
+    ElMessage.warning('请至少保留一条有效的下游名称')
+    return
+  }
+  savingBatch.value = true
+  try {
+    const existing = upstream.model_mappings || []
+    const nextMappings = [...existing]
+    for (const item of pending) {
+      const index = nextMappings.findIndex(
+        m => canonical(m.upstream_model) === canonical(item.upstream_model)
+      )
+      if (index >= 0) {
+        nextMappings[index] = item
+      } else {
+        nextMappings.push(item)
+      }
+    }
+    await adminApi.updateUpstream(upstream.id, { model_mappings: nextMappings })
+    ElMessage.success(`已批量保存 ${pending.length} 条映射`)
+    batchDialogVisible.value = false
+    await loadUpstreams()
+  } catch (err) {
+    const error = err as ApiError
+    const message =
+      error.response?.data?.error?.message || error.response?.data?.message || error.message || '保存失败'
+    ElMessage.error('批量保存失败: ' + message)
+  } finally {
+    savingBatch.value = false
+  }
+}
+
+// ---------------------------------------------------------------- 批量删除
+const handleMappingSelectionChange = (rows: MappingRow[]) => {
+  selectedMappingRows.value = rows
+}
+
+const handleBatchDelete = async () => {
+  const selected = selectedMappingRows.value
+  if (selected.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${selected.length} 条映射吗？`,
+      '批量删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return
+  }
+  savingMapping.value = true
+  try {
+    // 按上游分组，逐上游一次性更新
+    const byUpstream = new Map<string, Set<string>>()
+    for (const row of selected) {
+      const keys = byUpstream.get(row.upstreamId) || new Set<string>()
+      keys.add(canonical(row.upstreamModel))
+      byUpstream.set(row.upstreamId, keys)
+    }
+    for (const [upstreamId, keys] of byUpstream) {
+      const upstream = upstreams.value.find(u => u.id === upstreamId)
+      if (!upstream) continue
+      const nextMappings = (upstream.model_mappings || []).filter(
+        m => !keys.has(canonical(m.upstream_model))
+      )
+      await adminApi.updateUpstream(upstreamId, { model_mappings: nextMappings })
+    }
+    ElMessage.success(`已删除 ${selected.length} 条映射`)
+    selectedMappingRows.value = []
+    await loadUpstreams()
+  } catch (err) {
+    const error = err as ApiError
+    const message =
+      error.response?.data?.error?.message || error.response?.data?.message || error.message || '删除失败'
+    ElMessage.error('批量删除失败: ' + message)
   } finally {
     savingMapping.value = false
   }
@@ -1019,5 +1324,33 @@ onMounted(() => {
 
 .alias-input {
   width: 140px;
+}
+
+/* 批量添加映射 */
+.batch-models-panel {
+  margin-top: 4px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.batch-panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.batch-bulk-ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.batch-bulk-label {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
 }
 </style>
