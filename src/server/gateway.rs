@@ -1391,6 +1391,7 @@ struct ActiveGatewayRequestGuard {
     request_id: String,
     active: bool,
     aggregate_cancellation_log: Option<AggregateCancellationLogContext>,
+    downgrade_reported: bool,
 }
 
 impl ActiveGatewayRequestGuard {
@@ -1400,6 +1401,7 @@ impl ActiveGatewayRequestGuard {
             request_id,
             active: true,
             aggregate_cancellation_log: None,
+            downgrade_reported: false,
         }
     }
 
@@ -3971,6 +3973,16 @@ async fn finalize_stream_error(
     error_message: String,
     attribute_route_failure: bool,
 ) {
+    // A body decode failure that is also classified as a timeout (is_timeout
+    // on the transport error) otherwise records the identical message as a
+    // pure decode error; keep the two categories distinguishable in logs.
+    let error_message = if error_category == "stream_upstream_timeout"
+        && !error_message.to_ascii_lowercase().contains("timeout")
+    {
+        format!("upstream stream timed out while awaiting a response body: {error_message}")
+    } else {
+        error_message
+    };
     let hedge_loser = completion_context
         .as_ref()
         .is_some_and(StreamCompletionContext::is_hedge_loser)
@@ -4590,6 +4602,30 @@ async fn process_gateway_request_inner(
                     rejection = ?rejection,
                     "downstream admission rejected (request quota or concurrency)"
                 );
+                if let crate::state::DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                    retry_after_seconds: lockout_seconds,
+                    limit,
+                    used,
+                } = &rejection
+                {
+                    // A daily cost lockout usually emits exactly one WARN (the
+                    // client stops retrying), then stays silent for the rest
+                    // of the window.  Escalate long lockouts so an exhausted
+                    // downstream cannot drain its budget unnoticed.
+                    if *lockout_seconds >= 3600 {
+                        tracing::error!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %&normalized_model,
+                            daily_cost_limit_cents = limit,
+                            daily_cost_used_cents = used,
+                            lockout_seconds,
+                            "downstream daily cost quota exhausted; downstream is locked until the quota window resets"
+                        );
+                    }
+                }
                 let error = GatewayError::downstream_admission_rejection(rejection);
                 let _ = append_gateway_usage_log(
                     &state,
@@ -7105,8 +7141,10 @@ async fn process_gateway_request_inner(
                                     original_model = %model,
                                     normalized_model = %&normalized_model,
                                     selected_upstream_id = %upstream.id,
+                                    selected_upstream_name = %upstream.name,
                                     selected_upstream_protocol = ?protocol,
                                     route_id = %route_id,
+                                    upstream_status = error.upstream_status(),
                                     error_category = %error.error_category(),
                                     "upstream request failed"
                                 );

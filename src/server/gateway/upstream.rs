@@ -1330,7 +1330,7 @@ pub(super) async fn send_to_upstream(
     route_attempts: RequestRouteAttempts,
     route_health_key: RouteHealthKey,
     mut response_history_context: Option<ResponseHistoryContext>,
-    active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
+    mut active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
     hedge_control: Option<HedgeAttemptControl>,
     stream_only_recovery_request_safe: bool,
     mut account_attempt_feedback: Option<
@@ -1459,19 +1459,29 @@ pub(super) async fn send_to_upstream(
                 fallback_reasons.push("tool_choice_dropped");
             }
             if !fallback_reasons.is_empty() {
-                tracing::warn!(
-                    request_id = %request_id,
-                    downstream_key_id = %downstream_key_id,
-                    path = %endpoint.path(),
-                    original_model = %model,
-                    normalized_model = %normalized_model,
-                    retained_tool_count = fallback_report.retained_tool_count,
-                    stripped_tool_count = fallback_report.stripped_tool_count,
-                    has_tool_choice = fallback_report.has_tool_choice,
-                    tool_choice_dropped = fallback_report.tool_choice_dropped,
-                    fallback_reasons = ?fallback_reasons,
-                    "responses request downgraded to ChatCompletions"
-                );
+                // Report the downgrade once per request: the fallback decision
+                // is per-upstream-protocol and repeats identically on every
+                // routing attempt, so a WARN per attempt only floods the log.
+                let downgrade_already_reported =
+                    active_request_guard.as_ref().is_some_and(|guard| guard.downgrade_reported);
+                if !downgrade_already_reported {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream_key_id,
+                        path = %endpoint.path(),
+                        original_model = %model,
+                        normalized_model = %normalized_model,
+                        retained_tool_count = fallback_report.retained_tool_count,
+                        stripped_tool_count = fallback_report.stripped_tool_count,
+                        has_tool_choice = fallback_report.has_tool_choice,
+                        tool_choice_dropped = fallback_report.tool_choice_dropped,
+                        fallback_reasons = ?fallback_reasons,
+                        "responses request downgraded to ChatCompletions"
+                    );
+                    if let Some(guard) = active_request_guard.as_deref_mut() {
+                        guard.downgrade_reported = true;
+                    }
+                }
             }
             responses_request_to_chat_payload_with_fallback(
                 body,
@@ -2115,7 +2125,7 @@ pub(super) async fn send_to_upstream(
         let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);
         let upstream_error_message = upstream_client_message(status);
 
-        tracing::warn!(
+        tracing::debug!(
             request_id = %request_id,
             downstream_key_id = %downstream_key_id,
             path = %endpoint.path(),
