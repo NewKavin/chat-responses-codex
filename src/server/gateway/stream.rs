@@ -81,16 +81,16 @@ fn early_keepalive_stream(
                                     Some((Ok(sse_gateway_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                 }
                                 None => {
-                                    Some((Ok(sse_error_frame_for_endpoint(
-                                        endpoint,
+                                    let error = GatewayError::classified(
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                                         "request processing channel closed",
                                         "api_error",
                                         "stream_processing_error",
                                         "stream_processing_error",
-                                        json!({ "scope": "gateway" }),
-                                        1,
                                         None,
-                                    )), EarlyStreamState::Done))
+                                        Some(json!({ "scope": "gateway" })),
+                                    );
+                                    Some((Ok(sse_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                 }
                             }
                         }
@@ -218,18 +218,13 @@ pub(super) fn runtime_coordination_sse_error_frame(
 
 fn sse_error_frame_for_endpoint(
     endpoint: EndpointKind,
-    message: &str,
-    error_type: &str,
-    code: &str,
-    category: &str,
-    details: Value,
+    error: &GatewayError,
     responses_sequence_number: u64,
-    retry_after_seconds: Option<u64>,
 ) -> Bytes {
-    let message = decorate_retry_hint(&client_error_message(code, message), retry_after_seconds);
+    let message = decorate_retry_hint(&client_error_message(error.error_code(), error.message()), error.retry_after_seconds());
     match endpoint {
         EndpointKind::ChatCompletions => {
-            sse_error_frame(&message, error_type, code, category, details, retry_after_seconds)
+            sse_error_frame(&message, error.error_type(), error.error_code(), error.error_category(), error.safe_details(), error.retry_after_seconds())
         }
         EndpointKind::Responses => {
             let failed = json!({
@@ -242,9 +237,9 @@ fn sse_error_frame_for_endpoint(
                     "background": false,
                     "completed_at": Value::Null,
                     "error": {
-                        "code": code,
+                        "code": error.error_code(),
                         "message": message,
-                        "retry_after_seconds": retry_after_seconds,
+                        "retry_after_seconds": error.retry_after_seconds(),
                     },
                     "incomplete_details": Value::Null,
                     "instructions": Value::Null,
@@ -271,18 +266,18 @@ fn sse_error_frame_for_endpoint(
                 },
                 "sequence_number": responses_sequence_number,
             });
-            let error = json!({
+            let error_event = json!({
                 "type": "error",
-                "code": code,
+                "code": error.error_code(),
                 "message": message,
                 "param": Value::Null,
                 "sequence_number": responses_sequence_number.saturating_add(1),
-                "category": category,
-                "details": details,
-                "retry_after_seconds": retry_after_seconds,
+                "category": error.error_category(),
+                "details": error.safe_details(),
+                "retry_after_seconds": error.retry_after_seconds(),
             });
             Bytes::from(format!(
-                "event: response.failed\ndata: {failed}\n\nevent: error\ndata: {error}\n\ndata: [DONE]\n\n"
+                "event: response.failed\ndata: {failed}\n\nevent: error\ndata: {error_event}\n\ndata: [DONE]\n\n"
             ))
         }
     }
@@ -296,16 +291,7 @@ fn sse_gateway_error_frame_for_endpoint(
     if endpoint == EndpointKind::ChatCompletions {
         return sse_gateway_error_frame(error);
     }
-    sse_error_frame_for_endpoint(
-        endpoint,
-        error.message(),
-        error.error_type(),
-        error.error_code(),
-        error.error_category(),
-        error.safe_details(),
-        responses_sequence_number,
-        error.retry_after_seconds(),
-    )
+    sse_error_frame_for_endpoint(endpoint, error, responses_sequence_number)
 }
 
 /// Handle a streaming request by spawning `process_gateway_request` in the
@@ -2396,16 +2382,16 @@ mod diagnostic_tests {
 
     #[test]
     fn raw_chat_sse_error_message_adds_the_matching_prefix_once() {
-        let frame = sse_error_frame_for_endpoint(
-            EndpointKind::ChatCompletions,
+        let error = GatewayError::classified(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "request processing channel closed",
-            "upstream_error",
+            "api_error",
             "stream_processing_error",
             "stream_processing_error",
-            json!({"scope": "gateway"}),
-            0,
             None,
+            Some(json!({"scope": "gateway"})),
         );
+        let frame = sse_error_frame_for_endpoint(EndpointKind::ChatCompletions, &error, 0);
         let frame = std::str::from_utf8(&frame).expect("Chat SSE frame");
 
         assert!(frame.contains(
@@ -2417,16 +2403,16 @@ mod diagnostic_tests {
     #[test]
     fn sse_error_frame_appends_retry_hint_and_structured_field_on_both_endpoints() {
         for endpoint in [EndpointKind::ChatCompletions, EndpointKind::Responses] {
-            let frame = sse_error_frame_for_endpoint(
-                endpoint,
+            let error = GatewayError::classified(
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
                 "downstream daily token quota exceeded",
                 "invalid_request_error",
                 "gateway_daily_token_quota_exceeded",
                 "gateway_quota_exceeded",
-                json!({"limit": 1000, "used": 1001, "retry_after_seconds": 3600}),
-                7,
                 Some(3600),
+                Some(json!({"limit": 1000, "used": 1001})),
             );
+            let frame = sse_error_frame_for_endpoint(endpoint, &error, 7);
             let frame = std::str::from_utf8(&frame).expect("frame must be UTF-8");
             assert!(
                 frame.contains(
@@ -2439,8 +2425,8 @@ mod diagnostic_tests {
                 "structured retry field missing in frame: {frame}"
             );
             assert!(
-                frame.contains("\"details\":{\"limit\":1000,\"retry_after_seconds\":3600,\"used\":1001}"),
-                "details must keep its own retry_after_seconds: {frame}"
+                frame.contains("\"details\":{\"limit\":1000,\"used\":1001}"),
+                "details must not carry retry_after_seconds (it is a top-level field): {frame}"
             );
         }
     }
@@ -2484,6 +2470,66 @@ mod diagnostic_tests {
             frame.contains("\"retry_after_seconds\":3600"),
             "quota SSE frame must carry the structured field: {frame}"
         );
+    }
+
+    // Contract test: wire-format invariance after refactoring sse_error_frame_for_endpoint
+    // to accept &GatewayError.  Verifies the Responses endpoint frame carries the same
+    // structured fields that a downstream client (or SDK) would parse.
+    #[test]
+    fn sse_error_frame_responses_wire_format_is_stable() {
+        let error = GatewayError::classified(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "request processing channel closed",
+            "api_error",
+            "stream_processing_error",
+            "stream_processing_error",
+            None,
+            Some(json!({"scope": "gateway"})),
+        );
+        let frame = sse_error_frame_for_endpoint(EndpointKind::Responses, &error, 1);
+        let text = std::str::from_utf8(&frame).expect("frame is UTF-8");
+
+        // Must start with the response.failed event
+        assert!(text.starts_with("event: response.failed\ndata: {"), "Responses frame must begin with response.failed: {text}");
+
+        // Must contain error object with expected fields
+        assert!(text.contains("\"type\":\"response.failed\""));
+        assert!(text.contains("\"status\":\"failed\""));
+        assert!(text.contains("\"error\":"));
+        assert!(text.contains("\"code\":\"stream_processing_error\""));
+        assert!(text.contains("\"message\":\"[stream_processing_error] request processing channel closed\""));
+
+        // Must contain the error event with category and details
+        assert!(text.contains("event: error"));
+        assert!(text.contains("\"category\":\"stream_processing_error\""));
+        assert!(text.contains("\"details\":{\"scope\":\"gateway\"}"));
+
+        // Must end with [DONE] sentinel
+        assert!(text.contains("[DONE]"));
+    }
+
+    #[test]
+    fn sse_error_frame_responses_carries_retry_after_in_both_events() {
+        let error = GatewayError::classified(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "downstream daily token quota exceeded",
+            "invalid_request_error",
+            "gateway_daily_token_quota_exceeded",
+            "gateway_quota_exceeded",
+            Some(3600),
+            Some(json!({"limit": 1000, "used": 1001})),
+        );
+        let frame = sse_error_frame_for_endpoint(EndpointKind::Responses, &error, 7);
+        let text = std::str::from_utf8(&frame).expect("frame is UTF-8");
+
+        // retry_after_seconds must appear in both the response.failed error block and the error event
+        assert!(text.contains("\"retry_after_seconds\":3600"), "retry hint missing: {text}");
+
+        // Retry hint text must be appended to message
+        assert!(text.contains("please try again in 3600s"));
+
+        // details carries the structured context; retry_after_seconds is a top-level field on both events
+        assert!(text.contains("\"details\":{\"limit\":1000,\"used\":1001}"), "details must carry structured context: {text}");
     }
 
     #[derive(Clone, Default)]
