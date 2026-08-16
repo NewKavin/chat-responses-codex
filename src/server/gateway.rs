@@ -4714,35 +4714,9 @@ async fn process_gateway_request_inner(
         }
     }
 
-    let responses_upstream_available = endpoint == EndpointKind::Responses
-        && routing_snapshot.upstreams.iter().any(|upstream| {
-            upstream.active
-                && upstream.supports_protocol(UpstreamProtocol::Responses)
-                && upstream.supports_model_with(&normalized_model, case_insensitive)
-        });
-    let chat_only_responses_fallback =
-        endpoint == EndpointKind::Responses && !responses_upstream_available;
     let requires_responses_tooling =
         endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
-    let fallback_to_chat = requires_responses_tooling && chat_only_responses_fallback;
     let client_family = infer_client_family(user_agent.as_deref(), endpoint);
-    if requires_responses_tooling {
-        tracing::info!(
-            request_id = %request_id,
-            downstream_key_id = %downstream.id,
-            path = %request_path,
-            original_model = %model,
-            normalized_model = %&normalized_model,
-            stream = request_stream,
-            routing_fallback = fallback_to_chat,
-            routing_fallback_reason = if fallback_to_chat {
-                "no_responses_upstream_supports_model"
-            } else {
-                "responses_upstream_available"
-            },
-            "evaluated Responses routing strategy"
-        );
-    }
 
     let loaded_exact_continuation = response_history_context
         .as_ref()
@@ -4823,6 +4797,50 @@ async fn process_gateway_request_inner(
         inference_strength.as_deref(),
         case_insensitive,
     );
+    let eligible_responses_routes = route_capability_cache
+        .iter()
+        .filter(|((protocol, _, _), route)| {
+            *protocol == WireProtocol::Responses && route.eligible
+        })
+        .count();
+    let eligible_chat_routes = route_capability_cache
+        .iter()
+        .filter(|((protocol, _, _), route)| {
+            *protocol == WireProtocol::ChatCompletions && route.eligible
+        })
+        .count();
+    let responses_strategy = responses_route_strategy(
+        requires_responses_tooling,
+        eligible_responses_routes,
+        eligible_chat_routes,
+    );
+    let fallback_to_chat = matches!(responses_strategy, ResponsesRouteStrategy::ChatFallback);
+    let chat_only_responses_fallback = endpoint == EndpointKind::Responses
+        && eligible_responses_routes == 0
+        && eligible_chat_routes > 0;
+    if requires_responses_tooling {
+        let routing_reason = match responses_strategy {
+            ResponsesRouteStrategy::Responses => "eligible_responses_route_available",
+            ResponsesRouteStrategy::ChatFallback => {
+                "responses_routes_ineligible_fallback_to_chat"
+            }
+            ResponsesRouteStrategy::Unavailable => "no_eligible_responses_or_chat_route",
+            ResponsesRouteStrategy::ProtocolAgnostic => unreachable!(),
+        };
+        tracing::info!(
+            request_id = %request_id,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %&normalized_model,
+            stream = request_stream,
+            routing_fallback = fallback_to_chat,
+            routing_fallback_reason = routing_reason,
+            eligible_responses_routes,
+            eligible_chat_routes,
+            "evaluated Responses routing strategy"
+        );
+    }
     let route_capability =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
             route_capability_cache.get(&(
@@ -5295,17 +5313,16 @@ async fn process_gateway_request_inner(
     } else {
         match &claude_replay_route {
             ClaudeThinkingReplayRoute::Pinned { protocol, .. } => vec![*protocol],
-            ClaudeThinkingReplayRoute::NoReplay => {
-                if requires_responses_tooling {
-                    if fallback_to_chat {
-                        vec![UpstreamProtocol::ChatCompletions]
-                    } else {
-                        vec![UpstreamProtocol::Responses]
-                    }
-                } else {
+            ClaudeThinkingReplayRoute::NoReplay => match responses_strategy {
+                ResponsesRouteStrategy::ProtocolAgnostic => {
                     vec![endpoint.native_protocol(), endpoint.opposite()]
                 }
-            }
+                ResponsesRouteStrategy::Responses => vec![UpstreamProtocol::Responses],
+                ResponsesRouteStrategy::ChatFallback => {
+                    vec![UpstreamProtocol::ChatCompletions]
+                }
+                ResponsesRouteStrategy::Unavailable => Vec::new(),
+            },
             ClaudeThinkingReplayRoute::InvalidOrUnavailable => unreachable!(),
         }
     };

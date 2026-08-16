@@ -2819,7 +2819,14 @@ pub(super) fn no_routable_model_error(
     visible_models.sort();
     visible_models.dedup();
 
-    let message = if visible_models.is_empty() {
+    let model_is_configured = visible_models
+        .iter()
+        .any(|visible_model| visible_model.eq_ignore_ascii_case(model));
+    let message = if model_is_configured {
+        format!(
+            "model \"{model}\" is configured but no exact route is eligible; check protocol, key-model ownership, capability profile, and route configuration"
+        )
+    } else if visible_models.is_empty() {
         format!(
             "model \"{model}\" is not configured on any active upstream; check supported_models"
         )
