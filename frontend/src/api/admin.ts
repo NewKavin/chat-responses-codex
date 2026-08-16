@@ -16,6 +16,7 @@ import type {
   LoginResponse,
   LogsResponse,
   ModelProbeResponse,
+  ModelMappingStatusesResponse,
   CapabilityProbeBatchStatus,
   ProbeAllCapabilitiesRequest,
   ProbeAllCapabilitiesResponse,
@@ -26,6 +27,8 @@ import type {
   RuntimeSettingsUpdateResponse,
   TroubleshootingRunRequest,
   TroubleshootingRunResponse,
+  UpdateReasoningOverridesRequest,
+  UpdateReasoningOverridesResponse,
   UpdateRuntimeSettingsRequest,
   ApiKeyModelConfig,
   KeyModelDiscoveryResult,
@@ -417,6 +420,11 @@ export const adminApi = {
       : adminHttp.get<CapabilityDiscoveryResponse>('/admin/capabilities/discovery', {
         timeout: timeoutMs
       }),
+  updateReasoningOverrides: (data: UpdateReasoningOverridesRequest) =>
+    adminHttp.put<UpdateReasoningOverridesResponse>(
+      '/admin/capabilities/reasoning-overrides',
+      data
+    ),
 
   // Runtime settings
   getRuntimeSettings: () =>
@@ -433,5 +441,7 @@ export const adminApi = {
   getModelAliases: () =>
     adminHttp.get<{ model_aliases: ModelAliasRule[] }>('/admin/model-aliases'),
   updateModelAliases: (data: { model_aliases: ModelAliasRule[] }) =>
-    adminHttp.put<{ success: boolean }>('/admin/model-aliases', data)
+    adminHttp.put<{ success: boolean }>('/admin/model-aliases', data),
+  getModelMappingStatuses: () =>
+    adminHttp.get<ModelMappingStatusesResponse>('/admin/model-mappings/status')
 }

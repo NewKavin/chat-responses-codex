@@ -684,6 +684,8 @@ export interface CapabilityRouteDiscoverySummary {
   protocol: CapabilityWireProtocol
   outcome: CapabilityRouteProbeOutcome
   accepted_reasoning_levels: string[]
+  reasoning_source: CapabilitySource
+  managed_reasoning_override: boolean
   http_status: number | null
   operational_code: string | null
   last_attempt_at: number | null
@@ -698,6 +700,50 @@ export interface CapabilityModelDiscoverySummary {
 
 export interface CapabilityDiscoveryResponse {
   models: CapabilityModelDiscoverySummary[]
+}
+
+export type ReasoningEffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ReasoningOverrideScope = 'route' | 'model_routes'
+
+export interface UpdateReasoningOverridesRequest {
+  upstream_id: string
+  route_id: string
+  exposed_model_slug: string
+  runtime_model_slug: string
+  protocol: CapabilityWireProtocol
+  levels: ReasoningEffortLevel[]
+  scope: ReasoningOverrideScope
+}
+
+export interface UpdateReasoningOverridesResponse {
+  ok: true
+  configuration_revision: number
+  affected_route_count: number
+  affected_route_ids: string[]
+}
+
+export type ModelMappingStatus = 'effective' | 'partial' | 'inactive'
+export type ModelMappingStatusReason =
+  | 'eligible_routes_available'
+  | 'some_routes_ineligible'
+  | 'upstream_inactive'
+  | 'upstream_model_unavailable'
+  | 'no_key_for_upstream_model'
+  | 'no_eligible_routes'
+
+export interface ModelMappingStatusSummary {
+  upstream_id: string
+  upstream_model: string
+  downstream_model: string
+  status: ModelMappingStatus
+  reason: ModelMappingStatusReason
+  eligible_routes: number
+  configured_routes: number
+  unverified_routes: number
+}
+
+export interface ModelMappingStatusesResponse {
+  mappings: ModelMappingStatusSummary[]
 }
 
 export interface CapabilityConfigurationDocument {
