@@ -1,10 +1,13 @@
 use chat_responses_codex::capabilities::{
-    Capability, CapabilityHintKey, DialectProfileKey, RuntimeCapabilityHints, WireProtocol,
+    Capability, CapabilityHintKey, DialectProfileKey, ProbeReason, RuntimeCapabilityHints,
+    UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
 use std::collections::BTreeSet;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
 
 fn profile() -> DialectProfileKey {
     DialectProfileKey::for_key("up-1", "fingerprint-a", "glm-5.2", WireProtocol::Responses)
@@ -132,4 +135,112 @@ async fn upstream_configuration_mutation_reconciles_runtime_hints() {
     assert!(!state
         .runtime_capability_hints_snapshot()
         .blocks_protocol(&profile, &configuration_fingerprint));
+}
+
+#[tokio::test]
+async fn patch_queues_configuration_changed_probe_for_new_protocol_route() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let upstream = UpstreamConfig {
+        id: "up-patch-probe".into(),
+        name: "patch probe".into(),
+        base_url: "https://patch-probe.invalid".into(),
+        api_key: "key-a".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["opaque".into()],
+        active: true,
+        ..Default::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..Default::default()
+        },
+    );
+    let (sender, mut receiver) = mpsc::channel(4);
+    state.set_capability_probe_sender(sender);
+
+    state
+        .update_upstream_by_id(
+            &upstream.id,
+            serde_json::json!({"protocols": ["chat_completions", "responses"]}),
+        )
+        .await
+        .unwrap();
+
+    let batch = timeout(Duration::from_millis(100), receiver.recv())
+        .await
+        .expect("protocol PATCH should queue capability probes")
+        .unwrap();
+    assert!(batch.jobs().iter().any(|job| {
+        job.key.upstream_id == upstream.id
+            && job.key.runtime_model_slug == "opaque"
+            && job.key.protocol == WireProtocol::Responses
+            && job.reason == ProbeReason::ConfigurationChanged
+    }));
+}
+
+#[tokio::test]
+async fn patch_queues_no_probe_when_route_fingerprint_is_unchanged() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let upstream = UpstreamConfig {
+        id: "up-patch-stable".into(),
+        name: "patch stable".into(),
+        base_url: "https://patch-stable.invalid".into(),
+        api_key: "key-a".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["opaque".into()],
+        active: true,
+        ..Default::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..Default::default()
+        },
+    );
+    let key_fingerprint =
+        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    ));
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            &key_fingerprint,
+            "opaque",
+            "opaque",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile.last_success_at = Some(chat_responses_codex::state::unix_seconds());
+    state.upsert_dialect_profile(profile).await.unwrap();
+    let (sender, mut receiver) = mpsc::channel(4);
+    state.set_capability_probe_sender(sender);
+
+    state
+        .update_upstream_by_id(
+            &upstream.id,
+            serde_json::json!({"remark": "display-only change"}),
+        )
+        .await
+        .unwrap();
+
+    assert!(timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .is_err());
 }

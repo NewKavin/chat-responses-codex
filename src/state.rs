@@ -2942,6 +2942,32 @@ impl AppState {
         let _persist_guard = self.config_persist_lock.lock().await;
         let mut state = self.inner.lock().await;
         let mut candidate_state = state.clone();
+        for upstream in candidate_state.upstreams.iter() {
+            if let Err(validation_error) =
+                upstream.validate_model_mappings_against_aliases(&registry)
+            {
+                if let Some((mapping, canonical)) =
+                    upstream.model_mappings.iter().find_map(|mapping| {
+                        registry
+                            .resolve_alias(&mapping.downstream_model)
+                            .map(|canonical| (mapping, canonical))
+                    })
+                {
+                    return Err(format!(
+                        "upstream '{}' ({}) model mapping '{}' -> '{}' conflicts with canonical alias rule '{}': {validation_error}",
+                        upstream.name,
+                        upstream.id,
+                        mapping.upstream_model,
+                        mapping.downstream_model,
+                        canonical,
+                    ));
+                }
+                return Err(format!(
+                    "upstream '{}' ({}) has an invalid model mapping: {validation_error}",
+                    upstream.name, upstream.id,
+                ));
+            }
+        }
         candidate_state.model_aliases = rules;
 
         self.config_store

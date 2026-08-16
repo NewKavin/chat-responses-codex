@@ -5,7 +5,9 @@ use chat_responses_codex::state::{
     AppConfig, AppState, FreekeySyncItem, ManualProbeBatchCandidateState, ManualProbeBatchError,
     PersistedState, ProbeJobExecution,
 };
-use chat_responses_codex::state::{DownstreamConfig, UpstreamConfig};
+use chat_responses_codex::state::{
+    model_identity::ModelAliasRule, DownstreamConfig, UpstreamConfig, UpstreamModelMapping,
+};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -41,6 +43,62 @@ fn blocker_probe_batch() -> ProbeJobBatch {
         },
         plan_configuration: default_plan_configuration(),
     })
+}
+
+#[tokio::test]
+async fn alias_update_rejects_rules_that_capture_existing_model_mappings() {
+    let dir = tempdir().unwrap();
+    let old_aliases = vec![ModelAliasRule {
+        canonical: "legacy-canonical".into(),
+        aliases: vec!["legacy-alias".into()],
+    }];
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![UpstreamConfig {
+                id: "up-mapped".into(),
+                name: "Mapped upstream".into(),
+                base_url: "https://mapped.invalid".into(),
+                api_key: "secret".into(),
+                supported_models: vec!["gpt-4".into()],
+                model_mappings: vec![UpstreamModelMapping {
+                    upstream_model: "gpt-4".into(),
+                    downstream_model: "gpt-4-premium".into(),
+                }],
+                active: true,
+                ..Default::default()
+            }]),
+            model_aliases: old_aliases.clone(),
+            ..Default::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let error = state
+        .update_model_aliases(vec![ModelAliasRule {
+            canonical: "gpt-4-enterprise".into(),
+            aliases: vec!["gpt-4-premium".into()],
+        }])
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("Mapped upstream"), "unexpected error: {error}");
+    assert!(error.contains("gpt-4"), "unexpected error: {error}");
+    assert!(error.contains("gpt-4-premium"), "unexpected error: {error}");
+    assert!(error.contains("gpt-4-enterprise"), "unexpected error: {error}");
+    assert_eq!(state.snapshot().await.model_aliases, old_aliases);
+    assert_eq!(
+        state.model_alias_registry().resolve_alias("legacy-alias"),
+        Some("legacy-canonical")
+    );
+
+    state
+        .update_model_aliases(vec![ModelAliasRule {
+            canonical: "gpt-4-enterprise".into(),
+            aliases: vec!["gpt-4-enterprise-preview".into()],
+        }])
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
