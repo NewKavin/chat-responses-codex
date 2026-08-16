@@ -1,10 +1,11 @@
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey, ProbeMode,
-    ProbeProfileOutcome, RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile,
-    WireProtocol,
+    Capability, CapabilityConfiguration, CapabilityResolver, CapabilitySource, DialectProfileKey,
+    ProbeMode, ProbeProfileOutcome, RequestedFeatures, ResolutionInput, RouteIdentity,
+    UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
+use super::reasoning_overrides::managed_reasoning_override_id;
 use axum::extract::{Path, Query};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,6 +67,8 @@ pub(super) struct CapabilityRouteDiscoverySummary {
     protocol: WireProtocol,
     outcome: &'static str,
     accepted_reasoning_levels: Vec<String>,
+    reasoning_source: CapabilitySource,
+    managed_reasoning_override: bool,
     http_status: Option<u16>,
     operational_code: Option<String>,
     last_attempt_at: Option<u64>,
@@ -737,7 +740,7 @@ pub(super) fn capability_discovery_summaries(
                             )
                         })
                     });
-                    let mut accepted_reasoning_levels = resolve_route_capabilities_with_snapshot(
+                    let resolved = resolve_route_capabilities_with_snapshot(
                         &snapshot,
                         upstream,
                         &key_fingerprint,
@@ -745,26 +748,52 @@ pub(super) fn capability_discovery_summaries(
                         &runtime_model_slug,
                         protocol,
                         &RequestedFeatures::default(),
-                    )
-                    .filter(|resolved| resolved.supports(Capability::ReasoningOutput))
-                    .map(|resolved| resolved.effort_map.into_keys().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                    );
+                    let reasoning_source = resolved
+                        .as_ref()
+                        .and_then(|resolved| resolved.field_sources.get("effort_map"))
+                        .copied()
+                        .unwrap_or(CapabilitySource::Baseline);
+                    let mut accepted_reasoning_levels = resolved
+                        .filter(|resolved| resolved.supports(Capability::ReasoningOutput))
+                        .map(|resolved| resolved.effort_map.into_keys().collect::<Vec<_>>())
+                        .unwrap_or_default();
                     sort_canonical_reasoning_levels(&mut accepted_reasoning_levels);
+
+                    let route_id = anonymous_route_id(
+                        &upstream.id,
+                        &key_fingerprint,
+                        &runtime_model_slug,
+                        wire_protocol,
+                    );
+                    let mut route = RouteIdentity {
+                        upstream_id: upstream.id.clone(),
+                        key_fingerprint: key_fingerprint.clone(),
+                        exposed_model_slug: exposed_model_slug.clone(),
+                        runtime_model_slug: runtime_model_slug.clone(),
+                        protocol: wire_protocol,
+                        tags: Default::default(),
+                    };
+                    snapshot.configuration.apply_route_tags(&mut route);
+                    let managed_reasoning_override = snapshot
+                        .configuration
+                        .route_overrides_for(&route)
+                        .iter()
+                        .any(|route_override| {
+                            route_override.id == managed_reasoning_override_id(&route_id)
+                        });
 
                     let model = models.entry(exposed_model_slug.clone()).or_default();
                     model.0.extend(accepted_reasoning_levels.iter().cloned());
                     model.1.push(CapabilityRouteDiscoverySummary {
                         upstream_id: upstream.id.clone(),
-                        route_id: anonymous_route_id(
-                            &upstream.id,
-                            &key_fingerprint,
-                            &runtime_model_slug,
-                            wire_protocol,
-                        ),
+                        route_id,
                         runtime_model_slug: runtime_model_slug.clone(),
                         protocol: wire_protocol,
                         outcome: capability_probe_outcome_label(profile),
                         accepted_reasoning_levels,
+                        reasoning_source,
+                        managed_reasoning_override,
                         http_status: profile.and_then(|profile| {
                             profile
                                 .http_status

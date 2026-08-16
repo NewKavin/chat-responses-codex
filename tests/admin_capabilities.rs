@@ -158,6 +158,22 @@ impl AdminCapabilityFixture {
             .unwrap()
     }
 
+    async fn put_json(&self, path: &str, body: Value) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     async fn export(&self) -> Value {
         response_json(self.get("/api/admin/capabilities/export").await).await
     }
@@ -807,6 +823,224 @@ async fn capability_discovery_unions_successful_routes_and_keeps_failures() {
             .to_string()
             .contains(&upstream_key_fingerprint(&upstream.id, api_key)));
     }
+}
+
+#[tokio::test]
+async fn admin_reasoning_override_upserts_clears_and_reports_effective_source() {
+    let fixture = AdminCapabilityFixture::new().await;
+    let key_fingerprint = upstream_key_fingerprint("up-1", "upstream-secret");
+    let route_id = anonymous_route_id(
+        "up-1",
+        &key_fingerprint,
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+    let before = response_json(fixture.get("/api/admin/capabilities/discovery").await).await;
+    let before_outcome = before["models"][0]["routes"][0]["outcome"].clone();
+
+    let updated = fixture
+        .put_json(
+            "/api/admin/capabilities/reasoning-overrides",
+            json!({
+                "upstream_id": "up-1",
+                "route_id": route_id,
+                "exposed_model_slug": "opaque",
+                "runtime_model_slug": "opaque",
+                "protocol": "chat_completions",
+                "levels": ["high", "low", "high"],
+                "scope": "route"
+            }),
+        )
+        .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated_body = response_json(updated).await;
+    assert_eq!(updated_body["configuration_revision"], 1);
+    assert_eq!(updated_body["affected_route_count"], 1);
+    assert_eq!(updated_body["affected_route_ids"], json!([route_id]));
+    assert!(!updated_body.to_string().contains(&key_fingerprint));
+
+    let exported = fixture.export().await;
+    let managed = &exported["route_overrides"][0];
+    assert_eq!(managed["id"], format!("operator-reasoning-{route_id}"));
+    assert_eq!(managed["reasoning_control_field"], "reasoning_effort");
+    assert_eq!(managed["effort_map"], json!({"high": "high", "low": "low"}));
+    assert_eq!(managed["capabilities"]["reasoning_output"], "supported");
+
+    let discovery = response_json(fixture.get("/api/admin/capabilities/discovery").await).await;
+    let route = &discovery["models"][0]["routes"][0];
+    assert_eq!(route["accepted_reasoning_levels"], json!(["low", "high"]));
+    assert_eq!(route["reasoning_source"], "override");
+    assert_eq!(route["managed_reasoning_override"], true);
+    assert_eq!(route["outcome"], before_outcome);
+    assert!(!discovery.to_string().contains("key_fingerprint"));
+    assert!(!discovery.to_string().contains(&key_fingerprint));
+
+    let cleared = fixture
+        .put_json(
+            "/api/admin/capabilities/reasoning-overrides",
+            json!({
+                "upstream_id": "up-1",
+                "route_id": route_id,
+                "exposed_model_slug": "opaque",
+                "runtime_model_slug": "opaque",
+                "protocol": "chat_completions",
+                "levels": [],
+                "scope": "route"
+            }),
+        )
+        .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(response_json(cleared).await["configuration_revision"], 2);
+    assert!(fixture.export().await["route_overrides"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let discovery = response_json(fixture.get("/api/admin/capabilities/discovery").await).await;
+    let route = &discovery["models"][0]["routes"][0];
+    assert_eq!(route["reasoning_source"], "baseline");
+    assert_eq!(route["managed_reasoning_override"], false);
+}
+
+#[tokio::test]
+async fn admin_reasoning_override_rejects_invalid_levels_and_stale_routes_atomically() {
+    let fixture = AdminCapabilityFixture::new().await;
+    let key_fingerprint = upstream_key_fingerprint("up-1", "upstream-secret");
+    let route_id = anonymous_route_id(
+        "up-1",
+        &key_fingerprint,
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+    let payload = |route_id: &str, runtime_model_slug: &str, levels: Value| {
+        json!({
+            "upstream_id": "up-1",
+            "route_id": route_id,
+            "exposed_model_slug": "opaque",
+            "runtime_model_slug": runtime_model_slug,
+            "protocol": "chat_completions",
+            "levels": levels,
+            "scope": "route"
+        })
+    };
+
+    let invalid_level = fixture
+        .put_json(
+            "/api/admin/capabilities/reasoning-overrides",
+            payload(&route_id, "opaque", json!(["ultra"])),
+        )
+        .await;
+    assert_eq!(invalid_level.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(invalid_level).await["error"]["code"],
+        "capability_reasoning_override_invalid_level"
+    );
+
+    let stale_route = fixture
+        .put_json(
+            "/api/admin/capabilities/reasoning-overrides",
+            payload("route_stale", "opaque", json!(["low"])),
+        )
+        .await;
+    assert_eq!(stale_route.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(stale_route).await["error"]["code"],
+        "capability_reasoning_override_invalid_route"
+    );
+
+    let mismatched_model = fixture
+        .put_json(
+            "/api/admin/capabilities/reasoning-overrides",
+            payload(&route_id, "other-model", json!(["low"])),
+        )
+        .await;
+    assert_eq!(mismatched_model.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(mismatched_model).await["error"]["code"],
+        "capability_reasoning_override_invalid_route"
+    );
+
+    let exported = fixture.export().await;
+    assert_eq!(exported["revision"], 0);
+    assert!(exported["route_overrides"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn admin_reasoning_override_applies_to_all_current_model_routes_once() {
+    let fixture = AdminCapabilityFixture::new().await;
+    let mut first = fixture.state.upstreams().await.into_iter().next().unwrap();
+    first.api_key = "key-a".into();
+    first.api_keys = vec!["key-b".into()];
+    first.protocols = vec![
+        chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        chat_responses_codex::routing::UpstreamProtocol::Responses,
+    ];
+    fixture
+        .state
+        .update_upstream("up-1", first.clone())
+        .await
+        .unwrap();
+    fixture
+        .state
+        .add_upstream(UpstreamConfig {
+            id: "up-2".into(),
+            name: "Secondary".into(),
+            base_url: "https://secondary.invalid".into(),
+            api_key: "key-c".into(),
+            supported_models: vec!["opaque".into()],
+            active: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let selected_route_id = anonymous_route_id(
+        "up-1",
+        &upstream_key_fingerprint("up-1", "key-a"),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+
+    let updated = fixture
+        .put_json(
+            "/api/admin/capabilities/reasoning-overrides",
+            json!({
+                "upstream_id": "up-1",
+                "route_id": selected_route_id,
+                "exposed_model_slug": "opaque",
+                "runtime_model_slug": "opaque",
+                "protocol": "chat_completions",
+                "levels": ["medium", "max"],
+                "scope": "model_routes"
+            }),
+        )
+        .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let body = response_json(updated).await;
+    assert_eq!(body["configuration_revision"], 1);
+    assert_eq!(body["affected_route_count"], 5);
+    let affected = body["affected_route_ids"].as_array().unwrap();
+    assert_eq!(affected.len(), 5);
+    assert_eq!(
+        affected
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        5
+    );
+    assert!(!body.to_string().contains("key-a"));
+    assert!(!body.to_string().contains("key-b"));
+    assert!(!body.to_string().contains("key-c"));
+
+    let exported = fixture.export().await;
+    assert_eq!(exported["route_overrides"].as_array().unwrap().len(), 5);
+    assert!(exported["route_overrides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|route_override| route_override["effort_map"] == json!({
+            "max": "max",
+            "medium": "medium"
+        })));
 }
 
 #[tokio::test]

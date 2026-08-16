@@ -61,6 +61,7 @@ pub(crate) mod compatibility_semantics;
 mod context;
 mod dialect_retry;
 mod errors;
+mod reasoning_overrides;
 mod responses_fallback;
 mod route_attempts;
 mod route_retry;
@@ -78,6 +79,7 @@ use claude::*;
 use compat::*;
 use context::*;
 use errors::*;
+use reasoning_overrides::*;
 use responses_fallback::*;
 use route_attempts::*;
 use route_retry::{RouteRetryBudget, RouteRetryPolicy, RouteRetryWait};
@@ -1999,6 +2001,12 @@ pub fn build_router(state: AppState) -> Router {
                 state.clone(),
                 admin_auth_middleware,
             )),
+        )
+        .route(
+            "/api/admin/capabilities/reasoning-overrides",
+            axum::routing::put(admin_update_reasoning_overrides).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
         )
         .route(
             "/api/admin/capabilities/resolved",

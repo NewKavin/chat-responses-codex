@@ -1,5 +1,7 @@
 use super::common::*;
+use chat_responses_codex::auth::generate_admin_token;
 use chat_responses_codex::capabilities::*;
+use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
 use chat_responses_codex::state::ApiKeyModelConfig;
 use serde_json::Value;
 
@@ -260,12 +262,16 @@ async fn stamp_current_profile(
 }
 
 async fn get_models(state: AppState, secret: &str, codex: bool) -> Value {
+    get_models_from_app(build_router(state), secret, codex).await
+}
+
+async fn get_models_from_app(app: Router, secret: &str, codex: bool) -> Value {
     let uri = if codex {
         "/v1/models?client_version=0.144.1"
     } else {
         "/v1/models"
     };
-    let response = build_router(state)
+    let response = app
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -734,6 +740,65 @@ async fn codex_catalog_uses_explicit_none_when_reasoning_control_is_unverified()
     );
     assert_eq!(model["default_reasoning_level"], "none");
     assert_eq!(model["supports_reasoning_summaries"], false);
+}
+
+#[tokio::test]
+async fn codex_catalog_hot_applies_admin_reasoning_override_without_rebuilding_router() {
+    let model = "arbitrary/manual-reasoning";
+    let upstream = catalog_upstream("manual-reasoning-route", &[model]);
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    let app = build_router(state);
+
+    let before = get_models_from_app(app.clone(), &secret, true).await;
+    assert_eq!(before["models"][0]["default_reasoning_level"], "none");
+
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let route_id = anonymous_route_id(
+        &upstream.id,
+        &key_fingerprint,
+        model,
+        WireProtocol::ChatCompletions,
+    );
+    let admin_token =
+        generate_admin_token("admin", &AppConfig::default().jwt_secret).expect("admin token");
+    let updated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/capabilities/reasoning-overrides")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "upstream_id": upstream.id,
+                        "route_id": route_id,
+                        "exposed_model_slug": model,
+                        "runtime_model_slug": model,
+                        "protocol": "chat_completions",
+                        "levels": ["low", "high"],
+                        "scope": "route"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+
+    let after = get_models_from_app(app, &secret, true).await;
+    assert_eq!(
+        after["models"][0]["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "Use low reasoning effort"},
+            {"effort": "high", "description": "Use high reasoning effort"}
+        ])
+    );
+    assert_eq!(after["models"][0]["default_reasoning_level"], "high");
 }
 
 #[tokio::test]
