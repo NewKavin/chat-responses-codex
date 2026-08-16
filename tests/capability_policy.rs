@@ -51,6 +51,93 @@ fn arbitrary_slug_uses_external_selector_without_recompilation() {
 }
 
 #[test]
+fn key_fingerprint_selector_matches_only_the_exact_route() {
+    let compiled = CapabilityConfiguration {
+        route_overrides: vec![RouteCapabilityOverride {
+            id: "key-a-reasoning".to_owned(),
+            selector: CapabilitySelector {
+                key_fingerprint: Some("key-a".to_owned()),
+                ..Default::default()
+            },
+            capabilities: [(Capability::ReasoningOutput, EvidenceState::Supported)].into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap();
+    let mut key_a = route("lab/runtime-model");
+    key_a.key_fingerprint = "key-a".to_owned();
+    let mut key_b = key_a.clone();
+    key_b.key_fingerprint = "key-b".to_owned();
+
+    assert_eq!(compiled.route_overrides_for(&key_a).len(), 1);
+    assert!(compiled.route_overrides_for(&key_b).is_empty());
+}
+
+#[test]
+fn exact_key_selector_ranks_after_a_generic_selector() {
+    let compiled = CapabilityConfiguration {
+        route_overrides: vec![
+            RouteCapabilityOverride {
+                id: "generic".to_owned(),
+                priority: 10,
+                token_limit_field: Some(TokenLimitField::MaxTokens),
+                ..Default::default()
+            },
+            RouteCapabilityOverride {
+                id: "exact-key".to_owned(),
+                priority: 10,
+                selector: CapabilitySelector {
+                    key_fingerprint: Some("key-a".to_owned()),
+                    ..Default::default()
+                },
+                token_limit_field: Some(TokenLimitField::MaxOutputTokens),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap();
+    let mut selected = route("lab/runtime-model");
+    selected.key_fingerprint = "key-a".to_owned();
+
+    assert_eq!(
+        compiled
+            .route_overrides_for(&selected)
+            .iter()
+            .map(|route_override| route_override.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["generic", "exact-key"]
+    );
+}
+
+#[test]
+fn different_exact_key_selectors_do_not_overlap() {
+    let override_for = |id: &str, key: &str, state| RouteCapabilityOverride {
+        id: id.to_owned(),
+        priority: 10,
+        selector: CapabilitySelector {
+            key_fingerprint: Some(key.to_owned()),
+            ..Default::default()
+        },
+        capabilities: [(Capability::ReasoningOutput, state)].into(),
+        ..Default::default()
+    };
+
+    CapabilityConfiguration {
+        route_overrides: vec![
+            override_for("key-a", "key-a", EvidenceState::Supported),
+            override_for("key-b", "key-b", EvidenceState::Rejected),
+        ],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap();
+}
+
+#[test]
 fn administrator_route_tags_feed_policy_selection() {
     let tag = "primary_vision".to_owned();
     let compiled = CapabilityConfiguration {
@@ -191,6 +278,97 @@ fn configuration_defaults_round_trip_and_reject_unknown_fields() {
     }))
     .unwrap_err();
     assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn legacy_route_overrides_default_new_reasoning_fields() {
+    let configuration: CapabilityConfiguration = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "route_overrides": [{
+            "id": "legacy-override",
+            "selector": { "upstream_id": "up-legacy" },
+            "capabilities": {}
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        configuration.route_overrides[0].selector.key_fingerprint,
+        None
+    );
+    assert_eq!(
+        configuration.route_overrides[0].reasoning_control_field,
+        None
+    );
+    assert!(configuration.route_overrides[0].effort_map.is_empty());
+    configuration.compile().unwrap();
+}
+
+#[test]
+fn reasoning_override_requires_field_and_effort_map_together() {
+    let field_without_map = CapabilityConfiguration {
+        route_overrides: vec![RouteCapabilityOverride {
+            id: "field-without-map".to_owned(),
+            reasoning_control_field: Some("reasoning_effort".to_owned()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap_err();
+    assert!(field_without_map
+        .to_string()
+        .contains("reasoning_control_field requires a non-empty effort_map"));
+
+    let map_without_field = CapabilityConfiguration {
+        route_overrides: vec![RouteCapabilityOverride {
+            id: "map-without-field".to_owned(),
+            effort_map: [("high".to_owned(), serde_json::json!("high"))].into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap_err();
+    assert!(map_without_field
+        .to_string()
+        .contains("effort_map requires reasoning_control_field"));
+}
+
+#[test]
+fn equal_rank_reasoning_override_conflicts_are_rejected() {
+    let override_for = |id: &str, field: &str, value: &str| RouteCapabilityOverride {
+        id: id.to_owned(),
+        priority: 10,
+        reasoning_control_field: Some(field.to_owned()),
+        effort_map: [("high".to_owned(), serde_json::json!(value))].into(),
+        ..Default::default()
+    };
+    let field_error = CapabilityConfiguration {
+        route_overrides: vec![
+            override_for("field-a", "reasoning_effort", "high"),
+            override_for("field-b", "thinking.effort", "high"),
+        ],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap_err();
+    assert!(field_error
+        .to_string()
+        .contains("ambiguous override field reasoning_control_field"));
+
+    let effort_error = CapabilityConfiguration {
+        route_overrides: vec![
+            override_for("effort-a", "reasoning_effort", "high"),
+            override_for("effort-b", "reasoning_effort", "maximum"),
+        ],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap_err();
+    assert!(effort_error
+        .to_string()
+        .contains("ambiguous override field effort_map.high"));
 }
 
 #[test]

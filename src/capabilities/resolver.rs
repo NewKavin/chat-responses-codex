@@ -140,14 +140,8 @@ impl CapabilityResolver {
         let (token_limit_field, token_limit_source) =
             resolve_token_limit_field(&input, preset.as_ref());
         let correction_rules = resolve_correction_rules(&input);
-        let (reasoning_control_field, effort_map) = resolve_effort_control(&input, preset.as_ref());
-        let effort_source = if effort_map.is_empty() {
-            CapabilitySource::Baseline
-        } else if uses_preset {
-            CapabilitySource::Policy
-        } else {
-            CapabilitySource::Probe
-        };
+        let (reasoning_control_field, effort_map, effort_source) =
+            resolve_effort_control(&input, preset.as_ref());
         let (request_extensions, request_extension_source) =
             resolve_extensions(&input, preset.as_ref());
 
@@ -351,40 +345,57 @@ fn resolve_reasoning_carrier(
 fn resolve_effort_control(
     input: &ResolutionInput<'_>,
     preset: Option<&ResolvedCapabilities>,
-) -> (Option<String>, BTreeMap<String, serde_json::Value>) {
-    let Some(profile) = input.profile else {
-        if let Some(preset) = preset {
-            return (
-                preset.reasoning_control_field.clone(),
-                preset.effort_map.clone(),
-            );
-        }
-        return (None, BTreeMap::new());
-    };
+) -> (
+    Option<String>,
+    BTreeMap<String, serde_json::Value>,
+    CapabilitySource,
+) {
+    let mut field = None;
+    let mut effort_map = BTreeMap::new();
+    let mut source = CapabilitySource::Baseline;
 
-    for (field, accepted_values) in &profile.reasoning_controls {
-        let filtered = input
-            .semantic
-            .effort_map
-            .iter()
-            .filter(|(_, upstream_value)| {
-                accepted_values
-                    .iter()
-                    .any(|accepted| accepted.as_str() == Some(upstream_value.as_str()))
-            })
-            .map(|(requested_value, upstream_value)| {
-                (
-                    requested_value.clone(),
-                    serde_json::Value::String(upstream_value.clone()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        if !filtered.is_empty() {
-            return (Some(field.clone()), filtered);
+    if let Some(profile) = input.profile {
+        for (profile_field, accepted_values) in &profile.reasoning_controls {
+            let filtered = input
+                .semantic
+                .effort_map
+                .iter()
+                .filter(|(_, upstream_value)| {
+                    accepted_values
+                        .iter()
+                        .any(|accepted| accepted.as_str() == Some(upstream_value.as_str()))
+                })
+                .map(|(requested_value, upstream_value)| {
+                    (
+                        requested_value.clone(),
+                        serde_json::Value::String(upstream_value.clone()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            if !filtered.is_empty() {
+                field = Some(profile_field.clone());
+                effort_map = filtered;
+                source = CapabilitySource::Probe;
+                break;
+            }
+        }
+    } else if let Some(preset) = preset {
+        field = preset.reasoning_control_field.clone();
+        effort_map = preset.effort_map.clone();
+        if !effort_map.is_empty() {
+            source = CapabilitySource::Policy;
         }
     }
 
-    (None, BTreeMap::new())
+    for route_override in input.route_overrides {
+        if let Some(override_field) = &route_override.reasoning_control_field {
+            field = Some(override_field.clone());
+            effort_map = route_override.effort_map.clone();
+            source = CapabilitySource::Override;
+        }
+    }
+
+    (field, effort_map, source)
 }
 
 fn resolve_extensions(
