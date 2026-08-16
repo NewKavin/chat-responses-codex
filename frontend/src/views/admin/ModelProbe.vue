@@ -226,7 +226,7 @@
                 inactive-text="全局"
               />
               <span class="capability-probe-results__scope-label">
-                {{ showOnlyCurrentBatch ? '仅显示本批次模型' : '全局 discovery' }}
+                {{ showCurrentBatchResults ? '仅显示本批次模型' : '全局 discovery' }}
               </span>
               <el-tag type="success" effect="plain">
                 {{ capabilityModelResults.filter(row => row.levels.length > 0).length }} 个模型已验证
@@ -262,7 +262,7 @@
             </div>
 
             <el-collapse
-              v-if="showOnlyCurrentBatch && globalCapabilityModelResults.length > capabilityModelResults.length"
+              v-if="showCurrentBatchResults && globalCapabilityModelResults.length > capabilityModelResults.length"
               class="capability-probe-global-discovery"
             >
               <el-collapse-item name="global-discovery">
@@ -316,7 +316,7 @@
                 <el-table-column label="协议" width="140">
                   <template #default="{ row }">{{ capabilityProtocolLabel(row.protocol) }}</template>
                 </el-table-column>
-                <el-table-column label="状态" width="130">
+                <el-table-column label="探测状态" width="130">
                   <template #default="{ row }">
                     <el-tag :type="routeStatusTagType(row)" effect="plain" size="small">
                       {{ routeStatusLabel(row) }}
@@ -326,7 +326,7 @@
                 <el-table-column label="HTTP" width="80" align="center">
                   <template #default="{ row }">{{ row.http_status ?? '-' }}</template>
                 </el-table-column>
-                <el-table-column label="已验证档位" min-width="180">
+                <el-table-column label="生效档位" min-width="180">
                   <template #default="{ row }">
                     <template v-if="row.accepted_reasoning_levels.length > 0">
                       <el-tag
@@ -340,6 +340,16 @@
                       </el-tag>
                     </template>
                     <span v-else class="capability-probe-results__none">无</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="来源" width="110" align="center">
+                  <template #default="{ row }">
+                    <div class="reasoning-source-cell">
+                      <el-tag effect="plain" size="small">
+                        {{ reasoningSourceLabel(row.reasoning_source) }}
+                      </el-tag>
+                      <span v-if="row.reasoning_source === 'override'">手工生效</span>
+                    </div>
                   </template>
                 </el-table-column>
                 <el-table-column label="诊断" min-width="170" show-overflow-tooltip>
@@ -357,6 +367,37 @@
                 <el-table-column label="下次重试" width="110">
                   <template #default="{ row }">{{ formatProbeRetry(row.next_probe_at) }}</template>
                 </el-table-column>
+                <el-table-column label="操作" width="92" align="center">
+                  <template #default="{ row }">
+                    <div class="reasoning-route-actions">
+                      <el-tooltip content="编辑生效档位" placement="top">
+                        <el-button
+                          text
+                          circle
+                          :icon="Pencil"
+                          aria-label="编辑生效档位"
+                          :disabled="savingReasoningOverride"
+                          @click="openReasoningOverrideEditor(row)"
+                        />
+                      </el-tooltip>
+                      <el-tooltip
+                        v-if="row.managed_reasoning_override"
+                        content="清除手工档位"
+                        placement="top"
+                      >
+                        <el-button
+                          text
+                          circle
+                          type="danger"
+                          :icon="RotateCcw"
+                          aria-label="清除手工档位"
+                          :disabled="savingReasoningOverride"
+                          @click="clearReasoningOverride(row, 'route')"
+                        />
+                      </el-tooltip>
+                    </div>
+                  </template>
+                </el-table-column>
               </el-table>
             </div>
           </section>
@@ -370,24 +411,109 @@
         </div>
       </el-tab-pane>
     </el-tabs>
+
+    <el-dialog
+      v-model="reasoningOverrideDialogVisible"
+      title="编辑思考档位"
+      width="520px"
+      style="max-width: calc(100vw - 32px)"
+      :close-on-click-modal="false"
+    >
+      <template v-if="editingReasoningRoute">
+        <dl class="reasoning-override-identity">
+          <div>
+            <dt>模型</dt>
+            <dd>{{ editingReasoningRoute.exposed_model_slug }}</dd>
+          </div>
+          <div>
+            <dt>上游</dt>
+            <dd>{{ editingReasoningRoute.upstream_id }}</dd>
+          </div>
+          <div>
+            <dt>协议</dt>
+            <dd>{{ capabilityProtocolLabel(editingReasoningRoute.protocol) }}</dd>
+          </div>
+          <div>
+            <dt>当前来源</dt>
+            <dd>{{ reasoningSourceLabel(editingReasoningRoute.reasoning_source) }}</dd>
+          </div>
+        </dl>
+
+        <el-form label-position="top">
+          <el-form-item label="应用范围">
+            <el-radio-group v-model="reasoningOverrideScope" size="small">
+              <el-radio-button value="route">当前精确路由</el-radio-button>
+              <el-radio-button value="model_routes">模型全部当前路由</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="生效档位">
+            <el-checkbox-group
+              v-model="selectedReasoningLevels"
+              class="reasoning-override-levels"
+            >
+              <el-checkbox
+                v-for="level in REASONING_EFFORT_LEVELS"
+                :key="level"
+                :value="level"
+              >
+                {{ level }}
+              </el-checkbox>
+            </el-checkbox-group>
+          </el-form-item>
+        </el-form>
+      </template>
+
+      <template #footer>
+        <div class="reasoning-override-footer">
+          <el-button
+            v-if="editingReasoningRoute?.managed_reasoning_override"
+            type="danger"
+            plain
+            :icon="RotateCcw"
+            :loading="savingReasoningOverride"
+            @click="clearReasoningOverride(editingReasoningRoute, reasoningOverrideScope)"
+          >
+            清除手工设置
+          </el-button>
+          <span class="reasoning-override-footer__spacer" />
+          <el-button
+            :disabled="savingReasoningOverride"
+            @click="reasoningOverrideDialogVisible = false"
+          >
+            取消
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="savingReasoningOverride"
+            :disabled="selectedReasoningLevels.length === 0"
+            @click="saveReasoningOverride"
+          >
+            保存并生效
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { BadgeCheck, Radar, RefreshCw } from '@lucide/vue'
+import { BadgeCheck, Pencil, Radar, RefreshCw, RotateCcw } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
 import type {
   CapabilityDiscoveryResponse,
   CapabilityProbeBatchStatus,
+  CapabilityRouteDiscoverySummary,
   CapabilityWireProtocol,
   ModelProbeResponse,
   ModelQualificationCategory,
   ModelQualificationLevel,
   ProbeAllCapabilitiesResponse,
-  QualifyModelsResponse
+  QualifyModelsResponse,
+  ReasoningEffortLevel,
+  ReasoningOverrideScope
 } from '@/types'
 import {
   CAPABILITY_PROBE_WAIT_TIMEOUT_MS,
@@ -402,11 +528,19 @@ import {
   routeStatusTagType
 } from '@/utils/capabilityDiscovery'
 import {
+  REASONING_EFFORT_LEVELS,
+  normalizeReasoningLevels,
+  reasoningSourceLabel
+} from '@/utils/reasoningOverrides'
+import {
   DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS,
   getModelProbeRefreshDelayMs
 } from '@/utils/modelProbePolling'
 
 type ProbeTab = 'status' | 'reasoning'
+type EditableReasoningRoute = CapabilityRouteDiscoverySummary & {
+  exposed_model_slug: string
+}
 
 const activeProbeTab = ref<ProbeTab>('status')
 const loading = ref(false)
@@ -438,6 +572,11 @@ const selectedProbeModels = ref<string[]>([])
 const loadingProbeModels = ref(false)
 const probeModelScopeLoadFailed = ref(false)
 const showOnlyCurrentBatch = ref(true)
+const reasoningOverrideDialogVisible = ref(false)
+const savingReasoningOverride = ref(false)
+const editingReasoningRoute = ref<EditableReasoningRoute | null>(null)
+const reasoningOverrideScope = ref<ReasoningOverrideScope>('route')
+const selectedReasoningLevels = ref<ReasoningEffortLevel[]>([])
 const capabilityProbeTooltip = computed(() => {
   if (probeModelScopeLoadFailed.value) return '模型范围加载失败，请重试'
   if (selectedProbeModels.value.length === 0) return '请先选择要探测的模型'
@@ -452,13 +591,16 @@ const capabilityProbeBatchReused = computed(() =>
 const capabilityProbeBatchModels = computed(() =>
   capabilityProbeBatch.value?.models ?? []
 )
+const showCurrentBatchResults = computed(() =>
+  showOnlyCurrentBatch.value && capabilityProbeBatchModels.value.length > 0
+)
 const capabilityProbeBatchEta = computed(() => {
   const status = capabilityProbeBatch.value
   if (!status || status.terminal_at !== null) return null
   return formatProbeEta(status.estimated_remaining_seconds)
 })
 const capabilityModelResults = computed(() => {
-  const discovery = showOnlyCurrentBatch.value
+  const discovery = showCurrentBatchResults.value
     ? filterCapabilityDiscoveryByModels(capabilityDiscovery.value, capabilityProbeBatchModels.value)
     : capabilityDiscovery.value
   return discovery.models.map(model => ({
@@ -466,8 +608,8 @@ const capabilityModelResults = computed(() => {
     levels: model.verified_reasoning_levels
   }))
 })
-const capabilityRouteResults = computed(() => {
-  const discovery = showOnlyCurrentBatch.value
+const capabilityRouteResults = computed<EditableReasoningRoute[]>(() => {
+  const discovery = showCurrentBatchResults.value
     ? filterCapabilityDiscoveryByModels(capabilityDiscovery.value, capabilityProbeBatchModels.value)
     : capabilityDiscovery.value
   return discovery.models.flatMap(model =>
@@ -515,6 +657,77 @@ const refreshCapabilityDiscovery = async (): Promise<CapabilityDiscoveryResponse
     capabilityDiscovery.value = data
   }
   return data
+}
+
+const openReasoningOverrideEditor = (route: EditableReasoningRoute) => {
+  editingReasoningRoute.value = route
+  reasoningOverrideScope.value = 'route'
+  selectedReasoningLevels.value = normalizeReasoningLevels(
+    route.accepted_reasoning_levels
+  )
+  reasoningOverrideDialogVisible.value = true
+}
+
+const applyReasoningOverride = async (
+  route: EditableReasoningRoute,
+  levels: ReasoningEffortLevel[],
+  scope: ReasoningOverrideScope
+) => {
+  savingReasoningOverride.value = true
+  try {
+    const { data } = await adminApi.updateReasoningOverrides({
+      upstream_id: route.upstream_id,
+      route_id: route.route_id,
+      exposed_model_slug: route.exposed_model_slug,
+      runtime_model_slug: route.runtime_model_slug,
+      protocol: route.protocol,
+      levels: normalizeReasoningLevels(levels),
+      scope
+    })
+    reasoningOverrideDialogVisible.value = false
+    try {
+      await refreshCapabilityDiscovery()
+      ElMessage.success(`已更新 ${data.affected_route_count} 条精确路由`)
+    } catch {
+      ElMessage.warning(`已更新 ${data.affected_route_count} 条精确路由，状态刷新失败`)
+    }
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.error?.message || '思考档位保存失败'
+    ElMessage.error(errorMsg)
+  } finally {
+    savingReasoningOverride.value = false
+  }
+}
+
+const saveReasoningOverride = async () => {
+  if (!editingReasoningRoute.value || selectedReasoningLevels.value.length === 0) return
+  await applyReasoningOverride(
+    editingReasoningRoute.value,
+    selectedReasoningLevels.value,
+    reasoningOverrideScope.value
+  )
+}
+
+const clearReasoningOverride = async (
+  route: EditableReasoningRoute,
+  scope: ReasoningOverrideScope
+) => {
+  try {
+    await ElMessageBox.confirm(
+      scope === 'model_routes'
+        ? `清除模型 ${route.exposed_model_slug} 当前全部路由的手工档位？`
+        : `清除路由 ${route.route_id} 的手工档位？`,
+      '确认清除手工档位',
+      {
+        type: 'warning',
+        confirmButtonText: '清除',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch {
+    return
+  }
+  await applyReasoningOverride(route, [], scope)
 }
 
 const waitForProbesToSettle = async (
@@ -1000,5 +1213,87 @@ onUnmounted(() => {
 .capability-probe-results__route {
   font-family: var(--crc-font-mono);
   font-size: 12px;
+}
+
+.reasoning-source-cell {
+  display: flex;
+  min-height: 44px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: var(--crc-text-muted);
+  font-size: 11px;
+}
+
+.reasoning-route-actions {
+  display: flex;
+  min-width: 68px;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
+.reasoning-override-identity {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  margin: 0 0 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--crc-border);
+}
+
+.reasoning-override-identity div {
+  min-width: 0;
+}
+
+.reasoning-override-identity dt {
+  margin-bottom: 4px;
+  color: var(--crc-text-muted);
+  font-size: 11px;
+}
+
+.reasoning-override-identity dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-mono);
+  font-size: 12px;
+}
+
+.reasoning-override-levels {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.reasoning-override-levels :deep(.el-checkbox) {
+  margin-right: 0;
+}
+
+.reasoning-override-footer {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+}
+
+.reasoning-override-footer__spacer {
+  flex: 1;
+}
+
+@media (max-width: 560px) {
+  .reasoning-override-identity {
+    grid-template-columns: 1fr;
+  }
+
+  .reasoning-override-levels {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .reasoning-override-footer {
+    flex-wrap: wrap;
+  }
 }
 </style>
