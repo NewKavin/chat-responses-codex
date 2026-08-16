@@ -24,7 +24,7 @@ use chat_responses_codex::state::{
     ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyHealthKey,
     KeyQualificationDecision, ModelQualificationCategory, ModelQualificationLevel, PersistedState,
     QualificationObservation, RouteFailureClass, RouteHealthKey, StateStore, StoreFuture,
-    UpstreamConfig, UpstreamQualificationDecision,
+    UpstreamConfig, UpstreamModelMapping, UpstreamQualificationDecision,
 };
 use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use serde_json::{json, Value};
@@ -732,6 +732,165 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
     let json: Value = serde_json::from_slice(&body).unwrap();
 
     json["token"].as_str().unwrap().to_string()
+}
+
+async fn put_mapping_rejection_profile(
+    state: &AppState,
+    upstream: &UpstreamConfig,
+    exposed_model: &str,
+    runtime_model: &str,
+    protocol: UpstreamProtocol,
+    capability: Capability,
+) {
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        runtime_model,
+        WireProtocol::from(protocol),
+    ));
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            upstream,
+            &key_fingerprint,
+            exposed_model,
+            runtime_model,
+            protocol,
+        )
+        .unwrap();
+    profile.state = DialectProfileState::Unsupported;
+    profile
+        .capabilities
+        .insert(capability, EvidenceState::Rejected);
+    state.upsert_dialect_profile(profile).await.unwrap();
+}
+
+#[tokio::test]
+async fn model_mapping_status_reports_backend_route_validity_without_secrets() {
+    let mapped = |id: &str,
+                  upstream_model: &str,
+                  downstream_model: &str,
+                  active: bool|
+     -> UpstreamConfig {
+        UpstreamConfig {
+            id: id.into(),
+            name: id.into(),
+            base_url: format!("https://{id}.invalid"),
+            api_key: format!("secret-{id}"),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![upstream_model.into()],
+            model_mappings: vec![UpstreamModelMapping {
+                upstream_model: upstream_model.into(),
+                downstream_model: downstream_model.into(),
+            }],
+            active,
+            ..Default::default()
+        }
+    };
+    let effective = mapped("up-effective", "m-effective", "public-effective", true);
+    let inactive = mapped("up-inactive", "m-inactive", "public-inactive", false);
+    let mut stale = mapped("up-stale", "m-stale", "public-stale", true);
+    stale.supported_models = vec!["replacement-model".into()];
+    let mut no_key = mapped("up-no-key", "m-no-key", "public-no-key", true);
+    no_key.api_key.clear();
+    let mut partial = mapped("up-partial", "m-partial", "public-partial", true);
+    partial.protocols = vec![
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    ];
+    let rejected = mapped("up-rejected", "m-rejected", "public-rejected", true);
+    let upstreams = vec![
+        effective.clone(),
+        inactive,
+        stale,
+        no_key,
+        partial.clone(),
+        rejected.clone(),
+    ];
+    let state = create_test_state_with_upstreams(upstreams);
+    put_mapping_rejection_profile(
+        &state,
+        &partial,
+        "public-partial",
+        "m-partial",
+        UpstreamProtocol::Responses,
+        Capability::TextInput,
+    )
+    .await;
+    put_mapping_rejection_profile(
+        &state,
+        &rejected,
+        "public-rejected",
+        "m-rejected",
+        UpstreamProtocol::ChatCompletions,
+        Capability::NonStreamingResponse,
+    )
+    .await;
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/model-mappings/status")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let mappings = payload["mappings"].as_array().unwrap();
+    let status_for = |downstream_model: &str| {
+        mappings
+            .iter()
+            .find(|mapping| mapping["downstream_model"] == downstream_model)
+            .unwrap()
+    };
+
+    assert_eq!(
+        status_for("public-effective"),
+        &json!({
+            "upstream_id": "up-effective",
+            "upstream_model": "m-effective",
+            "downstream_model": "public-effective",
+            "status": "effective",
+            "reason": "eligible_routes_available",
+            "eligible_routes": 1,
+            "configured_routes": 1,
+            "unverified_routes": 1
+        })
+    );
+    assert_eq!(status_for("public-inactive")["status"], "inactive");
+    assert_eq!(status_for("public-inactive")["reason"], "upstream_inactive");
+    assert_eq!(status_for("public-stale")["reason"], "upstream_model_unavailable");
+    assert_eq!(status_for("public-no-key")["reason"], "no_key_for_upstream_model");
+    assert_eq!(status_for("public-partial")["status"], "partial");
+    assert_eq!(status_for("public-partial")["reason"], "some_routes_ineligible");
+    assert_eq!(status_for("public-partial")["eligible_routes"], 1);
+    assert_eq!(status_for("public-partial")["configured_routes"], 2);
+    assert_eq!(status_for("public-partial")["unverified_routes"], 1);
+    assert_eq!(status_for("public-rejected")["status"], "inactive");
+    assert_eq!(status_for("public-rejected")["reason"], "no_eligible_routes");
+    assert_eq!(status_for("public-rejected")["eligible_routes"], 0);
+    assert_eq!(status_for("public-rejected")["configured_routes"], 1);
+    assert_eq!(status_for("public-rejected")["unverified_routes"], 0);
+
+    let serialized = payload.to_string();
+    assert!(!serialized.contains("secret-up-"));
+    assert!(!serialized.contains("key_fingerprint"));
+    for upstream in [&effective, &partial, &rejected] {
+        assert!(!serialized.contains(&upstream_key_fingerprint(
+            &upstream.id,
+            &upstream.api_key,
+        )));
+    }
 }
 
 // ============================================================================

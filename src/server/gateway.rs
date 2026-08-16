@@ -61,6 +61,7 @@ pub(crate) mod compatibility_semantics;
 mod context;
 mod dialect_retry;
 mod errors;
+mod model_mapping_status;
 mod reasoning_overrides;
 mod responses_fallback;
 mod route_attempts;
@@ -79,6 +80,7 @@ use claude::*;
 use compat::*;
 use context::*;
 use errors::*;
+use model_mapping_status::*;
 use reasoning_overrides::*;
 use responses_fallback::*;
 use route_attempts::*;
@@ -2122,6 +2124,12 @@ pub fn build_router(state: AppState) -> Router {
                     state.clone(),
                     admin_auth_middleware,
                 )),
+        )
+        .route(
+            "/api/admin/model-mappings/status",
+            get(admin_model_mapping_status).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
         )
         .route(
             "/api/admin/integrations/freekey/sync",

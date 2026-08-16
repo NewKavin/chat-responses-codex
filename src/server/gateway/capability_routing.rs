@@ -800,7 +800,7 @@ pub(super) fn evaluate_route_capabilities_with_runtime_hints(
     RouteCapabilityResolution::Resolved(Box::new(resolved))
 }
 
-fn exact_route_effective_profile<'a>(
+pub(super) fn exact_route_effective_profile<'a>(
     snapshot: &'a CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
     key_fingerprint: &str,
