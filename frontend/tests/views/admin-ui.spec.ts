@@ -110,6 +110,25 @@ describe('admin ui structure', () => {
     expect(helper).toContain("'max'")
   })
 
+  it('uses backend-authoritative model mapping validity with a neutral fallback', () => {
+    const page = source('views/admin/ModelAliases.vue')
+    const helper = source('utils/modelMappingStatus.ts')
+
+    expect(page).toContain('adminApi.getModelMappingStatuses()')
+    expect(page).toContain('mappingStatuses')
+    expect(page).toContain('modelMappingStatusPresentation')
+    expect(page).toContain('mappingStatusTooltip(row)')
+    expect(page).toContain('eligible_routes')
+    expect(page).toContain('configured_routes')
+    expect(page).toContain('Promise.all([loadUpstreams(), loadMappingStatuses(), loadAliases()])')
+    expect(page).not.toContain('stale: !models.some')
+    expect(page).not.toContain('row.stale')
+    expect(helper).toContain("label: '生效'")
+    expect(helper).toContain("label: '部分生效'")
+    expect(helper).toContain("label: '未生效'")
+    expect(helper).toContain("label: '状态未知'")
+  })
+
   it('uses anonymous route ids for model probe channels', () => {
     const board = source('components/ModelProbeBoard.vue')
     const charts = source('utils/modelProbeCharts.ts')

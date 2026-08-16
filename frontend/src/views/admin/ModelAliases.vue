@@ -24,7 +24,7 @@
           style="margin-bottom: 16px;"
         />
 
-        <div v-loading="loadingUpstreams" class="mappings-panel">
+        <div v-loading="loadingUpstreams || loadingMappingStatuses" class="mappings-panel">
           <div class="mappings-toolbar">
             <el-select
               v-model="filterUpstreamId"
@@ -88,13 +88,16 @@
             <el-table-column label="状态" width="130" align="center">
               <template #default="{ row }">
                 <el-tooltip
-                  v-if="row.stale"
-                  content="上游模型已不在该账号的模型清单中，路由会跳过此映射；恢复清单后自动生效"
+                  :content="mappingStatusTooltip(row)"
                   placement="top"
                 >
-                  <el-tag type="danger" size="small">失效</el-tag>
+                  <el-tag
+                    :type="mappingStatusPresentation(row).tagType"
+                    size="small"
+                  >
+                    {{ mappingStatusPresentation(row).label }}
+                  </el-tag>
                 </el-tooltip>
-                <el-tag v-else type="success" size="small">生效</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="200" align="center">
@@ -517,7 +520,13 @@ import { onMounted, ref, reactive, nextTick, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { RefreshCw, Plus, Edit, Trash2, Search, ListPlus } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
-import type { ModelAliasRule, UpstreamConfig, UpstreamModelMapping } from '@/types'
+import type {
+  ModelAliasRule,
+  ModelMappingStatusSummary,
+  UpstreamConfig,
+  UpstreamModelMapping
+} from '@/types'
+import { modelMappingStatusPresentation } from '@/utils/modelMappingStatus'
 
 type ApiError = {
   response?: {
@@ -536,7 +545,7 @@ interface MappingRow {
   upstreamName: string
   upstreamModel: string
   downstreamModel: string
-  stale: boolean
+  mappingStatus: ModelMappingStatusSummary | null
 }
 
 const activeTab = ref<'mappings' | 'aliases'>('mappings')
@@ -544,7 +553,9 @@ const loadingAll = ref(false)
 
 // ---------------------------------------------------------------- Tab 1
 const loadingUpstreams = ref(false)
+const loadingMappingStatuses = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
+const mappingStatuses = ref<Map<string, ModelMappingStatusSummary>>(new Map())
 const filterUpstreamId = ref('')
 const mappingSearch = ref('')
 const mappingPage = ref(1)
@@ -569,6 +580,11 @@ const savingBatch = ref(false)
 const selectedMappingRows = ref<MappingRow[]>([])
 
 const canonical = (model: string) => model.trim().toLowerCase()
+const mappingStatusKey = (
+  upstreamId: string,
+  upstreamModel: string,
+  downstreamModel: string
+) => [upstreamId.trim(), canonical(upstreamModel), canonical(downstreamModel)].join('\u0000')
 
 /** 该上游对外可见的模型清单：supported_models ∪ api_key_models[].supported_models，按 canonical 去重（首选原拼写）。 */
 function upstreamModelList(upstream: UpstreamConfig): string[] {
@@ -591,18 +607,34 @@ const mappingRows = computed<MappingRow[]>(() => {
   const rows: MappingRow[] = []
   for (const upstream of upstreams.value) {
     for (const mapping of upstream.model_mappings || []) {
-      const models = upstreamModelList(upstream)
       rows.push({
         upstreamId: upstream.id,
         upstreamName: upstream.name || upstream.id,
         upstreamModel: mapping.upstream_model,
         downstreamModel: mapping.downstream_model,
-        stale: !models.some(model => canonical(model) === canonical(mapping.upstream_model))
+        mappingStatus: mappingStatuses.value.get(mappingStatusKey(
+          upstream.id,
+          mapping.upstream_model,
+          mapping.downstream_model
+        )) ?? null
       })
     }
   }
   return rows
 })
+
+const mappingStatusPresentation = (row: MappingRow) =>
+  modelMappingStatusPresentation(
+    row.mappingStatus?.status,
+    row.mappingStatus?.reason
+  )
+
+const mappingStatusTooltip = (row: MappingRow) => {
+  const presentation = mappingStatusPresentation(row)
+  const status = row.mappingStatus
+  if (!status) return presentation.reasonLabel
+  return `${presentation.reasonLabel}（${status.reason}）；可用路由 ${status.eligible_routes}/${status.configured_routes}；未探测 ${status.unverified_routes}`
+}
 
 const filteredMappingRows = computed<MappingRow[]>(() => {
   const keyword = mappingSearch.value.trim().toLowerCase()
@@ -720,7 +752,7 @@ const handleMappingDialogConfirm = async () => {
     await adminApi.updateUpstream(upstreamId, { model_mappings: nextMappings })
     ElMessage.success(mappingDialogMode.value === 'edit' ? '映射已更新' : '映射已添加')
     mappingDialogVisible.value = false
-    await loadUpstreams()
+    await reloadMappingData()
   } catch (err) {
     const error = err as ApiError
     const message =
@@ -754,7 +786,7 @@ const handleDeleteMapping = async (row: MappingRow) => {
     )
     await adminApi.updateUpstream(row.upstreamId, { model_mappings: nextMappings })
     ElMessage.success('映射已删除')
-    await loadUpstreams()
+    await reloadMappingData()
   } catch (err) {
     const error = err as ApiError
     const message =
@@ -884,7 +916,7 @@ const handleBatchConfirm = async () => {
     await adminApi.updateUpstream(upstream.id, { model_mappings: nextMappings })
     ElMessage.success(`已批量保存 ${pending.length} 条映射`)
     batchDialogVisible.value = false
-    await loadUpstreams()
+    await reloadMappingData()
   } catch (err) {
     const error = err as ApiError
     const message =
@@ -935,7 +967,7 @@ const handleBatchDelete = async () => {
     }
     ElMessage.success(`已删除 ${selected.length} 条映射`)
     selectedMappingRows.value = []
-    await loadUpstreams()
+    await reloadMappingData()
   } catch (err) {
     const error = err as ApiError
     const message =
@@ -996,6 +1028,32 @@ const loadUpstreams = async () => {
   }
 }
 
+const loadMappingStatuses = async () => {
+  loadingMappingStatuses.value = true
+  try {
+    const res = await adminApi.getModelMappingStatuses()
+    mappingStatuses.value = new Map(
+      res.data.mappings.map(status => [
+        mappingStatusKey(
+          status.upstream_id,
+          status.upstream_model,
+          status.downstream_model
+        ),
+        status
+      ])
+    )
+  } catch {
+    mappingStatuses.value = new Map()
+    ElMessage.warning('模型映射状态暂不可用，当前显示为状态未知')
+  } finally {
+    loadingMappingStatuses.value = false
+  }
+}
+
+const reloadMappingData = async () => {
+  await Promise.all([loadUpstreams(), loadMappingStatuses()])
+}
+
 const loadAliases = async () => {
   loading.value = true
   try {
@@ -1013,7 +1071,7 @@ const loadAliases = async () => {
 const reloadAll = async () => {
   loadingAll.value = true
   try {
-    await Promise.all([loadUpstreams(), loadAliases()])
+    await Promise.all([loadUpstreams(), loadMappingStatuses(), loadAliases()])
   } finally {
     loadingAll.value = false
   }
@@ -1119,8 +1177,7 @@ const removeAlias = (index: number) => {
 }
 
 onMounted(() => {
-  loadUpstreams()
-  loadAliases()
+  void reloadAll()
 })
 </script>
 
