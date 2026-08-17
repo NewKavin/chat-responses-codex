@@ -307,7 +307,7 @@ describe('integration config generators', () => {
     })
   })
 
-  it('offers only the fixed five verified Codex reasoning strengths', () => {
+  it('offers the fixed six verified Codex reasoning strengths with none first', () => {
     const selection = resolveCodexReasoningSelection(
       {
         models: [{
@@ -328,8 +328,16 @@ describe('integration config generators', () => {
       'verified/model'
     )
 
-    expect(CODEX_REASONING_EFFORTS).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(CODEX_REASONING_EFFORTS).toEqual([
+      'none',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
     expect(selection.options).toEqual([
+      { value: 'none', disabled: false },
       { value: 'low', disabled: false },
       { value: 'medium', disabled: false },
       { value: 'high', disabled: false },
@@ -356,6 +364,7 @@ describe('integration config generators', () => {
     const selected = resolveCodexReasoningSelection(catalog, 'bounded/model', 'low')
     expect(selected.selectedEffort).toBe('low')
     expect(selected.options.map(option => option.disabled)).toEqual([
+      true,
       false,
       true,
       false,
@@ -380,6 +389,7 @@ describe('integration config generators', () => {
     )
 
     expect(selection.options).toEqual([
+      { value: 'none', disabled: true },
       { value: 'low', disabled: false },
       { value: 'medium', disabled: true },
       { value: 'high', disabled: true },
@@ -391,7 +401,7 @@ describe('integration config generators', () => {
     expect(selection.configurable).toBe(true)
   })
 
-  it('keeps none internal when no configurable reasoning strength is verified', () => {
+  it('keeps a catalog-published none effort visible and copyable', () => {
     const selection = resolveCodexReasoningSelection(
       {
         models: [{
@@ -404,10 +414,17 @@ describe('integration config generators', () => {
       'high'
     )
 
-    expect(selection.options.every(option => option.disabled)).toBe(true)
+    expect(selection.options).toEqual([
+      { value: 'none', disabled: false },
+      { value: 'low', disabled: true },
+      { value: 'medium', disabled: true },
+      { value: 'high', disabled: true },
+      { value: 'xhigh', disabled: true },
+      { value: 'max', disabled: true }
+    ])
     expect(selection.defaultEffort).toBe('none')
     expect(selection.selectedEffort).toBe('none')
-    expect(selection.configurable).toBe(false)
+    expect(selection.configurable).toBe(true)
 
     const input = {
       modelSlug: 'conservative/model',
