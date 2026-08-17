@@ -258,6 +258,20 @@
                     <span v-else class="capability-probe-results__none">无</span>
                   </template>
                 </el-table-column>
+                <el-table-column label="操作" width="72" align="center">
+                  <template #default="{ row }">
+                    <el-tooltip content="配置模型全部当前路由" placement="top">
+                      <el-button
+                        text
+                        circle
+                        :icon="Pencil"
+                        aria-label="配置模型全部当前路由"
+                        :disabled="savingReasoningOverride || row.routes.length === 0"
+                        @click="openModelReasoningOverrideEditor(row)"
+                      />
+                    </el-tooltip>
+                  </template>
+                </el-table-column>
               </el-table>
             </div>
 
@@ -414,7 +428,7 @@
 
     <el-dialog
       v-model="reasoningOverrideDialogVisible"
-      title="编辑思考档位"
+      :title="reasoningOverrideDialogTitle"
       width="520px"
       style="max-width: calc(100vw - 32px)"
       :close-on-click-modal="false"
@@ -425,26 +439,38 @@
             <dt>模型</dt>
             <dd>{{ editingReasoningRoute.exposed_model_slug }}</dd>
           </div>
-          <div>
-            <dt>上游</dt>
-            <dd>{{ editingReasoningRoute.upstream_id }}</dd>
+          <div v-if="reasoningOverrideEditorMode === 'model' && editingReasoningModel">
+            <dt>应用范围</dt>
+            <dd>模型全部当前路由 · {{ editingReasoningModel.routes.length }} 条</dd>
           </div>
-          <div>
-            <dt>协议</dt>
-            <dd>{{ capabilityProtocolLabel(editingReasoningRoute.protocol) }}</dd>
-          </div>
-          <div>
-            <dt>当前来源</dt>
-            <dd>{{ reasoningSourceLabel(editingReasoningRoute.reasoning_source) }}</dd>
-          </div>
+          <template v-else>
+            <div>
+              <dt>上游</dt>
+              <dd>{{ editingReasoningRoute.upstream_id }}</dd>
+            </div>
+            <div>
+              <dt>协议</dt>
+              <dd>{{ capabilityProtocolLabel(editingReasoningRoute.protocol) }}</dd>
+            </div>
+            <div>
+              <dt>当前来源</dt>
+              <dd>{{ reasoningSourceLabel(editingReasoningRoute.reasoning_source) }}</dd>
+            </div>
+          </template>
         </dl>
 
         <el-form label-position="top">
-          <el-form-item label="应用范围">
+          <el-form-item
+            v-if="reasoningOverrideEditorMode === 'route'"
+            label="应用范围"
+          >
             <el-radio-group v-model="reasoningOverrideScope" size="small">
               <el-radio-button value="route">当前精确路由</el-radio-button>
               <el-radio-button value="model_routes">模型全部当前路由</el-radio-button>
             </el-radio-group>
+          </el-form-item>
+          <el-form-item v-else label="应用范围">
+            <el-tag effect="plain">模型全部当前路由</el-tag>
           </el-form-item>
           <el-form-item label="生效档位">
             <el-checkbox-group
@@ -466,12 +492,12 @@
       <template #footer>
         <div class="reasoning-override-footer">
           <el-button
-            v-if="editingReasoningRoute?.managed_reasoning_override"
+            v-if="reasoningEditorHasManagedOverride"
             type="danger"
             plain
             :icon="RotateCcw"
             :loading="savingReasoningOverride"
-            @click="clearReasoningOverride(editingReasoningRoute, reasoningOverrideScope)"
+            @click="clearEditingReasoningOverride"
           >
             清除手工设置
           </el-button>
@@ -541,6 +567,12 @@ type ProbeTab = 'status' | 'reasoning'
 type EditableReasoningRoute = CapabilityRouteDiscoverySummary & {
   exposed_model_slug: string
 }
+type EditableReasoningModel = {
+  exposed_model_slug: string
+  levels: ReasoningEffortLevel[]
+  routes: EditableReasoningRoute[]
+}
+type ReasoningOverrideEditorMode = 'model' | 'route'
 
 const activeProbeTab = ref<ProbeTab>('status')
 const loading = ref(false)
@@ -575,8 +607,20 @@ const showOnlyCurrentBatch = ref(true)
 const reasoningOverrideDialogVisible = ref(false)
 const savingReasoningOverride = ref(false)
 const editingReasoningRoute = ref<EditableReasoningRoute | null>(null)
+const editingReasoningModel = ref<EditableReasoningModel | null>(null)
+const reasoningOverrideEditorMode = ref<ReasoningOverrideEditorMode>('route')
 const reasoningOverrideScope = ref<ReasoningOverrideScope>('route')
 const selectedReasoningLevels = ref<ReasoningEffortLevel[]>([])
+const reasoningOverrideDialogTitle = computed(() =>
+  reasoningOverrideEditorMode.value === 'model'
+    ? '配置模型思考档位'
+    : '编辑路由思考档位'
+)
+const reasoningEditorHasManagedOverride = computed(() =>
+  reasoningOverrideEditorMode.value === 'model'
+    ? editingReasoningModel.value?.routes.some(route => route.managed_reasoning_override) === true
+    : editingReasoningRoute.value?.managed_reasoning_override === true
+)
 const capabilityProbeTooltip = computed(() => {
   if (probeModelScopeLoadFailed.value) return '模型范围加载失败，请重试'
   if (selectedProbeModels.value.length === 0) return '请先选择要探测的模型'
@@ -599,14 +643,21 @@ const capabilityProbeBatchEta = computed(() => {
   if (!status || status.terminal_at !== null) return null
   return formatProbeEta(status.estimated_remaining_seconds)
 })
+const toEditableReasoningModels = (
+  discovery: CapabilityDiscoveryResponse
+): EditableReasoningModel[] => discovery.models.map(model => ({
+  exposed_model_slug: model.exposed_model_slug,
+  levels: normalizeReasoningLevels(model.verified_reasoning_levels),
+  routes: model.routes.map(route => ({
+    ...route,
+    exposed_model_slug: model.exposed_model_slug
+  }))
+}))
 const capabilityModelResults = computed(() => {
   const discovery = showCurrentBatchResults.value
     ? filterCapabilityDiscoveryByModels(capabilityDiscovery.value, capabilityProbeBatchModels.value)
     : capabilityDiscovery.value
-  return discovery.models.map(model => ({
-    exposed_model_slug: model.exposed_model_slug,
-    levels: model.verified_reasoning_levels
-  }))
+  return toEditableReasoningModels(discovery)
 })
 const capabilityRouteResults = computed<EditableReasoningRoute[]>(() => {
   const discovery = showCurrentBatchResults.value
@@ -619,10 +670,9 @@ const capabilityRouteResults = computed<EditableReasoningRoute[]>(() => {
     }))
   )
 })
-const globalCapabilityModelResults = computed(() => capabilityDiscovery.value.models.map(model => ({
-  exposed_model_slug: model.exposed_model_slug,
-  levels: model.verified_reasoning_levels
-})))
+const globalCapabilityModelResults = computed(() =>
+  toEditableReasoningModels(capabilityDiscovery.value)
+)
 
 const fetchCapabilityDiscovery = async (
   timeoutMs?: number
@@ -659,7 +709,20 @@ const refreshCapabilityDiscovery = async (): Promise<CapabilityDiscoveryResponse
   return data
 }
 
+const openModelReasoningOverrideEditor = (model: EditableReasoningModel) => {
+  const representativeRoute = model.routes[0]
+  if (!representativeRoute) return
+  reasoningOverrideEditorMode.value = 'model'
+  editingReasoningModel.value = model
+  editingReasoningRoute.value = representativeRoute
+  reasoningOverrideScope.value = 'model_routes'
+  selectedReasoningLevels.value = normalizeReasoningLevels(model.levels)
+  reasoningOverrideDialogVisible.value = true
+}
+
 const openReasoningOverrideEditor = (route: EditableReasoningRoute) => {
+  reasoningOverrideEditorMode.value = 'route'
+  editingReasoningModel.value = null
   editingReasoningRoute.value = route
   reasoningOverrideScope.value = 'route'
   selectedReasoningLevels.value = normalizeReasoningLevels(
@@ -728,6 +791,14 @@ const clearReasoningOverride = async (
     return
   }
   await applyReasoningOverride(route, [], scope)
+}
+
+const clearEditingReasoningOverride = async () => {
+  if (!editingReasoningRoute.value) return
+  await clearReasoningOverride(
+    editingReasoningRoute.value,
+    reasoningOverrideScope.value
+  )
 }
 
 const waitForProbesToSettle = async (
@@ -1264,7 +1335,7 @@ onUnmounted(() => {
 .reasoning-override-levels {
   display: grid;
   width: 100%;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
