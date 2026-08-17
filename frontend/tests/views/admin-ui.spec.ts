@@ -113,6 +113,25 @@ describe('admin ui structure', () => {
     expect(page).toContain('const showCurrentBatchResults = computed')
     expect(page).toContain('capabilityProbeBatchModels.value.length > 0')
     expect(page).toContain('max-width: calc(100vw - 32px)')
+
+    const applyOverride = page.slice(
+      page.indexOf('const applyReasoningOverride = async ('),
+      page.indexOf('const saveReasoningOverride = async () =>')
+    )
+    const failedSave = applyOverride.slice(
+      applyOverride.indexOf('} catch (error: any) {'),
+      applyOverride.indexOf('} finally {')
+    )
+    expect(failedSave).toContain(
+      "errorCode === 'capability_reasoning_override_invalid_route'"
+    )
+    expect(failedSave).toContain('reasoningOverrideDialogVisible.value = false')
+    expect(failedSave).toContain('await refreshCapabilityDiscovery().catch(() => undefined)')
+    expect(failedSave.indexOf('await refreshCapabilityDiscovery()')).toBeLessThan(
+      failedSave.indexOf('ElMessage.error(errorMsg)')
+    )
+    expect(failedSave).not.toContain('adminApi.updateReasoningOverrides')
+
     expect(page).toMatch(
       /\.reasoning-override-levels\s*\{[^}]*grid-template-columns:\s*repeat\(6,/s
     )

@@ -2511,25 +2511,37 @@ fn codex_exposed_models(
     // the exception: they are exposed verbatim (the operator typed them),
     // see DownstreamModelEntry::from_mapping.
     let group_models = |entries: Vec<DownstreamModelEntry>| -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut grouped = Vec::new();
+        let mut grouped = BTreeMap::<String, (String, bool)>::new();
         for entry in entries {
-            let slug = entry.model;
-            let key = if case_insensitive {
-                crate::state::canonical_model_id(&slug)
-            } else {
-                slug.trim().to_string()
-            };
-            if key.is_empty() || !seen.insert(key.clone()) {
+            let slug = entry.model.trim();
+            let key = crate::state::model_identity_key_with(slug, case_insensitive);
+            if key.is_empty() {
                 continue;
             }
-            if entry.from_mapping {
-                grouped.push(slug.trim().to_string());
+            let display = if entry.from_mapping || !case_insensitive {
+                slug.to_owned()
             } else {
-                grouped.push(key);
+                key.clone()
+            };
+            match grouped.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((display, entry.from_mapping));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let (current_display, current_from_mapping) = slot.get();
+                    if (entry.from_mapping && !current_from_mapping)
+                        || (entry.from_mapping == *current_from_mapping
+                            && display < *current_display)
+                    {
+                        slot.insert((display, entry.from_mapping));
+                    }
+                }
             }
         }
         grouped
+            .into_values()
+            .map(|(display, _)| display)
+            .collect()
     };
 
     if allowlist.is_empty() {
@@ -2587,17 +2599,26 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
         return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
     };
     let snapshot = state.routing_snapshot().await;
-    let verified_reasoning_levels =
-        capability_verified_reasoning_levels_by_model(state, &snapshot.upstreams);
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
+    let verified_reasoning_levels = capability_verified_reasoning_levels_by_model(
+        state,
+        &snapshot.upstreams,
+        case_insensitive,
+    );
 
     let model_infos = codex_exposed_models(
         &snapshot.upstreams,
         &downstream.model_allowlist,
-        state.runtime_settings().model_case_insensitive_matching,
+        case_insensitive,
     )
         .into_iter()
         .map(|slug| {
-            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug);
+            let witness = select_catalog_witness_entry(
+                state,
+                &snapshot.upstreams,
+                &slug,
+                case_insensitive,
+            );
             let capabilities = witness.as_ref().map(|entry| &entry.capabilities);
             let context_window = capabilities
                 .and_then(|capabilities| {
@@ -2609,11 +2630,12 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                     codex_catalog_context_window(
                         &snapshot.upstreams,
                         &slug,
-                        state.runtime_settings().model_case_insensitive_matching,
+                        case_insensitive,
                     )
                 });
+            let reasoning_key = crate::state::model_identity_key_with(&slug, case_insensitive);
             let reasoning = verified_reasoning_levels
-                .get(&slug)
+                .get(&reasoning_key)
                 .map(|levels| codex_reasoning_metadata(levels))
                 .unwrap_or_else(codex_conservative_reasoning_metadata);
             let supports_custom_tools = capabilities

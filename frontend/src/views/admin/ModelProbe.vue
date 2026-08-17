@@ -755,6 +755,11 @@ const applyReasoningOverride = async (
       ElMessage.warning(`已更新 ${data.affected_route_count} 条精确路由，状态刷新失败`)
     }
   } catch (error: any) {
+    const errorCode = error?.response?.data?.error?.code
+    if (errorCode === 'capability_reasoning_override_invalid_route') {
+      reasoningOverrideDialogVisible.value = false
+      await refreshCapabilityDiscovery().catch(() => undefined)
+    }
     const errorMsg = error?.response?.data?.error?.message || '思考档位保存失败'
     ElMessage.error(errorMsg)
   } finally {

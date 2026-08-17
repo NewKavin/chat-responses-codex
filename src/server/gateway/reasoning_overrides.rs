@@ -56,7 +56,10 @@ pub(super) async fn admin_update_reasoning_overrides(
         }
     };
     let routing = state.routing_snapshot().await;
-    let Some(selected_route) = resolve_selected_route(&routing.upstreams, &request) else {
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
+    let Some(selected_route) =
+        resolve_selected_route(&routing.upstreams, &request, case_insensitive)
+    else {
         return reasoning_override_error(
             StatusCode::BAD_REQUEST,
             "capability_reasoning_override_invalid_route",
@@ -65,9 +68,11 @@ pub(super) async fn admin_update_reasoning_overrides(
     };
     let mut targets = match request.scope {
         ReasoningOverrideScope::Route => vec![selected_route],
-        ReasoningOverrideScope::ModelRoutes => {
-            current_routes_for_exposed_model(&routing.upstreams, &request.exposed_model_slug)
-        }
+        ReasoningOverrideScope::ModelRoutes => current_routes_for_exposed_model(
+            &routing.upstreams,
+            &request.exposed_model_slug,
+            case_insensitive,
+        ),
     };
     if targets.is_empty() {
         return reasoning_override_error(
@@ -132,11 +137,13 @@ pub(super) async fn admin_update_reasoning_overrides(
 fn resolve_selected_route(
     upstreams: &[UpstreamConfig],
     request: &ReasoningOverrideRequest,
+    case_insensitive: bool,
 ) -> Option<CurrentReasoningRoute> {
     let upstream = upstreams
         .iter()
         .find(|upstream| upstream.active && upstream.id == request.upstream_id)?;
-    let runtime_model_slug = upstream.resolved_model_name(&request.exposed_model_slug)?;
+    let runtime_model_slug =
+        upstream.resolved_model_name_with(&request.exposed_model_slug, case_insensitive)?;
     if runtime_model_slug != request.runtime_model_slug {
         return None;
     }
@@ -145,7 +152,7 @@ fn resolve_selected_route(
         return None;
     }
     upstream
-        .keys_for_model(&runtime_model_slug)
+        .keys_for_model_with(&runtime_model_slug, case_insensitive)
         .into_iter()
         .map(|api_key| {
             current_reasoning_route(upstream, &api_key, &runtime_model_slug, request.protocol)
@@ -156,13 +163,16 @@ fn resolve_selected_route(
 fn current_routes_for_exposed_model(
     upstreams: &[UpstreamConfig],
     exposed_model_slug: &str,
+    case_insensitive: bool,
 ) -> Vec<CurrentReasoningRoute> {
     let mut routes = Vec::new();
     for upstream in upstreams.iter().filter(|upstream| upstream.active) {
-        let Some(runtime_model_slug) = upstream.resolved_model_name(exposed_model_slug) else {
+        let Some(runtime_model_slug) =
+            upstream.resolved_model_name_with(exposed_model_slug, case_insensitive)
+        else {
             continue;
         };
-        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+        for api_key in upstream.keys_for_model_with(&runtime_model_slug, case_insensitive) {
             for protocol in upstream.supported_protocols() {
                 routes.push(current_reasoning_route(
                     upstream,

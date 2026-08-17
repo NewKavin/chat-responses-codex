@@ -134,7 +134,7 @@ pub use route_health::{
 use runtime_settings::differing_runtime_setting_fields;
 pub use model_identity::{
     canonical_model_id, models_equivalent, models_equivalent_with,
-    canonical_subagent_base_model_id, find_equivalent_stored,
+    canonical_subagent_base_model_id, find_equivalent_stored, model_identity_key_with,
 };
 pub use runtime_settings::{
     RuntimeSettings, RuntimeSettingsDocument, RuntimeSettingsResponse, RuntimeSettingsSource,
