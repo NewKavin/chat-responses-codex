@@ -774,12 +774,12 @@ async fn codex_catalog_hot_applies_admin_reasoning_override_without_rebuilding_r
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
-                        "upstream_id": upstream.id,
-                        "route_id": route_id,
+                        "upstream_id": upstream.id.clone(),
+                        "route_id": route_id.clone(),
                         "exposed_model_slug": model,
                         "runtime_model_slug": model,
                         "protocol": "chat_completions",
-                        "levels": ["low", "high"],
+                        "levels": ["low", "none"],
                         "scope": "route"
                     })
                     .to_string(),
@@ -790,15 +790,62 @@ async fn codex_catalog_hot_applies_admin_reasoning_override_without_rebuilding_r
         .unwrap();
     assert_eq!(updated.status(), StatusCode::OK);
 
-    let after = get_models_from_app(app, &secret, true).await;
+    let after = get_models_from_app(app.clone(), &secret, true).await;
     assert_eq!(
         after["models"][0]["supported_reasoning_levels"],
         json!([
-            {"effort": "low", "description": "Use low reasoning effort"},
-            {"effort": "high", "description": "Use high reasoning effort"}
+            {"effort": "none", "description": "Do not use reasoning effort"},
+            {"effort": "low", "description": "Use low reasoning effort"}
         ])
     );
-    assert_eq!(after["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(after["models"][0]["default_reasoning_level"], "low");
+    assert_eq!(after["models"][0]["supports_reasoning_summaries"], true);
+
+    let none_only_update = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/capabilities/reasoning-overrides")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "upstream_id": upstream.id,
+                        "route_id": route_id,
+                        "exposed_model_slug": model,
+                        "runtime_model_slug": model,
+                        "protocol": "chat_completions",
+                        "levels": ["none"],
+                        "scope": "route"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none_only_update.status(), StatusCode::OK);
+
+    let none_only = get_models_from_app(app, &secret, true).await;
+    assert_eq!(
+        none_only["models"][0]["supported_reasoning_levels"],
+        json!([{
+            "effort": "none",
+            "description": "Do not use reasoning effort"
+        }])
+    );
+    assert_eq!(
+        none_only["models"][0]["default_reasoning_level"],
+        "none"
+    );
+    assert_eq!(
+        none_only["models"][0]["supports_reasoning_summaries"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -821,6 +868,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
                 semantic: SemanticPolicy {
                     effort_map: std::collections::BTreeMap::from([
                         ("minimal".into(), "upstream-minimal".into()),
+                        ("none".into(), "upstream-none".into()),
                         ("high".into(), "upstream-high".into()),
                         ("low".into(), "upstream-low".into()),
                         ("medium".into(), "upstream-medium".into()),
@@ -866,6 +914,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         "reasoning_effort".into(),
         vec![
             "upstream-minimal".into(),
+            "upstream-none".into(),
             "upstream-high".into(),
             "upstream-low".into(),
             "upstream-medium".into(),
@@ -882,6 +931,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
     assert_eq!(
         model["supported_reasoning_levels"],
         json!([
+            {"effort": "none", "description": "Do not use reasoning effort"},
             {"effort": "low", "description": "Use low reasoning effort"},
             {"effort": "medium", "description": "Use medium reasoning effort"},
             {"effort": "high", "description": "Use high reasoning effort"},

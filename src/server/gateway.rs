@@ -2407,7 +2407,8 @@ struct CodexReasoningMetadata {
     supports_summaries: bool,
 }
 
-const CODEX_REASONING_EFFORT_ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const CODEX_REASONING_EFFORT_ORDER: [&str; 6] =
+    ["none", "low", "medium", "high", "xhigh", "max"];
 
 fn codex_reasoning_effort_rank(effort: &str) -> usize {
     CODEX_REASONING_EFFORT_ORDER
@@ -2417,7 +2418,11 @@ fn codex_reasoning_effort_rank(effort: &str) -> usize {
 }
 
 fn codex_reasoning_description(effort: &str) -> String {
-    format!("Use {effort} reasoning effort")
+    if effort == "none" {
+        "Do not use reasoning effort".to_owned()
+    } else {
+        format!("Use {effort} reasoning effort")
+    }
 }
 
 fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadata {
@@ -2431,6 +2436,7 @@ fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadat
             .cmp(&codex_reasoning_effort_rank(right))
             .then_with(|| left.cmp(right))
     });
+    efforts.dedup();
 
     if efforts.is_empty() {
         return CodexReasoningMetadata {
@@ -2446,8 +2452,10 @@ fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadat
     let default_effort = efforts
         .iter()
         .find(|effort| effort.as_str() == "high")
+        .or_else(|| efforts.iter().find(|effort| effort.as_str() != "none"))
         .cloned()
-        .unwrap_or_else(|| efforts[0].clone());
+        .unwrap_or_else(|| "none".to_owned());
+    let supports_summaries = efforts.iter().any(|effort| effort != "none");
     let supported_levels = efforts
         .into_iter()
         .map(|effort| {
@@ -2461,7 +2469,7 @@ fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadat
     CodexReasoningMetadata {
         supported_levels,
         default_level: Value::String(default_effort),
-        supports_summaries: true,
+        supports_summaries,
     }
 }
 

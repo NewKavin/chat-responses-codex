@@ -304,7 +304,7 @@ assert_eq!(captured[2]["reasoning_effort"], "upstream-max");
 Run:
 
 ```bash
-rtk cargo test --test gateway responses_fallback::mapped_reasoning_effort_precedes_generic_normalization -- --exact --nocapture
+rtk cargo test --test gateway responses::fallback::mapped_reasoning_effort_precedes_generic_normalization -- --exact --nocapture
 ```
 
 Expected: PASS, proving the existing request adapter needs no special disable

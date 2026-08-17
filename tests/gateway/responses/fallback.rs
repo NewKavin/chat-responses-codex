@@ -1747,6 +1747,7 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
                 },
                 semantic: SemanticPolicy {
                     effort_map: std::collections::BTreeMap::from([
+                        ("none".into(), "none".into()),
                         ("xhigh".into(), "upstream-xhigh".into()),
                         ("max".into(), "upstream-max".into()),
                     ]),
@@ -1776,13 +1777,17 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
     }
     profile.reasoning_controls.insert(
         "reasoning_effort".into(),
-        vec!["upstream-xhigh".into(), "upstream-max".into()],
+        vec![
+            "none".into(),
+            "upstream-xhigh".into(),
+            "upstream-max".into(),
+        ],
     );
     stamp_current_dialect_profile(&state, model, &mut profile).await;
     state.upsert_dialect_profile(profile).await.unwrap();
 
     let app = build_router(state);
-    for effort in ["xhigh", "max"] {
+    for effort in ["none", "xhigh", "max"] {
         let response = app
             .clone()
             .oneshot(
@@ -1810,9 +1815,10 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
     }
 
     let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 2);
-    assert_eq!(captured[0]["reasoning_effort"], "upstream-xhigh");
-    assert_eq!(captured[1]["reasoning_effort"], "upstream-max");
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0]["reasoning_effort"], "none");
+    assert_eq!(captured[1]["reasoning_effort"], "upstream-xhigh");
+    assert_eq!(captured[2]["reasoning_effort"], "upstream-max");
 }
 
 #[tokio::test]
