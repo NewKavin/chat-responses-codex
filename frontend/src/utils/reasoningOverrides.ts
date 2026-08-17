@@ -1,6 +1,7 @@
 import type { CapabilitySource, ReasoningEffortLevel } from '@/types'
 
 export const REASONING_EFFORT_LEVELS = [
+  'none',
   'low',
   'medium',
   'high',

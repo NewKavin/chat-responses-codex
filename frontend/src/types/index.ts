@@ -702,7 +702,13 @@ export interface CapabilityDiscoveryResponse {
   models: CapabilityModelDiscoverySummary[]
 }
 
-export type ReasoningEffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ReasoningEffortLevel =
+  | 'none'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
 export type ReasoningOverrideScope = 'route' | 'model_routes'
 
 export interface UpdateReasoningOverridesRequest {

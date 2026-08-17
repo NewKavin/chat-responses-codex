@@ -8,6 +8,7 @@ import {
 describe('reasoning overrides', () => {
   it('keeps the editable effort vocabulary in canonical order', () => {
     expect(REASONING_EFFORT_LEVELS).toEqual([
+      'none',
       'low',
       'medium',
       'high',
@@ -16,11 +17,13 @@ describe('reasoning overrides', () => {
     ])
     expect(normalizeReasoningLevels([
       'max',
+      'none',
       'low',
+      'none',
       'high',
       'low',
       'future-level'
-    ])).toEqual(['low', 'high', 'max'])
+    ])).toEqual(['none', 'low', 'high', 'max'])
   })
 
   it('labels effective reasoning sources without conflating probes and overrides', () => {
