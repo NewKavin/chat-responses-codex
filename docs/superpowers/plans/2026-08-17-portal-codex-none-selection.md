@@ -243,7 +243,7 @@ Run this dynamic asset check, which reads the current hashed filename from the
 deployed index before inspecting the utility chunk:
 
 ```bash
-rtk node -e 'const base="http://127.0.0.1:3000/"; const index=await fetch(base).then(r=>r.text()); const asset=index.match(/assets\/integration-[A-Za-z0-9_-]+\.js/)?.[0]; if(!asset) throw new Error("integration asset not found"); const body=await fetch(new URL(asset,base)).then(r=>r.text()); if(!/\[`none`,`low`,`medium`,`high`,`xhigh`,`max`\]/.test(body)) throw new Error("none-first effort tuple not found"); if(!body.includes("model_reasoning_effort")) throw new Error("TOML effort generator not found"); console.log(asset, "none-first tuple and TOML generator verified")'
+rtk node -e 'const base="http://127.0.0.1:3000/"; const html=await fetch(base).then(r=>r.text()); const entry=html.match(/src="\/(assets\/index-[A-Za-z0-9_-]+\.js)"/)?.[1]; if(!entry) throw new Error("index asset not found"); const index=await fetch(new URL(entry,base)).then(r=>r.text()); const asset=index.match(/assets\/integration-[A-Za-z0-9_-]+\.js/)?.[0]; if(!asset) throw new Error("integration asset not found"); const body=await fetch(new URL(asset,base)).then(r=>r.text()); if(!/\[`none`,`low`,`medium`,`high`,`xhigh`,`max`\]/.test(body)) throw new Error("none-first effort tuple not found"); if(!body.includes("model_reasoning_effort")) throw new Error("TOML effort generator not found"); console.log(entry, asset, "none-first tuple and TOML generator verified")'
 ```
 
 Expected: the deployed bundle contains the six-value order
