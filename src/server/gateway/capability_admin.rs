@@ -295,29 +295,17 @@ pub(super) async fn admin_capabilities_resolved(
         .route_overrides_for(&route);
     let policy_extensions = capability_snapshot.configuration.extensions_for(&route);
     let profile_key = DialectProfileKey::from_route(&route);
-    let current_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
-        &capability_snapshot,
-        upstream,
-        &key_fingerprint,
-        &query.model,
-        &runtime_model_slug,
-        protocol,
-    )
-    .ok();
     let raw_profile = capability_snapshot.profiles.get(&profile_key);
     let profile = raw_profile.filter(|profile| {
-        current_fingerprint.as_deref().is_some_and(|fingerprint| {
-            profile_is_current_for_route(
-                &capability_snapshot,
-                upstream,
-                &query.model,
-                &runtime_model_slug,
-                protocol,
-                profile,
-                fingerprint,
-                case_insensitive,
-            )
-        })
+        profile_is_current_for_route(
+            &capability_snapshot,
+            upstream,
+            &query.model,
+            &runtime_model_slug,
+            protocol,
+            profile,
+            case_insensitive,
+        )
     });
     let now = unix_seconds();
     let resolved = match CapabilityResolver.resolve(ResolutionInput {
@@ -695,26 +683,15 @@ fn profile_is_current_for_any_route(
                 })
         })
         .any(|(upstream, exposed)| {
-            AppState::route_configuration_fingerprint_with_snapshot(
+            profile_is_current_for_route(
                 snapshot,
                 upstream,
-                &profile.key.key_fingerprint,
                 &exposed,
                 &profile.key.runtime_model_slug,
                 protocol,
+                profile,
+                case_insensitive,
             )
-            .is_ok_and(|fingerprint| {
-                profile_is_current_for_route(
-                    snapshot,
-                    upstream,
-                    &exposed,
-                    &profile.key.runtime_model_slug,
-                    protocol,
-                    profile,
-                    &fingerprint,
-                    case_insensitive,
-                )
-            })
         })
 }
 
@@ -770,28 +747,16 @@ pub(super) fn capability_discovery_summaries(
                         runtime_model_slug.clone(),
                         wire_protocol,
                     );
-                    let profile = AppState::route_configuration_fingerprint_with_snapshot(
-                        &snapshot,
-                        upstream,
-                        &key_fingerprint,
-                        &exposed_model_slug,
-                        &runtime_model_slug,
-                        protocol,
-                    )
-                    .ok()
-                    .and_then(|fingerprint| {
-                        snapshot.profiles.get(&key).filter(|profile| {
-                            profile_is_current_for_route(
-                                &snapshot,
-                                upstream,
-                                &exposed_model_slug,
-                                &runtime_model_slug,
-                                protocol,
-                                profile,
-                                &fingerprint,
-                                case_insensitive,
-                            )
-                        })
+                    let profile = snapshot.profiles.get(&key).filter(|profile| {
+                        profile_is_current_for_route(
+                            &snapshot,
+                            upstream,
+                            &exposed_model_slug,
+                            &runtime_model_slug,
+                            protocol,
+                            profile,
+                            case_insensitive,
+                        )
                     });
                     let resolved = resolve_route_capabilities_with_snapshot(
                         &snapshot,
@@ -868,8 +833,8 @@ pub(super) fn capability_discovery_summaries(
     }
 
     models
-        .into_iter()
-        .map(|(_, mut model)| {
+        .into_values()
+        .map(|mut model| {
             model.routes.sort_by(|left, right| {
                 left.upstream_id
                     .cmp(&right.upstream_id)
@@ -955,7 +920,6 @@ fn profile_is_current_for_route(
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
     profile: &UpstreamDialectProfile,
-    fingerprint: &str,
     case_insensitive: bool,
 ) -> bool {
     profile.key
@@ -971,7 +935,6 @@ fn profile_is_current_for_route(
             .any(|api_key| {
                 upstream_key_fingerprint(&upstream.id, api_key) == profile.key.key_fingerprint
             })
-        && profile.configuration_fingerprint == fingerprint
         && profile.probe_schema_version == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
         && AppState::route_configuration_fingerprint_with_snapshot(
             snapshot,
@@ -981,7 +944,7 @@ fn profile_is_current_for_route(
             runtime_model_slug,
             protocol,
         )
-        .is_ok_and(|current| current == fingerprint)
+        .is_ok_and(|current| current == profile.configuration_fingerprint)
 }
 
 fn profile_currentness_label(has_profile: bool, is_current: bool) -> &'static str {
