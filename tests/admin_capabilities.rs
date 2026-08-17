@@ -847,7 +847,7 @@ async fn admin_reasoning_override_upserts_clears_and_reports_effective_source() 
                 "exposed_model_slug": "opaque",
                 "runtime_model_slug": "opaque",
                 "protocol": "chat_completions",
-                "levels": ["high", "low", "high"],
+                "levels": ["high", "none", "low", "none", "high"],
                 "scope": "route"
             }),
         )
@@ -863,12 +863,18 @@ async fn admin_reasoning_override_upserts_clears_and_reports_effective_source() 
     let managed = &exported["route_overrides"][0];
     assert_eq!(managed["id"], format!("operator-reasoning-{route_id}"));
     assert_eq!(managed["reasoning_control_field"], "reasoning_effort");
-    assert_eq!(managed["effort_map"], json!({"high": "high", "low": "low"}));
+    assert_eq!(
+        managed["effort_map"],
+        json!({"high": "high", "low": "low", "none": "none"})
+    );
     assert_eq!(managed["capabilities"]["reasoning_output"], "supported");
 
     let discovery = response_json(fixture.get("/api/admin/capabilities/discovery").await).await;
     let route = &discovery["models"][0]["routes"][0];
-    assert_eq!(route["accepted_reasoning_levels"], json!(["low", "high"]));
+    assert_eq!(
+        route["accepted_reasoning_levels"],
+        json!(["none", "low", "high"])
+    );
     assert_eq!(route["reasoning_source"], "override");
     assert_eq!(route["managed_reasoning_override"], true);
     assert_eq!(route["outcome"], before_outcome);
@@ -930,9 +936,14 @@ async fn admin_reasoning_override_rejects_invalid_levels_and_stale_routes_atomic
         )
         .await;
     assert_eq!(invalid_level.status(), StatusCode::BAD_REQUEST);
+    let invalid_level_body = response_json(invalid_level).await;
     assert_eq!(
-        response_json(invalid_level).await["error"]["code"],
+        invalid_level_body["error"]["code"],
         "capability_reasoning_override_invalid_level"
+    );
+    assert_eq!(
+        invalid_level_body["error"]["message"],
+        "levels must contain only none, low, medium, high, xhigh, or max"
     );
 
     let stale_route = fixture

@@ -850,7 +850,7 @@ pub(super) fn capability_verified_reasoning_levels_by_model(
 }
 
 fn sort_canonical_reasoning_levels(levels: &mut Vec<String>) {
-    const ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+    const ORDER: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
     levels.retain(|level| ORDER.contains(&level.as_str()));
     levels.sort_by(|left, right| {
         ORDER

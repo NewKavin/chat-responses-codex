@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 const MANAGED_REASONING_OVERRIDE_PREFIX: &str = "operator-reasoning-";
 const MANAGED_REASONING_OVERRIDE_PRIORITY: i32 = 1_000_000;
-const REASONING_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const REASONING_LEVELS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,7 +51,7 @@ pub(super) async fn admin_update_reasoning_overrides(
             return reasoning_override_error(
                 StatusCode::BAD_REQUEST,
                 "capability_reasoning_override_invalid_level",
-                "levels must contain only low, medium, high, xhigh, or max",
+                "levels must contain only none, low, medium, high, xhigh, or max",
             );
         }
     };
