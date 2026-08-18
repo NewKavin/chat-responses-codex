@@ -60,17 +60,24 @@
         <template #label><span class="filter-label"><Search :size="12" :stroke-width="2" />搜索</span></template>
         <el-input v-model="filters.search" placeholder="名称 / ID / Base URL" clearable />
       </el-form-item>
+      <el-form-item class="table-column-settings-item">
+        <TableColumnSettings
+          v-model="visibleColumnKeys"
+          :columns="tableColumns"
+          :default-keys="defaultColumnKeys"
+        />
+      </el-form-item>
     </el-form>
 
     <div class="crc-table-shell">
       <el-table :data="filteredUpstreams" v-loading="loading" stripe style="width: 100%"
         empty-text="当前筛选条件下暂无上游" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="48" />
-        <el-table-column label="ID" width="72" align="center">
+        <el-table-column v-if="isColumnVisible('id')" label="ID" width="72" align="center">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>
-        <el-table-column prop="name" label="名称" min-width="200" />
-        <el-table-column label="协议" min-width="240">
+        <el-table-column v-if="isColumnVisible('name')" prop="name" label="名称" min-width="200" />
+        <el-table-column v-if="isColumnVisible('protocol')" label="协议" min-width="240">
           <template #default="{ row }">
             <div class="protocol-cell">
               <el-tag
@@ -83,17 +90,17 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="模型数量" width="100">
+        <el-table-column v-if="isColumnVisible('models')" label="模型数量" width="100">
           <template #default="{ row }">
             {{ row.supported_models.length }}
           </template>
         </el-table-column>
-        <el-table-column label="Key 数量" width="100">
+        <el-table-column v-if="isColumnVisible('keys')" label="Key 数量" width="100">
           <template #default="{ row }">
             {{ displayKeyCount(row) }} 个
           </template>
         </el-table-column>
-        <el-table-column label="兼容清理" width="110">
+        <el-table-column v-if="isColumnVisible('compatibility')" label="兼容清理" width="110">
           <template #default="{ row }">
             <el-tag v-if="normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields) === 'always_strip'" type="success" size="small">强制</el-tag>
             <el-tag v-else-if="normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields) === 'forward'" type="warning" size="small">透传</el-tag>
@@ -103,7 +110,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="高端模型保护" min-width="160">
+        <el-table-column v-if="isColumnVisible('premium')" label="高端模型保护" min-width="160">
           <template #default="{ row }">
             <el-tooltip v-if="row.protect_premium_quota && row.premium_models.length > 0" 
                         :content="'保护模型: ' + row.premium_models.join(', ')" 
@@ -116,7 +123,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="状态" width="100">
+        <el-table-column v-if="isColumnVisible('status')" label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="row.active ? 'success' : 'danger'">
               {{ row.active ? '启用' : '禁用' }}
@@ -124,7 +131,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="优先级/权重" width="150" align="center">
+        <el-table-column v-if="isColumnVisible('priority')" label="优先级/权重" width="150" align="center">
           <template #default="{ row }">
             <el-input-number
               v-model="row.priority"
@@ -139,7 +146,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="备注" min-width="180" show-overflow-tooltip>
+        <el-table-column v-if="isColumnVisible('remark')" label="备注" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ row.remark || '-' }}</template>
         </el-table-column>
         
@@ -393,6 +400,7 @@ import {
   type BatchCreateUpstreamPayload
 } from '@/api/admin'
 import type { ApiKeyModelConfig, KeyModelDiscoveryResult, NonstandardFieldPolicy, UpstreamConfig } from '@/types'
+import { useTableColumnPreferences, type TableColumnDefinition } from '@/composables/useTableColumns'
 
 const loading = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
@@ -403,6 +411,25 @@ const filters = ref({
   protocol: 'all',
   search: ''
 })
+const tableColumns: TableColumnDefinition[] = [
+  { key: 'id', label: 'ID' },
+  { key: 'name', label: '名称' },
+  { key: 'protocol', label: '协议' },
+  { key: 'models', label: '模型数量' },
+  { key: 'keys', label: 'Key 数量' },
+  { key: 'compatibility', label: '兼容清理' },
+  { key: 'premium', label: '高端模型保护' },
+  { key: 'status', label: '状态' },
+  { key: 'priority', label: '优先级/权重' },
+  { key: 'remark', label: '备注' }
+]
+const defaultColumnKeys = tableColumns.map(column => column.key)
+const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
+  tableColumns,
+  'admin-upstreams-visible-columns',
+  defaultColumnKeys
+)
+
 const inlineSaving = ref<Record<string, boolean>>({})
 const inlineCommitted = ref<Record<string, { priority: number }>>({})
 const dialogVisible = ref(false)
@@ -1193,6 +1220,11 @@ onMounted(() => {
 
 .upstream-filters :deep(.el-input) {
   min-width: 220px;
+}
+
+.table-column-settings-item {
+  margin-right: 0;
+  margin-bottom: 8px;
 }
 
 .filter-label {

@@ -90,6 +90,27 @@ describe('admin ui structure', () => {
     expect(charts).not.toContain('key_prefix')
   })
 
+  it('supports editable visible column preferences on upstream and downstream lists', () => {
+    const upstream = source('views/admin/Upstreams.vue')
+    const downstream = source('views/admin/Downstreams.vue')
+
+    for (const page of [upstream, downstream]) {
+      expect(page).toContain('<TableColumnSettings')
+      expect(page).toContain('v-model="visibleColumnKeys"')
+      expect(page).toContain(':columns="tableColumns"')
+      expect(page).toContain(':default-keys="defaultColumnKeys"')
+    }
+
+    expect(upstream).toContain("'admin-upstreams-visible-columns'")
+    expect(downstream).toContain("'admin-downstreams-visible-columns'")
+    expect(upstream).toContain('useTableColumnPreferences')
+    expect(downstream).toContain('useTableColumnPreferences')
+    expect(upstream).toContain("v-if=\"isColumnVisible('name')\"")
+    expect(upstream).toContain("v-if=\"isColumnVisible('remark')\"")
+    expect(downstream).toContain("v-if=\"isColumnVisible('id')\"")
+    expect(downstream).toContain("v-if=\"isColumnVisible('key')\"")
+  })
+
   it('uses the responsive upstream management workbench', () => {
     const page = source('views/admin/Upstreams.vue')
 
@@ -319,7 +340,7 @@ describe('admin downstream runtime display', () => {
     expect(page).toContain('class="row-actions"')
     expect(page).not.toContain('fixed="right"')
     expect(page).toContain('class="crc-table-shell downstreams-table-shell"')
-    expect(page).toContain('<el-table-column label="运行并发" width="400">')
+    expect(page).toContain('<el-table-column v-if="isColumnVisible(\'runtime\')" label="运行并发" width="400">')
     expect(page).toMatch(/\.runtime-cell\s*\{[^}]*flex-wrap:\s*nowrap/s)
     expect(page).toMatch(/\.runtime-cell\s*\{[^}]*white-space:\s*nowrap/s)
     expect(page).not.toMatch(/\.compact-downstreams-table\s*:deep\(\.el-table__cell\)/)

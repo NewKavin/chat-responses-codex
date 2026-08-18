@@ -37,14 +37,21 @@
         <template #label><span class="filter-label"><Search :size="12" :stroke-width="2" />搜索</span></template>
         <el-input v-model="filters.search" @input="loadData" placeholder="名称或ID" clearable />
       </el-form-item>
+      <el-form-item class="table-column-settings-item">
+        <TableColumnSettings
+          v-model="visibleColumnKeys"
+          :columns="tableColumns"
+          :default-keys="defaultColumnKeys"
+        />
+      </el-form-item>
     </el-form>
       
     <div class="crc-table-shell downstreams-table-shell">
       <el-table class="compact-downstreams-table" :data="downstreams" v-loading="loading" stripe @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="45" />
-        <el-table-column prop="id" label="ID" width="150" />
-        <el-table-column prop="name" label="名称" width="200" />
-        <el-table-column label="秘钥" width="220">
+        <el-table-column v-if="isColumnVisible('id')" prop="id" label="ID" width="150" />
+        <el-table-column v-if="isColumnVisible('name')" prop="name" label="名称" width="200" />
+        <el-table-column v-if="isColumnVisible('key')" label="秘钥" width="220">
           <template #default="{ row }">
             <div class="key-cell">
               <code v-if="hasUsablePlaintextKey(row.plaintext_key)">
@@ -66,7 +73,7 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="限额配置" min-width="320">
+        <el-table-column v-if="isColumnVisible('quota')" label="限额配置" min-width="320">
           <template #default="{ row }">
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
             <span v-else-if="isCostRow(row)">
@@ -79,7 +86,7 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="运行并发" width="400">
+        <el-table-column v-if="isColumnVisible('runtime')" label="运行并发" width="400">
           <template #default="{ row }">
             <div class="runtime-cell" v-if="runtimeById[row.id]?.available">
               <span class="runtime-metric" v-if="runtimeById[row.id]?.running !== undefined">
@@ -99,14 +106,14 @@
             <el-tag v-else type="info" size="small">Unavailable</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="生命周期" width="120">
+        <el-table-column v-if="isColumnVisible('lifecycle')" label="生命周期" width="120">
           <template #default="{ row }">
             <el-tag :type="row.expires_at ? 'warning' : 'success'">
               {{ row.expires_at ? '试用' : '永久' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column v-if="isColumnVisible('status')" label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="row.active ? 'success' : 'danger'">
               {{ row.active ? '启用' : '禁用' }}
@@ -387,6 +394,7 @@ import {
 } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
+import { useTableColumnPreferences, type TableColumnDefinition } from '@/composables/useTableColumns'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
 
 const loading = ref(false)
@@ -399,6 +407,22 @@ const formRef = ref()
 const newPlaintextKey = ref('')
 const runtimeById = ref<Record<string, DownstreamConcurrencySnapshot>>({})
 let runtimeTimer: number | null = null
+const tableColumns: TableColumnDefinition[] = [
+  { key: 'id', label: 'ID' },
+  { key: 'name', label: '名称' },
+  { key: 'key', label: '秘钥' },
+  { key: 'quota', label: '限额配置' },
+  { key: 'runtime', label: '运行并发' },
+  { key: 'lifecycle', label: '生命周期' },
+  { key: 'status', label: '状态' }
+]
+const defaultColumnKeys = tableColumns.map(column => column.key)
+const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
+  tableColumns,
+  'admin-downstreams-visible-columns',
+  defaultColumnKeys
+)
+
 const requestQuotaHours = ref(5)
 const requestQuotaCount = ref(600)
 // 按金额计费：输入单位为元，提交时换算成分（¢）。
@@ -780,6 +804,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+
+.table-column-settings-item {
+  margin-right: 0;
+  margin-bottom: 8px;
+}
 .downstreams-page {
   min-height: 100%;
 }
