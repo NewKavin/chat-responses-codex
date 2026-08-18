@@ -18,6 +18,11 @@ services:
       start_period: 5s
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   redis:
     image: redis:7-alpine
@@ -33,6 +38,11 @@ services:
       start_period: 5s
     volumes:
       - redis-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   gateway:
     image: chat-responses-codex:latest
@@ -45,6 +55,11 @@ services:
         condition: service_healthy
     ports:
       - "3001:3001"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     # Local coordination supports one authoritative gateway; enable Redis before adding replicas.
     environment:
       # Bootstrap connections, credentials, and infrastructure remain environment-only.
