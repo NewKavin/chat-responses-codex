@@ -155,5 +155,45 @@ fi
 log "Deploying with compose in ${DEPLOY_DIR}"
 "${COMPOSE[@]}" --env-file "$DEPLOY_ENV" -f "$DEPLOY_COMPOSE" --project-directory "$DEPLOY_DIR" up -d --remove-orphans
 
+wait_for_gateway_health() {
+  local container="${GATEWAY_CONTAINER_NAME:-chat-responses-codex}"
+  local port="${GATEWAY_HEALTH_PORT:-3000}"
+  local health attempt
+
+  for attempt in $(seq 1 30); do
+    health=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)
+    printf '[%s] Gateway health attempt %s/30: %s\n' \
+      "$(date '+%Y-%m-%d %H:%M:%S')" "$attempt" "${health:-unknown}"
+    if [[ "$health" == healthy ]] &&
+       [[ "$(curl --noproxy '*' -fsS "http://127.0.0.1:${port}/healthz" 2>/dev/null || true)" == ok ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "Error: gateway failed health verification" >&2
+  return 1
+}
+
+verify_deployed_frontend() {
+  local port="${GATEWAY_HEALTH_PORT:-3000}"
+  local index asset main upstream_asset
+
+  index=$(curl --noproxy '*' -fsS "http://127.0.0.1:${port}/") || return 1
+  asset=$(printf '%s' "$index" | grep -o 'assets/index-[^" ]*\.js' | head -n1)
+  [[ -n "$asset" ]] || { echo "Error: deployed index has no main asset" >&2; return 1; }
+  main=$(curl --noproxy '*' -fsS "http://127.0.0.1:${port}/${asset}") || return 1
+  upstream_asset=$(printf '%s' "$main" | grep -o 'assets/Upstreams-[^" ]*\.js' | head -n1)
+  [[ -n "$upstream_asset" ]] || { echo "Error: deployed main asset has no Upstreams chunk" >&2; return 1; }
+  curl --noproxy '*' -fsS "http://127.0.0.1:${port}/${upstream_asset}" |
+    grep -F -q 'key_concurrency' || {
+      echo "Error: deployed Upstreams chunk is stale" >&2
+      return 1
+    }
+}
+
+wait_for_gateway_health
+verify_deployed_frontend
+
 log "Deployment finished"
 "${COMPOSE[@]}" --project-directory "$DEPLOY_DIR" -f "$DEPLOY_COMPOSE" ps
