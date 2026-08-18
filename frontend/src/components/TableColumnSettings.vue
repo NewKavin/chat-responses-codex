@@ -13,23 +13,25 @@
     </template>
 
     <div class="table-column-panel" role="group" aria-label="列表展示列设置">
-      <el-select
-        :model-value="modelValue"
-        multiple
-        filterable
-        collapse-tags
-        collapse-tags-tooltip
-        placeholder="选择要展示的字段"
-        class="table-column-select"
-        @update:model-value="handleSelectionChange"
-      >
-        <el-option
-          v-for="column in columns"
+      <el-input
+        v-model="search"
+        size="small"
+        clearable
+        placeholder="搜索字段"
+        class="table-column-search"
+      />
+
+      <div class="table-column-options">
+        <el-checkbox
+          v-for="column in filteredColumns"
           :key="column.key"
+          class="table-column-option"
+          :model-value="isSelected(column.key)"
           :label="column.label"
-          :value="column.key"
+          @change="toggleColumn(column.key, $event === true)"
         />
-      </el-select>
+        <div v-if="filteredColumns.length === 0" class="table-column-empty">没有匹配字段</div>
+      </div>
 
       <div class="table-column-actions">
         <el-checkbox
@@ -46,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { Columns3 } from '@lucide/vue'
 import type { TableColumnDefinition } from '@/composables/useTableColumns'
 
@@ -62,20 +64,35 @@ const emit = defineEmits<{
   (event: 'update:modelValue', keys: string[]): void
 }>()
 
+const search = ref('')
+const filteredColumns = computed(() => {
+  const query = search.value.trim().toLowerCase()
+  if (!query) return props.columns
+  return props.columns.filter(column =>
+    column.label.toLowerCase().includes(query) ||
+    column.key.toLowerCase().includes(query)
+  )
+})
+const isSelected = (key: string) => props.modelValue.includes(key)
+
+const orderedKeys = (keys: string[]) => props.columns
+  .map(column => column.key)
+  .filter(key => keys.includes(key))
+
+const toggleColumn = (key: string, checked: boolean) => {
+  if (!checked && props.modelValue.length === 1) return
+  const next = checked
+    ? orderedKeys([...props.modelValue, key])
+    : props.modelValue.filter(item => item !== key)
+  emit('update:modelValue', next)
+}
+
 const availableKeys = computed(() => new Set(props.columns.map(column => column.key)))
 const validSelectedCount = computed(
   () => props.modelValue.filter(key => availableKeys.value.has(key)).length
 )
 const allSelected = computed(() => validSelectedCount.value === props.columns.length)
 const someSelected = computed(() => validSelectedCount.value > 0)
-
-const orderedKeys = (keys: string[]) => props.columns
-  .map(column => column.key)
-  .filter(key => keys.includes(key))
-
-const handleSelectionChange = (keys: string[]) => {
-  if (keys.length > 0) emit('update:modelValue', orderedKeys(keys))
-}
 
 const toggleAll = (checked: boolean | string | number) => {
   if (checked) {
@@ -100,8 +117,16 @@ const resetDefaults = () => {
   gap: 10px;
 }
 
-.table-column-select {
-  width: 100%;
+.table-column-options {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.table-column-empty {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 .table-column-actions {

@@ -4,7 +4,16 @@ import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { resolve } from 'path'
 
+/// <reference types="vitest" />
 export default defineConfig({
+  test: {
+    css: false,
+    server: {
+      deps: {
+        inline: ['element-plus']
+      }
+    }
+  },
   plugins: [
     vue(),
     Components({
