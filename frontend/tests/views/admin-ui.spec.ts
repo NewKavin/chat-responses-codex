@@ -203,6 +203,9 @@ describe('admin ui structure', () => {
     expect(downstream).toContain("key: 'available_models', label: '可用模型'")
     expect(downstream).toContain("v-if=\"isColumnVisible('available_models')\"")
     expect(downstream).toContain('formatModelList(row.model_allowlist)')
+    expect(upstream).toContain("key: 'route_health', label: '路由健康'")
+    expect(upstream).toContain('formatRouteFailureClasses(row.route_health)')
+    expect(upstream).toContain('formatRouteCooldown(row.route_health)')
   })
 
   it('uses the responsive upstream management workbench', () => {
