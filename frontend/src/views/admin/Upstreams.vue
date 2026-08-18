@@ -126,6 +126,15 @@
             {{ displayKeyCount(row) }} 个
           </template>
         </el-table-column>
+        <el-table-column
+          v-if="isColumnVisible('key_concurrency')"
+          prop="max_concurrency"
+          label="每 Key 最大并发"
+          width="140"
+          align="center"
+        >
+          <template #default="{ row }">{{ row.max_concurrency }}</template>
+        </el-table-column>
         <el-table-column v-if="isColumnVisible('compatibility')" label="兼容清理" width="110">
           <template #default="{ row }">
             <el-tag v-if="normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields) === 'always_strip'" type="success" size="small">强制</el-tag>
@@ -445,6 +454,7 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'models', label: '模型数量' },
   { key: 'supported_models', label: '支持的模型' },
   { key: 'keys', label: 'Key 数量' },
+  { key: 'key_concurrency', label: '每 Key 最大并发' },
   { key: 'compatibility', label: '兼容清理' },
   { key: 'premium', label: '高端模型保护' },
   { key: 'status', label: '状态' },
@@ -453,7 +463,7 @@ const tableColumns: TableColumnDefinition[] = [
 ]
 const defaultColumnKeys = tableColumns
   .map(column => column.key)
-  .filter(key => key !== 'base_url' && key !== 'supported_models')
+  .filter(key => key !== 'base_url' && key !== 'supported_models' && key !== 'key_concurrency')
 const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
   tableColumns,
   'admin-upstreams-visible-columns',
