@@ -198,7 +198,10 @@ async fn v1_models_catalogs_restore_exact_case_behavior_when_switch_is_disabled(
         .iter()
         .map(|model| model["id"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(standard_ids, std::collections::BTreeSet::from(["GLM-4.5", "glm-4.5"]));
+    assert_eq!(
+        standard_ids,
+        std::collections::BTreeSet::from(["GLM-4.5", "glm-4.5"])
+    );
 
     let codex = case_variant_models_payload("/v1/models?format=codex", false).await;
     let codex_ids = codex["models"]
@@ -207,7 +210,10 @@ async fn v1_models_catalogs_restore_exact_case_behavior_when_switch_is_disabled(
         .iter()
         .map(|model| model["slug"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(codex_ids, std::collections::BTreeSet::from(["GLM-4.5", "glm-4.5"]));
+    assert_eq!(
+        codex_ids,
+        std::collections::BTreeSet::from(["GLM-4.5", "glm-4.5"])
+    );
 }
 
 #[tokio::test]

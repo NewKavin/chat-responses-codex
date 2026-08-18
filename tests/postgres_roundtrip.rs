@@ -647,7 +647,6 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
     }
 }
 
-
 #[tokio::test]
 async fn postgres_roundtrip_preserves_model_mappings() {
     let _guard = env_lock().lock().await;
@@ -713,10 +712,22 @@ async fn postgres_roundtrip_preserves_model_mappings() {
 
     assert_eq!(snapshot.upstreams.len(), 1);
     assert_eq!(snapshot.upstreams[0].model_mappings.len(), 2);
-    assert_eq!(snapshot.upstreams[0].model_mappings[0].upstream_model, "gpt-4");
-    assert_eq!(snapshot.upstreams[0].model_mappings[0].downstream_model, "gpt-4-premium");
-    assert_eq!(snapshot.upstreams[0].model_mappings[1].upstream_model, "gpt-4o");
-    assert_eq!(snapshot.upstreams[0].model_mappings[1].downstream_model, "gpt-4o-std");
+    assert_eq!(
+        snapshot.upstreams[0].model_mappings[0].upstream_model,
+        "gpt-4"
+    );
+    assert_eq!(
+        snapshot.upstreams[0].model_mappings[0].downstream_model,
+        "gpt-4-premium"
+    );
+    assert_eq!(
+        snapshot.upstreams[0].model_mappings[1].upstream_model,
+        "gpt-4o"
+    );
+    assert_eq!(
+        snapshot.upstreams[0].model_mappings[1].downstream_model,
+        "gpt-4o-std"
+    );
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
@@ -2163,10 +2174,7 @@ async fn stream_diagnostics_round_trip_through_postgres() {
     assert!(reloaded_diag.semantic_output_observed);
     assert!(!reloaded_diag.semantic_terminal_observed);
     assert_eq!(reloaded_diag.retry_waited_ms, 4_700);
-    assert_eq!(
-        reloaded_diag.give_up_reason.as_deref(),
-        Some("wait_budget")
-    );
+    assert_eq!(reloaded_diag.give_up_reason.as_deref(), Some("wait_budget"));
 }
 
 #[tokio::test]
@@ -2493,14 +2501,8 @@ async fn postgres_roundtrip_preserves_model_aliases() {
 
     // Verify the registry was built correctly
     let registry = reloaded.model_alias_registry();
-    assert_eq!(
-        registry.resolve_alias("deepseek-chat"),
-        Some("deepseek-v3")
-    );
-    assert_eq!(
-        registry.resolve_alias("GLM-4.5-Preview"),
-        Some("GLM-4.5")
-    );
+    assert_eq!(registry.resolve_alias("deepseek-chat"), Some("deepseek-v3"));
+    assert_eq!(registry.resolve_alias("GLM-4.5-Preview"), Some("GLM-4.5"));
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");

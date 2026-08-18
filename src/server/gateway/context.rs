@@ -610,26 +610,22 @@ pub(super) fn apply_context_budget_controls(
             .saturating_add(requested_output_tokens.max(u64::from(output_reserve)))
             .min(u64::from(u32::MAX)) as u32;
 
-        if let Some(switched_model) =
-            upstream.context_fallback_model_for_with_profile_and_case(
-                model,
-                required_limit,
-                global_context_profile,
-                case_insensitive,
-            )
-        {
+        if let Some(switched_model) = upstream.context_fallback_model_for_with_profile_and_case(
+            model,
+            required_limit,
+            global_context_profile,
+            case_insensitive,
+        ) {
             if let Some(object) = payload.as_object_mut() {
                 object.insert("model".into(), Value::String(switched_model.clone()));
             }
             fallback_model = Some(switched_model.clone());
 
-            if let Some(next_config) = upstream
-                .context_config_for_model_with_profile_and_case(
-                    &switched_model,
-                    global_context_profile,
-                    case_insensitive,
-                )
-            {
+            if let Some(next_config) = upstream.context_config_for_model_with_profile_and_case(
+                &switched_model,
+                global_context_profile,
+                case_insensitive,
+            ) {
                 config = next_config;
                 context_limit = config.context_limit;
                 output_reserve = config.output_reserve;

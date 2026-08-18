@@ -8,11 +8,11 @@ use super::{
     ResponseHistoryEntry, RuntimeSettingsDocument, UpstreamConfig, UpstreamProtocol, UsageLog,
     UsageLogPage, UsageLogQuery,
 };
-use crate::state::model_identity::ModelAliasRule;
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
     WireProtocol,
 };
+use crate::state::model_identity::ModelAliasRule;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use serde_json::{Map, Value};
@@ -702,7 +702,12 @@ impl PostgresStateStore {
         let usage_row = conn
             .query_one(
                 sum_sql,
-                &[&downstream_id, &today_start, &month_start, &rolling_24h_start],
+                &[
+                    &downstream_id,
+                    &today_start,
+                    &month_start,
+                    &rolling_24h_start,
+                ],
             )
             .await
             .map_err(io_other)?;

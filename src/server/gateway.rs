@@ -19,9 +19,9 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_millis, unix_seconds, AccountConcurrencyKey,
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
-    CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
-    RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    DownstreamModelEntry, RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings,
+    CompatibilityUsageMetadata, DownstreamConcurrencyLease, DownstreamModelEntry,
+    GlobalContextProfile, KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit,
+    RouteOutcome, RouteRecovery, RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings,
     StreamDiagnostics, UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use axum::body::{Body, BodyDataStream};
@@ -2127,9 +2127,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/admin/model-mappings/status",
-            get(admin_model_mapping_status).route_layer(
-                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
-            ),
+            get(admin_model_mapping_status).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
         )
         .route(
             "/api/admin/integrations/freekey/sync",
@@ -2407,8 +2408,7 @@ struct CodexReasoningMetadata {
     supports_summaries: bool,
 }
 
-const CODEX_REASONING_EFFORT_ORDER: [&str; 6] =
-    ["none", "low", "medium", "high", "xhigh", "max"];
+const CODEX_REASONING_EFFORT_ORDER: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
 
 fn codex_reasoning_effort_rank(effort: &str) -> usize {
     CODEX_REASONING_EFFORT_ORDER
@@ -2491,9 +2491,7 @@ fn codex_catalog_context_window(
 ) -> Option<i64> {
     upstreams
         .iter()
-        .filter(|upstream| {
-            upstream.active && upstream.supports_model_with(model, case_insensitive)
-        })
+        .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
         .filter_map(|upstream| upstream.context_config_for_model_with(model, case_insensitive))
         .map(|config| i64::from(config.context_limit))
         .max()
@@ -2538,10 +2536,7 @@ fn codex_exposed_models(
                 }
             }
         }
-        grouped
-            .into_values()
-            .map(|(display, _)| display)
-            .collect()
+        grouped.into_values().map(|(display, _)| display).collect()
     };
 
     if allowlist.is_empty() {
@@ -2600,11 +2595,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     };
     let snapshot = state.routing_snapshot().await;
     let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
-    let verified_reasoning_levels = capability_verified_reasoning_levels_by_model(
-        state,
-        &snapshot.upstreams,
-        case_insensitive,
-    );
+    let verified_reasoning_levels =
+        capability_verified_reasoning_levels_by_model(state, &snapshot.upstreams, case_insensitive);
 
     let model_infos = codex_exposed_models(
         &snapshot.upstreams,
@@ -4632,72 +4624,74 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
 
-    let (downstream_request_reservation, downstream_concurrency_lease) =
-        match state.reserve_downstream_admission(&downstream).await {
-            Ok(admission) => admission,
-            Err(rejection) => {
-                let retry_after_seconds = rejection.retry_after_seconds();
-                tracing::warn!(
-                    request_id = %request_id,
-                    downstream_key_id = %downstream.id,
-                    path = %request_path,
-                    original_model = %model,
-                    normalized_model = %&normalized_model,
-                    retry_after_seconds,
-                    max_concurrency = downstream.max_concurrency,
-                    rejection = ?rejection,
-                    "downstream admission rejected (request quota or concurrency)"
-                );
-                if let crate::state::DownstreamAdmissionRejection::DailyCostQuotaExceeded {
-                    retry_after_seconds: lockout_seconds,
-                    limit,
-                    used,
-                } = &rejection
-                {
-                    // A daily cost lockout usually emits exactly one WARN (the
-                    // client stops retrying), then stays silent for the rest
-                    // of the window.  Escalate long lockouts so an exhausted
-                    // downstream cannot drain its budget unnoticed.
-                    if *lockout_seconds >= 3600 {
-                        tracing::error!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %&normalized_model,
-                            daily_cost_limit_cents = limit,
-                            daily_cost_used_cents = used,
-                            lockout_seconds,
-                            "downstream daily cost quota exhausted; downstream is locked until the quota window resets"
-                        );
-                    }
+    let (downstream_request_reservation, downstream_concurrency_lease) = match state
+        .reserve_downstream_admission(&downstream)
+        .await
+    {
+        Ok(admission) => admission,
+        Err(rejection) => {
+            let retry_after_seconds = rejection.retry_after_seconds();
+            tracing::warn!(
+                request_id = %request_id,
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %&normalized_model,
+                retry_after_seconds,
+                max_concurrency = downstream.max_concurrency,
+                rejection = ?rejection,
+                "downstream admission rejected (request quota or concurrency)"
+            );
+            if let crate::state::DownstreamAdmissionRejection::DailyCostQuotaExceeded {
+                retry_after_seconds: lockout_seconds,
+                limit,
+                used,
+            } = &rejection
+            {
+                // A daily cost lockout usually emits exactly one WARN (the
+                // client stops retrying), then stays silent for the rest
+                // of the window.  Escalate long lockouts so an exhausted
+                // downstream cannot drain its budget unnoticed.
+                if *lockout_seconds >= 3600 {
+                    tracing::error!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream.id,
+                        path = %request_path,
+                        original_model = %model,
+                        normalized_model = %&normalized_model,
+                        daily_cost_limit_cents = limit,
+                        daily_cost_used_cents = used,
+                        lockout_seconds,
+                        "downstream daily cost quota exhausted; downstream is locked until the quota window resets"
+                    );
                 }
-                let error = GatewayError::downstream_admission_rejection(rejection);
-                let _ = append_gateway_usage_log(
-                    &state,
-                    &request_id,
-                    &downstream.id,
-                    &downstream.name,
-                    "",
-                    None,
-                    request_path,
-                    model,
-                    inference_strength.as_deref(),
-                    user_agent.as_deref(),
-                    None,
-                    error.status_code(),
-                    Some(error.to_string()),
-                    Some(error.error_category().to_string()),
-                    0,
-                    0,
-                    0,
-                    started,
-                )
-                .await;
-                active_request_guard.fail_and_finish(error.error_category());
-                return Err(error);
             }
-        };
+            let error = GatewayError::downstream_admission_rejection(rejection);
+            let _ = append_gateway_usage_log(
+                &state,
+                &request_id,
+                &downstream.id,
+                &downstream.name,
+                "",
+                None,
+                request_path,
+                model,
+                inference_strength.as_deref(),
+                user_agent.as_deref(),
+                None,
+                error.status_code(),
+                Some(error.to_string()),
+                Some(error.error_category().to_string()),
+                0,
+                0,
+                0,
+                started,
+            )
+            .await;
+            active_request_guard.fail_and_finish(error.error_category());
+            return Err(error);
+        }
+    };
     let account_recovery_deadline = TokioInstant::now()
         + Duration::from_millis(runtime_settings.upstream_concurrency_recovery_max_wait_ms);
     let mut account_recovery = AccountRecoverySession::new(
@@ -4845,9 +4839,7 @@ async fn process_gateway_request_inner(
     );
     let eligible_responses_routes = route_capability_cache
         .iter()
-        .filter(|((protocol, _, _), route)| {
-            *protocol == WireProtocol::Responses && route.eligible
-        })
+        .filter(|((protocol, _, _), route)| *protocol == WireProtocol::Responses && route.eligible)
         .count();
     let eligible_chat_routes = route_capability_cache
         .iter()
@@ -4867,9 +4859,7 @@ async fn process_gateway_request_inner(
     if requires_responses_tooling {
         let routing_reason = match responses_strategy {
             ResponsesRouteStrategy::Responses => "eligible_responses_route_available",
-            ResponsesRouteStrategy::ChatFallback => {
-                "responses_routes_ineligible_fallback_to_chat"
-            }
+            ResponsesRouteStrategy::ChatFallback => "responses_routes_ineligible_fallback_to_chat",
             ResponsesRouteStrategy::Unavailable => "no_eligible_responses_or_chat_route",
             ResponsesRouteStrategy::ProtocolAgnostic => unreachable!(),
         };
@@ -4904,7 +4894,9 @@ async fn process_gateway_request_inner(
                     && upstream.id == continuation.profile_key().upstream_id
                     && upstream.supports_model_with(&normalized_model, case_insensitive)
             }) {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+                let Some(runtime_model_slug) =
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -4986,9 +4978,13 @@ async fn process_gateway_request_inner(
         if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
             let mut eligible_profiles = Vec::new();
             for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
-                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(&normalized_model, case_insensitive)
+                upstream.active
+                    && upstream.id == upstream_id
+                    && upstream.supports_model_with(&normalized_model, case_insensitive)
             }) {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+                let Some(runtime_model_slug) =
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -5023,7 +5019,9 @@ async fn process_gateway_request_inner(
     let route_profile_constraint_active = continuation_profile_key.is_some();
     let route_matches_profile_constraint =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
-            let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+            let Some(runtime_model_slug) =
+                upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+            else {
                 return false;
             };
             if let Some(continuation) = exact_continuation.as_ref() {
@@ -5149,10 +5147,14 @@ async fn process_gateway_request_inner(
     }
     let required_route_available = if route_profile_constraint_active {
         routing_snapshot.upstreams.iter().any(|upstream| {
-            if !upstream.active || !upstream.supports_model_with(&normalized_model, case_insensitive) {
+            if !upstream.active
+                || !upstream.supports_model_with(&normalized_model, case_insensitive)
+            {
                 return false;
             }
-            let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+            let Some(runtime_model_slug) =
+                upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+            else {
                 return false;
             };
             route_api_keys(upstream, &runtime_model_slug, case_insensitive)
@@ -5181,16 +5183,20 @@ async fn process_gateway_request_inner(
                         .is_some_and(|route| route.eligible)
             }),
             ClaudeThinkingReplayRoute::NoReplay => {
-                let has_configured_route = routing_snapshot
-                    .upstreams
-                    .iter()
-                    .any(|upstream| upstream.active && upstream.supports_model_with(&normalized_model, case_insensitive));
+                let has_configured_route = routing_snapshot.upstreams.iter().any(|upstream| {
+                    upstream.active
+                        && upstream.supports_model_with(&normalized_model, case_insensitive)
+                });
                 !has_configured_route
                     || routing_snapshot.upstreams.iter().any(|upstream| {
-                        if !upstream.active || !upstream.supports_model_with(&normalized_model, case_insensitive) {
+                        if !upstream.active
+                            || !upstream.supports_model_with(&normalized_model, case_insensitive)
+                        {
                             return false;
                         }
-                        let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+                        let Some(runtime_model_slug) =
+                            upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                        else {
                             return false;
                         };
                         route_api_keys(upstream, &runtime_model_slug, case_insensitive)
@@ -5250,12 +5256,13 @@ async fn process_gateway_request_inner(
             // when the capability contract can no longer be re-derived.
             let mut candidate_route_health = Vec::new();
             if let Some(profile_key) = continuation_profile_key.as_ref() {
-                for upstream in routing_snapshot
-                    .upstreams
-                    .iter()
-                    .filter(|upstream| upstream.active && upstream.supports_model_with(&normalized_model, case_insensitive))
-                {
-                    let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+                for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
+                    upstream.active
+                        && upstream.supports_model_with(&normalized_model, case_insensitive)
+                }) {
+                    let Some(runtime_model_slug) =
+                        upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                    else {
                         continue;
                     };
                     if runtime_model_slug != profile_key.runtime_model_slug {
@@ -5393,7 +5400,9 @@ async fn process_gateway_request_inner(
                     .is_some_and(|route| route.eligible)
         };
     let upstream_has_candidate_route = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+        let Some(runtime_model_slug) =
+            upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+        else {
             return false;
         };
         route_api_keys(upstream, &runtime_model_slug, case_insensitive)
@@ -5413,7 +5422,9 @@ async fn process_gateway_request_inner(
         let mut miss_tiers = std::collections::BTreeSet::new();
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+                let Some(runtime_model_slug) =
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -5460,14 +5471,18 @@ async fn process_gateway_request_inner(
             .upstreams
             .iter()
             .any(|upstream| {
-                upstream.active && upstream.id == upstream_id && upstream.supports_model_with(&normalized_model, case_insensitive)
+                upstream.active
+                    && upstream.id == upstream_id
+                    && upstream.supports_model_with(&normalized_model, case_insensitive)
             })
             .then(|| upstream_id.to_string())
     } else if runtime_settings.routing_affinity_enabled {
         match state.get_affinity_upstream(&downstream.id, &normalized_model) {
             Some(upstream_id)
                 if routing_snapshot.upstreams.iter().any(|upstream| {
-                    upstream.active && upstream.id == upstream_id && upstream.supports_model_with(&normalized_model, case_insensitive)
+                    upstream.active
+                        && upstream.id == upstream_id
+                        && upstream.supports_model_with(&normalized_model, case_insensitive)
                 }) =>
             {
                 Some(upstream_id)
@@ -5510,7 +5525,9 @@ async fn process_gateway_request_inner(
 
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) = upstream.resolved_model_name_with(&normalized_model, case_insensitive) else {
+                let Some(runtime_model_slug) =
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                else {
                     continue;
                 };
                 for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
@@ -5534,7 +5551,8 @@ async fn process_gateway_request_inner(
 
         'candidate_passes: for (optional_miss_tier, protocol) in candidate_passes.iter().copied() {
             let upstream_optional_misses = |upstream: &UpstreamConfig| {
-                let runtime_model_slug = upstream.resolved_model_name_with(&normalized_model, case_insensitive)?;
+                let runtime_model_slug =
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)?;
                 route_api_keys(upstream, &runtime_model_slug, case_insensitive)
                     .into_iter()
                     .filter_map(|api_key| {
@@ -5560,7 +5578,8 @@ async fn process_gateway_request_inner(
                 .collect::<Vec<_>>();
             let mut deprioritized_upstreams = Vec::new();
             upstreams.retain(|upstream| {
-                let is_non_premium_request = !upstream.is_premium_model_request_with(&normalized_model, case_insensitive);
+                let is_non_premium_request =
+                    !upstream.is_premium_model_request_with(&normalized_model, case_insensitive);
                 let should_deprioritize = upstream.protect_premium_quota
                     && !upstream.premium_models.is_empty()
                     && is_non_premium_request;
@@ -5813,22 +5832,22 @@ async fn process_gateway_request_inner(
                 let mut candidate_keys =
                     route_api_keys(&upstream, &runtime_model_slug, case_insensitive)
                         .into_iter()
-                    .filter(|api_key| {
-                        let key_fingerprint = route_key_fingerprint(&upstream, api_key);
-                        let (route_health_key, _) = route_health_keys(
-                            &upstream,
-                            &key_fingerprint,
-                            &runtime_model_slug,
-                            protocol,
-                        );
-                        request_route_attempts.should_attempt(&route_health_key)
-                            && route_is_candidate(&upstream, &key_fingerprint, protocol)
-                            && optional_miss_tier.is_none_or(|misses| {
-                                route_capability(&upstream, &key_fingerprint, protocol)
-                                    .is_some_and(|route| route.optional_misses == misses)
-                            })
-                    })
-                    .collect::<Vec<_>>();
+                        .filter(|api_key| {
+                            let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                            let (route_health_key, _) = route_health_keys(
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                            );
+                            request_route_attempts.should_attempt(&route_health_key)
+                                && route_is_candidate(&upstream, &key_fingerprint, protocol)
+                                && optional_miss_tier.is_none_or(|misses| {
+                                    route_capability(&upstream, &key_fingerprint, protocol)
+                                        .is_some_and(|route| route.optional_misses == misses)
+                                })
+                        })
+                        .collect::<Vec<_>>();
                 rotate_route_keys_for_request(
                     &mut candidate_keys,
                     &request_id,
@@ -6343,14 +6362,18 @@ async fn process_gateway_request_inner(
                                     .skip(upstream_index + 1)
                                     .filter_map(|candidate| {
                                         let runtime_model_slug = candidate
-                                            .resolved_model_name_with(&normalized_model, case_insensitive)?;
+                                            .resolved_model_name_with(
+                                                &normalized_model,
+                                                case_insensitive,
+                                            )?;
                                         route_api_keys(
                                             candidate,
                                             &runtime_model_slug,
                                             case_insensitive,
                                         )
                                         .into_iter()
-                                            .find_map(|api_key| {
+                                        .find_map(
+                                            |api_key| {
                                                 let key_fingerprint =
                                                     route_key_fingerprint(candidate, &api_key);
                                                 let (route_health_key, _) = route_health_keys(
@@ -6391,7 +6414,8 @@ async fn process_gateway_request_inner(
                                                     protocol,
                                                     resolved_capabilities: route.resolved.clone(),
                                                 })
-                                            })
+                                            },
+                                        )
                                     }),
                             );
                             candidates
@@ -6691,8 +6715,11 @@ async fn process_gateway_request_inner(
                                         .iter()
                                         .find(|candidate| candidate.id == selected_upstream_id)
                                     {
-                                        if let Some(selected_runtime_model) =
-                                            selected_upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                                        if let Some(selected_runtime_model) = selected_upstream
+                                            .resolved_model_name_with(
+                                                &normalized_model,
+                                                case_insensitive,
+                                            )
                                         {
                                             clear_runtime_capability_hints_for_success(
                                                 &state,
@@ -6830,7 +6857,11 @@ async fn process_gateway_request_inner(
                             {
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
+                                    route_health_outcome(
+                                        &error,
+                                        request_route_attempts
+                                            .has_transient_failure_for(&route_health_key),
+                                    ),
                                 )
                                 .await?;
                                 record_route_attempt(route_attempt_context, &error).await?;
@@ -6880,7 +6911,8 @@ async fn process_gateway_request_inner(
                                     "upstream concurrency/capacity response; moving to another route"
                                 );
                                 if runtime_settings.routing_affinity_enabled {
-                                    state.clear_affinity_upstream(&downstream.id, &normalized_model);
+                                    state
+                                        .clear_affinity_upstream(&downstream.id, &normalized_model);
                                 }
                                 if let Some(retry_after) = retry_after {
                                     if state
@@ -6978,7 +7010,8 @@ async fn process_gateway_request_inner(
                                     "upstream rate limited; moving to another route"
                                 );
                                 if runtime_settings.routing_affinity_enabled {
-                                    state.clear_affinity_upstream(&downstream.id, &normalized_model);
+                                    state
+                                        .clear_affinity_upstream(&downstream.id, &normalized_model);
                                 }
                                 if state
                                     .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
@@ -7098,7 +7131,11 @@ async fn process_gateway_request_inner(
                                 if class.is_some() {
                                     finish_route_health_permit(
                                         &route_health_permit,
-                                        route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
+                                        route_health_outcome(
+                                            &error,
+                                            request_route_attempts
+                                                .has_transient_failure_for(&route_health_key),
+                                        ),
                                     )
                                     .await?;
                                     record_route_attempt(route_attempt_context, &error).await?;
@@ -7135,7 +7172,11 @@ async fn process_gateway_request_inner(
                             {
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
+                                    route_health_outcome(
+                                        &error,
+                                        request_route_attempts
+                                            .has_transient_failure_for(&route_health_key),
+                                    ),
                                 )
                                 .await?;
                                 tracing::debug!(
@@ -7213,7 +7254,11 @@ async fn process_gateway_request_inner(
                                 );
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(&error, request_route_attempts.has_transient_failure_for(&route_health_key)),
+                                    route_health_outcome(
+                                        &error,
+                                        request_route_attempts
+                                            .has_transient_failure_for(&route_health_key),
+                                    ),
                                 )
                                 .await?;
                                 record_route_attempt(route_attempt_context, &error).await?;

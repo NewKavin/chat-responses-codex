@@ -82,8 +82,6 @@ async fn downstream_legacy_token_limit_is_no_longer_enforced() {
     );
 }
 
-
-
 #[tokio::test]
 async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhausted() {
     let tempdir = tempdir().unwrap();
@@ -820,8 +818,14 @@ async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs
     let downstream = state.snapshot().await.downstreams[0].clone();
 
     // 2 admitted slots remain in the window after filtering (200 + 400).
-    let usage = state.compute_request_quota_usage(&downstream).await.unwrap();
-    assert_eq!(usage.used, 2, "rejected/rolled-back logs must not count as used");
+    let usage = state
+        .compute_request_quota_usage(&downstream)
+        .await
+        .unwrap();
+    assert_eq!(
+        usage.used, 2,
+        "rejected/rolled-back logs must not count as used"
+    );
 
     // Window full (2/2): a new request is rejected.
     let admission = state.reserve_downstream_request(&downstream).await;
@@ -909,11 +913,15 @@ async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
     );
 
     let downstream = state.snapshot().await.downstreams[0].clone();
-    let usage = state.compute_request_quota_usage(&downstream).await.unwrap();
-    assert_eq!(usage.used, 3, "duplicate log ids must be collapsed on replay");
+    let usage = state
+        .compute_request_quota_usage(&downstream)
+        .await
+        .unwrap();
+    assert_eq!(
+        usage.used, 3,
+        "duplicate log ids must be collapsed on replay"
+    );
 }
-
-
 
 #[tokio::test]
 async fn downstream_billing_mode_defaults_to_request_when_absent() {

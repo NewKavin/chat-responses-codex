@@ -172,6 +172,22 @@ describe('admin ui structure', () => {
     expect(charts).not.toContain('key_prefix')
   })
 
+  it('pauses downstream runtime polling while hidden', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain("document.addEventListener('visibilitychange'")
+    expect(page).toContain('isDocumentVisible')
+    expect(page).toContain('clearRuntimeTimer')
+  })
+
+  it('filters upstreams with credential failures', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain("credentials === 'failing'")
+    expect(page).toContain('hasCredentialFailure')
+    expect(page).toContain('凭证失败')
+  })
+
   it('supports editable visible column preferences on upstream and downstream lists', () => {
     const upstream = source('views/admin/Upstreams.vue')
     const downstream = source('views/admin/Downstreams.vue')
@@ -203,6 +219,9 @@ describe('admin ui structure', () => {
     expect(downstream).toContain("key: 'available_models', label: '可用模型'")
     expect(downstream).toContain("v-if=\"isColumnVisible('available_models')\"")
     expect(downstream).toContain('formatModelList(row.model_allowlist)')
+    expect(upstream).toContain("key: 'route_health', label: '路由健康'")
+    expect(upstream).toContain('formatRouteFailureClasses(row.route_health)')
+    expect(upstream).toContain('formatRouteCooldown(row.route_health)')
   })
 
   it('uses the responsive upstream management workbench', () => {

@@ -55,3 +55,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "chat-responses-codex"
 path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"

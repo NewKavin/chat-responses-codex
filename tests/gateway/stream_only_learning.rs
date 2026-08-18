@@ -177,7 +177,7 @@ impl LearningHarness {
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(HashMap::new()),
                 runtime_settings: None,
-            model_aliases: vec![],
+                model_aliases: vec![],
             },
             tempdir().unwrap().path().join("state.json"),
             AppConfig::default(),

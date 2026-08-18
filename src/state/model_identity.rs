@@ -49,10 +49,7 @@ pub fn models_equivalent_with(a: &str, b: &str, case_insensitive: bool) -> bool 
 ///
 /// The suffix is case-sensitive on the wire (it is a gateway-owned marker),
 /// so only the exact suffix is stripped before canonical folding.
-pub fn canonical_subagent_base_model_id(
-    model: &str,
-    subagent_suffix: &str,
-) -> Option<String> {
+pub fn canonical_subagent_base_model_id(model: &str, subagent_suffix: &str) -> Option<String> {
     let model = model.trim();
     if model.is_empty() {
         return None;
@@ -78,16 +75,18 @@ pub fn find_equivalent_stored<'a>(
         if canonical.is_empty() {
             return None;
         }
-        stored
-            .iter()
-            .map(String::as_str)
-            .find(|candidate| !candidate.trim().is_empty() && canonical_model_id(candidate) == canonical)
+        stored.iter().map(String::as_str).find(|candidate| {
+            !candidate.trim().is_empty() && canonical_model_id(candidate) == canonical
+        })
     } else {
         let model = model.trim();
         if model.is_empty() {
             return None;
         }
-        stored.iter().map(String::as_str).find(|candidate| candidate.trim() == model)
+        stored
+            .iter()
+            .map(String::as_str)
+            .find(|candidate| candidate.trim() == model)
     }
 }
 
@@ -269,14 +268,8 @@ mod tests {
 
     #[test]
     fn model_identity_key_honors_case_matching_switch() {
-        assert_eq!(
-            model_identity_key_with("  GLM-4.5  ", true),
-            "glm-4.5"
-        );
-        assert_eq!(
-            model_identity_key_with("  GLM-4.5  ", false),
-            "GLM-4.5"
-        );
+        assert_eq!(model_identity_key_with("  GLM-4.5  ", true), "glm-4.5");
+        assert_eq!(model_identity_key_with("  GLM-4.5  ", false), "GLM-4.5");
         assert_eq!(model_identity_key_with("   ", true), "");
         assert_eq!(model_identity_key_with("   ", false), "");
     }
@@ -305,10 +298,7 @@ mod tests {
             canonical_subagent_base_model_id("GLM-4.5-fast-preview", suffix).as_deref(),
             Some("glm-4.5")
         );
-        assert_eq!(
-            canonical_subagent_base_model_id("glm-4.5", suffix),
-            None
-        );
+        assert_eq!(canonical_subagent_base_model_id("glm-4.5", suffix), None);
         assert_eq!(
             canonical_subagent_base_model_id("-fast-preview", suffix),
             None
@@ -318,7 +308,11 @@ mod tests {
 
     #[test]
     fn find_equivalent_stored_returns_original_spelling() {
-        let stored = vec!["GLM-4.5".to_string(), "glm-4.5".to_string(), "other".to_string()];
+        let stored = vec![
+            "GLM-4.5".to_string(),
+            "glm-4.5".to_string(),
+            "other".to_string(),
+        ];
         assert_eq!(
             find_equivalent_stored(&stored, "glm-4.5", true),
             Some("GLM-4.5")
@@ -433,6 +427,9 @@ mod tests {
 
         let mut spellings = registry.all_spellings_for_canonical("deepseek-v3");
         spellings.sort();
-        assert_eq!(spellings, vec!["deepseek-chat", "deepseek-chat-v3", "deepseek-v3"]);
+        assert_eq!(
+            spellings,
+            vec!["deepseek-chat", "deepseek-chat-v3", "deepseek-v3"]
+        );
     }
 }

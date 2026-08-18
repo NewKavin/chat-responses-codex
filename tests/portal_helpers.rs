@@ -24,7 +24,6 @@ fn unique_state_path() -> PathBuf {
     PathBuf::from(format!("/tmp/test_state_portal_helpers_{unique}.json"))
 }
 
-
 fn stable_today_noon() -> u64 {
     // Use the same calendar logic as the server's default deployment timezone (Asia/Shanghai)
     // so that test timestamps fall within the expected calendar day.
@@ -33,7 +32,6 @@ fn stable_today_noon() -> u64 {
     let today = calendar.resolve_detail(None, now).unwrap();
     today.start_time + 12 * 60 * 60 // noon in Shanghai
 }
-
 
 /// Helper function to create a test AppState with usage logs
 fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
@@ -70,7 +68,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -110,7 +108,7 @@ fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -389,12 +387,6 @@ async fn test_compute_request_quota_usage_counts_reserved_requests() {
 // Token Usage Tests
 // ============================================================================
 
-
-
-
-
-
-
 // ============================================================================
 #[tokio::test]
 async fn test_compute_cost_usage_calculates_rolling_24h_usage() {
@@ -535,7 +527,10 @@ async fn test_compute_cost_usage_slides_after_24h() {
     let usage = state.compute_cost_usage("downstream-1", now).await;
 
     let daily = usage.daily.unwrap();
-    assert_eq!(daily.used, 750, "only events inside the rolling 24h window count");
+    assert_eq!(
+        daily.used, 750,
+        "only events inside the rolling 24h window count"
+    );
     assert_eq!(daily.limit, 3000);
     assert_eq!(daily.remaining, 2250);
 }
@@ -828,7 +823,6 @@ async fn test_portal_overview_cost_quota_matches_24h_summary() {
         "token monthly quota must no longer be exposed"
     );
 }
-
 
 // Daily Stats Tests
 // ============================================================================
@@ -1558,7 +1552,7 @@ async fn test_compute_model_stats_empty_allowlist() {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     let app_state = chat_responses_codex::state::AppState::new(state, unique_state_path(), config);

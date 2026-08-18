@@ -57,6 +57,12 @@
         </el-select>
       </el-form-item>
       <el-form-item>
+        <template #label><span class="filter-label"><CircleSlash :size="12" :stroke-width="2" />凭证</span></template>
+        <el-select v-model="filters.credentials" clearable placeholder="凭证状态">
+          <el-option label="凭证失败" value="failing" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
         <template #label><span class="filter-label"><Search :size="12" :stroke-width="2" />搜索</span></template>
         <el-input v-model="filters.search" placeholder="名称 / ID / Base URL" clearable />
       </el-form-item>
@@ -163,6 +169,25 @@
             <el-tag :type="row.active ? 'success' : 'danger'">
               {{ row.active ? '启用' : '禁用' }}
             </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column v-if="isColumnVisible('route_health')" label="路由健康" min-width="180">
+          <template #default="{ row }">
+            <el-tooltip
+              :content="formatRouteFailureClasses(row.route_health)"
+              :disabled="!formatRouteFailureClasses(row.route_health)"
+              placement="top"
+            >
+              <span>
+                <el-tag type="warning" size="small">
+                  冷却 {{ row.route_health?.cooldown_routes ?? 0 }}
+                </el-tag>
+                <span v-if="formatRouteCooldown(row.route_health)">
+                  {{ formatRouteCooldown(row.route_health) }}
+                </span>
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
 
@@ -444,6 +469,7 @@ const selectedUpstreams = ref<UpstreamConfig[]>([])
 const filters = ref({
   status: 'all',
   protocol: 'all',
+  credentials: 'all',
   search: ''
 })
 const tableColumns: TableColumnDefinition[] = [
@@ -457,13 +483,14 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'key_concurrency', label: '每 Key 最大并发' },
   { key: 'compatibility', label: '兼容清理' },
   { key: 'premium', label: '高端模型保护' },
+  { key: 'route_health', label: '路由健康' },
   { key: 'status', label: '状态' },
   { key: 'priority', label: '优先级/权重' },
   { key: 'remark', label: '备注' }
 ]
 const defaultColumnKeys = tableColumns
   .map(column => column.key)
-  .filter(key => key !== 'base_url' && key !== 'supported_models' && key !== 'key_concurrency')
+  .filter(key => key !== 'base_url' && key !== 'supported_models' && key !== 'key_concurrency' && key !== 'route_health')
 const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
   tableColumns,
   'admin-upstreams-visible-columns',
@@ -638,11 +665,39 @@ const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
 
 const formatModelList = (models: string[]) => models.length > 0 ? models.join(', ') : '-'
 
+const failureClassLabels: Record<string, string> = {
+  credentials: '凭证失败',
+  rate_limited: '限流',
+  key_quota: 'Key 配额',
+  capacity_unavailable: '容量不足',
+  transient_server: '临时故障',
+  transport: '网络失败',
+  concurrency_saturated: '并发饱和'
+}
+
+const formatRouteFailureClasses = (health?: UpstreamConfig['route_health']) => {
+  const entries = Object.entries(health?.failure_classes ?? {})
+    .filter(([key]) => key in failureClassLabels)
+  if (entries.length === 0) return ''
+  return entries.map(([key, count]) => `${failureClassLabels[key]} ${count}`).join('，')
+}
+
+const formatRouteCooldown = (health?: UpstreamConfig['route_health']) => {
+  const seconds = health?.earliest_retry_after_seconds
+  if (!seconds || seconds <= 0) return ''
+  if (seconds < 60) return `${seconds} 秒后恢复`
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} 分钟后恢复`
+  return `${(seconds / 3600).toFixed(1)} 小时后恢复`
+}
+
 const availableProtocols = computed(() => {
   const set = new Set<string>()
   upstreams.value.forEach(item => displayProtocols(item).forEach(p => set.add(p)))
   return Array.from(set).sort()
 })
+
+const hasCredentialFailure = (row: UpstreamConfig) =>
+  (row.route_health?.failure_classes?.credentials ?? 0) > 0
 
 const filteredUpstreams = computed(() => {
   const keyword = filters.value.search.trim().toLowerCase()
@@ -652,6 +707,9 @@ const filteredUpstreams = computed(() => {
     if (filters.value.protocol !== 'all') {
       const matched = displayProtocols(item).some(p => p === filters.value.protocol)
       if (!matched) return false
+    }
+    if (filters.value.credentials === 'failing' && !hasCredentialFailure(item)) {
+      return false
     }
     if (keyword) {
       const haystack = [item.id, item.name, item.base_url, item.remark]

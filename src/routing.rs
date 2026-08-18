@@ -99,11 +99,7 @@ impl UpstreamCandidate {
         self.should_avoid_for_non_premium_with(model, true)
     }
 
-    pub fn should_avoid_for_non_premium_with(
-        &self,
-        model: &str,
-        case_insensitive: bool,
-    ) -> bool {
+    pub fn should_avoid_for_non_premium_with(&self, model: &str, case_insensitive: bool) -> bool {
         self.protect_premium_quota
             && !self.premium_models.is_empty()
             && !self.is_premium_model_with(model, case_insensitive)
@@ -142,11 +138,7 @@ pub fn select_upstream_with_model_matching(
         .filter(|candidate| {
             candidate.protocol == request.protocol
                 && candidate.models.iter().any(|model| {
-                    crate::state::models_equivalent_with(
-                        model,
-                        &request.model,
-                        case_insensitive,
-                    )
+                    crate::state::models_equivalent_with(model, &request.model, case_insensitive)
                 })
         })
         .cloned()
@@ -157,9 +149,8 @@ pub fn select_upstream_with_model_matching(
     }
 
     // Step 2: Separate into preferred and fallback groups
-    let (mut preferred, mut fallback): (Vec<_>, Vec<_>) = supported
-        .into_iter()
-        .partition(|candidate| {
+    let (mut preferred, mut fallback): (Vec<_>, Vec<_>) =
+        supported.into_iter().partition(|candidate| {
             !candidate.should_avoid_for_non_premium_with(&request.model, case_insensitive)
         });
 

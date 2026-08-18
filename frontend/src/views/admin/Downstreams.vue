@@ -409,6 +409,7 @@ import {
   Wallet
 } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { useTableColumnPreferences, type TableColumnDefinition } from '@/composables/useTableColumns'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -504,24 +505,10 @@ const copyKey = async (key: unknown) => {
     return
   }
 
-  try {
-    await navigator.clipboard.writeText(copyableKey)
+  if (await copyTextToClipboard(copyableKey)) {
     ElMessage.success('已复制到剪贴板')
-  } catch {
-    const textArea = document.createElement('textarea')
-    textArea.value = copyableKey
-    textArea.style.position = 'fixed'
-    textArea.style.left = '-9999px'
-    document.body.appendChild(textArea)
-    textArea.focus()
-    textArea.select()
-    try {
-      document.execCommand('copy')
-      ElMessage.success('已复制到剪贴板')
-    } catch {
-      ElMessage.error('复制失败，请手动复制')
-    }
-    document.body.removeChild(textArea)
+  } else {
+    ElMessage.error('复制失败，请手动复制')
   }
 }
 
@@ -809,18 +796,42 @@ const submitBatchMode = async () => {
   }
 }
 
-onMounted(() => {
-  loadData()
-  loadModels()
-  loadRuntime()
-  runtimeTimer = window.setInterval(loadRuntime, 5000)
-})
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible'
 
-onUnmounted(() => {
+const clearRuntimeTimer = () => {
   if (runtimeTimer !== null) {
     clearInterval(runtimeTimer)
     runtimeTimer = null
   }
+}
+
+const startRuntimeTimer = () => {
+  if (runtimeTimer === null && isDocumentVisible()) {
+    runtimeTimer = window.setInterval(loadRuntime, 5000)
+  }
+}
+
+const handleRuntimeVisibility = () => {
+  if (isDocumentVisible()) {
+    void loadRuntime()
+    startRuntimeTimer()
+  } else {
+    clearRuntimeTimer()
+  }
+}
+
+onMounted(() => {
+  loadData()
+  loadModels()
+  loadRuntime()
+  startRuntimeTimer()
+  document.addEventListener('visibilitychange', handleRuntimeVisibility)
+})
+
+onUnmounted(() => {
+  clearRuntimeTimer()
+  document.removeEventListener('visibilitychange', handleRuntimeVisibility)
 })
 </script>
 

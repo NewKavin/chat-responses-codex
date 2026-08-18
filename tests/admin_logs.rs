@@ -190,7 +190,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -911,7 +911,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     let app = AppState::new(state, unique_state_path(), config);
@@ -970,7 +970,7 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     let app = AppState::new(state, unique_state_path(), config);

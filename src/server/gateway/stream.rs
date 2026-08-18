@@ -221,11 +221,19 @@ fn sse_error_frame_for_endpoint(
     error: &GatewayError,
     responses_sequence_number: u64,
 ) -> Bytes {
-    let message = decorate_retry_hint(&client_error_message(error.error_code(), error.message()), error.retry_after_seconds());
+    let message = decorate_retry_hint(
+        &client_error_message(error.error_code(), error.message()),
+        error.retry_after_seconds(),
+    );
     match endpoint {
-        EndpointKind::ChatCompletions => {
-            sse_error_frame(&message, error.error_type(), error.error_code(), error.error_category(), error.safe_details(), error.retry_after_seconds())
-        }
+        EndpointKind::ChatCompletions => sse_error_frame(
+            &message,
+            error.error_type(),
+            error.error_code(),
+            error.error_category(),
+            error.safe_details(),
+            error.retry_after_seconds(),
+        ),
         EndpointKind::Responses => {
             let failed = json!({
                 "type": "response.failed",
@@ -2490,14 +2498,19 @@ mod diagnostic_tests {
         let text = std::str::from_utf8(&frame).expect("frame is UTF-8");
 
         // Must start with the response.failed event
-        assert!(text.starts_with("event: response.failed\ndata: {"), "Responses frame must begin with response.failed: {text}");
+        assert!(
+            text.starts_with("event: response.failed\ndata: {"),
+            "Responses frame must begin with response.failed: {text}"
+        );
 
         // Must contain error object with expected fields
         assert!(text.contains("\"type\":\"response.failed\""));
         assert!(text.contains("\"status\":\"failed\""));
         assert!(text.contains("\"error\":"));
         assert!(text.contains("\"code\":\"stream_processing_error\""));
-        assert!(text.contains("\"message\":\"[stream_processing_error] request processing channel closed\""));
+        assert!(text.contains(
+            "\"message\":\"[stream_processing_error] request processing channel closed\""
+        ));
 
         // Must contain the error event with category and details
         assert!(text.contains("event: error"));
@@ -2523,13 +2536,19 @@ mod diagnostic_tests {
         let text = std::str::from_utf8(&frame).expect("frame is UTF-8");
 
         // retry_after_seconds must appear in both the response.failed error block and the error event
-        assert!(text.contains("\"retry_after_seconds\":3600"), "retry hint missing: {text}");
+        assert!(
+            text.contains("\"retry_after_seconds\":3600"),
+            "retry hint missing: {text}"
+        );
 
         // Retry hint text must be appended to message
         assert!(text.contains("please try again in 3600s"));
 
         // details carries the structured context; retry_after_seconds is a top-level field on both events
-        assert!(text.contains("\"details\":{\"limit\":1000,\"used\":1001}"), "details must carry structured context: {text}");
+        assert!(
+            text.contains("\"details\":{\"limit\":1000,\"used\":1001}"),
+            "details must carry structured context: {text}"
+        );
     }
 
     #[derive(Clone, Default)]

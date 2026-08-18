@@ -93,14 +93,7 @@ pub(super) struct RouteRetryPolicy {
 impl RouteRetryPolicy {
     #[cfg(test)]
     pub fn new(enabled: bool, max_wait: Duration, max_rounds: u32) -> Self {
-        Self::new_with_tuning(
-            enabled,
-            max_wait,
-            max_rounds,
-            max_wait,
-            max_rounds,
-            true,
-        )
+        Self::new_with_tuning(enabled, max_wait, max_rounds, max_wait, max_rounds, true)
     }
 
     #[cfg(test)]
@@ -334,8 +327,10 @@ mod tests {
         assert_eq!(policy.concurrency_max_wait, Duration::from_millis(999));
         assert_eq!(policy.concurrency_max_rounds, 7);
         assert!(!policy.budget_alignment_enabled);
-        assert!(RouteRetryPolicy::from_sources(&config, &RuntimeSettings::from_app_config(&config))
-            .budget_alignment_enabled);
+        assert!(
+            RouteRetryPolicy::from_sources(&config, &RuntimeSettings::from_app_config(&config))
+                .budget_alignment_enabled
+        );
     }
 
     #[test]
@@ -643,7 +638,13 @@ mod tests {
         };
         assert!(
             policy
-                .decide(&budget, terminal, Some(recovery), true, "client-rate-limited")
+                .decide(
+                    &budget,
+                    terminal,
+                    Some(recovery),
+                    true,
+                    "client-rate-limited"
+                )
                 .is_none(),
             "a pure 429-family exhaustion must never absorb an in-gateway wait (B3)"
         );
@@ -773,7 +774,9 @@ mod tests {
         assert_eq!(reason, None);
         let credentials = TerminalFailure::Credentials;
         assert_eq!(
-            policy.decide_with_reason(&fresh, credentials, None, false, "credentials").1,
+            policy
+                .decide_with_reason(&fresh, credentials, None, false, "credentials")
+                .1,
             None,
         );
         assert_eq!(

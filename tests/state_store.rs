@@ -509,7 +509,10 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
     assert_eq!(summary.downstream_id, "downstream-2");
     assert_eq!(summary.today_tokens, 220);
     assert_eq!(summary.month_tokens, 220);
-    assert_eq!(summary.cost_used_24h_cents, 0, "no cost cents recorded for these logs");
+    assert_eq!(
+        summary.cost_used_24h_cents, 0,
+        "no cost cents recorded for these logs"
+    );
     assert_eq!(summary.total_models, 2);
     assert_eq!(summary.active_models, 1);
 }

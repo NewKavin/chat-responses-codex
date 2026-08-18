@@ -2,11 +2,11 @@ use chat_responses_codex::capabilities::*;
 use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::server::{probe_plan_for_job, CoreProbeCase};
 use chat_responses_codex::state::{
-    AppConfig, AppState, FreekeySyncItem, ManualProbeBatchCandidateState, ManualProbeBatchError,
-    PersistedState, ProbeJobExecution,
+    model_identity::ModelAliasRule, DownstreamConfig, UpstreamConfig, UpstreamModelMapping,
 };
 use chat_responses_codex::state::{
-    model_identity::ModelAliasRule, DownstreamConfig, UpstreamConfig, UpstreamModelMapping,
+    AppConfig, AppState, FreekeySyncItem, ManualProbeBatchCandidateState, ManualProbeBatchError,
+    PersistedState, ProbeJobExecution,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -82,10 +82,16 @@ async fn alias_update_rejects_rules_that_capture_existing_model_mappings() {
         .await
         .unwrap_err();
 
-    assert!(error.contains("Mapped upstream"), "unexpected error: {error}");
+    assert!(
+        error.contains("Mapped upstream"),
+        "unexpected error: {error}"
+    );
     assert!(error.contains("gpt-4"), "unexpected error: {error}");
     assert!(error.contains("gpt-4-premium"), "unexpected error: {error}");
-    assert!(error.contains("gpt-4-enterprise"), "unexpected error: {error}");
+    assert!(
+        error.contains("gpt-4-enterprise"),
+        "unexpected error: {error}"
+    );
     assert_eq!(state.snapshot().await.model_aliases, old_aliases);
     assert_eq!(
         state.model_alias_registry().resolve_alias("legacy-alias"),

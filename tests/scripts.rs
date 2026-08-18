@@ -427,6 +427,9 @@ fn deploy_builds_local_artifacts_before_packaging_runtime_image() {
         );
     }
     fs::copy("docker-compose.yml", repo_root.join("docker-compose.yml")).unwrap();
+    let compose_source = fs::read_to_string(repo_root.join("docker-compose.yml")).unwrap();
+    assert!(compose_source.contains("max-size: \"50m\""));
+    assert!(compose_source.contains("max-file: \"5\""));
     fs::copy(".env.example", repo_root.join(".env.example")).unwrap();
     fs::copy(
         "frontend/package-lock.json",
@@ -550,6 +553,135 @@ exit 92
     assert!(runtime.contains("useradd --system --uid 10001"));
     assert!(runtime.contains("HEALTHCHECK --interval=30s"));
     assert!(runtime.contains("USER app"));
+}
+
+#[test]
+fn deploy_waits_for_container_health_before_reporting_success() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path().join("repo");
+    let scripts_dir = repo_root.join("scripts");
+    let frontend_dir = repo_root.join("frontend");
+    let fake_bin = temp.path().join("bin");
+    let deploy_dir = temp.path().join("deploy");
+    let trace = temp.path().join("deploy-trace.txt");
+    let curl_trace = temp.path().join("curl-trace.txt");
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::create_dir_all(&frontend_dir).unwrap();
+    fs::create_dir(&fake_bin).unwrap();
+
+    write_executable(
+        &scripts_dir.join("deploy.sh"),
+        &fs::read_to_string("scripts/deploy.sh").unwrap(),
+    );
+    fs::copy("docker-compose.yml", repo_root.join("docker-compose.yml")).unwrap();
+    fs::copy(".env.example", repo_root.join(".env.example")).unwrap();
+
+    write_executable(
+        &fake_bin.join("npm"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p frontend/dist/assets
+printf 'console.log("key_concurrency")\n' >frontend/dist/assets/Upstreams-test.js
+"#,
+    );
+    write_executable(
+        &fake_bin.join("cargo"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p target/release
+printf '#!/usr/bin/env bash\nexit 0\n' >target/release/chat-responses-codex
+chmod +x target/release/chat-responses-codex
+"#,
+    );
+    write_executable(
+        &fake_bin.join("docker"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "inspect" ]]; then
+  printf 'healthy'
+  printf 'docker' >>"$DEPLOY_TRACE"
+  printf '\t%s' "$@" >>"$DEPLOY_TRACE"
+  printf '\n' >>"$DEPLOY_TRACE"
+  exit 0
+fi
+if [[ "${1:-}" == "compose" ]]; then
+  printf 'docker' >>"$DEPLOY_TRACE"
+  printf '\t%s' "$@" >>"$DEPLOY_TRACE"
+  printf '\n' >>"$DEPLOY_TRACE"
+  exit 0
+fi
+printf 'unexpected docker invocation:' >&2
+printf ' %s' "$@" >&2
+printf '\n' >&2
+exit 92
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl' >>"$CURL_TRACE"
+printf '\t%s' "$@" >>"$CURL_TRACE"
+printf '\n' >>"$CURL_TRACE"
+url="${@: -1}"
+path="/${url#*://*/}"
+case "$path" in
+  /healthz)
+    printf 'ok'
+    ;;
+  /)
+    printf '<html><script src="assets/index-main.js"></script></html>'
+    ;;
+  /assets/index-main.js)
+    printf 'window.__assets__=["assets/Upstreams-test.js"]'
+    ;;
+  /assets/Upstreams-test.js)
+    printf 'console.log("key_concurrency")\n'
+    ;;
+  *)
+    printf 'unexpected curl url: %s\n' "$url" >&2
+    exit 94
+    ;;
+esac
+"#,
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let output = Command::new("bash")
+        .arg("scripts/deploy.sh")
+        .arg("--deploy-dir")
+        .arg(&deploy_dir)
+        .arg("--skip-build")
+        .current_dir(&repo_root)
+        .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+        .env("DEPLOY_TRACE", &trace)
+        .env("CURL_TRACE", &curl_trace)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "deploy fixture failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let trace_text = fs::read_to_string(&trace).unwrap();
+    let compose_up = trace_text.find("up\t-d\t--remove-orphans").unwrap();
+    let compose_ps = trace_text.find("\tps").unwrap();
+    assert!(compose_up < compose_ps, "compose ps must follow compose up");
+
+    let curl_trace = fs::read_to_string(&curl_trace).unwrap_or_default();
+    assert!(
+        curl_trace.contains("healthz"),
+        "deployed gateway /healthz was never polled"
+    );
+    assert!(
+        curl_trace.contains("assets/Upstreams-test.js"),
+        "deployed Upstreams chunk was never fetched"
+    );
 }
 
 #[test]

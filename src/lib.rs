@@ -1,3 +1,4 @@
+pub mod logging;
 pub mod server;
 pub mod upstream_feedback;
 pub use gateway_core::admin;

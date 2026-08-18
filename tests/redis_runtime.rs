@@ -1660,11 +1660,7 @@ async fn redis_legacy_token_limit_without_prices_writes_no_window() {
     // No prices: not cost billing, so no daily window key is written at all.
     first.insert_downstream(downstream.clone()).await.unwrap();
     first
-        .append_usage_log(redis_test_usage_log(
-            "legacy-no-window",
-            &downstream.id,
-            1,
-        ))
+        .append_usage_log(redis_test_usage_log("legacy-no-window", &downstream.id, 1))
         .await
         .unwrap();
 
@@ -2618,11 +2614,7 @@ async fn redis_route_health_probe_ignores_cooldown_and_is_single_flight() {
     // the Redis backend drops the route hash entirely, so the snapshot is
     // gone and a normal reserve is ready immediately.
     permit.finish(RouteOutcome::Success).await.unwrap();
-    assert!(first
-        .route_health_snapshot(&route)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
     assert!(matches!(
         second.reserve_route_health(&route, &key).await.unwrap(),
         RouteAvailability::Ready(permit) if !permit.is_half_open()
@@ -2638,7 +2630,8 @@ async fn redis_route_health_probe_enforces_one_second_interval_per_route() {
     let config = redis_test_config();
     let (state, _second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("early-probe-interval-upstream", "fingerprint-a");
-    let route = redis_test_health_route("early-probe-interval-upstream", "fingerprint-a", "model-a");
+    let route =
+        redis_test_health_route("early-probe-interval-upstream", "fingerprint-a", "model-a");
 
     state
         .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
@@ -3346,8 +3339,7 @@ async fn redis_repeated_transient_failure_within_same_request_keeps_step_flat() 
     config.upstream_transient_route_cooldown_max_seconds = 1;
     let (first, second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("request-suppressed-upstream", "fingerprint-a");
-    let route =
-        redis_test_health_route("request-suppressed-upstream", "fingerprint-a", "model-a");
+    let route = redis_test_health_route("request-suppressed-upstream", "fingerprint-a", "model-a");
 
     first
         .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
@@ -3394,8 +3386,11 @@ async fn redis_independent_request_failures_still_escalate_the_step() {
     config.upstream_transient_route_cooldown_max_seconds = 1;
     let (first, second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("independent-escalation-upstream", "fingerprint-a");
-    let route =
-        redis_test_health_route("independent-escalation-upstream", "fingerprint-a", "model-a");
+    let route = redis_test_health_route(
+        "independent-escalation-upstream",
+        "fingerprint-a",
+        "model-a",
+    );
 
     first
         .observe_route_failure(&route, RouteFailureClass::TransientServer, None)

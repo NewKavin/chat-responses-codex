@@ -132,8 +132,10 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
     let first_cooldown = first_step.cooldown_remaining;
 
     for round in 2..=3 {
-        let remaining =
-            registry.route_health_snapshot(&route).unwrap().cooldown_remaining;
+        let remaining = registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .cooldown_remaining;
         tokio::time::advance(remaining + Duration::from_millis(1)).await;
         let lease = match registry.reserve(&route, &key) {
             RouteAvailability::Ready(lease) if lease.is_half_open() => lease,

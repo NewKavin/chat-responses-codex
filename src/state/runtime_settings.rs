@@ -1,7 +1,6 @@
 use super::types::{
-    default_model_case_insensitive_matching, default_capability_probe_concurrency,
-    default_capability_probe_reasoning_timeout_seconds,
-    default_upstream_common_mode_breaker_threshold,
+    default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
+    default_model_case_insensitive_matching, default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
     default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_transient_last_resort_probe_enabled,

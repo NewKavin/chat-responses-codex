@@ -115,7 +115,17 @@ export interface UpstreamConfig {
   strip_nonstandard_chat_fields: NonstandardFieldPolicy
   dialect_preset?: string | null
   runtime_state?: UpstreamRuntimeState
+  route_health?: RouteHealthSnapshot
   _replace_api_keys?: boolean
+}
+
+export interface RouteHealthSnapshot {
+  healthy_routes: number
+  cooldown_routes: number
+  half_open_routes: number
+  legacy_local_admission_poisoned_routes: number
+  earliest_retry_after_seconds?: number | null
+  failure_classes?: Record<string, number>
 }
 
 export interface UpstreamRuntimeState {

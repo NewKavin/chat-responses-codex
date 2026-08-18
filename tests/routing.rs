@@ -85,6 +85,9 @@ fn affinity_keys_honor_model_case_matching_switch() {
         );
         state.set_affinity_upstream("down", "GLM-4.5", "upper", 60);
 
-        assert_eq!(state.get_affinity_upstream("down", "glm-4.5").as_deref(), expected);
+        assert_eq!(
+            state.get_affinity_upstream("down", "glm-4.5").as_deref(),
+            expected
+        );
     }
 }

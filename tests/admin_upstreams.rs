@@ -90,7 +90,7 @@ fn create_test_state() -> AppState {
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
@@ -119,7 +119,7 @@ fn create_test_state_with_upstreams_and_config(
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
-            model_aliases: vec![],
+        model_aliases: vec![],
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
@@ -767,27 +767,24 @@ async fn put_mapping_rejection_profile(
 
 #[tokio::test]
 async fn model_mapping_status_reports_backend_route_validity_without_secrets() {
-    let mapped = |id: &str,
-                  upstream_model: &str,
-                  downstream_model: &str,
-                  active: bool|
-     -> UpstreamConfig {
-        UpstreamConfig {
-            id: id.into(),
-            name: id.into(),
-            base_url: format!("https://{id}.invalid"),
-            api_key: format!("secret-{id}"),
-            protocol: UpstreamProtocol::ChatCompletions,
-            protocols: vec![UpstreamProtocol::ChatCompletions],
-            supported_models: vec![upstream_model.into()],
-            model_mappings: vec![UpstreamModelMapping {
-                upstream_model: upstream_model.into(),
-                downstream_model: downstream_model.into(),
-            }],
-            active,
-            ..Default::default()
-        }
-    };
+    let mapped =
+        |id: &str, upstream_model: &str, downstream_model: &str, active: bool| -> UpstreamConfig {
+            UpstreamConfig {
+                id: id.into(),
+                name: id.into(),
+                base_url: format!("https://{id}.invalid"),
+                api_key: format!("secret-{id}"),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![upstream_model.into()],
+                model_mappings: vec![UpstreamModelMapping {
+                    upstream_model: upstream_model.into(),
+                    downstream_model: downstream_model.into(),
+                }],
+                active,
+                ..Default::default()
+            }
+        };
     let effective = mapped("up-effective", "m-effective", "public-effective", true);
     let inactive = mapped("up-inactive", "m-inactive", "public-inactive", false);
     let mut stale = mapped("up-stale", "m-stale", "public-stale", true);
@@ -869,15 +866,27 @@ async fn model_mapping_status_reports_backend_route_validity_without_secrets() {
     );
     assert_eq!(status_for("public-inactive")["status"], "inactive");
     assert_eq!(status_for("public-inactive")["reason"], "upstream_inactive");
-    assert_eq!(status_for("public-stale")["reason"], "upstream_model_unavailable");
-    assert_eq!(status_for("public-no-key")["reason"], "no_key_for_upstream_model");
+    assert_eq!(
+        status_for("public-stale")["reason"],
+        "upstream_model_unavailable"
+    );
+    assert_eq!(
+        status_for("public-no-key")["reason"],
+        "no_key_for_upstream_model"
+    );
     assert_eq!(status_for("public-partial")["status"], "partial");
-    assert_eq!(status_for("public-partial")["reason"], "some_routes_ineligible");
+    assert_eq!(
+        status_for("public-partial")["reason"],
+        "some_routes_ineligible"
+    );
     assert_eq!(status_for("public-partial")["eligible_routes"], 1);
     assert_eq!(status_for("public-partial")["configured_routes"], 2);
     assert_eq!(status_for("public-partial")["unverified_routes"], 1);
     assert_eq!(status_for("public-rejected")["status"], "inactive");
-    assert_eq!(status_for("public-rejected")["reason"], "no_eligible_routes");
+    assert_eq!(
+        status_for("public-rejected")["reason"],
+        "no_eligible_routes"
+    );
     assert_eq!(status_for("public-rejected")["eligible_routes"], 0);
     assert_eq!(status_for("public-rejected")["configured_routes"], 1);
     assert_eq!(status_for("public-rejected")["unverified_routes"], 0);
@@ -886,10 +895,7 @@ async fn model_mapping_status_reports_backend_route_validity_without_secrets() {
     assert!(!serialized.contains("secret-up-"));
     assert!(!serialized.contains("key_fingerprint"));
     for upstream in [&effective, &partial, &rejected] {
-        assert!(!serialized.contains(&upstream_key_fingerprint(
-            &upstream.id,
-            &upstream.api_key,
-        )));
+        assert!(!serialized.contains(&upstream_key_fingerprint(&upstream.id, &upstream.api_key,)));
     }
 }
 
