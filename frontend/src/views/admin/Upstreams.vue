@@ -90,9 +90,35 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column
+          v-if="isColumnVisible('base_url')"
+          prop="base_url"
+          label="Base URL"
+          min-width="240"
+          show-overflow-tooltip
+        >
+          <template #default="{ row }">
+            <code class="base-url-cell">{{ row.base_url }}</code>
+          </template>
+        </el-table-column>
         <el-table-column v-if="isColumnVisible('models')" label="模型数量" width="100">
           <template #default="{ row }">
             {{ row.supported_models.length }}
+          </template>
+        </el-table-column>
+        <el-table-column
+          v-if="isColumnVisible('supported_models')"
+          label="支持的模型"
+          min-width="260"
+        >
+          <template #default="{ row }">
+            <el-tooltip
+              :content="formatModelList(row.supported_models)"
+              placement="top"
+              :disabled="!row.supported_models.length"
+            >
+              <span class="model-list-cell">{{ formatModelList(row.supported_models) }}</span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column v-if="isColumnVisible('keys')" label="Key 数量" width="100">
@@ -415,7 +441,9 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'id', label: 'ID' },
   { key: 'name', label: '名称' },
   { key: 'protocol', label: '协议' },
+  { key: 'base_url', label: 'Base URL' },
   { key: 'models', label: '模型数量' },
+  { key: 'supported_models', label: '支持的模型' },
   { key: 'keys', label: 'Key 数量' },
   { key: 'compatibility', label: '兼容清理' },
   { key: 'premium', label: '高端模型保护' },
@@ -423,7 +451,9 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'priority', label: '优先级/权重' },
   { key: 'remark', label: '备注' }
 ]
-const defaultColumnKeys = tableColumns.map(column => column.key)
+const defaultColumnKeys = tableColumns
+  .map(column => column.key)
+  .filter(key => key !== 'base_url' && key !== 'supported_models')
 const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
   tableColumns,
   'admin-upstreams-visible-columns',
@@ -595,6 +625,8 @@ const resolveProtocols = (value: Partial<UpstreamConfig>): UpstreamConfig['proto
 }
 
 const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
+
+const formatModelList = (models: string[]) => models.length > 0 ? models.join(', ') : '-'
 
 const availableProtocols = computed(() => {
   const set = new Set<string>()
@@ -1106,6 +1138,20 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   width: 100%;
+}
+
+.base-url-cell,
+.model-list-cell {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.base-url-cell {
+  font-family: var(--crc-font-mono);
 }
 
 .model-input-group {

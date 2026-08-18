@@ -51,6 +51,22 @@
         <el-table-column type="selection" width="45" />
         <el-table-column v-if="isColumnVisible('id')" prop="id" label="ID" width="150" />
         <el-table-column v-if="isColumnVisible('name')" prop="name" label="名称" width="200" />
+        <el-table-column
+          v-if="isColumnVisible('available_models')"
+          label="可用模型"
+          min-width="260"
+        >
+          <template #default="{ row }">
+            <el-tooltip
+              :content="row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型'"
+              placement="top"
+            >
+              <span class="model-list-cell">
+                {{ row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型' }}
+              </span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column v-if="isColumnVisible('key')" label="秘钥" width="220">
           <template #default="{ row }">
             <div class="key-cell">
@@ -410,13 +426,16 @@ let runtimeTimer: number | null = null
 const tableColumns: TableColumnDefinition[] = [
   { key: 'id', label: 'ID' },
   { key: 'name', label: '名称' },
+  { key: 'available_models', label: '可用模型' },
   { key: 'key', label: '秘钥' },
   { key: 'quota', label: '限额配置' },
   { key: 'runtime', label: '运行并发' },
   { key: 'lifecycle', label: '生命周期' },
   { key: 'status', label: '状态' }
 ]
-const defaultColumnKeys = tableColumns.map(column => column.key)
+const defaultColumnKeys = tableColumns
+  .map(column => column.key)
+  .filter(key => key !== 'available_models')
 const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
   tableColumns,
   'admin-downstreams-visible-columns',
@@ -445,6 +464,8 @@ const filters = ref({
   lifecycle: 'all',
   search: ''
 })
+
+const formatModelList = (models: string[]) => models.length > 0 ? models.join(', ') : '-'
 
 // UI 层的「按金额」选项，提交时映射回后端的 token 模式。
 type BillingModeUI = 'request' | 'cost'
@@ -804,6 +825,15 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+
+.model-list-cell {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
 
 .table-column-settings-item {
   margin-right: 0;

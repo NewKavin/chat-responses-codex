@@ -191,6 +191,15 @@ describe('admin ui structure', () => {
     expect(upstream).toContain("v-if=\"isColumnVisible('remark')\"")
     expect(downstream).toContain("v-if=\"isColumnVisible('id')\"")
     expect(downstream).toContain("v-if=\"isColumnVisible('key')\"")
+    expect(upstream).toContain("key: 'base_url', label: 'Base URL'")
+    expect(upstream).toContain("v-if=\"isColumnVisible('base_url')\"")
+    expect(upstream).toContain('{{ row.base_url }}')
+    expect(upstream).toContain("key: 'supported_models', label: '支持的模型'")
+    expect(upstream).toContain("v-if=\"isColumnVisible('supported_models')\"")
+    expect(upstream).toContain('formatModelList(row.supported_models)')
+    expect(downstream).toContain("key: 'available_models', label: '可用模型'")
+    expect(downstream).toContain("v-if=\"isColumnVisible('available_models')\"")
+    expect(downstream).toContain('formatModelList(row.model_allowlist)')
   })
 
   it('uses the responsive upstream management workbench', () => {

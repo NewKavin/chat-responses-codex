@@ -62,8 +62,12 @@ const emit = defineEmits<{
   (event: 'update:modelValue', keys: string[]): void
 }>()
 
-const allSelected = computed(() => props.modelValue.length === props.columns.length)
-const someSelected = computed(() => props.modelValue.length > 0)
+const availableKeys = computed(() => new Set(props.columns.map(column => column.key)))
+const validSelectedCount = computed(
+  () => props.modelValue.filter(key => availableKeys.value.has(key)).length
+)
+const allSelected = computed(() => validSelectedCount.value === props.columns.length)
+const someSelected = computed(() => validSelectedCount.value > 0)
 
 const orderedKeys = (keys: string[]) => props.columns
   .map(column => column.key)
