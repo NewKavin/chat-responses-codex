@@ -207,6 +207,8 @@ pub struct CapabilitySelector {
     pub runtime_model: Option<String>,
     pub runtime_model_glob: Option<String>,
     pub upstream_id: Option<String>,
+    #[serde(default)]
+    pub key_fingerprint: Option<String>,
     pub protocol: Option<WireProtocol>,
     pub tag: Option<String>,
 }
@@ -299,6 +301,10 @@ pub struct RouteCapabilityOverride {
     pub token_limit_field: Option<TokenLimitField>,
     #[serde(default)]
     pub reasoning_carrier: Option<ReasoningCarrier>,
+    #[serde(default)]
+    pub reasoning_control_field: Option<String>,
+    #[serde(default)]
+    pub effort_map: BTreeMap<String, Value>,
     #[serde(default)]
     pub correction_rules: Vec<DialectCorrectionRule>,
     #[serde(default)]

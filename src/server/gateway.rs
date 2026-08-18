@@ -61,6 +61,8 @@ pub(crate) mod compatibility_semantics;
 mod context;
 mod dialect_retry;
 mod errors;
+mod model_mapping_status;
+mod reasoning_overrides;
 mod responses_fallback;
 mod route_attempts;
 mod route_retry;
@@ -78,6 +80,8 @@ use claude::*;
 use compat::*;
 use context::*;
 use errors::*;
+use model_mapping_status::*;
+use reasoning_overrides::*;
 use responses_fallback::*;
 use route_attempts::*;
 use route_retry::{RouteRetryBudget, RouteRetryPolicy, RouteRetryWait};
@@ -2001,6 +2005,12 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/capabilities/reasoning-overrides",
+            axum::routing::put(admin_update_reasoning_overrides).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
+        .route(
             "/api/admin/capabilities/resolved",
             get(admin_capabilities_resolved).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -2114,6 +2124,12 @@ pub fn build_router(state: AppState) -> Router {
                     state.clone(),
                     admin_auth_middleware,
                 )),
+        )
+        .route(
+            "/api/admin/model-mappings/status",
+            get(admin_model_mapping_status).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
         )
         .route(
             "/api/admin/integrations/freekey/sync",
@@ -2391,7 +2407,8 @@ struct CodexReasoningMetadata {
     supports_summaries: bool,
 }
 
-const CODEX_REASONING_EFFORT_ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const CODEX_REASONING_EFFORT_ORDER: [&str; 6] =
+    ["none", "low", "medium", "high", "xhigh", "max"];
 
 fn codex_reasoning_effort_rank(effort: &str) -> usize {
     CODEX_REASONING_EFFORT_ORDER
@@ -2401,7 +2418,11 @@ fn codex_reasoning_effort_rank(effort: &str) -> usize {
 }
 
 fn codex_reasoning_description(effort: &str) -> String {
-    format!("Use {effort} reasoning effort")
+    if effort == "none" {
+        "Do not use reasoning effort".to_owned()
+    } else {
+        format!("Use {effort} reasoning effort")
+    }
 }
 
 fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadata {
@@ -2415,6 +2436,7 @@ fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadat
             .cmp(&codex_reasoning_effort_rank(right))
             .then_with(|| left.cmp(right))
     });
+    efforts.dedup();
 
     if efforts.is_empty() {
         return CodexReasoningMetadata {
@@ -2430,8 +2452,10 @@ fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadat
     let default_effort = efforts
         .iter()
         .find(|effort| effort.as_str() == "high")
+        .or_else(|| efforts.iter().find(|effort| effort.as_str() != "none"))
         .cloned()
-        .unwrap_or_else(|| efforts[0].clone());
+        .unwrap_or_else(|| "none".to_owned());
+    let supports_summaries = efforts.iter().any(|effort| effort != "none");
     let supported_levels = efforts
         .into_iter()
         .map(|effort| {
@@ -2445,7 +2469,7 @@ fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadat
     CodexReasoningMetadata {
         supported_levels,
         default_level: Value::String(default_effort),
-        supports_summaries: true,
+        supports_summaries,
     }
 }
 
@@ -2487,25 +2511,37 @@ fn codex_exposed_models(
     // the exception: they are exposed verbatim (the operator typed them),
     // see DownstreamModelEntry::from_mapping.
     let group_models = |entries: Vec<DownstreamModelEntry>| -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut grouped = Vec::new();
+        let mut grouped = BTreeMap::<String, (String, bool)>::new();
         for entry in entries {
-            let slug = entry.model;
-            let key = if case_insensitive {
-                crate::state::canonical_model_id(&slug)
-            } else {
-                slug.trim().to_string()
-            };
-            if key.is_empty() || !seen.insert(key.clone()) {
+            let slug = entry.model.trim();
+            let key = crate::state::model_identity_key_with(slug, case_insensitive);
+            if key.is_empty() {
                 continue;
             }
-            if entry.from_mapping {
-                grouped.push(slug.trim().to_string());
+            let display = if entry.from_mapping || !case_insensitive {
+                slug.to_owned()
             } else {
-                grouped.push(key);
+                key.clone()
+            };
+            match grouped.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((display, entry.from_mapping));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let (current_display, current_from_mapping) = slot.get();
+                    if (entry.from_mapping && !current_from_mapping)
+                        || (entry.from_mapping == *current_from_mapping
+                            && display < *current_display)
+                    {
+                        slot.insert((display, entry.from_mapping));
+                    }
+                }
             }
         }
         grouped
+            .into_values()
+            .map(|(display, _)| display)
+            .collect()
     };
 
     if allowlist.is_empty() {
@@ -2563,17 +2599,26 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
         return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
     };
     let snapshot = state.routing_snapshot().await;
-    let verified_reasoning_levels =
-        capability_verified_reasoning_levels_by_model(state, &snapshot.upstreams);
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
+    let verified_reasoning_levels = capability_verified_reasoning_levels_by_model(
+        state,
+        &snapshot.upstreams,
+        case_insensitive,
+    );
 
     let model_infos = codex_exposed_models(
         &snapshot.upstreams,
         &downstream.model_allowlist,
-        state.runtime_settings().model_case_insensitive_matching,
+        case_insensitive,
     )
         .into_iter()
         .map(|slug| {
-            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug);
+            let witness = select_catalog_witness_entry(
+                state,
+                &snapshot.upstreams,
+                &slug,
+                case_insensitive,
+            );
             let capabilities = witness.as_ref().map(|entry| &entry.capabilities);
             let context_window = capabilities
                 .and_then(|capabilities| {
@@ -2585,11 +2630,12 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                     codex_catalog_context_window(
                         &snapshot.upstreams,
                         &slug,
-                        state.runtime_settings().model_case_insensitive_matching,
+                        case_insensitive,
                     )
                 });
+            let reasoning_key = crate::state::model_identity_key_with(&slug, case_insensitive);
             let reasoning = verified_reasoning_levels
-                .get(&slug)
+                .get(&reasoning_key)
                 .map(|levels| codex_reasoning_metadata(levels))
                 .unwrap_or_else(codex_conservative_reasoning_metadata);
             let supports_custom_tools = capabilities
@@ -4714,35 +4760,9 @@ async fn process_gateway_request_inner(
         }
     }
 
-    let responses_upstream_available = endpoint == EndpointKind::Responses
-        && routing_snapshot.upstreams.iter().any(|upstream| {
-            upstream.active
-                && upstream.supports_protocol(UpstreamProtocol::Responses)
-                && upstream.supports_model_with(&normalized_model, case_insensitive)
-        });
-    let chat_only_responses_fallback =
-        endpoint == EndpointKind::Responses && !responses_upstream_available;
     let requires_responses_tooling =
         endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
-    let fallback_to_chat = requires_responses_tooling && chat_only_responses_fallback;
     let client_family = infer_client_family(user_agent.as_deref(), endpoint);
-    if requires_responses_tooling {
-        tracing::info!(
-            request_id = %request_id,
-            downstream_key_id = %downstream.id,
-            path = %request_path,
-            original_model = %model,
-            normalized_model = %&normalized_model,
-            stream = request_stream,
-            routing_fallback = fallback_to_chat,
-            routing_fallback_reason = if fallback_to_chat {
-                "no_responses_upstream_supports_model"
-            } else {
-                "responses_upstream_available"
-            },
-            "evaluated Responses routing strategy"
-        );
-    }
 
     let loaded_exact_continuation = response_history_context
         .as_ref()
@@ -4823,6 +4843,50 @@ async fn process_gateway_request_inner(
         inference_strength.as_deref(),
         case_insensitive,
     );
+    let eligible_responses_routes = route_capability_cache
+        .iter()
+        .filter(|((protocol, _, _), route)| {
+            *protocol == WireProtocol::Responses && route.eligible
+        })
+        .count();
+    let eligible_chat_routes = route_capability_cache
+        .iter()
+        .filter(|((protocol, _, _), route)| {
+            *protocol == WireProtocol::ChatCompletions && route.eligible
+        })
+        .count();
+    let responses_strategy = responses_route_strategy(
+        requires_responses_tooling,
+        eligible_responses_routes,
+        eligible_chat_routes,
+    );
+    let fallback_to_chat = matches!(responses_strategy, ResponsesRouteStrategy::ChatFallback);
+    let chat_only_responses_fallback = endpoint == EndpointKind::Responses
+        && eligible_responses_routes == 0
+        && eligible_chat_routes > 0;
+    if requires_responses_tooling {
+        let routing_reason = match responses_strategy {
+            ResponsesRouteStrategy::Responses => "eligible_responses_route_available",
+            ResponsesRouteStrategy::ChatFallback => {
+                "responses_routes_ineligible_fallback_to_chat"
+            }
+            ResponsesRouteStrategy::Unavailable => "no_eligible_responses_or_chat_route",
+            ResponsesRouteStrategy::ProtocolAgnostic => unreachable!(),
+        };
+        tracing::info!(
+            request_id = %request_id,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %&normalized_model,
+            stream = request_stream,
+            routing_fallback = fallback_to_chat,
+            routing_fallback_reason = routing_reason,
+            eligible_responses_routes,
+            eligible_chat_routes,
+            "evaluated Responses routing strategy"
+        );
+    }
     let route_capability =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
             route_capability_cache.get(&(
@@ -5295,17 +5359,16 @@ async fn process_gateway_request_inner(
     } else {
         match &claude_replay_route {
             ClaudeThinkingReplayRoute::Pinned { protocol, .. } => vec![*protocol],
-            ClaudeThinkingReplayRoute::NoReplay => {
-                if requires_responses_tooling {
-                    if fallback_to_chat {
-                        vec![UpstreamProtocol::ChatCompletions]
-                    } else {
-                        vec![UpstreamProtocol::Responses]
-                    }
-                } else {
+            ClaudeThinkingReplayRoute::NoReplay => match responses_strategy {
+                ResponsesRouteStrategy::ProtocolAgnostic => {
                     vec![endpoint.native_protocol(), endpoint.opposite()]
                 }
-            }
+                ResponsesRouteStrategy::Responses => vec![UpstreamProtocol::Responses],
+                ResponsesRouteStrategy::ChatFallback => {
+                    vec![UpstreamProtocol::ChatCompletions]
+                }
+                ResponsesRouteStrategy::Unavailable => Vec::new(),
+            },
             ClaudeThinkingReplayRoute::InvalidOrUnavailable => unreachable!(),
         }
     };

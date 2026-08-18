@@ -60,6 +60,11 @@ pub enum CapabilityPolicyError {
         first: String,
         second: String,
     },
+    #[error("invalid reasoning override {id}: {reason}")]
+    InvalidReasoningOverride {
+        id: String,
+        reason: &'static str,
+    },
     #[error("protected request path {path} in extension case {id}")]
     ProtectedRequestPath { id: String, path: String },
     #[error(
@@ -165,6 +170,7 @@ impl CompiledSelector {
             selector.exposed_model.is_some(),
             selector.runtime_model.is_some(),
             selector.upstream_id.is_some(),
+            selector.key_fingerprint.is_some(),
             selector.protocol.is_some(),
             selector.tag.is_some(),
         ]
@@ -187,6 +193,10 @@ impl CompiledSelector {
             self.source.runtime_model.as_deref(),
             &route.runtime_model_slug,
         ) && optional_matches(self.source.upstream_id.as_deref(), &route.upstream_id)
+            && optional_matches(
+                self.source.key_fingerprint.as_deref(),
+                &route.key_fingerprint,
+            )
             && self
                 .source
                 .protocol
@@ -274,6 +284,7 @@ impl CapabilityConfiguration {
         validate_fixtures(self)?;
         validate_extensions(self)?;
         validate_route_tags(self)?;
+        validate_reasoning_overrides(self)?;
 
         let mut policies = self
             .policies
@@ -569,6 +580,10 @@ fn validate_selector_value_lengths(
             selector.runtime_model_glob.as_deref(),
         ),
         ("selector.upstream_id", selector.upstream_id.as_deref()),
+        (
+            "selector.key_fingerprint",
+            selector.key_fingerprint.as_deref(),
+        ),
         ("selector.tag", selector.tag.as_deref()),
     ] {
         if let Some(value) = value {
@@ -855,6 +870,32 @@ fn validate_route_tags(
     Ok(())
 }
 
+fn validate_reasoning_overrides(
+    configuration: &CapabilityConfiguration,
+) -> Result<(), CapabilityPolicyError> {
+    for route_override in &configuration.route_overrides {
+        match (
+            route_override.reasoning_control_field.as_ref(),
+            route_override.effort_map.is_empty(),
+        ) {
+            (Some(_), true) => {
+                return Err(CapabilityPolicyError::InvalidReasoningOverride {
+                    id: route_override.id.clone(),
+                    reason: "reasoning_control_field requires a non-empty effort_map",
+                });
+            }
+            (None, false) => {
+                return Err(CapabilityPolicyError::InvalidReasoningOverride {
+                    id: route_override.id.clone(),
+                    reason: "effort_map requires reasoning_control_field",
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn compile_expectations(
     configuration: &CapabilityConfiguration,
 ) -> Result<Vec<CompiledExpectation>, CapabilityPolicyError> {
@@ -1010,6 +1051,21 @@ fn conflicting_override_field(
     if specified_values_conflict(left.reasoning_carrier, right.reasoning_carrier) {
         return Some("reasoning_carrier".to_owned());
     }
+    if exact_values_differ(
+        left.reasoning_control_field.as_ref(),
+        right.reasoning_control_field.as_ref(),
+    ) {
+        return Some("reasoning_control_field".to_owned());
+    }
+    if let Some(level) = left.effort_map.iter().find_map(|(level, left_value)| {
+        right
+            .effort_map
+            .get(level)
+            .filter(|right_value| *right_value != left_value)
+            .map(|_| level)
+    }) {
+        return Some(format!("effort_map.{level}"));
+    }
     if !left.correction_rules.is_empty()
         && !right.correction_rules.is_empty()
         && left.correction_rules != right.correction_rules
@@ -1049,6 +1105,9 @@ fn selectors_overlap(left: &CompiledSelector, right: &CompiledSelector) -> bool 
     ) || exact_values_differ(
         left.source.upstream_id.as_ref(),
         right.source.upstream_id.as_ref(),
+    ) || exact_values_differ(
+        left.source.key_fingerprint.as_ref(),
+        right.source.key_fingerprint.as_ref(),
     ) || exact_values_differ(
         left.source.protocol.as_ref(),
         right.source.protocol.as_ref(),

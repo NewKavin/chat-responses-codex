@@ -16,7 +16,7 @@ pub(super) fn normalize_reasoning_effort_for_model(
 }
 
 /// Ordered Codex reasoning-effort vocabulary, from lowest to highest.
-const CODEX_REASONING_EFFORT_ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const CODEX_REASONING_EFFORT_ORDER: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
 
 fn codex_reasoning_effort_rank(effort: &str) -> usize {
     CODEX_REASONING_EFFORT_ORDER
@@ -605,6 +605,20 @@ mod tests {
             );
             assert_eq!(body["reasoning_effort"], "high");
         }
+    }
+
+    #[test]
+    fn unsupported_none_drops_reasoning_control_instead_of_promoting_it() {
+        let resolved = resolved_with_effort_control("reasoning_effort", &["low", "high", "max"]);
+        let mut body = json!({});
+
+        normalize_chat_payload_for_capabilities_with_requested_effort(
+            &mut body,
+            &resolved,
+            Some("none"),
+        );
+
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

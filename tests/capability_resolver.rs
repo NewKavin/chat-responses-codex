@@ -60,6 +60,65 @@ fn explicit_override_beats_probe_and_probe_beats_baseline() {
 }
 
 #[test]
+fn effort_override_beats_probe_and_reports_override_source() {
+    let route = route(WireProtocol::ChatCompletions);
+    let requested = RequestedFeatures::text_stream();
+    let semantic = SemanticPolicy {
+        effort_map: BTreeMap::from([("medium".to_owned(), "probe-medium".to_owned())]),
+        ..Default::default()
+    };
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::from_route(&route));
+    profile.reasoning_controls = BTreeMap::from([(
+        "profile_effort".to_owned(),
+        vec![Value::from("probe-medium")],
+    )]);
+    let route_override = RouteCapabilityOverride {
+        id: "operator-reasoning-route-a".to_owned(),
+        selector: CapabilitySelector {
+            key_fingerprint: Some("key-a".to_owned()),
+            ..Default::default()
+        },
+        capabilities: [(Capability::ReasoningOutput, EvidenceState::Supported)].into(),
+        reasoning_control_field: Some("reasoning_effort".to_owned()),
+        effort_map: BTreeMap::from([
+            ("low".to_owned(), serde_json::json!("low")),
+            ("high".to_owned(), serde_json::json!("high")),
+        ]),
+        ..Default::default()
+    };
+    let route_overrides = [&route_override];
+
+    let resolved = CapabilityResolver
+        .resolve(ResolutionInput {
+            route: &route,
+            requested: &requested,
+            semantic: &semantic,
+            route_overrides: &route_overrides,
+            policy_extensions: &[],
+            profile: Some(&profile),
+            dialect_preset: None,
+            strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
+        })
+        .unwrap();
+
+    assert_eq!(
+        resolved.reasoning_control_field.as_deref(),
+        Some("reasoning_effort")
+    );
+    assert_eq!(
+        resolved.effort_map,
+        BTreeMap::from([
+            ("low".to_owned(), serde_json::json!("low")),
+            ("high".to_owned(), serde_json::json!("high")),
+        ])
+    );
+    assert_eq!(
+        resolved.field_sources.get("effort_map"),
+        Some(&CapabilitySource::Override)
+    );
+}
+
+#[test]
 fn unprobed_chat_is_conservative_and_unprobed_responses_is_restricted() {
     let requested = RequestedFeatures::text_stream();
     let chat_route = route(WireProtocol::ChatCompletions);

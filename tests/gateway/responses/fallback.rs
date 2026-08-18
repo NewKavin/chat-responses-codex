@@ -7,6 +7,181 @@ use chat_responses_codex::capabilities::{
 use chat_responses_codex::protocol::tool_adapter::{ToolAdapterRegistry, ToolIdentity, ToolTarget};
 
 #[tokio::test]
+async fn capability_ineligible_responses_route_does_not_suppress_chat_fallback() {
+    let captured_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let chat_capture = captured_paths.clone();
+    let responses_capture = captured_paths.clone();
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let capture = chat_capture.clone();
+                async move {
+                    capture
+                        .lock()
+                        .unwrap()
+                        .push(request.uri().path().to_string());
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-capability-fallback",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "synthetic/capability-fallback",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "fallback-ok"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post(move |request: Request<Body>| {
+                let capture = responses_capture.clone();
+                async move {
+                    capture
+                        .lock()
+                        .unwrap()
+                        .push(request.uri().path().to_string());
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({"error": {"message": "must not be called"}})),
+                    )
+                }
+            }),
+        );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/capability-fallback";
+    let upstream = UpstreamConfig {
+        id: "capability-fallback".into(),
+        name: "capability-fallback".into(),
+        base_url: format!("http://{address}"),
+        api_key: "upstream-secret".into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![
+            UpstreamProtocol::ChatCompletions,
+            UpstreamProtocol::Responses,
+        ],
+        supported_models: vec![model.into()],
+        active: true,
+        ..Default::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream]),
+            downstreams: Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+
+    let mut chat_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: "capability-fallback".into(),
+        key_fingerprint: String::new(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    chat_profile.state = DialectProfileState::Verified;
+    chat_profile
+        .capabilities
+        .insert(Capability::FunctionTools, EvidenceState::Supported);
+    stamp_current_dialect_profile(&state, model, &mut chat_profile).await;
+    state.upsert_dialect_profile(chat_profile).await.unwrap();
+
+    let mut responses_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: "capability-fallback".into(),
+        key_fingerprint: String::new(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::Responses,
+    });
+    responses_profile.state = DialectProfileState::Verified;
+    responses_profile
+        .capabilities
+        .insert(Capability::FunctionTools, EvidenceState::Rejected);
+    stamp_current_dialect_profile(&state, model, &mut responses_profile).await;
+    state
+        .upsert_dialect_profile(responses_profile)
+        .await
+        .unwrap();
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": "use the lookup tool",
+                        "tools": [
+                            {"type": "web_search"},
+                            {
+                                "type": "function",
+                                "name": "lookup",
+                                "description": "Lookup a value",
+                                "parameters": {"type": "object", "properties": {}}
+                            }
+                        ],
+                        "tool_choice": "auto",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        captured_paths.lock().unwrap().as_slice(),
+        ["/v1/chat/completions"]
+    );
+}
+
+#[tokio::test]
 async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
     let capture = Arc::new(Mutex::new(Vec::<Value>::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1572,6 +1747,7 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
                 },
                 semantic: SemanticPolicy {
                     effort_map: std::collections::BTreeMap::from([
+                        ("none".into(), "none".into()),
                         ("xhigh".into(), "upstream-xhigh".into()),
                         ("max".into(), "upstream-max".into()),
                     ]),
@@ -1601,13 +1777,17 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
     }
     profile.reasoning_controls.insert(
         "reasoning_effort".into(),
-        vec!["upstream-xhigh".into(), "upstream-max".into()],
+        vec![
+            "none".into(),
+            "upstream-xhigh".into(),
+            "upstream-max".into(),
+        ],
     );
     stamp_current_dialect_profile(&state, model, &mut profile).await;
     state.upsert_dialect_profile(profile).await.unwrap();
 
     let app = build_router(state);
-    for effort in ["xhigh", "max"] {
+    for effort in ["none", "xhigh", "max"] {
         let response = app
             .clone()
             .oneshot(
@@ -1635,9 +1815,10 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
     }
 
     let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 2);
-    assert_eq!(captured[0]["reasoning_effort"], "upstream-xhigh");
-    assert_eq!(captured[1]["reasoning_effort"], "upstream-max");
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0]["reasoning_effort"], "none");
+    assert_eq!(captured[1]["reasoning_effort"], "upstream-xhigh");
+    assert_eq!(captured[2]["reasoning_effort"], "upstream-max");
 }
 
 #[tokio::test]

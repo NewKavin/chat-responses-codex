@@ -80,6 +80,88 @@ describe('admin ui structure', () => {
     expect(board).not.toContain('summary-card')
   })
 
+  it('edits effective reasoning levels without rewriting probe evidence', () => {
+    const page = source('views/admin/ModelProbe.vue')
+    const helper = source('utils/reasoningOverrides.ts')
+
+    expect(page).toContain('label="探测状态"')
+    expect(page).toContain('label="生效档位"')
+    expect(page).toContain('label="来源"')
+    expect(page).toContain('routeStatusLabel(row)')
+    expect(page).toContain('reasoningSourceLabel(row.reasoning_source)')
+    expect(page).toContain('手工生效')
+    expect(page).toContain(':icon="Pencil"')
+    expect(page).toContain('aria-label="编辑生效档位"')
+    expect(page).toContain(':icon="RotateCcw"')
+    expect(page).toContain('aria-label="清除手工档位"')
+    expect(page).toContain(':title="reasoningOverrideDialogTitle"')
+    expect(page).toContain('value="route"')
+    expect(page).toContain('value="model_routes"')
+    expect(page).toContain('v-for="level in REASONING_EFFORT_LEVELS"')
+    expect(page).toContain('aria-label="配置模型全部当前路由"')
+    expect(page).toContain('openModelReasoningOverrideEditor(row)')
+    expect(page).toContain("reasoningOverrideEditorMode.value = 'model'")
+    expect(page).toContain("reasoningOverrideScope.value = 'model_routes'")
+    expect(page).toContain('editingReasoningModel.routes.length')
+    expect(page).toContain('模型全部当前路由')
+    expect(page).toContain('openReasoningOverrideEditor(row)')
+    expect(page).toContain("reasoningOverrideEditorMode.value = 'route'")
+    expect(page).toContain('adminApi.updateReasoningOverrides')
+    expect(page).toContain('clearReasoningOverride')
+    expect(page).toContain('const clearEditingReasoningOverride = async () =>')
+    expect(page).toContain('applyReasoningOverride(route, [], scope)')
+    expect(page).toContain('const showCurrentBatchResults = computed')
+    expect(page).toContain('capabilityProbeBatchModels.value.length > 0')
+    expect(page).toContain('max-width: calc(100vw - 32px)')
+
+    const applyOverride = page.slice(
+      page.indexOf('const applyReasoningOverride = async ('),
+      page.indexOf('const saveReasoningOverride = async () =>')
+    )
+    const failedSave = applyOverride.slice(
+      applyOverride.indexOf('} catch (error: any) {'),
+      applyOverride.indexOf('} finally {')
+    )
+    expect(failedSave).toContain(
+      "errorCode === 'capability_reasoning_override_invalid_route'"
+    )
+    expect(failedSave).toContain('reasoningOverrideDialogVisible.value = false')
+    expect(failedSave).toContain('await refreshCapabilityDiscovery().catch(() => undefined)')
+    expect(failedSave.indexOf('await refreshCapabilityDiscovery()')).toBeLessThan(
+      failedSave.indexOf('ElMessage.error(errorMsg)')
+    )
+    expect(failedSave).not.toContain('adminApi.updateReasoningOverrides')
+
+    expect(page).toMatch(
+      /\.reasoning-override-levels\s*\{[^}]*grid-template-columns:\s*repeat\(6,/s
+    )
+    expect(helper).toContain("'none'")
+    expect(helper).toContain("'low'")
+    expect(helper).toContain("'medium'")
+    expect(helper).toContain("'high'")
+    expect(helper).toContain("'xhigh'")
+    expect(helper).toContain("'max'")
+  })
+
+  it('uses backend-authoritative model mapping validity with a neutral fallback', () => {
+    const page = source('views/admin/ModelAliases.vue')
+    const helper = source('utils/modelMappingStatus.ts')
+
+    expect(page).toContain('adminApi.getModelMappingStatuses()')
+    expect(page).toContain('mappingStatuses')
+    expect(page).toContain('modelMappingStatusPresentation')
+    expect(page).toContain('mappingStatusTooltip(row)')
+    expect(page).toContain('eligible_routes')
+    expect(page).toContain('configured_routes')
+    expect(page).toContain('Promise.all([loadUpstreams(), loadMappingStatuses(), loadAliases()])')
+    expect(page).not.toContain('stale: !models.some')
+    expect(page).not.toContain('row.stale')
+    expect(helper).toContain("label: '生效'")
+    expect(helper).toContain("label: '部分生效'")
+    expect(helper).toContain("label: '未生效'")
+    expect(helper).toContain("label: '状态未知'")
+  })
+
   it('uses anonymous route ids for model probe channels', () => {
     const board = source('components/ModelProbeBoard.vue')
     const charts = source('utils/modelProbeCharts.ts')

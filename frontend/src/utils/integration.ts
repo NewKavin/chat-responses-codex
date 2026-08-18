@@ -12,7 +12,14 @@ export interface CodexCatalogResponse {
   models: Array<{ [key: string]: JsonValue }>
 }
 
-export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export const CODEX_REASONING_EFFORTS = [
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max'
+] as const
 
 export type CodexReasoningEffort = typeof CODEX_REASONING_EFFORTS[number]
 

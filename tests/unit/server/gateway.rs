@@ -2955,6 +2955,65 @@ fn upstream_stream_timeout_is_gateway_timeout() {
 }
 
 #[test]
+fn responses_tooling_falls_back_when_only_chat_has_an_eligible_route() {
+    assert_eq!(
+        responses_route_strategy(true, 0, 1),
+        ResponsesRouteStrategy::ChatFallback,
+    );
+}
+
+#[test]
+fn responses_tooling_prefers_an_eligible_responses_route() {
+    assert_eq!(
+        responses_route_strategy(true, 1, 3),
+        ResponsesRouteStrategy::Responses,
+    );
+}
+
+#[test]
+fn responses_tooling_reports_unavailable_when_neither_protocol_is_eligible() {
+    assert_eq!(
+        responses_route_strategy(true, 0, 0),
+        ResponsesRouteStrategy::Unavailable,
+    );
+}
+
+#[test]
+fn response_requests_without_special_tooling_remain_protocol_agnostic() {
+    assert_eq!(
+        responses_route_strategy(false, 0, 0),
+        ResponsesRouteStrategy::ProtocolAgnostic,
+    );
+}
+
+#[test]
+fn no_routable_error_distinguishes_configured_but_ineligible_models() {
+    let configured = PersistedState {
+        upstreams: Arc::new(vec![UpstreamConfig {
+            id: "configured-upstream".into(),
+            supported_models: vec!["configured-model".into()],
+            active: true,
+            ..Default::default()
+        }]),
+        ..PersistedState::default()
+    };
+
+    let configured_error = no_routable_model_error(&configured, "configured-model");
+    assert!(
+        configured_error
+            .to_string()
+            .contains("configured but no exact route is eligible")
+    );
+
+    let absent_error = no_routable_model_error(&configured, "absent-model");
+    assert!(
+        absent_error
+            .to_string()
+            .contains("not configured on any active upstream")
+    );
+}
+
+#[test]
 fn capability_name_prefers_failed_capability_intersecting_required_set() {
     let mut cache = BTreeMap::new();
     cache.insert(

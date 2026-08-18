@@ -15,7 +15,8 @@ import type {
   ApiKeyModelConfig,
   CompatibilityMatrixRunResponse,
   DashboardSummaryResponse,
-  DialectProfileSummary
+  DialectProfileSummary,
+  UpdateReasoningOverridesRequest
 } from '@/types'
 
 describe('admin api auth behavior', () => {
@@ -140,6 +141,38 @@ describe('admin api auth behavior', () => {
       models: ['deepseek-v4-flash']
     })
     expect(get).toHaveBeenCalledWith('/admin/capabilities/discovery', { timeout: 2500 })
+  })
+
+  it('updates exact-route reasoning overrides and reads mapping validity', async () => {
+    const put = vi.spyOn(adminHttp, 'put').mockResolvedValue({
+      data: {
+        ok: true,
+        configuration_revision: 8,
+        affected_route_count: 1,
+        affected_route_ids: ['route-1']
+      }
+    } as never)
+    const get = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { mappings: [] }
+    } as never)
+    const payload: UpdateReasoningOverridesRequest = {
+      upstream_id: 'up-1',
+      route_id: 'route-1',
+      exposed_model_slug: 'gpt-5.6-sol',
+      runtime_model_slug: 'gpt-5.6-sol',
+      protocol: 'responses',
+      levels: ['low', 'high'],
+      scope: 'route'
+    }
+
+    await adminApi.updateReasoningOverrides(payload)
+    await adminApi.getModelMappingStatuses()
+
+    expect(put).toHaveBeenCalledWith(
+      '/admin/capabilities/reasoning-overrides',
+      payload
+    )
+    expect(get).toHaveBeenCalledWith('/admin/model-mappings/status')
   })
 
   it('addresses model discovery results by stable key index', async () => {

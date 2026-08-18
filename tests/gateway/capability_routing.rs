@@ -1,6 +1,8 @@
 use super::common::*;
+use chat_responses_codex::auth::generate_admin_token;
 use chat_responses_codex::capabilities::*;
-use chat_responses_codex::state::ApiKeyModelConfig;
+use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
+use chat_responses_codex::state::{ApiKeyModelConfig, UpstreamModelMapping};
 use serde_json::Value;
 
 #[allow(dead_code)]
@@ -178,6 +180,39 @@ fn catalog_state(
     (tempdir, state, downstream_key.plaintext)
 }
 
+fn catalog_route_override(
+    id: &str,
+    upstream: &UpstreamConfig,
+    runtime_model: &str,
+    efforts: &[&str],
+    supports_custom_tools: bool,
+) -> RouteCapabilityOverride {
+    let mut capabilities = std::collections::BTreeMap::from([
+        (Capability::FunctionTools, EvidenceState::Supported),
+        (Capability::ToolContinuation, EvidenceState::Supported),
+        (Capability::ReasoningOutput, EvidenceState::Supported),
+    ]);
+    if supports_custom_tools {
+        capabilities.insert(Capability::CustomTools, EvidenceState::Supported);
+    }
+    RouteCapabilityOverride {
+        id: id.into(),
+        selector: CapabilitySelector {
+            upstream_id: Some(upstream.id.clone()),
+            runtime_model: Some(runtime_model.into()),
+            protocol: Some(WireProtocol::ChatCompletions),
+            ..Default::default()
+        },
+        capabilities,
+        reasoning_control_field: Some("reasoning_effort".into()),
+        effort_map: efforts
+            .iter()
+            .map(|effort| ((*effort).into(), Value::String((*effort).into())))
+            .collect(),
+        ..Default::default()
+    }
+}
+
 async fn put_catalog_profile(
     state: &AppState,
     upstream: &UpstreamConfig,
@@ -260,12 +295,16 @@ async fn stamp_current_profile(
 }
 
 async fn get_models(state: AppState, secret: &str, codex: bool) -> Value {
+    get_models_from_app(build_router(state), secret, codex).await
+}
+
+async fn get_models_from_app(app: Router, secret: &str, codex: bool) -> Value {
     let uri = if codex {
         "/v1/models?client_version=0.144.1"
     } else {
         "/v1/models"
     };
-    let response = build_router(state)
+    let response = app
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -737,6 +776,190 @@ async fn codex_catalog_uses_explicit_none_when_reasoning_control_is_unverified()
 }
 
 #[tokio::test]
+async fn codex_catalog_hot_applies_admin_reasoning_override_without_rebuilding_router() {
+    let model = "arbitrary/manual-reasoning";
+    let upstream = catalog_upstream("manual-reasoning-route", &[model]);
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    let app = build_router(state);
+
+    let before = get_models_from_app(app.clone(), &secret, true).await;
+    assert_eq!(before["models"][0]["default_reasoning_level"], "none");
+
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let route_id = anonymous_route_id(
+        &upstream.id,
+        &key_fingerprint,
+        model,
+        WireProtocol::ChatCompletions,
+    );
+    let admin_token =
+        generate_admin_token("admin", &AppConfig::default().jwt_secret).expect("admin token");
+    let updated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/capabilities/reasoning-overrides")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "upstream_id": upstream.id.clone(),
+                        "route_id": route_id.clone(),
+                        "exposed_model_slug": model,
+                        "runtime_model_slug": model,
+                        "protocol": "chat_completions",
+                        "levels": ["low", "none"],
+                        "scope": "route"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+
+    let after = get_models_from_app(app.clone(), &secret, true).await;
+    assert_eq!(
+        after["models"][0]["supported_reasoning_levels"],
+        json!([
+            {"effort": "none", "description": "Do not use reasoning effort"},
+            {"effort": "low", "description": "Use low reasoning effort"}
+        ])
+    );
+    assert_eq!(after["models"][0]["default_reasoning_level"], "low");
+    assert_eq!(after["models"][0]["supports_reasoning_summaries"], true);
+
+    let none_only_update = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/capabilities/reasoning-overrides")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "upstream_id": upstream.id,
+                        "route_id": route_id,
+                        "exposed_model_slug": model,
+                        "runtime_model_slug": model,
+                        "protocol": "chat_completions",
+                        "levels": ["none"],
+                        "scope": "route"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none_only_update.status(), StatusCode::OK);
+
+    let none_only = get_models_from_app(app, &secret, true).await;
+    assert_eq!(
+        none_only["models"][0]["supported_reasoning_levels"],
+        json!([{
+            "effort": "none",
+            "description": "Do not use reasoning effort"
+        }])
+    );
+    assert_eq!(none_only["models"][0]["default_reasoning_level"], "none");
+    assert_eq!(
+        none_only["models"][0]["supports_reasoning_summaries"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn codex_catalog_case_folded_slug_keeps_reasoning_metadata() {
+    let model = "GLM-4.5";
+    let upstream = catalog_upstream("upper-reasoning", &[model]);
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], Vec::new());
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            route_overrides: vec![catalog_route_override(
+                "upper-reasoning",
+                &upstream,
+                model,
+                &["none", "low"],
+                false,
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let catalog = get_models(state, &secret, true).await;
+    let model = &catalog["models"][0];
+    assert_eq!(model["slug"], "glm-4.5");
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([
+            {"effort": "none", "description": "Do not use reasoning effort"},
+            {"effort": "low", "description": "Use low reasoning effort"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn codex_catalog_keeps_case_distinct_metadata_and_witnesses_when_folding_is_disabled() {
+    let upper = catalog_upstream("upper", &["GLM-4.5"]);
+    let lower = catalog_upstream("lower", &["glm-4.5"]);
+    let (_tempdir, state, secret) = catalog_state(vec![upper.clone(), lower.clone()], Vec::new());
+    let mut settings = state.runtime_settings().as_ref().clone();
+    settings.model_case_insensitive_matching = false;
+    state.update_runtime_settings(0, settings).await.unwrap();
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            route_overrides: vec![
+                catalog_route_override("upper", &upper, "GLM-4.5", &["low"], true),
+                catalog_route_override("lower", &lower, "glm-4.5", &["high"], false),
+            ],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let catalog = get_models(state, &secret, true).await;
+    let models = catalog["models"].as_array().unwrap();
+    let upper = models
+        .iter()
+        .find(|model| model["slug"] == "GLM-4.5")
+        .unwrap();
+    let lower = models
+        .iter()
+        .find(|model| model["slug"] == "glm-4.5")
+        .unwrap();
+    assert_eq!(upper["supported_reasoning_levels"][0]["effort"], "low");
+    assert_eq!(upper["apply_patch_tool_type"], "freeform");
+    assert_eq!(lower["supported_reasoning_levels"][0]["effort"], "high");
+    assert_eq!(lower["apply_patch_tool_type"], Value::Null);
+}
+
+#[tokio::test]
+async fn codex_catalog_prefers_mapping_label_over_earlier_unmapped_case_variant() {
+    let unmapped = catalog_upstream("unmapped", &["model-x"]);
+    let mut mapped = catalog_upstream("mapped", &["runtime-x"]);
+    mapped.model_mappings = vec![UpstreamModelMapping {
+        upstream_model: "runtime-x".into(),
+        downstream_model: "Model-X".into(),
+    }];
+    let (_tempdir, state, secret) = catalog_state(vec![unmapped, mapped], Vec::new());
+
+    let catalog = get_models(state, &secret, true).await;
+    assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+    assert_eq!(catalog["models"][0]["slug"], "Model-X");
+}
+
+#[tokio::test]
 async fn codex_catalog_advertises_only_verified_reasoning_levels() {
     let model = "arbitrary/reasoning-output";
     let upstream = catalog_upstream("reasoning-route", &[model]);
@@ -756,6 +979,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
                 semantic: SemanticPolicy {
                     effort_map: std::collections::BTreeMap::from([
                         ("minimal".into(), "upstream-minimal".into()),
+                        ("none".into(), "upstream-none".into()),
                         ("high".into(), "upstream-high".into()),
                         ("low".into(), "upstream-low".into()),
                         ("medium".into(), "upstream-medium".into()),
@@ -801,6 +1025,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         "reasoning_effort".into(),
         vec![
             "upstream-minimal".into(),
+            "upstream-none".into(),
             "upstream-high".into(),
             "upstream-low".into(),
             "upstream-medium".into(),
@@ -817,6 +1042,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
     assert_eq!(
         model["supported_reasoning_levels"],
         json!([
+            {"effort": "none", "description": "Do not use reasoning effort"},
             {"effort": "low", "description": "Use low reasoning effort"},
             {"effort": "medium", "description": "Use medium reasoning effort"},
             {"effort": "high", "description": "Use high reasoning effort"},
@@ -2873,7 +3099,11 @@ async fn model_catalog_dedups_case_only_duplicates_across_upstreams() {
         .filter_map(|entry| entry["slug"].as_str())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    assert_eq!(codex_slugs.len(), 1, "codex catalog must dedup: {codex_slugs:?}");
+    assert_eq!(
+        codex_slugs.len(),
+        1,
+        "codex catalog must dedup: {codex_slugs:?}"
+    );
     assert_eq!(codex_slugs[0], "glm-4.5");
 }
 
@@ -2924,10 +3154,8 @@ async fn case_folded_downstream_model_routes_to_upstream_stored_spelling() {
     let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec!["GLM-4.5".into()]);
 
     // Seed a verified profile so the request actually routes without probing.
-    let key_fingerprint = chat_responses_codex::keys::upstream_key_fingerprint(
-        &upstream.id,
-        &upstream.api_key,
-    );
+    let key_fingerprint =
+        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &upstream.api_key);
     let profile_key = DialectProfileKey::for_key(
         upstream.id.clone(),
         key_fingerprint.clone(),

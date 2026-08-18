@@ -228,6 +228,9 @@ pub(super) async fn capture_single_chat_request_with_options(
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("gateway response body should complete");
 
     let captured = capture
         .lock()

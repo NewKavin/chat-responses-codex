@@ -5,6 +5,30 @@ use crate::protocol::{
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ResponsesRouteStrategy {
+    ProtocolAgnostic,
+    Responses,
+    ChatFallback,
+    Unavailable,
+}
+
+pub(super) fn responses_route_strategy(
+    requires_responses_tooling: bool,
+    eligible_responses_routes: usize,
+    eligible_chat_routes: usize,
+) -> ResponsesRouteStrategy {
+    if !requires_responses_tooling {
+        ResponsesRouteStrategy::ProtocolAgnostic
+    } else if eligible_responses_routes > 0 {
+        ResponsesRouteStrategy::Responses
+    } else if eligible_chat_routes > 0 {
+        ResponsesRouteStrategy::ChatFallback
+    } else {
+        ResponsesRouteStrategy::Unavailable
+    }
+}
+
 pub(super) fn responses_request_requires_responses_upstream(body: &Value) -> bool {
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
         return tools.iter().any(responses_tool_requires_responses_upstream);

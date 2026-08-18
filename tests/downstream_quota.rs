@@ -758,7 +758,7 @@ async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs
     .iter()
     .enumerate()
     .map(|(index, (status, suffix))| UsageLog {
-        id: format!("log-{index}").into(),
+        id: format!("log-{index}"),
         downstream_key_id: "down-1".into(),
         upstream_key_id: "up-1".into(),
         downstream_name: None,
@@ -769,7 +769,7 @@ async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs
         billing_mode: None,
         request_count: None,
         user_agent: None,
-        request_id: format!("REQ-{suffix}").into(),
+        request_id: format!("REQ-{suffix}"),
         status_code: *status,
         wire_status_code: 0,
         stream_diagnostics: None,
@@ -848,7 +848,7 @@ async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
     // archived logs after a snapshot: replay must dedupe by id.
     let mut logs: Vec<UsageLog> = (0..3)
         .map(|index| UsageLog {
-            id: format!("log-{index}").into(),
+            id: format!("log-{index}"),
             downstream_key_id: "down-1".into(),
             upstream_key_id: "up-1".into(),
             downstream_name: None,
@@ -859,7 +859,7 @@ async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
             billing_mode: None,
             request_count: None,
             user_agent: None,
-            request_id: format!("REQ-{index}").into(),
+            request_id: format!("REQ-{index}"),
             status_code: 200,
             wire_status_code: 0,
             stream_diagnostics: None,

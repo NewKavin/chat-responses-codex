@@ -1,8 +1,9 @@
+use super::reasoning_overrides::managed_reasoning_override_id;
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey, ProbeMode,
-    ProbeProfileOutcome, RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile,
-    WireProtocol,
+    Capability, CapabilityConfiguration, CapabilityResolver, CapabilitySource, DialectProfileKey,
+    ProbeMode, ProbeProfileOutcome, RequestedFeatures, ResolutionInput, RouteIdentity,
+    UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use axum::extract::{Path, Query};
@@ -66,10 +67,19 @@ pub(super) struct CapabilityRouteDiscoverySummary {
     protocol: WireProtocol,
     outcome: &'static str,
     accepted_reasoning_levels: Vec<String>,
+    reasoning_source: CapabilitySource,
+    managed_reasoning_override: bool,
     http_status: Option<u16>,
     operational_code: Option<String>,
     last_attempt_at: Option<u64>,
     next_probe_at: Option<u64>,
+}
+
+struct CapabilityModelDiscoveryAccumulator {
+    exposed_model_slug: String,
+    display_from_mapping: bool,
+    verified_reasoning_levels: BTreeSet<String>,
+    routes: Vec<CapabilityRouteDiscoverySummary>,
 }
 
 pub(super) async fn admin_capabilities_export(State(state): State<AppState>) -> Response {
@@ -180,6 +190,7 @@ pub(super) async fn admin_capabilities_import(
 pub(super) async fn admin_capability_profiles(State(state): State<AppState>) -> Response {
     let snapshot = state.capability_snapshot();
     let routing = state.routing_snapshot().await;
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
     let now = unix_seconds();
     let profiles = snapshot
         .profiles
@@ -188,7 +199,12 @@ pub(super) async fn admin_capability_profiles(State(state): State<AppState>) -> 
             capability_profile_summary(
                 profile,
                 now,
-                profile_is_current_for_any_route(&snapshot, &routing.upstreams, profile),
+                profile_is_current_for_any_route(
+                    &snapshot,
+                    &routing.upstreams,
+                    profile,
+                    case_insensitive,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -197,8 +213,9 @@ pub(super) async fn admin_capability_profiles(State(state): State<AppState>) -> 
 
 pub(super) async fn admin_capability_discovery(State(state): State<AppState>) -> Response {
     let routing = state.routing_snapshot().await;
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
     Json(json!({
-        "models": capability_discovery_summaries(&state, &routing.upstreams),
+        "models": capability_discovery_summaries(&state, &routing.upstreams, case_insensitive),
     }))
     .into_response()
 }
@@ -208,6 +225,7 @@ pub(super) async fn admin_capabilities_resolved(
     Query(query): Query<CapabilityResolvedQuery>,
 ) -> Response {
     let routing = state.routing_snapshot().await;
+    let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
     let Some(upstream) = routing
         .upstreams
         .iter()
@@ -229,7 +247,9 @@ pub(super) async fn admin_capabilities_resolved(
                 .into_response();
         }
     };
-    let Some(runtime_model_slug) = upstream.resolved_model_name(&query.model) else {
+    let Some(runtime_model_slug) =
+        upstream.resolved_model_name_with(&query.model, case_insensitive)
+    else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"message": "model not configured for upstream"}})),
@@ -239,7 +259,7 @@ pub(super) async fn admin_capabilities_resolved(
 
     let capability_snapshot = state.capability_snapshot();
     let key_fingerprints = upstream
-        .keys_for_model(&runtime_model_slug)
+        .keys_for_model_with(&runtime_model_slug, case_insensitive)
         .into_iter()
         .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
         .collect::<Vec<_>>();
@@ -275,28 +295,17 @@ pub(super) async fn admin_capabilities_resolved(
         .route_overrides_for(&route);
     let policy_extensions = capability_snapshot.configuration.extensions_for(&route);
     let profile_key = DialectProfileKey::from_route(&route);
-    let current_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
-        &capability_snapshot,
-        upstream,
-        &key_fingerprint,
-        &query.model,
-        &runtime_model_slug,
-        protocol,
-    )
-    .ok();
     let raw_profile = capability_snapshot.profiles.get(&profile_key);
     let profile = raw_profile.filter(|profile| {
-        current_fingerprint.as_deref().is_some_and(|fingerprint| {
-            profile_is_current_for_route(
-                &capability_snapshot,
-                upstream,
-                &query.model,
-                &runtime_model_slug,
-                protocol,
-                profile,
-                fingerprint,
-            )
-        })
+        profile_is_current_for_route(
+            &capability_snapshot,
+            upstream,
+            &query.model,
+            &runtime_model_slug,
+            protocol,
+            profile,
+            case_insensitive,
+        )
     });
     let now = unix_seconds();
     let resolved = match CapabilityResolver.resolve(ResolutionInput {
@@ -647,6 +656,7 @@ fn profile_is_current_for_any_route(
     snapshot: &crate::capabilities::CapabilityRuntimeSnapshot,
     upstreams: &[crate::state::UpstreamConfig],
     profile: &UpstreamDialectProfile,
+    case_insensitive: bool,
 ) -> bool {
     let protocol = match profile.key.protocol {
         WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
@@ -665,47 +675,69 @@ fn profile_is_current_for_any_route(
                 .effective_downstream_models()
                 .into_iter()
                 .filter_map(move |exposed| {
-                    (upstream.resolved_model_name(&exposed).as_deref()
+                    (upstream
+                        .resolved_model_name_with(&exposed, case_insensitive)
+                        .as_deref()
                         == Some(profile.key.runtime_model_slug.as_str()))
                     .then_some((upstream, exposed))
                 })
         })
         .any(|(upstream, exposed)| {
-            AppState::route_configuration_fingerprint_with_snapshot(
+            profile_is_current_for_route(
                 snapshot,
                 upstream,
-                &profile.key.key_fingerprint,
                 &exposed,
                 &profile.key.runtime_model_slug,
                 protocol,
+                profile,
+                case_insensitive,
             )
-            .is_ok_and(|fingerprint| {
-                profile_is_current_for_route(
-                    snapshot,
-                    upstream,
-                    &exposed,
-                    &profile.key.runtime_model_slug,
-                    protocol,
-                    profile,
-                    &fingerprint,
-                )
-            })
         })
 }
 
 pub(super) fn capability_discovery_summaries(
     state: &AppState,
     upstreams: &[crate::state::UpstreamConfig],
+    case_insensitive: bool,
 ) -> Vec<CapabilityModelDiscoverySummary> {
     let snapshot = state.capability_snapshot();
-    let mut models =
-        BTreeMap::<String, (BTreeSet<String>, Vec<CapabilityRouteDiscoverySummary>)>::new();
+    let mut models = BTreeMap::<String, CapabilityModelDiscoveryAccumulator>::new();
     for upstream in upstreams.iter().filter(|upstream| upstream.active) {
-        for exposed_model_slug in upstream.effective_downstream_models() {
-            let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model_slug) else {
+        for entry in upstream.effective_downstream_models_detailed() {
+            let exposed_model_slug = entry.model.trim().to_owned();
+            let identity_key =
+                crate::state::model_identity_key_with(&exposed_model_slug, case_insensitive);
+            if identity_key.is_empty() {
+                continue;
+            }
+            let display_slug = if entry.from_mapping || !case_insensitive {
+                exposed_model_slug.clone()
+            } else {
+                identity_key.clone()
+            };
+            let model =
+                models
+                    .entry(identity_key)
+                    .or_insert_with(|| CapabilityModelDiscoveryAccumulator {
+                        exposed_model_slug: display_slug.clone(),
+                        display_from_mapping: entry.from_mapping,
+                        verified_reasoning_levels: BTreeSet::new(),
+                        routes: Vec::new(),
+                    });
+            if (entry.from_mapping && !model.display_from_mapping)
+                || (entry.from_mapping == model.display_from_mapping
+                    && display_slug < model.exposed_model_slug)
+            {
+                model.exposed_model_slug = display_slug;
+                model.display_from_mapping = entry.from_mapping;
+            }
+
+            let Some(runtime_model_slug) =
+                upstream.resolved_model_name_with(&exposed_model_slug, case_insensitive)
+            else {
                 continue;
             };
-            for api_key in upstream.keys_for_model(&runtime_model_slug) {
+            for api_key in upstream.keys_for_model_with(&runtime_model_slug, case_insensitive) {
                 let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
                 for protocol in upstream.supported_protocols() {
                     let wire_protocol = WireProtocol::from(protocol);
@@ -715,29 +747,18 @@ pub(super) fn capability_discovery_summaries(
                         runtime_model_slug.clone(),
                         wire_protocol,
                     );
-                    let profile = AppState::route_configuration_fingerprint_with_snapshot(
-                        &snapshot,
-                        upstream,
-                        &key_fingerprint,
-                        &exposed_model_slug,
-                        &runtime_model_slug,
-                        protocol,
-                    )
-                    .ok()
-                    .and_then(|fingerprint| {
-                        snapshot.profiles.get(&key).filter(|profile| {
-                            profile_is_current_for_route(
-                                &snapshot,
-                                upstream,
-                                &exposed_model_slug,
-                                &runtime_model_slug,
-                                protocol,
-                                profile,
-                                &fingerprint,
-                            )
-                        })
+                    let profile = snapshot.profiles.get(&key).filter(|profile| {
+                        profile_is_current_for_route(
+                            &snapshot,
+                            upstream,
+                            &exposed_model_slug,
+                            &runtime_model_slug,
+                            protocol,
+                            profile,
+                            case_insensitive,
+                        )
                     });
-                    let mut accepted_reasoning_levels = resolve_route_capabilities_with_snapshot(
+                    let resolved = resolve_route_capabilities_with_snapshot(
                         &snapshot,
                         upstream,
                         &key_fingerprint,
@@ -745,26 +766,53 @@ pub(super) fn capability_discovery_summaries(
                         &runtime_model_slug,
                         protocol,
                         &RequestedFeatures::default(),
-                    )
-                    .filter(|resolved| resolved.supports(Capability::ReasoningOutput))
-                    .map(|resolved| resolved.effort_map.into_keys().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                    );
+                    let reasoning_source = resolved
+                        .as_ref()
+                        .and_then(|resolved| resolved.field_sources.get("effort_map"))
+                        .copied()
+                        .unwrap_or(CapabilitySource::Baseline);
+                    let mut accepted_reasoning_levels = resolved
+                        .filter(|resolved| resolved.supports(Capability::ReasoningOutput))
+                        .map(|resolved| resolved.effort_map.into_keys().collect::<Vec<_>>())
+                        .unwrap_or_default();
                     sort_canonical_reasoning_levels(&mut accepted_reasoning_levels);
 
-                    let model = models.entry(exposed_model_slug.clone()).or_default();
-                    model.0.extend(accepted_reasoning_levels.iter().cloned());
-                    model.1.push(CapabilityRouteDiscoverySummary {
+                    let route_id = anonymous_route_id(
+                        &upstream.id,
+                        &key_fingerprint,
+                        &runtime_model_slug,
+                        wire_protocol,
+                    );
+                    let mut route = RouteIdentity {
                         upstream_id: upstream.id.clone(),
-                        route_id: anonymous_route_id(
-                            &upstream.id,
-                            &key_fingerprint,
-                            &runtime_model_slug,
-                            wire_protocol,
-                        ),
+                        key_fingerprint: key_fingerprint.clone(),
+                        exposed_model_slug: exposed_model_slug.clone(),
+                        runtime_model_slug: runtime_model_slug.clone(),
+                        protocol: wire_protocol,
+                        tags: Default::default(),
+                    };
+                    snapshot.configuration.apply_route_tags(&mut route);
+                    let managed_reasoning_override = snapshot
+                        .configuration
+                        .route_overrides_for(&route)
+                        .iter()
+                        .any(|route_override| {
+                            route_override.id == managed_reasoning_override_id(&route_id)
+                        });
+
+                    model
+                        .verified_reasoning_levels
+                        .extend(accepted_reasoning_levels.iter().cloned());
+                    model.routes.push(CapabilityRouteDiscoverySummary {
+                        upstream_id: upstream.id.clone(),
+                        route_id,
                         runtime_model_slug: runtime_model_slug.clone(),
                         protocol: wire_protocol,
                         outcome: capability_probe_outcome_label(profile),
                         accepted_reasoning_levels,
+                        reasoning_source,
+                        managed_reasoning_override,
                         http_status: profile.and_then(|profile| {
                             profile
                                 .http_status
@@ -785,21 +833,27 @@ pub(super) fn capability_discovery_summaries(
     }
 
     models
-        .into_iter()
-        .map(|(exposed_model_slug, (verified_levels, mut routes))| {
-            routes.sort_by(|left, right| {
+        .into_values()
+        .map(|mut model| {
+            model.routes.sort_by(|left, right| {
                 left.upstream_id
                     .cmp(&right.upstream_id)
                     .then_with(|| left.route_id.cmp(&right.route_id))
                     .then_with(|| left.runtime_model_slug.cmp(&right.runtime_model_slug))
                     .then_with(|| left.protocol.cmp(&right.protocol))
             });
-            let mut verified_reasoning_levels = verified_levels.into_iter().collect::<Vec<_>>();
+            model
+                .routes
+                .dedup_by(|left, right| left.route_id == right.route_id);
+            let mut verified_reasoning_levels = model
+                .verified_reasoning_levels
+                .into_iter()
+                .collect::<Vec<_>>();
             sort_canonical_reasoning_levels(&mut verified_reasoning_levels);
             CapabilityModelDiscoverySummary {
-                exposed_model_slug,
+                exposed_model_slug: model.exposed_model_slug,
                 verified_reasoning_levels,
-                routes,
+                routes: model.routes,
             }
         })
         .collect()
@@ -808,12 +862,16 @@ pub(super) fn capability_discovery_summaries(
 pub(super) fn capability_verified_reasoning_levels_by_model(
     state: &AppState,
     upstreams: &[crate::state::UpstreamConfig],
+    case_insensitive: bool,
 ) -> BTreeMap<String, Vec<String>> {
-    capability_discovery_summaries(state, upstreams)
+    capability_discovery_summaries(state, upstreams, case_insensitive)
         .into_iter()
         .map(|summary| {
             (
-                summary.exposed_model_slug,
+                crate::state::model_identity_key_with(
+                    &summary.exposed_model_slug,
+                    case_insensitive,
+                ),
                 summary.verified_reasoning_levels,
             )
         })
@@ -821,7 +879,7 @@ pub(super) fn capability_verified_reasoning_levels_by_model(
 }
 
 fn sort_canonical_reasoning_levels(levels: &mut Vec<String>) {
-    const ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+    const ORDER: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
     levels.retain(|level| ORDER.contains(&level.as_str()));
     levels.sort_by(|left, right| {
         ORDER
@@ -862,7 +920,7 @@ fn profile_is_current_for_route(
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
     profile: &UpstreamDialectProfile,
-    fingerprint: &str,
+    case_insensitive: bool,
 ) -> bool {
     profile.key
         == DialectProfileKey::for_key(
@@ -872,12 +930,11 @@ fn profile_is_current_for_route(
             WireProtocol::from(protocol),
         )
         && upstream
-            .keys_for_model(runtime_model_slug)
+            .keys_for_model_with(runtime_model_slug, case_insensitive)
             .iter()
             .any(|api_key| {
                 upstream_key_fingerprint(&upstream.id, api_key) == profile.key.key_fingerprint
             })
-        && profile.configuration_fingerprint == fingerprint
         && profile.probe_schema_version == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
         && AppState::route_configuration_fingerprint_with_snapshot(
             snapshot,
@@ -887,7 +944,7 @@ fn profile_is_current_for_route(
             runtime_model_slug,
             protocol,
         )
-        .is_ok_and(|current| current == fingerprint)
+        .is_ok_and(|current| current == profile.configuration_fingerprint)
 }
 
 fn profile_currentness_label(has_profile: bool, is_current: bool) -> &'static str {

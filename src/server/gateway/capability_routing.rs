@@ -800,7 +800,7 @@ pub(super) fn evaluate_route_capabilities_with_runtime_hints(
     RouteCapabilityResolution::Resolved(Box::new(resolved))
 }
 
-fn exact_route_effective_profile<'a>(
+pub(super) fn exact_route_effective_profile<'a>(
     snapshot: &'a CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
     key_fingerprint: &str,
@@ -868,17 +868,19 @@ pub(super) fn select_catalog_witness_entry(
     state: &AppState,
     upstreams: &[UpstreamConfig],
     model: &str,
+    case_insensitive: bool,
 ) -> Option<CatalogWitnessEntry> {
     let snapshot = state.capability_snapshot();
     let mut candidates = Vec::new();
     for upstream in upstreams
         .iter()
-        .filter(|upstream| upstream.active && upstream.supports_model(model))
+        .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
     {
-        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive)
+        else {
             continue;
         };
-        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+        for api_key in upstream.keys_for_model_with(&runtime_model_slug, case_insensitive) {
             let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
             for protocol in upstream.supported_protocols() {
                 let Some(resolved) = resolve_route_capabilities_with_snapshot(

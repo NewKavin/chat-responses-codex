@@ -751,6 +751,22 @@ impl AppState {
         self.reconcile_route_health(&current_upstreams)
             .await
             .map_err(UpstreamMutationError::RuntimeCoordination)?;
+        let jobs = self.stale_capability_probe_jobs_for_upstreams(
+            current_upstreams
+                .iter()
+                .filter(|upstream| upstream.id == id),
+            crate::state::unix_seconds(),
+        );
+        self.submit_capability_probe_jobs(
+            jobs,
+            crate::capabilities::ProbeReason::ConfigurationChanged,
+        )
+        .await
+        .map_err(|error| {
+            UpstreamMutationError::Persist(format!(
+                "Failed to submit capability probe jobs: {error}"
+            ))
+        })?;
         Ok(updated_upstream)
     }
 }

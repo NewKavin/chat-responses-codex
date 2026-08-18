@@ -18,6 +18,16 @@ pub fn canonical_model_id(model: &str) -> String {
     model.trim().to_ascii_lowercase()
 }
 
+/// Comparison/dedup key honoring the runtime case-matching switch. The key
+/// is never used as an upstream wire spelling.
+pub fn model_identity_key_with(model: &str, case_insensitive: bool) -> String {
+    if case_insensitive {
+        canonical_model_id(model)
+    } else {
+        model.trim().to_owned()
+    }
+}
+
 /// Canonical equality: `true` iff both models fold to the same trimmed
 /// lowercase key. Empty/whitespace-only input never compares equal to itself.
 pub fn models_equivalent(a: &str, b: &str) -> bool {
@@ -29,11 +39,9 @@ pub fn models_equivalent(a: &str, b: &str) -> bool {
 /// Canonical equality honoring the runtime switch. When
 /// `case_insensitive` is false this is the legacy exact comparison.
 pub fn models_equivalent_with(a: &str, b: &str, case_insensitive: bool) -> bool {
-    if case_insensitive {
-        models_equivalent(a, b)
-    } else {
-        a.trim() == b.trim() && !a.trim().is_empty()
-    }
+    let a = model_identity_key_with(a, case_insensitive);
+    let b = model_identity_key_with(b, case_insensitive);
+    !a.is_empty() && a == b
 }
 
 /// Strip a codex subagent variant suffix (`-fast-preview`), then fold the
@@ -257,6 +265,20 @@ mod tests {
         assert_eq!(canonical_model_id("DeepSeek-V3"), "deepseek-v3");
         assert_eq!(canonical_model_id(""), "");
         assert_eq!(canonical_model_id("   "), "");
+    }
+
+    #[test]
+    fn model_identity_key_honors_case_matching_switch() {
+        assert_eq!(
+            model_identity_key_with("  GLM-4.5  ", true),
+            "glm-4.5"
+        );
+        assert_eq!(
+            model_identity_key_with("  GLM-4.5  ", false),
+            "GLM-4.5"
+        );
+        assert_eq!(model_identity_key_with("   ", true), "");
+        assert_eq!(model_identity_key_with("   ", false), "");
     }
 
     #[test]
