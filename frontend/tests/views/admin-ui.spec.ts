@@ -172,6 +172,14 @@ describe('admin ui structure', () => {
     expect(charts).not.toContain('key_prefix')
   })
 
+  it('pauses downstream runtime polling while hidden', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain("document.addEventListener('visibilitychange'")
+    expect(page).toContain('isDocumentVisible')
+    expect(page).toContain('clearRuntimeTimer')
+  })
+
   it('filters upstreams with credential failures', () => {
     const page = source('views/admin/Upstreams.vue')
 

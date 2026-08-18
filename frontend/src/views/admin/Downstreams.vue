@@ -796,18 +796,42 @@ const submitBatchMode = async () => {
   }
 }
 
-onMounted(() => {
-  loadData()
-  loadModels()
-  loadRuntime()
-  runtimeTimer = window.setInterval(loadRuntime, 5000)
-})
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible'
 
-onUnmounted(() => {
+const clearRuntimeTimer = () => {
   if (runtimeTimer !== null) {
     clearInterval(runtimeTimer)
     runtimeTimer = null
   }
+}
+
+const startRuntimeTimer = () => {
+  if (runtimeTimer === null && isDocumentVisible()) {
+    runtimeTimer = window.setInterval(loadRuntime, 5000)
+  }
+}
+
+const handleRuntimeVisibility = () => {
+  if (isDocumentVisible()) {
+    void loadRuntime()
+    startRuntimeTimer()
+  } else {
+    clearRuntimeTimer()
+  }
+}
+
+onMounted(() => {
+  loadData()
+  loadModels()
+  loadRuntime()
+  startRuntimeTimer()
+  document.addEventListener('visibilitychange', handleRuntimeVisibility)
+})
+
+onUnmounted(() => {
+  clearRuntimeTimer()
+  document.removeEventListener('visibilitychange', handleRuntimeVisibility)
 })
 </script>
 
