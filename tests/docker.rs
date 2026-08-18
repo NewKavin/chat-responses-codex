@@ -397,13 +397,26 @@ fn docker_compose_maps_runtime_logs_to_a_local_directory() {
         "docker-compose.yml should point LOG_PATH at the mounted logs directory"
     );
     assert!(
-        compose.contains("3001:3001"),
-        "docker-compose.yml should publish gateway port 3001"
-    );
-    assert!(
         compose.contains("BIND_ADDR: 0.0.0.0:3001")
             || compose.contains("BIND_ADDR: ${BIND_ADDR:-0.0.0.0:3001}"),
         "docker-compose.yml should bind the gateway to port 3001"
+    );
+}
+
+#[test]
+fn docker_compose_matches_the_deploy_health_port_contract() {
+    let compose =
+        fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
+    let deploy =
+        fs::read_to_string("scripts/deploy.sh").expect("scripts/deploy.sh should be readable");
+
+    assert!(
+        compose.contains("3000:3001"),
+        "docker-compose.yml should publish host port 3000 to gateway port 3001"
+    );
+    assert!(
+        deploy.contains("${GATEWAY_HEALTH_PORT:-3000}"),
+        "scripts/deploy.sh should verify the default deployment on host port 3000"
     );
 }
 

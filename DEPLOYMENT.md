@@ -360,7 +360,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3001:3001"
+      - "3000:3001"
     environment:
       BIND_ADDR: 0.0.0.0:3001
       DATABASE_URL: postgres://chat_responses_codex@postgres/chat_responses_codex
