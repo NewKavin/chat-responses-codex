@@ -51,5 +51,8 @@ fn rolling_log_appender_prunes_files_beyond_max_when_reopened() {
         prepare_rolling_log_appender(&dir, prefix, LogRotationCadence::Hourly, Some(2)).unwrap();
 
     assert!(current_path.exists(), "current log must be retained");
-    assert!(!expired.exists(), "expired log beyond max_files must be pruned");
+    assert!(
+        !expired.exists(),
+        "expired log beyond max_files must be pruned"
+    );
 }

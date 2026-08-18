@@ -1701,7 +1701,7 @@ impl AccountCapacityHarness {
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
                 runtime_settings: None,
-            model_aliases: vec![],
+                model_aliases: vec![],
             },
             self.directory.path().join("state.json"),
             config,
@@ -2107,13 +2107,8 @@ async fn budget_aligned_last_wait_recovers_inside_remaining_budget() {
     let state_path = tempdir.path().join("state.json");
     // Six failures = three routing rounds (each round tries once plus one
     // in-place same-route retry); hit seven succeeds during the aligned round.
-    let base_url = spawn_retry_after_upstream(
-        hits.clone(),
-        6,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        None,
-    )
-    .await;
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), 6, StatusCode::INTERNAL_SERVER_ERROR, None).await;
 
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
@@ -2154,7 +2149,10 @@ async fn budget_aligned_last_wait_recovers_inside_remaining_budget() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "second-round-ok");
+    assert_eq!(
+        payload["choices"][0]["message"]["content"],
+        "second-round-ok"
+    );
     // Three failing rounds (6 hits) plus one successful aligned-round attempt.
     assert_eq!(hits.load(Ordering::SeqCst), 7);
     assert!(
@@ -2303,13 +2301,8 @@ async fn budget_aligned_last_wait_switch_off_keeps_round_cap_behavior() {
     let hits = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
-    let base_url = spawn_retry_after_upstream(
-        hits.clone(),
-        6,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        None,
-    )
-    .await;
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), 6, StatusCode::INTERNAL_SERVER_ERROR, None).await;
 
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
@@ -2592,13 +2585,8 @@ async fn route_retry_last_resort_probe_recovers_earliest_route_when_all_cooling(
     let state_path = tempdir.path().join("state.json");
     // Every upstream answers OK: the cooldowns below are seeded directly, so
     // the only upstream hit the probe test should ever see is the probe.
-    let base_url = spawn_retry_after_upstream(
-        hits.clone(),
-        0,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        None,
-    )
-    .await;
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), 0, StatusCode::INTERNAL_SERVER_ERROR, None).await;
 
     let downstream_key = generate_downstream_key("gw");
     let upstreams = vec![
@@ -2634,13 +2622,11 @@ async fn route_retry_last_resort_probe_recovers_earliest_route_when_all_cooling(
         .await
         .upstreams
         .iter()
-        .map(|upstream| {
-            chat_responses_codex::state::RouteHealthKey {
-                upstream_id: upstream.id.clone(),
-                key_fingerprint: upstream_model_key_fingerprint(upstream, "gpt-4.1-mini"),
-                runtime_model_slug: "gpt-4.1-mini".into(),
-                protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
-            }
+        .map(|upstream| chat_responses_codex::state::RouteHealthKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: upstream_model_key_fingerprint(upstream, "gpt-4.1-mini"),
+            runtime_model_slug: "gpt-4.1-mini".into(),
+            protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
         })
         .collect::<Vec<_>>();
     for (route, cooldown_seconds) in routes.iter().zip([30, 40, 50]) {
@@ -2784,7 +2770,10 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
     // A5: the terminal details must report that this request itself was the
     // last-resort probe and that it failed inside a tight wait budget.
-    assert_eq!(payload["error"]["details"]["last_resort_probe_attempted"], true);
+    assert_eq!(
+        payload["error"]["details"]["last_resort_probe_attempted"],
+        true
+    );
     assert_eq!(payload["error"]["details"]["give_up_reason"], "wait_budget");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let after_first = state
@@ -2812,7 +2801,10 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
     let payload = send_request(&app, &downstream_key).await;
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
     // A5: the fresh request probed again.
-    assert_eq!(payload["error"]["details"]["last_resort_probe_attempted"], true);
+    assert_eq!(
+        payload["error"]["details"]["last_resort_probe_attempted"],
+        true
+    );
     assert_eq!(hits.load(Ordering::SeqCst) - before, 1);
     let after_third = state
         .route_health_snapshot(&route)

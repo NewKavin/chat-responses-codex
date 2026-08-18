@@ -10,9 +10,7 @@ pub enum LogRotationCadence {
     Daily,
 }
 
-pub fn log_rotation_cadence_from_env(
-    read: impl FnOnce() -> Option<String>,
-) -> LogRotationCadence {
+pub fn log_rotation_cadence_from_env(read: impl FnOnce() -> Option<String>) -> LogRotationCadence {
     match read()
         .as_deref()
         .map(str::trim)

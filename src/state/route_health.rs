@@ -801,8 +801,7 @@ impl RouteHealthRegistry {
             if elapsed < HALF_OPEN_BUSY_RETRY {
                 return RouteAvailability::HalfOpenBusy {
                     class,
-                    retry_after: (HALF_OPEN_BUSY_RETRY - elapsed)
-                        .max(Duration::from_millis(1)),
+                    retry_after: (HALF_OPEN_BUSY_RETRY - elapsed).max(Duration::from_millis(1)),
                     upstream_status,
                 };
             }

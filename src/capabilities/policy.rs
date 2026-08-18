@@ -61,10 +61,7 @@ pub enum CapabilityPolicyError {
         second: String,
     },
     #[error("invalid reasoning override {id}: {reason}")]
-    InvalidReasoningOverride {
-        id: String,
-        reason: &'static str,
-    },
+    InvalidReasoningOverride { id: String, reason: &'static str },
     #[error("protected request path {path} in extension case {id}")]
     ProtectedRequestPath { id: String, path: String },
     #[error(

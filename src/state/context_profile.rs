@@ -68,7 +68,11 @@ impl UpstreamConfig {
                     config.slug.trim() == candidate
                 }
             };
-            if let Some(config) = self.model_contexts.iter().find(|config| slug_matches(config)) {
+            if let Some(config) = self
+                .model_contexts
+                .iter()
+                .find(|config| slug_matches(config))
+            {
                 return Some(config.clone());
             }
 
@@ -134,11 +138,8 @@ impl UpstreamConfig {
         profile: Option<&GlobalContextProfile>,
         case_insensitive: bool,
     ) -> Option<String> {
-        let current = self.context_config_for_model_with_profile_and_case(
-            model,
-            profile,
-            case_insensitive,
-        )?;
+        let current =
+            self.context_config_for_model_with_profile_and_case(model, profile, case_insensitive)?;
 
         let mut candidate_contexts = HashMap::new();
 
@@ -182,8 +183,7 @@ impl UpstreamConfig {
         }
 
         for candidate in candidates {
-            if let Some(resolved) =
-                self.resolved_model_name_with(&candidate.slug, case_insensitive)
+            if let Some(resolved) = self.resolved_model_name_with(&candidate.slug, case_insensitive)
             {
                 if resolved.trim() != current_resolved.trim() {
                     return Some(resolved);

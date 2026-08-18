@@ -135,10 +135,7 @@ fn case_insensitive_model_identity_covers_key_premium_and_context_matching() {
         ..UpstreamConfig::default()
     };
 
-    assert_eq!(
-        upstream.keys_for_model_with("glm-4.5", true),
-        vec!["key-a"]
-    );
+    assert_eq!(upstream.keys_for_model_with("glm-4.5", true), vec!["key-a"]);
     assert!(upstream.is_premium_model_request_with("glm-4.5", true));
     assert_eq!(
         upstream
@@ -148,9 +145,7 @@ fn case_insensitive_model_identity_covers_key_premium_and_context_matching() {
         "GLM-4.5"
     );
 
-    assert!(upstream
-        .keys_for_model_with("glm-4.5", false)
-        .is_empty());
+    assert!(upstream.keys_for_model_with("glm-4.5", false).is_empty());
     assert!(!upstream.is_premium_model_request_with("glm-4.5", false));
     assert!(upstream
         .context_config_for_model_with("glm-4.5", false)
@@ -219,7 +214,10 @@ async fn file_roundtrip_preserves_model_mappings() {
 
     assert_eq!(upstream.model_mappings.len(), 2);
     assert_eq!(upstream.model_mappings[0].upstream_model, "glm-4.7");
-    assert_eq!(upstream.model_mappings[0].downstream_model, "glm-4.7-premium");
+    assert_eq!(
+        upstream.model_mappings[0].downstream_model,
+        "glm-4.7-premium"
+    );
     assert_eq!(upstream.model_mappings[1].upstream_model, "glm-5.2");
     assert_eq!(upstream.model_mappings[1].downstream_model, "glm-5.2-std");
 }

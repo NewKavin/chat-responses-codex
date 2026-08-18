@@ -43,10 +43,10 @@ mod context_profile;
 mod freekey_sync;
 #[path = "state/model_discovery.rs"]
 mod model_discovery;
-#[path = "state/model_key_sync.rs"]
-mod model_key_sync;
 #[path = "state/model_identity.rs"]
 pub mod model_identity;
+#[path = "state/model_key_sync.rs"]
+mod model_key_sync;
 #[path = "state/model_qualification.rs"]
 mod model_qualification;
 #[path = "state/normalize.rs"]
@@ -116,6 +116,10 @@ pub use model_discovery::{
     fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently, model_discovery_url,
     KeyModelDiscoveryResult, ModelDiscoveryError,
 };
+pub use model_identity::{
+    canonical_model_id, canonical_subagent_base_model_id, find_equivalent_stored,
+    model_identity_key_with, models_equivalent, models_equivalent_with,
+};
 pub use model_key_sync::{
     ModelKeySyncService, ModelKeySyncSummary, TARGETED_DISCOVERY_QUEUE_CAPACITY,
 };
@@ -132,10 +136,6 @@ pub use route_health::{
     ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 use runtime_settings::differing_runtime_setting_fields;
-pub use model_identity::{
-    canonical_model_id, models_equivalent, models_equivalent_with,
-    canonical_subagent_base_model_id, find_equivalent_stored, model_identity_key_with,
-};
 pub use runtime_settings::{
     RuntimeSettings, RuntimeSettingsDocument, RuntimeSettingsResponse, RuntimeSettingsSource,
     RuntimeSettingsUpdate, RuntimeSettingsUpdateError, RuntimeSettingsValidationError,
@@ -151,17 +151,17 @@ pub use types::{
     DownstreamConfig, GlobalContextProfile, ModelContextConfig, NonstandardFieldPolicy,
     PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
     UpstreamModelMapping, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
-    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
-    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
-    DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
@@ -968,12 +968,12 @@ impl AppState {
         state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
-        let model_alias_registry = model_identity::ModelAliasRegistry::from_rules(
-            state.model_aliases.clone()
-        ).unwrap_or_else(|error| {
-            tracing::error!(error = %error, "invalid model alias rules, ignoring");
-            model_identity::ModelAliasRegistry::default()
-        });
+        let model_alias_registry =
+            model_identity::ModelAliasRegistry::from_rules(state.model_aliases.clone())
+                .unwrap_or_else(|error| {
+                    tracing::error!(error = %error, "invalid model alias rules, ignoring");
+                    model_identity::ModelAliasRegistry::default()
+                });
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -1051,12 +1051,12 @@ impl AppState {
         state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
-        let model_alias_registry = model_identity::ModelAliasRegistry::from_rules(
-            state.model_aliases.clone()
-        ).unwrap_or_else(|error| {
-            tracing::error!(error = %error, "invalid model alias rules, ignoring");
-            model_identity::ModelAliasRegistry::default()
-        });
+        let model_alias_registry =
+            model_identity::ModelAliasRegistry::from_rules(state.model_aliases.clone())
+                .unwrap_or_else(|error| {
+                    tracing::error!(error = %error, "invalid model alias rules, ignoring");
+                    model_identity::ModelAliasRegistry::default()
+                });
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -1130,12 +1130,12 @@ impl AppState {
         state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
-        let model_alias_registry = model_identity::ModelAliasRegistry::from_rules(
-            state.model_aliases.clone()
-        ).unwrap_or_else(|error| {
-            tracing::error!(error = %error, "invalid model alias rules, ignoring");
-            model_identity::ModelAliasRegistry::default()
-        });
+        let model_alias_registry =
+            model_identity::ModelAliasRegistry::from_rules(state.model_aliases.clone())
+                .unwrap_or_else(|error| {
+                    tracing::error!(error = %error, "invalid model alias rules, ignoring");
+                    model_identity::ModelAliasRegistry::default()
+                });
         let downstream_usage_logs = state.usage_logs.clone();
         let downstreams = state.downstreams.clone();
         let postgres = Arc::new(postgres);
@@ -4030,7 +4030,9 @@ impl AppState {
                 .downstreams
                 .iter()
                 .find(|downstream| downstream.id == log.downstream_key_id)
-                .filter(|downstream| downstream.rate_limit_enabled && downstream.cost_billing_mode())
+                .filter(|downstream| {
+                    downstream.rate_limit_enabled && downstream.cost_billing_mode()
+                })
                 .map(|downstream| {
                     // Prefer the billed amount recorded at request end so the
                     // live window matches the replay window (which reads
@@ -4388,9 +4390,8 @@ impl AppState {
                 .iter()
                 .filter(|event| {
                     event.created_at
-                        >= now.saturating_sub(
-                            DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
-                        )
+                        >= now
+                            .saturating_sub(DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1))
                 })
                 .map(|event| event.tokens)
                 .sum::<u64>();

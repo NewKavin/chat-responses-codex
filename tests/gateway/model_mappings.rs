@@ -96,13 +96,10 @@ async fn spawn_payload_recording_chat_upstream(
             async move {
                 let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
                 let payload: Value = serde_json::from_slice(&body).unwrap();
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push((
-                        label.to_string(),
-                        payload["model"].as_str().unwrap_or_default().to_string(),
-                    ));
+                recorded.lock().unwrap().push((
+                    label.to_string(),
+                    payload["model"].as_str().unwrap_or_default().to_string(),
+                ));
                 (
                     StatusCode::OK,
                     axum::Json(json!({
@@ -135,10 +132,8 @@ async fn seed_verified_profile(
     exposed_model: &str,
     runtime_model_slug: &str,
 ) {
-    let key_fingerprint = chat_responses_codex::keys::upstream_key_fingerprint(
-        &upstream.id,
-        &upstream.api_key,
-    );
+    let key_fingerprint =
+        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &upstream.api_key);
     let profile_key = DialectProfileKey::for_key(
         upstream.id.clone(),
         key_fingerprint.clone(),
@@ -190,9 +185,12 @@ async fn send_chat_request(app: &Router, secret: &str, model: &str) -> (StatusCo
 async fn per_upstream_mappings_isolate_same_named_upstream_models() {
     // A: gpt-4 -> gpt-4-premium; B: gpt-4 -> gpt-4-standard; C: unmapped gpt-4.
     let recorded = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-    let url_a = spawn_payload_recording_chat_upstream("up-a", "secret-up-a", recorded.clone()).await;
-    let url_b = spawn_payload_recording_chat_upstream("up-b", "secret-up-b", recorded.clone()).await;
-    let url_c = spawn_payload_recording_chat_upstream("up-c", "secret-up-c", recorded.clone()).await;
+    let url_a =
+        spawn_payload_recording_chat_upstream("up-a", "secret-up-a", recorded.clone()).await;
+    let url_b =
+        spawn_payload_recording_chat_upstream("up-b", "secret-up-b", recorded.clone()).await;
+    let url_c =
+        spawn_payload_recording_chat_upstream("up-c", "secret-up-c", recorded.clone()).await;
 
     let mut upstream_a = mapped_upstream("up-a", &["gpt-4"], &[("gpt-4", "gpt-4-premium")]);
     upstream_a.base_url = url_a;
@@ -258,7 +256,11 @@ async fn per_upstream_mappings_isolate_same_named_upstream_models() {
     recorded_models.sort();
     assert_eq!(
         recorded_models,
-        vec!["gpt-4".to_string(), "gpt-4-premium".to_string(), "gpt-4-standard".to_string()],
+        vec![
+            "gpt-4".to_string(),
+            "gpt-4-premium".to_string(),
+            "gpt-4-standard".to_string()
+        ],
         "usage logs must record downstream-facing names: {recorded_models:?}"
     );
 }
@@ -266,7 +268,9 @@ async fn per_upstream_mappings_isolate_same_named_upstream_models() {
 #[tokio::test]
 async fn mapped_routes_fold_case_and_stack_after_global_alias_normalization() {
     let recorded = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-    let url = spawn_payload_recording_chat_upstream("up-deepseek", "secret-deepseek", recorded.clone()).await;
+    let url =
+        spawn_payload_recording_chat_upstream("up-deepseek", "secret-deepseek", recorded.clone())
+            .await;
     let mut upstream = mapped_upstream(
         "up-deepseek",
         &["DeepSeek-Chat"],
@@ -278,10 +282,12 @@ async fn mapped_routes_fold_case_and_stack_after_global_alias_normalization() {
     let (_tempdir, state, secret) = catalog_state_with_aliases(
         vec![upstream.clone()],
         vec!["deepseek-v3".into(), "deepseek-chat".into()],
-        vec![chat_responses_codex::state::model_identity::ModelAliasRule {
-            canonical: "deepseek-v3".into(),
-            aliases: vec!["deepseek-chat".into()],
-        }],
+        vec![
+            chat_responses_codex::state::model_identity::ModelAliasRule {
+                canonical: "deepseek-v3".into(),
+                aliases: vec!["deepseek-chat".into()],
+            },
+        ],
     );
     seed_verified_profile(&state, &upstream, "deepseek-v3", "DeepSeek-Chat").await;
     let app = build_router(state.clone());
@@ -346,9 +352,15 @@ async fn stale_model_mapping_is_skipped_and_revives_without_config_change() {
 
     // Phase 2: same mapping config, upstream lists the model again
     // (model sync restored it) -> the mapping revives without edits.
-    let mut revived = mapped_upstream("up-stale", &["gpt-4", "removed-model"], &[("removed-model", "gpt-x")]);
+    let mut revived = mapped_upstream(
+        "up-stale",
+        &["gpt-4", "removed-model"],
+        &[("removed-model", "gpt-x")],
+    );
     let recorded = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-    let url = spawn_payload_recording_chat_upstream("up-stale", "secret-up-stale", recorded.clone()).await;
+    let url =
+        spawn_payload_recording_chat_upstream("up-stale", "secret-up-stale", recorded.clone())
+            .await;
     revived.base_url = url;
     let (_tempdir2, state2, secret2) = catalog_state_with_aliases(
         vec![revived.clone()],

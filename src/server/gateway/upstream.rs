@@ -1462,8 +1462,9 @@ pub(super) async fn send_to_upstream(
                 // Report the downgrade once per request: the fallback decision
                 // is per-upstream-protocol and repeats identically on every
                 // routing attempt, so a WARN per attempt only floods the log.
-                let downgrade_already_reported =
-                    active_request_guard.as_ref().is_some_and(|guard| guard.downgrade_reported);
+                let downgrade_already_reported = active_request_guard
+                    .as_ref()
+                    .is_some_and(|guard| guard.downgrade_reported);
                 if !downgrade_already_reported {
                     tracing::warn!(
                         request_id = %request_id,

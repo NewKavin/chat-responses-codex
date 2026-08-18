@@ -289,7 +289,10 @@ fn terminal_retry_after_seconds_are_rounded_up() {
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
     // No recovery and no probe: A5 details report the absence explicitly.
-    assert_eq!(error.safe_details()["give_up_reason"], serde_json::Value::Null);
+    assert_eq!(
+        error.safe_details()["give_up_reason"],
+        serde_json::Value::Null
+    );
     assert_eq!(
         error.safe_details()["live_recovery_seconds"],
         serde_json::Value::Null
@@ -324,8 +327,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
     let details = error.safe_details();
     assert_eq!(details["give_up_reason"], "alignment_exhausted");
     assert_eq!(
-        details["live_recovery_seconds"],
-        14,
+        details["live_recovery_seconds"], 14,
         "live recovery must prefer the half-open remaining time"
     );
     assert_eq!(details["last_resort_probe_attempted"], true);
@@ -349,7 +351,15 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         retry_after: Some(Duration::from_secs(2)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(9_800), None, 1, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        3,
+        Duration::from_millis(9_800),
+        None,
+        1,
+        None,
+        false,
+    );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(error.error_type(), "rate_limit_error");
@@ -389,7 +399,15 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         });
     }
 
-    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(6_900), None, 0, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        3,
+        Duration::from_millis(6_900),
+        None,
+        0,
+        None,
+        false,
+    );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let message = error.message();
@@ -2999,18 +3017,14 @@ fn no_routable_error_distinguishes_configured_but_ineligible_models() {
     };
 
     let configured_error = no_routable_model_error(&configured, "configured-model");
-    assert!(
-        configured_error
-            .to_string()
-            .contains("configured but no exact route is eligible")
-    );
+    assert!(configured_error
+        .to_string()
+        .contains("configured but no exact route is eligible"));
 
     let absent_error = no_routable_model_error(&configured, "absent-model");
-    assert!(
-        absent_error
-            .to_string()
-            .contains("not configured on any active upstream")
-    );
+    assert!(absent_error
+        .to_string()
+        .contains("not configured on any active upstream"));
 }
 
 #[test]

@@ -363,8 +363,7 @@ impl RequestRouteAttempts {
     /// (`last_resort_probe_armed`), so a pool that stays cooling cannot spin
     /// extra probing rounds indefinitely.
     pub fn arm_last_resort_probe(&self, route: RouteHealthKey) {
-        self.last_resort_probe_armed
-            .store(true, Ordering::Relaxed);
+        self.last_resort_probe_armed.store(true, Ordering::Relaxed);
         *self
             .last_resort_probe
             .lock()
@@ -449,17 +448,14 @@ impl RequestRouteAttempts {
             .cooled_candidates
             .iter()
             .min_by_key(|failure| failure.retry_after.unwrap_or(Duration::MAX))?;
-        self.tracker()
-            .eligible_routes()
-            .into_iter()
-            .find(|route| {
-                anonymous_route_id(
-                    &route.upstream_id,
-                    &route.key_fingerprint,
-                    &route.runtime_model_slug,
-                    route.protocol,
-                ) == selected.route_id
-            })
+        self.tracker().eligible_routes().into_iter().find(|route| {
+            anonymous_route_id(
+                &route.upstream_id,
+                &route.key_fingerprint,
+                &route.runtime_model_slug,
+                route.protocol,
+            ) == selected.route_id
+        })
     }
 
     pub fn take_newly_exhausted(&self) -> Vec<RouteSetObservation> {

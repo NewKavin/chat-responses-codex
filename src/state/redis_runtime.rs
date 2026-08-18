@@ -2562,10 +2562,10 @@ fn route_health_retention_ttl_seconds(cooldown: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_downstream_admission, parse_downstream_reservation,
-        parse_downstream_runtime_counts, parse_health_state_snapshot,
-        parse_route_health_finish_result, parse_route_health_observe_result,
-        parse_route_health_reservation, route_health_redis_key, route_health_retention_ttl_seconds,
+        parse_downstream_admission, parse_downstream_reservation, parse_downstream_runtime_counts,
+        parse_health_state_snapshot, parse_route_health_finish_result,
+        parse_route_health_observe_result, parse_route_health_reservation, route_health_redis_key,
+        route_health_retention_ttl_seconds,
     };
     use crate::capabilities::WireProtocol;
     use crate::state::{KeyHealthKey, RouteAvailability, RouteFailureClass, RouteHealthKey};

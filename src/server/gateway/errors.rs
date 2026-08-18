@@ -119,7 +119,10 @@ pub(super) fn terminal_route_failure_error(
             "give_up_reason".to_string(),
             json!(give_up_reason.map(GiveUpReason::as_str)),
         ),
-        ("live_recovery_seconds".to_string(), json!(live_recovery_seconds)),
+        (
+            "live_recovery_seconds".to_string(),
+            json!(live_recovery_seconds),
+        ),
         (
             "last_resort_probe_attempted".to_string(),
             json!(last_resort_probe_attempted),

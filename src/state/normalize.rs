@@ -193,7 +193,8 @@ impl UpstreamConfig {
     }
 
     pub fn supports_model_with(&self, model: &str, case_insensitive: bool) -> bool {
-        self.canonical_route_model(model, case_insensitive).is_some()
+        self.canonical_route_model(model, case_insensitive)
+            .is_some()
     }
 
     /// Resolve the requested model to the upstream's *stored* spelling
@@ -228,9 +229,8 @@ impl UpstreamConfig {
                 let premium = premium.trim();
                 if case_insensitive {
                     super::models_equivalent_with(premium, candidate, true)
-                        || super::codex_subagent_base_model(candidate).is_some_and(|base| {
-                            super::models_equivalent_with(premium, base, true)
-                        })
+                        || super::codex_subagent_base_model(candidate)
+                            .is_some_and(|base| super::models_equivalent_with(premium, base, true))
                 } else {
                     premium == candidate
                         || super::codex_subagent_base_model(candidate)
@@ -498,9 +498,8 @@ impl UpstreamConfig {
             .iter()
             .map(|mapping| super::canonical_model_id(mapping.upstream_model.trim()))
             .collect::<HashSet<_>>();
-        let unoccupied = |candidate: &&String| {
-            !occupied.contains(&super::canonical_model_id(candidate))
-        };
+        let unoccupied =
+            |candidate: &&String| !occupied.contains(&super::canonical_model_id(candidate));
 
         if route_models.is_empty() {
             return super::codex_subagent_base_model(model)
@@ -508,17 +507,13 @@ impl UpstreamConfig {
                 .then(|| model.to_string());
         }
 
-        if let Some(candidate) = route_models
-            .iter()
-            .filter(unoccupied)
-            .find(|candidate| {
-                if case_insensitive {
-                    super::models_equivalent_with(candidate, model, true)
-                } else {
-                    candidate.trim() == model
-                }
-            })
-        {
+        if let Some(candidate) = route_models.iter().filter(unoccupied).find(|candidate| {
+            if case_insensitive {
+                super::models_equivalent_with(candidate, model, true)
+            } else {
+                candidate.trim() == model
+            }
+        }) {
             return Some(candidate.to_string());
         }
 
@@ -755,7 +750,10 @@ mod tests {
     fn model_mappings_reject_duplicate_upstream_model_canonically() {
         let upstream = UpstreamConfig {
             supported_models: vec!["gpt-4".into(), "gpt-4o".into()],
-            model_mappings: vec![mapping("gpt-4", "gpt-4-premium"), mapping("GPT-4", "gpt-4-std")],
+            model_mappings: vec![
+                mapping("gpt-4", "gpt-4-premium"),
+                mapping("GPT-4", "gpt-4-std"),
+            ],
             ..UpstreamConfig::default()
         };
         let err = upstream.validate_configuration().unwrap_err();
@@ -830,17 +828,16 @@ mod tests {
             model_mappings: vec![mapping("gpt-4", "deepseek-v3")],
             ..mapped_upstream()
         };
-        assert!(ok.validate_model_mappings_against_aliases(&registry).is_ok());
+        assert!(ok
+            .validate_model_mappings_against_aliases(&registry)
+            .is_ok());
     }
     #[test]
     fn model_mappings_effective_downstream_models_maps_names_then_unmapped_spellings() {
         // gpt-4 -> gpt-4-premium mapping, gpt-4o unmapped.
         assert_eq!(
             mapped_upstream().effective_downstream_models(),
-            vec![
-                "gpt-4-premium".to_string(),
-                "gpt-4o".to_string()
-            ]
+            vec!["gpt-4-premium".to_string(), "gpt-4o".to_string()]
         );
     }
 
@@ -858,7 +855,9 @@ mod tests {
         // upstream_model no longer in any model list: its downstream name
         // must not be exposed until the model is restored.
         let mut upstream = mapped_upstream();
-        upstream.model_mappings.push(mapping("removed-model", "gpt-x"));
+        upstream
+            .model_mappings
+            .push(mapping("removed-model", "gpt-x"));
         assert_eq!(
             upstream.effective_downstream_models(),
             vec!["gpt-4-premium".to_string(), "gpt-4o".to_string()]

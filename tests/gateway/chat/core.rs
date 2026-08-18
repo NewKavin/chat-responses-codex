@@ -291,7 +291,7 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
                 runtime_settings: None,
-            model_aliases: vec![],
+                model_aliases: vec![],
             },
             state_path,
             AppConfig::default(),
@@ -759,8 +759,7 @@ async fn downstream_legacy_token_limit_does_not_reject() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_ne!(
-        payload["error"]["code"],
-        "gateway_daily_token_quota_exceeded",
+        payload["error"]["code"], "gateway_daily_token_quota_exceeded",
         "legacy token-limit rows must not emit the token quota error"
     );
 }
