@@ -409,6 +409,7 @@ import {
   Wallet
 } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { useTableColumnPreferences, type TableColumnDefinition } from '@/composables/useTableColumns'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -504,24 +505,10 @@ const copyKey = async (key: unknown) => {
     return
   }
 
-  try {
-    await navigator.clipboard.writeText(copyableKey)
+  if (await copyTextToClipboard(copyableKey)) {
     ElMessage.success('已复制到剪贴板')
-  } catch {
-    const textArea = document.createElement('textarea')
-    textArea.value = copyableKey
-    textArea.style.position = 'fixed'
-    textArea.style.left = '-9999px'
-    document.body.appendChild(textArea)
-    textArea.focus()
-    textArea.select()
-    try {
-      document.execCommand('copy')
-      ElMessage.success('已复制到剪贴板')
-    } catch {
-      ElMessage.error('复制失败，请手动复制')
-    }
-    document.body.removeChild(textArea)
+  } else {
+    ElMessage.error('复制失败，请手动复制')
   }
 }
 

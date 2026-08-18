@@ -589,6 +589,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import { ElMessage } from 'element-plus'
 import { Copy } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
@@ -899,30 +900,10 @@ const copyCode = async (content: string) => {
     return
   }
 
-  try {
-    await navigator.clipboard.writeText(content)
+  if (await copyTextToClipboard(content)) {
     ElMessage.success('已复制到剪贴板')
-    return
-  } catch {
-    // Fall back to a hidden textarea for browsers that block Clipboard API.
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = content
-  textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  textarea.style.pointerEvents = 'none'
-  document.body.appendChild(textarea)
-  textarea.select()
-
-  try {
-    document.execCommand('copy')
-    ElMessage.success('已复制到剪贴板')
-  } catch {
+  } else {
     ElMessage.error('复制失败，请手动复制')
-  } finally {
-    document.body.removeChild(textarea)
   }
 }
 
