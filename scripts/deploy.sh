@@ -185,11 +185,12 @@ verify_deployed_frontend() {
   main=$(curl --noproxy '*' -fsS "http://127.0.0.1:${port}/${asset}") || return 1
   upstream_asset=$(printf '%s' "$main" | grep -o 'assets/Upstreams-[^" ]*\.js' | head -n1)
   [[ -n "$upstream_asset" ]] || { echo "Error: deployed main asset has no Upstreams chunk" >&2; return 1; }
-  curl --noproxy '*' -fsS "http://127.0.0.1:${port}/${upstream_asset}" |
-    grep -F -q 'key_concurrency' || {
-      echo "Error: deployed Upstreams chunk is stale" >&2
-      return 1
-    }
+  local chunk
+  chunk=$(curl --noproxy '*' -fsS "http://127.0.0.1:${port}/${upstream_asset}") || return 1
+  printf '%s' "$chunk" | grep -F -q 'key_concurrency' || {
+    echo "Error: deployed Upstreams chunk is stale" >&2
+    return 1
+  }
 }
 
 wait_for_gateway_health
