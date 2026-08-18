@@ -57,6 +57,12 @@
         </el-select>
       </el-form-item>
       <el-form-item>
+        <template #label><span class="filter-label"><CircleSlash :size="12" :stroke-width="2" />凭证</span></template>
+        <el-select v-model="filters.credentials" clearable placeholder="凭证状态">
+          <el-option label="凭证失败" value="failing" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
         <template #label><span class="filter-label"><Search :size="12" :stroke-width="2" />搜索</span></template>
         <el-input v-model="filters.search" placeholder="名称 / ID / Base URL" clearable />
       </el-form-item>
@@ -463,6 +469,7 @@ const selectedUpstreams = ref<UpstreamConfig[]>([])
 const filters = ref({
   status: 'all',
   protocol: 'all',
+  credentials: 'all',
   search: ''
 })
 const tableColumns: TableColumnDefinition[] = [
@@ -689,6 +696,9 @@ const availableProtocols = computed(() => {
   return Array.from(set).sort()
 })
 
+const hasCredentialFailure = (row: UpstreamConfig) =>
+  (row.route_health?.failure_classes?.credentials ?? 0) > 0
+
 const filteredUpstreams = computed(() => {
   const keyword = filters.value.search.trim().toLowerCase()
   return upstreams.value.filter(item => {
@@ -697,6 +707,9 @@ const filteredUpstreams = computed(() => {
     if (filters.value.protocol !== 'all') {
       const matched = displayProtocols(item).some(p => p === filters.value.protocol)
       if (!matched) return false
+    }
+    if (filters.value.credentials === 'failing' && !hasCredentialFailure(item)) {
+      return false
     }
     if (keyword) {
       const haystack = [item.id, item.name, item.base_url, item.remark]

@@ -172,6 +172,14 @@ describe('admin ui structure', () => {
     expect(charts).not.toContain('key_prefix')
   })
 
+  it('filters upstreams with credential failures', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain("credentials === 'failing'")
+    expect(page).toContain('hasCredentialFailure')
+    expect(page).toContain('凭证失败')
+  })
+
   it('supports editable visible column preferences on upstream and downstream lists', () => {
     const upstream = source('views/admin/Upstreams.vue')
     const downstream = source('views/admin/Downstreams.vue')
