@@ -1,3 +1,4 @@
+use chat_responses_codex::logging::{log_rotation_cadence_from_env, prepare_rolling_log_appender, LogRotationCadence};
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
@@ -22,11 +23,10 @@ use chrono::{FixedOffset, Utc};
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -39,7 +39,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3001");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
     let log_path = env_or("LOG_PATH", "logs/chat-responses-codex.log");
-    let _log_guard = init_tracing(&log_path);
+    let rotation_cadence = log_rotation_cadence_from_env(|| env::var("LOG_ROTATION").ok());
+    let rotation_max_files = env_usize("LOG_ROTATION_MAX_FILES", 14).max(1);
+    let _log_guard = init_tracing(&log_path, rotation_cadence, rotation_max_files);
     let context_retry_max_attempts_chat_default = env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 2).max(1);
     let context_retry_max_attempts_responses_default =
         env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 3).max(1);
@@ -658,7 +660,11 @@ fn spawn_usage_log_retention_task(state: AppState) {
     });
 }
 
-fn init_tracing(log_path: &str) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+fn init_tracing(
+    log_path: &str,
+    rotation_cadence: LogRotationCadence,
+    rotation_max_files: usize,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn"));
     let builder = tracing_subscriber::fmt()
@@ -669,8 +675,23 @@ fn init_tracing(log_path: &str) -> Option<tracing_appender::non_blocking::Worker
         .with_thread_names(false)
         .with_ansi(false);
 
-    let file_writer = match prepare_log_file(log_path) {
-        Ok(file) => Some(Arc::new(Mutex::new(file))),
+    let log_path_buf = PathBuf::from(log_path);
+    let directory = log_path_buf
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    let file_prefix = log_path_buf
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("chat-responses-codex");
+    let file_writer = match prepare_rolling_log_appender(
+        &directory,
+        file_prefix,
+        rotation_cadence,
+        Some(rotation_max_files),
+    ) {
+        Ok(appender) => Some(Box::new(appender) as Box<dyn Write + Send>),
         Err(error) => {
             eprintln!("failed to open log file {}: {}", log_path, error);
             None
@@ -702,19 +723,8 @@ impl tracing_subscriber::fmt::time::FormatTime for BeijingTime {
     }
 }
 
-fn prepare_log_file(log_path: &str) -> io::Result<fs::File> {
-    let path = PathBuf::from(log_path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
-    OpenOptions::new().create(true).append(true).open(path)
-}
-
 struct TeeWriter {
-    file: Arc<Mutex<fs::File>>,
+    file: Box<dyn Write + Send>,
 }
 
 impl Write for TeeWriter {
@@ -723,22 +733,14 @@ impl Write for TeeWriter {
         stdout.write_all(buf)?;
         stdout.flush()?;
 
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("log file lock poisoned"))?;
-        file.write_all(buf)?;
-        file.flush()?;
+        self.file.write_all(buf)?;
+        self.file.flush()?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         io::stdout().lock().flush()?;
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("log file lock poisoned"))?;
-        file.flush()
+        self.file.flush()
     }
 }
 

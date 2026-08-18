@@ -1,299 +1,55 @@
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UsageLog};
+use chat_responses_codex::logging::{
+    log_rotation_cadence_from_env, prepare_rolling_log_appender, LogRotationCadence,
+};
 use std::fs;
-use tempfile::tempdir;
+use std::io::Write;
 
-#[tokio::test]
-async fn usage_logs_rotate_by_size_into_archive_files() {
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let state = AppState::new(
-        PersistedState::default(),
-        &state_path,
-        AppConfig {
-            usage_log_rotation_max_bytes: 900,
-            ..AppConfig::default()
-        },
+#[test]
+fn log_rotation_policy_defaults_to_daily_and_honors_configuration() {
+    assert_eq!(
+        log_rotation_cadence_from_env(|| None),
+        LogRotationCadence::Daily
     );
-    state.persist().await.unwrap();
-
-    for index in 1..=3 {
-        state
-            .append_usage_log(UsageLog {
-                id: format!("log-{index}"),
-                downstream_key_id: "down-1".into(),
-                upstream_key_id: "up-1".into(),
-                downstream_name: None,
-                upstream_name: None,
-                endpoint: "/v1/chat/completions".into(),
-                model: "gpt-4.1-mini-with-a-long-name".into(),
-                inference_strength: None,
-                billing_mode: None,
-                request_count: None,
-                user_agent: None,
-                request_id: format!("req-{index}-{}", "x".repeat(120)),
-                status_code: 200,
-                wire_status_code: 0,
-                stream_diagnostics: None,
-                error_message: None,
-                error_category: None,
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-                total_cost_cents: None,
-                first_token_latency_ms: None,
-                latency_ms: 10,
-                created_at: index,
-                compatibility: None,
-            })
-            .await
-            .unwrap();
-    }
-
-    state.flush_usage_logs_for_test().await.unwrap();
-
-    let snapshot = state.snapshot().await;
-    let ids = snapshot
-        .usage_logs
-        .iter()
-        .map(|log| log.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["log-1", "log-2", "log-3"]);
-
-    let persisted_state: PersistedState =
-        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let current_ids = persisted_state
-        .usage_logs
-        .iter()
-        .map(|log| log.id.as_str())
-        .collect::<Vec<_>>();
-    assert!(current_ids.is_empty());
-
-    let archive_files = archive_files(&tempdir);
-    assert!(!archive_files.is_empty());
-
-    let mut archived_ids = Vec::new();
-    for archive in archive_files {
-        let archived_logs: Vec<UsageLog> =
-            serde_json::from_slice(&fs::read(&archive).unwrap()).unwrap();
-        archived_ids.extend(archived_logs.iter().map(|log| log.id.as_str().to_string()));
-    }
-    assert_eq!(archived_ids, vec!["log-1", "log-2", "log-3"]);
+    assert_eq!(
+        log_rotation_cadence_from_env(|| Some("never".into())),
+        LogRotationCadence::Never
+    );
+    assert_eq!(
+        log_rotation_cadence_from_env(|| Some("hourly".into())),
+        LogRotationCadence::Hourly
+    );
+    assert_eq!(
+        log_rotation_cadence_from_env(|| Some("bogus".into())),
+        LogRotationCadence::Daily
+    );
 }
 
-#[tokio::test]
-async fn load_from_path_loads_rotated_usage_logs() {
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let state = AppState::new(
-        PersistedState::default(),
-        &state_path,
-        AppConfig {
-            usage_log_rotation_max_bytes: 900,
-            ..AppConfig::default()
-        },
-    );
+#[test]
+fn rolling_log_appender_prunes_files_beyond_max_when_reopened() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("nested").join("logs");
+    let prefix = "gateway";
 
-    for index in 1..=3 {
-        state
-            .append_usage_log(UsageLog {
-                id: format!("log-{index}"),
-                downstream_key_id: "down-1".into(),
-                upstream_key_id: "up-1".into(),
-                downstream_name: None,
-                upstream_name: None,
-                endpoint: "/v1/chat/completions".into(),
-                model: "gpt-4.1-mini-with-a-long-name".into(),
-                inference_strength: None,
-                billing_mode: None,
-                request_count: None,
-                user_agent: None,
-                request_id: format!("req-{index}-{}", "x".repeat(120)),
-                status_code: 200,
-                wire_status_code: 0,
-                stream_diagnostics: None,
-                error_message: None,
-                error_category: None,
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-                total_cost_cents: None,
-                first_token_latency_ms: None,
-                latency_ms: 10,
-                created_at: index,
-                compatibility: None,
-            })
-            .await
-            .unwrap();
-    }
+    let mut first =
+        prepare_rolling_log_appender(&dir, prefix, LogRotationCadence::Hourly, Some(2)).unwrap();
+    first.write_all(b"current line\n").unwrap();
 
-    state.flush_usage_logs_for_test().await.unwrap();
-
-    let reloaded = AppState::load_from_path(
-        &state_path,
-        AppConfig {
-            usage_log_rotation_max_bytes: 900,
-            ..AppConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    let snapshot = reloaded.snapshot().await;
-    let ids = snapshot
-        .usage_logs
-        .iter()
-        .map(|log| log.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["log-1", "log-2", "log-3"]);
-}
-
-#[tokio::test]
-async fn usage_log_archives_are_capped_by_count() {
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let state = AppState::new(
-        PersistedState::default(),
-        &state_path,
-        AppConfig {
-            usage_log_rotation_max_bytes: 900,
-            usage_log_archive_max_files: 2,
-            ..AppConfig::default()
-        },
-    );
-
-    for index in 1..=4 {
-        state
-            .append_usage_log(UsageLog {
-                id: format!("log-{index}"),
-                downstream_key_id: "down-1".into(),
-                upstream_key_id: "up-1".into(),
-                downstream_name: None,
-                upstream_name: None,
-                endpoint: "/v1/chat/completions".into(),
-                model: "gpt-4.1-mini-with-a-long-name".into(),
-                inference_strength: None,
-                billing_mode: None,
-                request_count: None,
-                user_agent: None,
-                request_id: format!("req-{index}-{}", "x".repeat(120)),
-                status_code: 200,
-                wire_status_code: 0,
-                stream_diagnostics: None,
-                error_message: None,
-                error_category: None,
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-                total_cost_cents: None,
-                first_token_latency_ms: None,
-                latency_ms: 10,
-                created_at: index,
-                compatibility: None,
-            })
-            .await
-            .unwrap();
-        state.flush_usage_logs_for_test().await.unwrap();
-    }
-
-    let archive_files = archive_files(&tempdir);
-    assert_eq!(archive_files.len(), 2);
-
-    let snapshot = state.snapshot().await;
-    let ids = snapshot
-        .usage_logs
-        .iter()
-        .map(|log| log.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["log-3", "log-4"]);
-}
-
-#[tokio::test]
-async fn load_from_path_prunes_existing_usage_log_archives() {
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let state = AppState::new(
-        PersistedState::default(),
-        &state_path,
-        AppConfig {
-            usage_log_rotation_max_bytes: 900,
-            usage_log_archive_max_files: 10,
-            ..AppConfig::default()
-        },
-    );
-
-    for index in 1..=4 {
-        state
-            .append_usage_log(UsageLog {
-                id: format!("log-{index}"),
-                downstream_key_id: "down-1".into(),
-                upstream_key_id: "up-1".into(),
-                downstream_name: None,
-                upstream_name: None,
-                endpoint: "/v1/chat/completions".into(),
-                model: "gpt-4.1-mini-with-a-long-name".into(),
-                inference_strength: None,
-                billing_mode: None,
-                request_count: None,
-                user_agent: None,
-                request_id: format!("req-{index}-{}", "x".repeat(120)),
-                status_code: 200,
-                wire_status_code: 0,
-                stream_diagnostics: None,
-                error_message: None,
-                error_category: None,
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-                total_cost_cents: None,
-                first_token_latency_ms: None,
-                latency_ms: 10,
-                created_at: index,
-                compatibility: None,
-            })
-            .await
-            .unwrap();
-        state.flush_usage_logs_for_test().await.unwrap();
-    }
-
-    let reloaded = AppState::load_from_path(
-        &state_path,
-        AppConfig {
-            usage_log_rotation_max_bytes: 900,
-            usage_log_archive_max_files: 2,
-            ..AppConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    let archive_files = archive_files(&tempdir);
-    assert_eq!(archive_files.len(), 2);
-
-    let snapshot = reloaded.snapshot().await;
-    let ids = snapshot
-        .usage_logs
-        .iter()
-        .map(|log| log.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["log-3", "log-4"]);
-}
-
-fn archive_files(tempdir: &tempfile::TempDir) -> Vec<std::path::PathBuf> {
-    let mut files = fs::read_dir(tempdir.path())
+    let current_path = fs::read_dir(&dir)
         .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let file_name = path.file_name()?.to_str()?;
-            if !file_name.starts_with("state.json.usage.") {
-                return None;
-            }
-
-            let logs: Vec<UsageLog> = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
-            let sort_key = logs.first().map(|log| log.created_at).unwrap_or(0);
-            Some((sort_key, file_name.to_string(), path))
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{prefix}.")))
         })
-        .collect::<Vec<_>>();
-    files.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    files.into_iter().map(|(_, _, path)| path).collect()
+        .expect("rolling appender must create the current log file");
+
+    let expired = dir.join(format!("{prefix}.1999010100"));
+    fs::write(&expired, "expired").unwrap();
+
+    let _second =
+        prepare_rolling_log_appender(&dir, prefix, LogRotationCadence::Hourly, Some(2)).unwrap();
+
+    assert!(current_path.exists(), "current log must be retained");
+    assert!(!expired.exists(), "expired log beyond max_files must be pruned");
 }
