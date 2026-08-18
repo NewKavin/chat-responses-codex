@@ -69,6 +69,9 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell or .env file}
       LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}
       RUST_LOG: ${RUST_LOG:-info}
+      # never | hourly | daily；LOG_ROTATION_MAX_FILES 保留的旧文件数。
+      LOG_ROTATION: ${LOG_ROTATION:-daily}
+      LOG_ROTATION_MAX_FILES: ${LOG_ROTATION_MAX_FILES:-14}
       TZ: ${TZ:-Asia/Shanghai}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in your shell or .env file}

@@ -430,6 +430,8 @@ fn deploy_builds_local_artifacts_before_packaging_runtime_image() {
     let compose_source = fs::read_to_string(repo_root.join("docker-compose.yml")).unwrap();
     assert!(compose_source.contains("max-size: \"50m\""));
     assert!(compose_source.contains("max-file: \"5\""));
+    assert!(compose_source.contains("LOG_ROTATION: ${LOG_ROTATION:-daily}"));
+    assert!(compose_source.contains("LOG_ROTATION_MAX_FILES: ${LOG_ROTATION_MAX_FILES:-14}"));
     fs::copy(".env.example", repo_root.join(".env.example")).unwrap();
     fs::copy(
         "frontend/package-lock.json",
