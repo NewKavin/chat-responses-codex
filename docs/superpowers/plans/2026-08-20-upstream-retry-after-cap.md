@@ -463,7 +463,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 > 4. 解析层 `parse_retry_after` 与 Redis Lua 确认未动；Redis 侧所有 `retry_after` 均由 Rust
 >    咽喉点 clamp 后传入，本地/Redis 行为一致。
 
-### T5（P1）凭证族一击轻惩罚 —— ✅ commit（见 T6 回填）
+### T5（P1）凭证族一击轻惩罚 —— ✅ commit `30893a1`
 
 - [x] RED：实际落 3 处——
   - `tests/gateway/chat/credentials_first_strike.rs`（注册于 `tests/gateway/chat.rs`，2 用例）：
@@ -512,12 +512,16 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 > 4. Redis 与本地 schedule 均由 Rust 预计算，两边输入同一 `credentials_first_strike`，
 >    行为一致；Lua 无改动。
 
-### T6（P2）清理死参数
+### T6（P2）清理死参数 —— ✅ commit（见 T7 回填）
 
-- [ ] 删除 `upstream_rate_limit_max_retry_after_seconds`（`types.rs:143/:254`、`main.rs:96-100`）
-  及 4 处测试显式赋值（`tests/gateway/responses/upstream_feedback.rs:860`、`admin_runtime.rs:232`、
-  `tests/gateway/chat/feedback.rs:232`、`streaming.rs:3212`）。
-- [ ] 理由：与 T4 新参数命名域重叠且从未生效，留着会误导。求稳可改为文档标注 deprecated。
+- [x] 删除：行号已漂移（实际 `types.rs:163/:298`、`main.rs:119-121`）——字段定义、Default 赋值、
+  env 读取一并删除；grep 确认全仓 src/ 无消费点（runtime_settings.rs / state.rs 均无）。
+- [x] 测试赋值 4+3 处：方案列的 4 处（`upstream_feedback.rs:860`、`admin_runtime.rs:232`、
+  `feedback.rs:232`、`streaming.rs:3220`）之外，`tests/docker.rs` 另有 3 处字符串引用
+  （2 处 passthrough env 白名单 `:225/:507` + 1 处 "compose 不得宣传已移除 key" 断言 `:668`），
+  一并删除（完整清理，避免白名单误导）。
+- [x] 验证：`rtk cargo build --all-targets` 干净；`--test gateway`（398）、`--test docker`（18）全绿；
+  fmt/clippy 干净。历史文档（2026-07-18 plan/spec、2026-07-24 plan）保留原样不动。
 
 ### T7（P2）前端设置项与部署文档
 

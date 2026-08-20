@@ -857,7 +857,6 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
         state_path,
         AppConfig {
             upstream_rate_limit_force_retry_enabled: false,
-            upstream_rate_limit_max_retry_after_seconds: 1,
             ..AppConfig::default()
         },
     );
