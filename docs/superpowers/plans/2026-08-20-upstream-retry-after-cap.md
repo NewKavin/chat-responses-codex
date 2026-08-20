@@ -401,7 +401,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 8. `HALF_OPEN_BUSY_RETRY` 由 `pub(crate)` 改 `pub` 并经 `state.rs` 的 `pub use route_health` 导出
    （`crate::state` 是 `gateway_core::state` 的 re-export，`pub(crate)` 跨 crate 不可见）。
 
-### T4（P1）上游 Retry-After 统一封顶 —— ✅ commit（见 T5 回填）
+### T4（P1）上游 Retry-After 统一封顶 —— ✅ commit `fcd897d`
 
 - [x] RED：新增 `tests/upstream_retry_after_cap.rs`（4 用例）
   - 上游 429 带 `Retry-After: 3600` → 终结错误 status 429，`Retry-After` header ≤ cap，
@@ -463,18 +463,54 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 > 4. 解析层 `parse_retry_after` 与 Redis Lua 确认未动；Redis 侧所有 `retry_after` 均由 Rust
 >    咽喉点 clamp 后传入，本地/Redis 行为一致。
 
-### T5（P1）凭证族一击轻惩罚
+### T5（P1）凭证族一击轻惩罚 —— ✅ commit（见 T6 回填）
 
-- [ ] RED：`tests/gateway/chat/` 新增用例——单次 401 后 key 冷却 ≈ 首击秒数（默认 60s）而非 15min；
-  同类第二次 401 才升级到 `CREDENTIAL_KEY_BASE` 指数曲线；`KeyQuota` 语义不变。
-- [ ] GREEN：
-  - 新设置 `upstream_credentials_first_strike_seconds`（默认 60，范围 1..=3_600，immediate）。
-  - `src/state/route_health.rs:1096` `observe_key_failure_at` → `key_cooldown`：
-    `class == Credentials && step == 1` 时用首击值，`step >= 2` 起沿用现有 15min→1h 曲线。
-  - Redis 侧：key 冷却 schedule 由 Rust 侧算好后作为 `key_schedule` 传入
-    （`route_health_finish.lua` 的 `key_schedule`），因此只需改 Rust 的 schedule 构造点，Lua 不动
-    （实现时确认 `redis_runtime.rs` 中 key schedule 的构造函数）。
-- [ ] 验证：`rtk cargo test --test gateway --test runtime_settings`。
+- [x] RED：实际落 3 处——
+  - `tests/gateway/chat/credentials_first_strike.rs`（注册于 `tests/gateway/chat.rs`，2 用例）：
+    `single_401_cools_key_for_first_strike_seconds_not_quarter_hour`（单次 401 → key 冷却 ≈ 首击秒数
+    48..=72s 抖动窗，非 15min）与 `second_401_escalates_to_key_curve_and_first_strike_is_tunable`
+    （`upstream_credentials_first_strike_seconds=2` 时首击 1600..=2400ms；第二次 401 升级
+    = 15min-曲线 step2 一半 24..=36min；第三次起不撞 key 配额）。
+  - `tests/route_health.rs` 2 单元用例（`credentials_first_strike_cools_short_then_escalates_to_key_curve`、
+    `credentials_first_strike_honors_registry_tuning_and_key_quota_unaffected`：registry tuning 即时生效、
+    KeyQuota 走 30s 基线与首击无关）。
+  - `tests/redis_runtime.rs` `redis_credentials_first_strike_cools_short_then_escalates`（本地无 Redis 则
+    ignored，编译进套件）。
+  - 字段计数 51→52（`tests/runtime_settings.rs`）/ 52→53（`tests/admin_runtime_settings.rs`）；
+    校验用例（0 与 3601 拒绝、1 与 3600 接受）落 `tests/runtime_settings.rs`。
+- [x] GREEN：
+  - 新设置 `upstream_credentials_first_strike_seconds`（默认 60，范围 1..=3_600，immediate）：
+    `src/state/types.rs`（const + AppConfig 字段 + Default）、`src/state/runtime_settings.rs`
+    （字段 + `IMMEDIATE_RUNTIME_SETTING_FIELDS` + from/apply + 校验）、`src/main.rs`
+    （`env_u64(...).clamp(1, 3_600)`）、`src/state.rs`（re-export + registry ctor +
+    `update_runtime_tuning` 第 8 参）、前端项见 T7。
+  - `src/state/route_health.rs`：`RouteHealthRegistry` 增 `credentials_first_strike`；
+    `key_cooldown`（实际位置已偏移，现约 :1955）`Credentials && step == 1` 用首击值，
+    `step >= 2` 沿用 `CREDENTIAL_KEY_BASE` 15min→1h 曲线；`key_cooldown_schedule_ms` 增参；
+    `observe_key_failure_at`（现约 :1356）传入 `self.credentials_first_strike`。
+  - Redis 侧：`RedisRuntimeTuning` 增字段；`update_runtime_tuning` 第 7 参；两处
+    `key_cooldown_schedule_ms` 调用点（finish 路径 ~:1464、`observe_key_failure` ~:1583）传
+    tuning snapshot。schedule 由 Rust 侧预计算，**Lua 不动**（与方案一致）。
+- [x] 验证：`rtk cargo test --test route_health`（45）、`--test runtime_settings`（28）、
+  `--test admin_runtime_settings`（10）、`--test gateway`（398，含新 2 用例）、
+  `cargo build --all-targets` 干净；`--test redis_runtime` 编译通过（83 ignored）。
+
+> **T5 实现记录（2026-08-21，commit 回填于验证后）**
+> 1. **测试栈回归（与产品行为无关的测试基建修复）**：T5 增加 AppConfig/运行时设置字段后，
+>    既有流式测试 `slow_first_output_hedge_uses_the_next_upstream_account` 在 debug 构建下
+>    SIGABRT "stack overflow"——复现/二分确认是**二进制布局敏感**的既有深 drop 链
+>    （held-open 上游流 + 胜出 hedge 的释放链）在 libtest 2MiB 线程栈上的边界问题，不是
+>    T5 语义引入（仅加字段即翻转布局；直跑通过、rtk 沙箱下必现；同族 Responses 用例通过）。
+>    处理：测试改为在显式 16MiB 栈线程 + current-thread runtime 上运行
+>    （`tests/gateway/common.rs` 新增 `run_on_big_stack`，要求 `Send + 'static`），
+>    测试语义零改动。未改任何产品代码。
+> 2. 方案锚点 `route_health.rs:1096` 已漂移：`key_cooldown` 实际在 :1955 附近；
+>    `observe_key_failure_at` 在 :1356 附近；`update_runtime_tuning` 的 Redis 侧在
+>    `redis_runtime.rs :225` 附近（7 个已有序参后追加第 7 参）。
+> 3. 未动 `CREDENTIAL_KEY_BASE`（15min）/`KEY_COOLDOWN_MAX`（1h）常量：首击只替换
+>    `step == 1` 的基数，`failure_step` 推进逻辑不变，第二次起仍走既有曲线。
+> 4. Redis 与本地 schedule 均由 Rust 预计算，两边输入同一 `credentials_first_strike`，
+>    行为一致；Lua 无改动。
 
 ### T6（P2）清理死参数
 

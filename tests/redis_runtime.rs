@@ -3937,6 +3937,44 @@ async fn redis_key_and_aggregate_health_are_shared_without_overblocking_routes()
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_credentials_first_strike_cools_short_then_escalates() {
+    // T5 mirror of the local registry test: the key cooldown schedule is
+    // precomputed Rust-side, so the first Credentials strike uses the
+    // ~60s first-strike window and the second escalates to the 15min curve.
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("first-strike-upstream", "fingerprint-a");
+    let route = redis_test_health_route("first-strike-upstream", "fingerprint-a", "model-a");
+
+    state
+        .observe_key_failure(&key, RouteFailureClass::Credentials, None)
+        .await
+        .unwrap();
+    let first = match state.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Cooling { retry_after, .. } => retry_after,
+        other => panic!("expected key cooling after first strike, got {other:?}"),
+    };
+    assert!(
+        first >= Duration::from_secs(48) && first <= Duration::from_secs(72),
+        "first credential strike should cool ~60s on Redis too, got {first:?}"
+    );
+
+    state
+        .observe_key_failure(&key, RouteFailureClass::Credentials, None)
+        .await
+        .unwrap();
+    let second = match state.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Cooling { retry_after, .. } => retry_after,
+        other => panic!("expected key cooling after second strike, got {other:?}"),
+    };
+    assert!(
+        second >= Duration::from_secs(24 * 60) && second <= Duration::from_secs(36 * 60),
+        "second credential strike should escalate to ~30min on Redis too, got {second:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_cancelled_half_open_reapplies_concurrency_probe_delay() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;

@@ -114,6 +114,25 @@ fn runtime_settings_accept_boundary_retry_after_cap() {
 }
 
 #[test]
+fn runtime_settings_reject_invalid_credentials_first_strike() {
+    for value in [0_u64, 3_601] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_credentials_first_strike_seconds = value;
+        let error = settings.validate_and_normalize().unwrap_err();
+        assert_eq!(error.field(), "upstream_credentials_first_strike_seconds");
+    }
+}
+
+#[test]
+fn runtime_settings_accept_boundary_credentials_first_strike() {
+    for value in [1_u64, 3_600] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_credentials_first_strike_seconds = value;
+        settings.validate_and_normalize().unwrap();
+    }
+}
+
+#[test]
 fn runtime_settings_document_starts_at_revision_zero() {
     let config = AppConfig::default();
     let document = RuntimeSettingsDocument::startup(&config);
@@ -132,7 +151,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 51);
+    assert_eq!(all.len(), 52);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()

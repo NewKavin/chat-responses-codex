@@ -27,6 +27,27 @@ pub use std::time::Duration;
 pub use tempfile::tempdir;
 pub use tower::ServiceExt;
 
+/// Run a future on an explicit-stack thread with a current-thread tokio
+/// runtime (the same shape `#[tokio::test]` generates, but with a
+/// deterministic larger stack).  Debug-build futures with very deep drop
+/// chains - e.g. a held-open upstream stream along a winning hedge - can
+/// unwind past libtest's default 2MiB test thread stack; such tests are
+/// otherwise at the mercy of binary layout and ASLR.
+pub fn run_on_big_stack(output: impl Future<Output = ()> + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("big-stack test runtime");
+            runtime.block_on(output);
+        })
+        .expect("spawn big-stack test thread")
+        .join()
+        .expect("big-stack test panicked");
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct TracingCapture {
     bytes: Arc<Mutex<Vec<u8>>>,

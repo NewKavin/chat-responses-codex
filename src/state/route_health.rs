@@ -8,6 +8,7 @@ use super::redis_runtime::{RedisRuntimeCoordinator, RuntimeCoordinationError};
 use super::types::{
     RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig,
     DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
@@ -548,6 +549,7 @@ pub struct RouteHealthRegistry {
     transient_route_cooldown_max: Duration,
     half_open_ttl: Duration,
     half_open_exclusive_window: Duration,
+    credentials_first_strike: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -611,6 +613,7 @@ impl RouteHealthRegistry {
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+            DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
         )
     }
 
@@ -622,6 +625,7 @@ impl RouteHealthRegistry {
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
+        credentials_first_strike_seconds: u64,
     ) -> Self {
         let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
         let transient_route_cooldown_max_seconds =
@@ -642,6 +646,7 @@ impl RouteHealthRegistry {
             transient_route_cooldown_max: Duration::from_secs(transient_route_cooldown_max_seconds),
             half_open_ttl: Duration::from_secs(half_open_ttl_seconds.max(1)),
             half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
+            credentials_first_strike: Duration::from_secs(credentials_first_strike_seconds.max(1)),
         }
     }
 
@@ -652,6 +657,7 @@ impl RouteHealthRegistry {
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
+        credentials_first_strike_seconds: u64,
     ) {
         let base = Duration::from_secs(transient_route_cooldown_base_seconds.max(1));
         let max = Duration::from_secs(
@@ -672,6 +678,8 @@ impl RouteHealthRegistry {
         self.transient_route_cooldown_max = max;
         self.half_open_ttl = half_open_ttl;
         self.half_open_exclusive_window = half_open_exclusive_window;
+        self.credentials_first_strike =
+            Duration::from_secs(credentials_first_strike_seconds.max(1));
 
         for state in self.routes.values_mut() {
             if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
@@ -1348,7 +1356,7 @@ impl RouteHealthRegistry {
         } else {
             ROUTE_COOLDOWN_MAX
         };
-        let local = key_cooldown(class, step, key, max);
+        let local = key_cooldown(class, step, key, max, self.credentials_first_strike);
         state.cooldown_until =
             Some(now + retry_after.map_or(local, |explicit| explicit.max(local)));
     }
@@ -1900,14 +1908,26 @@ pub(super) fn route_cooldown_schedule_ms(
         .collect()
 }
 
-pub(super) fn key_cooldown_schedule_ms(key: &KeyHealthKey, class: RouteFailureClass) -> Vec<u64> {
+pub(super) fn key_cooldown_schedule_ms(
+    key: &KeyHealthKey,
+    class: RouteFailureClass,
+    credentials_first_strike: Duration,
+) -> Vec<u64> {
     let max = if class == RouteFailureClass::Credentials {
         KEY_COOLDOWN_MAX
     } else {
         ROUTE_COOLDOWN_MAX
     };
     (1..=17)
-        .map(|step| duration_millis_saturating(key_cooldown(class, step, key, max)))
+        .map(|step| {
+            duration_millis_saturating(key_cooldown(
+                class,
+                step,
+                key,
+                max,
+                credentials_first_strike,
+            ))
+        })
         .collect()
 }
 
@@ -1935,8 +1955,12 @@ fn key_cooldown(
     step: u32,
     key: &KeyHealthKey,
     max: Duration,
+    credentials_first_strike: Duration,
 ) -> Duration {
     let base = match class {
+        // T5: the very first credential strike gets the short first-strike
+        // window instead of the 15min curve; consecutive strikes escalate.
+        RouteFailureClass::Credentials if step == 1 => credentials_first_strike,
         RouteFailureClass::Credentials => CREDENTIAL_KEY_BASE,
         _ => DEFAULT_RATE_LIMIT_BASE,
     };

@@ -15,6 +15,8 @@ mod compatibility;
 mod context;
 #[path = "chat/core.rs"]
 mod core;
+#[path = "chat/credentials_first_strike.rs"]
+mod credentials_first_strike;
 #[path = "chat/feedback.rs"]
 mod feedback;
 #[path = "chat/half_open_busy_ledger.rs"]

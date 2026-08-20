@@ -111,6 +111,13 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 /// while the local exponential backoff and the Redis Lua parsing stay
 /// untouched.
 pub const DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS: u64 = 30;
+/// First Credentials-family (401/403) strike cooldown (seconds, T5).  The old
+/// behavior cooled a key for 15min on the very first 401, so a single
+/// misconfigured credential made that key unusable for a quarter hour even
+/// when the next attempt would succeed.  The first strike now gets this short
+/// window; consecutive strikes within the streak window escalate to the
+/// 15min -> 1h CREDENTIAL_KEY_BASE curve.  Range 1..=3600.
+pub const DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS: u64 = 60;
 /// Dedicated half-open-busy round budget (T3): how many 1s busy polls a
 /// request may take when the whole pool is in half-open recovery before
 /// giving up with `give_up_reason = half_open_busy_cap`.  Busy waits never
@@ -234,6 +241,11 @@ pub struct AppConfig {
     /// "disable the cap".
     #[serde(default = "default_upstream_retry_after_cap_seconds")]
     pub upstream_retry_after_cap_seconds: u64,
+    /// First Credentials-family (401/403) strike cooldown (seconds, T5).
+    /// Range 1..=3600; higher values make the first strike behave more like
+    /// the old 15min quarantine.
+    #[serde(default = "default_upstream_credentials_first_strike_seconds")]
+    pub upstream_credentials_first_strike_seconds: u64,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -333,6 +345,8 @@ impl Default for AppConfig {
             upstream_route_half_open_busy_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
             upstream_retry_after_cap_seconds: DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+            upstream_credentials_first_strike_seconds:
+                DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -999,6 +1013,10 @@ pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {
 
 pub fn default_upstream_retry_after_cap_seconds() -> u64 {
     DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS
+}
+
+pub fn default_upstream_credentials_first_strike_seconds() -> u64 {
+    DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

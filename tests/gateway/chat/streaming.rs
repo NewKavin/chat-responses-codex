@@ -832,8 +832,16 @@ async fn first_sse_error_retries_without_stream_before_output() {
     assert_eq!(snapshot.usage_logs[0].status_code, 200);
 }
 
-#[tokio::test]
-async fn slow_first_output_hedge_uses_the_next_upstream_account() {
+#[test]
+fn slow_first_output_hedge_uses_the_next_upstream_account() {
+    // The gateway streaming drop chain (held-open upstream stream + hedge
+    // winner) unwinds deeply in debug builds and can exceed libtest's default
+    // 2MiB thread stack once AppState/settings structs grow; run on an explicit
+    // stack. See T5 plan note. Product behavior is untouched.
+    run_on_big_stack(slow_first_output_hedge_uses_the_next_upstream_account_impl());
+}
+
+async fn slow_first_output_hedge_uses_the_next_upstream_account_impl() {
     let slow_hits = Arc::new(AtomicUsize::new(0));
     let fast_hits = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
