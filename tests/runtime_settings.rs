@@ -95,6 +95,44 @@ fn runtime_settings_reject_invalid_stream_timeout_order() {
 }
 
 #[test]
+fn runtime_settings_reject_invalid_retry_after_cap() {
+    for value in [0_u64, 3_601] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_retry_after_cap_seconds = value;
+        let error = settings.validate_and_normalize().unwrap_err();
+        assert_eq!(error.field(), "upstream_retry_after_cap_seconds");
+    }
+}
+
+#[test]
+fn runtime_settings_accept_boundary_retry_after_cap() {
+    for value in [1_u64, 3_600] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_retry_after_cap_seconds = value;
+        settings.validate_and_normalize().unwrap();
+    }
+}
+
+#[test]
+fn runtime_settings_reject_invalid_credentials_first_strike() {
+    for value in [0_u64, 3_601] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_credentials_first_strike_seconds = value;
+        let error = settings.validate_and_normalize().unwrap_err();
+        assert_eq!(error.field(), "upstream_credentials_first_strike_seconds");
+    }
+}
+
+#[test]
+fn runtime_settings_accept_boundary_credentials_first_strike() {
+    for value in [1_u64, 3_600] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_credentials_first_strike_seconds = value;
+        settings.validate_and_normalize().unwrap();
+    }
+}
+
+#[test]
 fn runtime_settings_document_starts_at_revision_zero() {
     let config = AppConfig::default();
     let document = RuntimeSettingsDocument::startup(&config);
@@ -113,7 +151,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 48);
+    assert_eq!(all.len(), 52);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -126,6 +164,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_transient_route_cooldown_base_seconds",
         "upstream_transient_route_cooldown_max_seconds",
         "upstream_route_health_half_open_ttl_seconds",
+        "upstream_route_half_open_exclusive_window_ms",
         "upstream_concurrency_recovery_max_wait_ms",
         "upstream_concurrency_probe_delays_ms",
         "upstream_common_mode_transient_threshold",

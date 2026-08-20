@@ -13,6 +13,12 @@ pub(super) struct AttemptFailure {
     pub upstream_status: Option<u16>,
     pub class: FailureClass,
     pub retry_after: Option<Duration>,
+    /// True when the route was skipped not because it is cooling but because
+    /// its half-open lease is currently in its exclusive window (T3).  Such
+    /// entries never represent a physical attempt and are accounted
+    /// separately (`half_open_busy_count`) so an all-busy pool is not
+    /// misreported as transient-server pool exhaustion.
+    pub half_open_busy: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +43,10 @@ pub(super) enum GiveUpReason {
     /// The one budget-aligned wait per request was already consumed; the
     /// round cap now applies for real.
     AlignmentExhausted,
+    /// The request waited through the dedicated half-open-busy round budget
+    /// (`upstream_route_half_open_busy_max_rounds`) while the whole pool
+    /// stayed in half-open recovery (T3).
+    HalfOpenBusyCap,
 }
 
 impl GiveUpReason {
@@ -46,6 +56,7 @@ impl GiveUpReason {
             Self::WaitBudget => "wait_budget",
             Self::NoRecovery => "no_recovery",
             Self::AlignmentExhausted => "alignment_exhausted",
+            Self::HalfOpenBusyCap => "half_open_busy_cap",
         }
     }
 }
@@ -333,6 +344,7 @@ impl RequestRouteAttempts {
             upstream_status,
             class,
             retry_after,
+            half_open_busy: false,
         });
     }
 
@@ -497,6 +509,31 @@ impl AttemptLedger {
     /// CapacityUnavailable, the same family A1 suppression tracks).  Pure
     /// rate-limit / key-quota quarantines (B3) and request-shape or
     /// model-quarantine cooldowns never qualify for a last-resort probe.
+    /// How many distinct routes were skipped because their half-open lease
+    /// is inside the exclusive window (T3).  Reported in the terminal error
+    /// details so operators can tell "the pool is still being probed" from
+    /// "the pool is really failing".
+    pub fn half_open_busy_count(&self) -> usize {
+        self.failures
+            .iter()
+            .chain(self.cooled_candidates.iter())
+            .filter(|failure| failure.half_open_busy)
+            .count()
+    }
+
+    /// Whether every candidate this round was skipped only because of a
+    /// half-open exclusive window (no physical attempt, no real cooldown).
+    /// Busy waits are bounded by `upstream_route_half_open_busy_max_rounds`
+    /// and do not consume the ordinary `max_rounds` budget (T3).
+    pub fn is_all_half_open_busy(&self) -> bool {
+        !self.is_empty()
+            && self
+                .failures
+                .iter()
+                .chain(self.cooled_candidates.iter())
+                .all(|failure| failure.half_open_busy)
+    }
+
     pub fn is_all_cooled_transient_family(&self) -> bool {
         !self.cooled_candidates.is_empty()
             && self.cooled_candidates.iter().all(|failure| {

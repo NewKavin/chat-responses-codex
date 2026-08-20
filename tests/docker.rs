@@ -222,7 +222,6 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS",
-        "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS",
         "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT",
         "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT",
         "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES",
@@ -504,7 +503,6 @@ fn runtime_settings_leave_dotenv_bootstrap_only_and_compose_legacy_fallbacks() {
         "USAGE_LOG_ROTATION_MAX_BYTES",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS",
-        "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS",
         "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED",
         "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT",
         "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT",
@@ -665,7 +663,6 @@ fn deployment_surfaces_document_model_key_sync_and_optional_redis_coordination()
     for key in [
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS",
-        "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS",
         "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED",
     ] {
         assert!(

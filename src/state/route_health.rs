@@ -8,9 +8,11 @@ use super::redis_runtime::{RedisRuntimeCoordinator, RuntimeCoordinationError};
 use super::types::{
     RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig,
     DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
+use super::AppState;
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
 use sha2::{Digest, Sha256};
@@ -36,9 +38,10 @@ const KEY_COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
 const MODEL_QUARANTINE_BASE: Duration = Duration::from_secs(15 * 60);
 const MODEL_QUARANTINE_MAX: Duration = Duration::from_secs(60 * 60);
 const FAILURE_STREAK_RESET: Duration = Duration::from_secs(10 * 60);
-const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
+pub const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
 const LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN: Duration = Duration::from_secs(60);
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
+pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct KeyHealthKey {
@@ -119,12 +122,24 @@ pub struct RouteHealthPermit {
 
 enum RouteHealthPermitBackend {
     Local {
+        state: AppState,
         registry: Arc<Mutex<RouteHealthRegistry>>,
         lease: HealthLease,
     },
     Redis {
+        state: AppState,
         coordinator: Arc<RedisRuntimeCoordinator>,
         lease: RedisHealthLease,
+    },
+    /// The lease was settled healthy at the first semantic output (T2). The
+    /// permit keeps the identity of the route/key and a state handle so a
+    /// later stream failure can be observed WITHOUT a lease (the finish
+    /// script must not be re-invoked for the same lease; observe goes through
+    /// the plain observe script).
+    Settled {
+        state: AppState,
+        route: RouteHealthKey,
+        key: KeyHealthKey,
     },
 }
 
@@ -148,6 +163,7 @@ impl std::fmt::Debug for RouteHealthPermit {
                 &self.backend.as_ref().map(|backend| match backend {
                     RouteHealthPermitBackend::Local { .. } => "local",
                     RouteHealthPermitBackend::Redis { .. } => "redis",
+                    RouteHealthPermitBackend::Settled { .. } => "settled",
                 }),
             )
             .field("half_open", &self.is_half_open())
@@ -156,18 +172,31 @@ impl std::fmt::Debug for RouteHealthPermit {
 }
 
 impl RouteHealthPermit {
-    pub(crate) fn new_local(registry: Arc<Mutex<RouteHealthRegistry>>, lease: HealthLease) -> Self {
+    pub(crate) fn new_local(
+        state: AppState,
+        registry: Arc<Mutex<RouteHealthRegistry>>,
+        lease: HealthLease,
+    ) -> Self {
         Self {
-            backend: Some(RouteHealthPermitBackend::Local { registry, lease }),
+            backend: Some(RouteHealthPermitBackend::Local {
+                state,
+                registry,
+                lease,
+            }),
         }
     }
 
     pub(crate) fn new_redis(
+        state: AppState,
         coordinator: Arc<RedisRuntimeCoordinator>,
         lease: RedisHealthLease,
     ) -> Self {
         Self {
-            backend: Some(RouteHealthPermitBackend::Redis { coordinator, lease }),
+            backend: Some(RouteHealthPermitBackend::Redis {
+                state,
+                coordinator,
+                lease,
+            }),
         }
     }
 
@@ -175,6 +204,7 @@ impl RouteHealthPermit {
         self.backend.as_ref().is_some_and(|backend| match backend {
             RouteHealthPermitBackend::Local { lease, .. } => lease.is_half_open(),
             RouteHealthPermitBackend::Redis { lease, .. } => lease.half_open,
+            RouteHealthPermitBackend::Settled { .. } => false,
         })
     }
 
@@ -182,6 +212,7 @@ impl RouteHealthPermit {
         self.backend.as_ref().map(|backend| match backend {
             RouteHealthPermitBackend::Local { lease, .. } => lease.route(),
             RouteHealthPermitBackend::Redis { lease, .. } => &lease.route,
+            RouteHealthPermitBackend::Settled { route, .. } => route,
         })
     }
 
@@ -190,12 +221,119 @@ impl RouteHealthPermit {
             return Ok(());
         };
         match backend {
-            RouteHealthPermitBackend::Local { registry, lease } => {
+            RouteHealthPermitBackend::Local {
+                registry, lease, ..
+            } => {
                 registry.lock().await.finish(lease, outcome);
                 Ok(())
             }
-            RouteHealthPermitBackend::Redis { coordinator, lease } => {
-                coordinator.finish_route_health(lease, outcome).await
+            RouteHealthPermitBackend::Redis {
+                coordinator, lease, ..
+            } => coordinator.finish_route_health(lease, outcome).await,
+            RouteHealthPermitBackend::Settled { state, route, key } => {
+                match outcome {
+                    // A settled lease already recorded its success: later
+                    // success / cancellation are no-ops.
+                    RouteOutcome::Success | RouteOutcome::Cancelled => Ok(()),
+                    // Any failure after the first semantic output is a NEW
+                    // independent failure: observe it without a lease so the
+                    // failure streak restarts at 1 and no half-open probe
+                    // escalation applies (T2).
+                    RouteOutcome::RouteFailure {
+                        class,
+                        upstream_status: _,
+                        repeat_within_request: _,
+                    } => state.observe_route_failure(&route, class, None).await,
+                    RouteOutcome::RouteFailureWithRetry {
+                        class,
+                        retry_after,
+                        upstream_status: _,
+                        repeat_within_request: _,
+                    } => {
+                        state
+                            .observe_route_failure(&route, class, Some(retry_after))
+                            .await
+                    }
+                    RouteOutcome::KeyFailure(class) => {
+                        state.observe_key_failure(&key, class, None).await
+                    }
+                    RouteOutcome::KeyFailureWithRetry { class, retry_after } => {
+                        state
+                            .observe_key_failure(&key, class, Some(retry_after))
+                            .await
+                    }
+                    RouteOutcome::UncertainRouteFailure(class) => {
+                        state.observe_route_failure(&route, class, None).await
+                    }
+                }
+            }
+        }
+    }
+
+    /// Settle a live lease as healthy at the first semantic output (T2).
+    ///
+    /// The lease is finished with `RouteOutcome::Success` immediately — while
+    /// the stream is still open — which clears the route cooldown and releases
+    /// the half-open exclusive window. The permit then enters the `Settled`
+    /// state: later stream failures become no-lease observations, and later
+    /// success/cancellation are no-ops.
+    pub async fn settle_healthy(&mut self) -> Result<(), RuntimeCoordinationError> {
+        let Some(backend) = self.backend.take() else {
+            return Ok(());
+        };
+        match backend {
+            RouteHealthPermitBackend::Local {
+                state,
+                registry,
+                lease,
+            } => {
+                let route = lease.route().clone();
+                let key = lease.key().clone();
+                {
+                    let mut registry = registry.lock().await;
+                    registry.finish(lease, RouteOutcome::Success);
+                    // Mirror the Redis success clear_state (DEL): drop the
+                    // now-clear route/key state so a settled probe leaves no
+                    // residue and `route_health_snapshot` reports None (T2).
+                    registry.remove_cleared_route_and_key(&route, &key);
+                }
+                self.backend = Some(RouteHealthPermitBackend::Settled { state, route, key });
+                Ok(())
+            }
+            RouteHealthPermitBackend::Redis {
+                state,
+                coordinator,
+                lease,
+            } => {
+                let route = lease.route.clone();
+                let key = lease.key.clone();
+                match coordinator
+                    .finish_route_health(lease.clone(), RouteOutcome::Success)
+                    .await
+                {
+                    Ok(()) => {
+                        self.backend =
+                            Some(RouteHealthPermitBackend::Settled { state, route, key });
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // Keep the live lease for the normal completion path
+                        // to retry; never lose a lease on a coordination error.
+                        self.backend = Some(RouteHealthPermitBackend::Redis {
+                            state,
+                            coordinator,
+                            lease,
+                        });
+                        Err(error)
+                    }
+                }
+            }
+            RouteHealthPermitBackend::Settled { state, route, key } => {
+                // Idempotent: a second settle on an already-settled permit is
+                // a no-op that preserves the identity (normal flow never
+                // reaches this arm — the gateway settle is atomic-guarded).
+                self.backend = Some(RouteHealthPermitBackend::Settled { state, route, key });
+                Ok(())
             }
         }
     }
@@ -206,16 +344,25 @@ impl Drop for RouteHealthPermit {
         let Some(backend) = self.backend.take() else {
             return;
         };
+        // A settled permit must be a no-op on drop: the lease was already
+        // finished successfully at the first semantic output.
+        if matches!(backend, RouteHealthPermitBackend::Settled { .. }) {
+            return;
+        }
         let Ok(handle) = Handle::try_current() else {
             return;
         };
         match backend {
-            RouteHealthPermitBackend::Local { registry, lease } => {
+            RouteHealthPermitBackend::Local {
+                registry, lease, ..
+            } => {
                 handle.spawn(async move {
                     registry.lock().await.finish(lease, RouteOutcome::Cancelled);
                 });
             }
-            RouteHealthPermitBackend::Redis { coordinator, lease } => {
+            RouteHealthPermitBackend::Redis {
+                coordinator, lease, ..
+            } => {
                 handle.spawn(async move {
                     if let Err(error) = coordinator
                         .finish_route_health(lease, RouteOutcome::Cancelled)
@@ -228,6 +375,9 @@ impl Drop for RouteHealthPermit {
                     }
                 });
             }
+            // Unreachable in practice — the guard above returns first — but
+            // required for exhaustive matching.
+            RouteHealthPermitBackend::Settled { .. } => {}
         }
     }
 }
@@ -269,6 +419,13 @@ struct HealthState {
     cooldown_until: Option<Instant>,
     half_open_generation: Option<u64>,
     half_open_expires_at: Option<Instant>,
+    /// Deadline of the half-open exclusive window: while `now` is before this
+    /// instant, `reserve` reports `HalfOpenBusy` for the route/key; after it
+    /// elapses (but the lease is still alive) concurrent requests are
+    /// admitted without a lease (T1). Mirrors `half_open_expires_at` for the
+    /// single-flight early-probe path, which intentionally ignores the
+    /// window.
+    half_open_exclusive_until: Option<Instant>,
     /// When the last last-resort early probe was granted for this route
     /// (A3).  Early probes are single-flight (the half-open lease) and
     /// rate-limited to one per second per route to avoid hammering a
@@ -289,6 +446,7 @@ impl HealthState {
             cooldown_until: None,
             half_open_generation: None,
             half_open_expires_at: None,
+            half_open_exclusive_until: None,
             last_early_probe_at: None,
             state_generation: 0,
             last_access: now,
@@ -320,14 +478,33 @@ impl HealthState {
         self.cooldown_until = None;
         self.half_open_generation = None;
         self.half_open_expires_at = None;
+        self.half_open_exclusive_until = None;
         self.last_early_probe_at = None;
         self.last_access = now;
+    }
+
+    /// Whether the entry carries no health signal: no cooldown, no half-open
+    /// lease and no recorded failure. Such an entry is functionally identical
+    /// to an absent one (reserve() returns `Ready` either way), so the T2
+    /// settle path may drop it — mirroring the Redis success `clear_state`
+    /// which DELETEs the key.
+    fn is_clear(&self) -> bool {
+        self.consecutive_failures == 0
+            && self.last_failure_class.is_none()
+            && self.last_failure_status.is_none()
+            && self.last_failure_at.is_none()
+            && self.cooldown_until.is_none()
+            && self.half_open_generation.is_none()
+            && self.half_open_expires_at.is_none()
+            && self.half_open_exclusive_until.is_none()
+            && self.last_early_probe_at.is_none()
     }
 
     fn release_half_open(&mut self, generation: Option<u64>, now: Instant) {
         if generation.is_some() && self.half_open_generation == generation {
             self.half_open_generation = None;
             self.half_open_expires_at = None;
+            self.half_open_exclusive_until = None;
         }
         self.last_access = now;
     }
@@ -336,6 +513,27 @@ impl HealthState {
         self.half_open_expires_at
             .map(|expires_at| expires_at.saturating_duration_since(now))
             .unwrap_or_default()
+    }
+
+    /// Remaining time of the half-open exclusive window (T3).  While this is
+    /// non-zero the route/key reports `HalfOpenBusy` to `reserve`; after it
+    /// elapses concurrent requests are admitted without a lease even though
+    /// the original probe lease is still alive.  Falls back to the lease
+    /// remaining when no window is recorded (legacy states).
+    fn half_open_exclusive_remaining(&self, now: Instant) -> Duration {
+        self.half_open_exclusive_until
+            .map(|until| until.saturating_duration_since(now))
+            .unwrap_or_else(|| self.half_open_remaining(now))
+    }
+
+    /// Honest wait time for a client while the route/key is half-open busy:
+    /// `min(remaining exclusive window, remaining lease)`, floored at the
+    /// optimistic 1s poll interval.  Telling the client to wait the whole
+    /// 300s lease TTL is a lie once the exclusive window has elapsed (T3).
+    fn half_open_busy_wait(&self, now: Instant) -> Duration {
+        self.half_open_remaining(now)
+            .min(self.half_open_exclusive_remaining(now))
+            .max(HALF_OPEN_BUSY_RETRY)
     }
 }
 
@@ -350,6 +548,8 @@ pub struct RouteHealthRegistry {
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
     half_open_ttl: Duration,
+    half_open_exclusive_window: Duration,
+    credentials_first_strike: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -412,6 +612,8 @@ impl RouteHealthRegistry {
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+            DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+            DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
         )
     }
 
@@ -422,6 +624,8 @@ impl RouteHealthRegistry {
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
+        half_open_exclusive_window_ms: u64,
+        credentials_first_strike_seconds: u64,
     ) -> Self {
         let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
         let transient_route_cooldown_max_seconds =
@@ -441,6 +645,8 @@ impl RouteHealthRegistry {
             ),
             transient_route_cooldown_max: Duration::from_secs(transient_route_cooldown_max_seconds),
             half_open_ttl: Duration::from_secs(half_open_ttl_seconds.max(1)),
+            half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
+            credentials_first_strike: Duration::from_secs(credentials_first_strike_seconds.max(1)),
         }
     }
 
@@ -450,6 +656,8 @@ impl RouteHealthRegistry {
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
+        half_open_exclusive_window_ms: u64,
+        credentials_first_strike_seconds: u64,
     ) {
         let base = Duration::from_secs(transient_route_cooldown_base_seconds.max(1));
         let max = Duration::from_secs(
@@ -458,15 +666,20 @@ impl RouteHealthRegistry {
                 .max(1),
         );
         let half_open_ttl = Duration::from_secs(half_open_ttl_seconds.max(1));
+        let half_open_exclusive_window = Duration::from_millis(half_open_exclusive_window_ms);
         let now = Instant::now();
         let max_cooldown_until = now + max;
         let max_half_open_until = now + half_open_ttl;
+        let max_exclusive_until = now + half_open_exclusive_window;
 
         self.concurrency_probe_delays =
             normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         self.transient_route_cooldown_base = base;
         self.transient_route_cooldown_max = max;
         self.half_open_ttl = half_open_ttl;
+        self.half_open_exclusive_window = half_open_exclusive_window;
+        self.credentials_first_strike =
+            Duration::from_secs(credentials_first_strike_seconds.max(1));
 
         for state in self.routes.values_mut() {
             if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
@@ -483,6 +696,12 @@ impl RouteHealthRegistry {
             {
                 state.half_open_expires_at = Some(max_half_open_until);
             }
+            if state
+                .half_open_exclusive_until
+                .is_some_and(|until| until > max_exclusive_until)
+            {
+                state.half_open_exclusive_until = Some(max_exclusive_until);
+            }
         }
         for state in self.keys.values_mut() {
             if state
@@ -490,6 +709,12 @@ impl RouteHealthRegistry {
                 .is_some_and(|until| until > max_half_open_until)
             {
                 state.half_open_expires_at = Some(max_half_open_until);
+            }
+            if state
+                .half_open_exclusive_until
+                .is_some_and(|until| until > max_exclusive_until)
+            {
+                state.half_open_exclusive_until = Some(max_exclusive_until);
             }
         }
     }
@@ -660,7 +885,11 @@ impl RouteHealthRegistry {
                 {
                     state.half_open_generation = None;
                     state.half_open_expires_at = None;
-                } else {
+                    state.half_open_exclusive_until = None;
+                } else if state
+                    .half_open_exclusive_until
+                    .is_some_and(|until| until > now)
+                {
                     return RouteAvailability::HalfOpenBusy {
                         class: state
                             .last_failure_class
@@ -691,7 +920,11 @@ impl RouteHealthRegistry {
                 {
                     state.half_open_generation = None;
                     state.half_open_expires_at = None;
-                } else {
+                    state.half_open_exclusive_until = None;
+                } else if state
+                    .half_open_exclusive_until
+                    .is_some_and(|until| until > now)
+                {
                     return RouteAvailability::HalfOpenBusy {
                         class: state
                             .last_failure_class
@@ -813,6 +1046,10 @@ impl RouteHealthRegistry {
         let state = self.routes.get_mut(route).expect("route state must exist");
         state.half_open_generation = Some(route_generation);
         state.half_open_expires_at = Some(now + self.half_open_ttl);
+        // Early probes (A3) stay strictly single-flight: the exclusive window
+        // for probe-held leases is the full lease lifetime so concurrent
+        // regular reserves cannot bypass a cooling route's probe.
+        state.half_open_exclusive_until = Some(now + self.half_open_ttl);
         state.last_early_probe_at = Some(now);
         RouteAvailability::Ready(HealthLease {
             route: route.clone(),
@@ -840,6 +1077,7 @@ impl RouteHealthRegistry {
         let state = self.keys.get_mut(key)?;
         state.half_open_generation = Some(generation);
         state.half_open_expires_at = Some(now + self.half_open_ttl);
+        state.half_open_exclusive_until = Some(now + self.half_open_exclusive_window);
         state.last_access = now;
         Some(generation)
     }
@@ -864,6 +1102,7 @@ impl RouteHealthRegistry {
         let state = self.routes.get_mut(route)?;
         state.half_open_generation = Some(generation);
         state.half_open_expires_at = Some(now + self.half_open_ttl);
+        state.half_open_exclusive_until = Some(now + self.half_open_exclusive_window);
         state.last_access = now;
         Some(generation)
     }
@@ -949,6 +1188,19 @@ impl RouteHealthRegistry {
 
     pub fn clear_route_health(&mut self, route: &RouteHealthKey) {
         self.clear_route(route, Instant::now());
+    }
+
+    /// T2: after settling a lease healthy, drop the route/key state if it is
+    /// now fully clear — the local mirror of the Redis success `clear_state`
+    /// (which DELETEs the key). If a concurrent observation re-populated the
+    /// state, it is left untouched.
+    pub fn remove_cleared_route_and_key(&mut self, route: &RouteHealthKey, key: &KeyHealthKey) {
+        if self.routes.get(route).is_some_and(HealthState::is_clear) {
+            self.routes.remove(route);
+        }
+        if self.keys.get(key).is_some_and(HealthState::is_clear) {
+            self.keys.remove(key);
+        }
     }
 
     pub fn observe_key_failure(
@@ -1045,6 +1297,7 @@ impl RouteHealthRegistry {
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
         state.half_open_expires_at = None;
+        state.half_open_exclusive_until = None;
         state.last_access = now;
         let local = route_cooldown_with_concurrency_delays(
             class,
@@ -1096,13 +1349,14 @@ impl RouteHealthRegistry {
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
         state.half_open_expires_at = None;
+        state.half_open_exclusive_until = None;
         state.last_access = now;
         let max = if class == RouteFailureClass::Credentials {
             KEY_COOLDOWN_MAX
         } else {
             ROUTE_COOLDOWN_MAX
         };
-        let local = key_cooldown(class, step, key, max);
+        let local = key_cooldown(class, step, key, max, self.credentials_first_strike);
         state.cooldown_until =
             Some(now + retry_after.map_or(local, |explicit| explicit.max(local)));
     }
@@ -1146,6 +1400,7 @@ impl RouteHealthRegistry {
         }
         state.half_open_generation = None;
         state.half_open_expires_at = None;
+        state.half_open_exclusive_until = None;
         state.cooldown_until = Some(now + delay);
         state.last_access = now;
         true
@@ -1476,7 +1731,7 @@ fn health_snapshot(state: &HealthState, now: Instant) -> HealthStateSnapshot {
         cooldown_remaining: state.retry_after(now),
         half_open,
         half_open_remaining: if half_open {
-            state.half_open_remaining(now)
+            state.half_open_busy_wait(now)
         } else {
             Duration::ZERO
         },
@@ -1490,7 +1745,7 @@ fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecov
         Some(RouteRecovery {
             class,
             retry_after: HALF_OPEN_BUSY_RETRY,
-            half_open_remaining: Some(state.half_open_remaining(now).max(HALF_OPEN_BUSY_RETRY)),
+            half_open_remaining: Some(state.half_open_busy_wait(now)),
         })
     } else {
         Some(RouteRecovery {
@@ -1653,14 +1908,26 @@ pub(super) fn route_cooldown_schedule_ms(
         .collect()
 }
 
-pub(super) fn key_cooldown_schedule_ms(key: &KeyHealthKey, class: RouteFailureClass) -> Vec<u64> {
+pub(super) fn key_cooldown_schedule_ms(
+    key: &KeyHealthKey,
+    class: RouteFailureClass,
+    credentials_first_strike: Duration,
+) -> Vec<u64> {
     let max = if class == RouteFailureClass::Credentials {
         KEY_COOLDOWN_MAX
     } else {
         ROUTE_COOLDOWN_MAX
     };
     (1..=17)
-        .map(|step| duration_millis_saturating(key_cooldown(class, step, key, max)))
+        .map(|step| {
+            duration_millis_saturating(key_cooldown(
+                class,
+                step,
+                key,
+                max,
+                credentials_first_strike,
+            ))
+        })
         .collect()
 }
 
@@ -1688,8 +1955,12 @@ fn key_cooldown(
     step: u32,
     key: &KeyHealthKey,
     max: Duration,
+    credentials_first_strike: Duration,
 ) -> Duration {
     let base = match class {
+        // T5: the very first credential strike gets the short first-strike
+        // window instead of the 15min curve; consecutive strikes escalate.
+        RouteFailureClass::Credentials if step == 1 => credentials_first_strike,
         RouteFailureClass::Credentials => CREDENTIAL_KEY_BASE,
         _ => DEFAULT_RATE_LIMIT_BASE,
     };

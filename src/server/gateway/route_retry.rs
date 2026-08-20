@@ -1,5 +1,5 @@
 use super::{GiveUpReason, TerminalFailure};
-use crate::state::{AppConfig, RouteRecovery, RuntimeSettings};
+use crate::state::{AppConfig, RouteRecovery, RuntimeSettings, HALF_OPEN_BUSY_RETRY};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -13,6 +13,11 @@ pub(super) struct RouteRetryBudget {
     /// wait (R2): the round cap can be crossed exactly once per request when
     /// a live transient recovery fits the remaining time budget.
     alignment_used: bool,
+    /// How many dedicated half-open-busy waits the request already took (T3).
+    /// Busy waits never advance `current_round`, so an all-busy pool cannot
+    /// silently consume the ordinary `max_rounds` budget; they are bounded by
+    /// `RouteRetryPolicy::busy_max_rounds` and the total time budget.
+    busy_rounds: u32,
 }
 
 impl Default for RouteRetryBudget {
@@ -21,6 +26,7 @@ impl Default for RouteRetryBudget {
             current_round: 1,
             waited: Duration::ZERO,
             alignment_used: false,
+            busy_rounds: 0,
         }
     }
 }
@@ -38,6 +44,11 @@ impl RouteRetryBudget {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn alignment_used(self) -> bool {
         self.alignment_used
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn busy_rounds(self) -> u32 {
+        self.busy_rounds
     }
 
     /// Record a wait that happened outside `RouteRetryPolicy::decide`
@@ -58,8 +69,16 @@ impl RouteRetryBudget {
     }
 
     pub fn record_wait(&mut self, wait: RouteRetryWait) {
-        debug_assert_eq!(wait.next_round, self.current_round.saturating_add(1));
-        self.current_round = wait.next_round;
+        if wait.busy {
+            // A half-open-busy wait advances the dedicated busy counter, not
+            // the ordinary round counter: an all-busy pool must be able to
+            // wait out its busy cap even when max_rounds == 1 (T3).
+            debug_assert_eq!(wait.next_round, self.current_round);
+            self.busy_rounds = self.busy_rounds.saturating_add(1);
+        } else {
+            debug_assert_eq!(wait.next_round, self.current_round.saturating_add(1));
+            self.current_round = wait.next_round;
+        }
         self.waited = self
             .waited
             .checked_add(wait.sleep_for)
@@ -78,6 +97,9 @@ pub(super) struct RouteRetryWait {
     /// True for the single budget-aligned last wait granted after the round
     /// cap when a live transient recovery fits the remaining time budget.
     pub alignment: bool,
+    /// True for a dedicated half-open-busy wait (T3): it advances
+    /// `RouteRetryBudget::busy_rounds` instead of the ordinary round counter.
+    pub busy: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +110,10 @@ pub(super) struct RouteRetryPolicy {
     concurrency_max_wait: Duration,
     concurrency_max_rounds: u32,
     budget_alignment_enabled: bool,
+    /// Dedicated half-open-busy round cap (T3).  Busy waits do not consume
+    /// `max_rounds`; this budget bounds how many 1s busy polls a request may
+    /// take before giving up with `GiveUpReason::HalfOpenBusyCap`.
+    busy_max_rounds: u32,
 }
 
 impl RouteRetryPolicy {
@@ -113,6 +139,7 @@ impl RouteRetryPolicy {
         )
     }
 
+    #[cfg(test)]
     fn new_with_tuning(
         enabled: bool,
         max_wait: Duration,
@@ -121,6 +148,26 @@ impl RouteRetryPolicy {
         concurrency_max_rounds: u32,
         budget_alignment_enabled: bool,
     ) -> Self {
+        Self::new_with_full_tuning(
+            enabled,
+            max_wait,
+            max_rounds,
+            concurrency_max_wait,
+            concurrency_max_rounds,
+            budget_alignment_enabled,
+            10,
+        )
+    }
+
+    fn new_with_full_tuning(
+        enabled: bool,
+        max_wait: Duration,
+        max_rounds: u32,
+        concurrency_max_wait: Duration,
+        concurrency_max_rounds: u32,
+        budget_alignment_enabled: bool,
+        busy_max_rounds: u32,
+    ) -> Self {
         Self {
             enabled,
             max_wait,
@@ -128,17 +175,19 @@ impl RouteRetryPolicy {
             concurrency_max_wait,
             concurrency_max_rounds: concurrency_max_rounds.max(1),
             budget_alignment_enabled,
+            busy_max_rounds: busy_max_rounds.max(1),
         }
     }
 
     pub fn from_sources(_config: &AppConfig, runtime_settings: &RuntimeSettings) -> Self {
-        Self::new_with_tuning(
+        Self::new_with_full_tuning(
             runtime_settings.upstream_route_exhaustion_retry_enabled,
             Duration::from_millis(runtime_settings.upstream_route_exhaustion_retry_max_wait_ms),
             runtime_settings.upstream_route_exhaustion_retry_max_rounds,
             Duration::from_millis(runtime_settings.upstream_concurrency_recovery_max_wait_ms),
             runtime_settings.upstream_concurrency_recovery_max_rounds,
             runtime_settings.upstream_route_exhaustion_budget_alignment_enabled,
+            runtime_settings.upstream_route_half_open_busy_max_rounds,
         )
     }
 
@@ -160,6 +209,7 @@ impl RouteRetryPolicy {
             terminal,
             health_recovery,
             client_retryable_rate_limit,
+            false,
             request_id,
         )
         .0
@@ -175,6 +225,7 @@ impl RouteRetryPolicy {
         terminal: TerminalFailure,
         health_recovery: Option<RouteRecovery>,
         client_retryable_rate_limit: bool,
+        busy_only: bool,
         request_id: &str,
     ) -> (Option<RouteRetryWait>, Option<GiveUpReason>) {
         if !self.enabled {
@@ -189,6 +240,40 @@ impl RouteRetryPolicy {
             // keeps the task alive, so the gateway must not absorb the
             // cooldown in-process (B3).
             return (None, None);
+        }
+        if busy_only {
+            // The whole pool is half-open busy: every candidate is being
+            // probed right now and no real cooldown is left.  Wait the
+            // optimistic 1s poll interval on a DEDICATED busy budget that does
+            // not consume the ordinary `max_rounds` (an all-busy pool would
+            // otherwise trip round_cap before any probe gets a chance),
+            // bounded by the busy round cap and the total time budget (T3).
+            let busy_round = budget.busy_rounds.saturating_add(1);
+            if busy_round > self.busy_max_rounds {
+                return (None, Some(GiveUpReason::HalfOpenBusyCap));
+            }
+            let next_round = budget.current_round;
+            let jitter = deterministic_jitter(request_id, next_round);
+            let required_delay = HALF_OPEN_BUSY_RETRY;
+            let Some(sleep_for) = required_delay.checked_add(jitter) else {
+                return (None, Some(GiveUpReason::WaitBudget));
+            };
+            let remaining = self.max_wait.saturating_sub(budget.waited);
+            if sleep_for > remaining {
+                return (None, Some(GiveUpReason::WaitBudget));
+            }
+            return (
+                Some(RouteRetryWait {
+                    next_round,
+                    required_delay,
+                    jitter,
+                    sleep_for,
+                    remaining_after: remaining - sleep_for,
+                    alignment: false,
+                    busy: true,
+                }),
+                None,
+            );
         }
         let concurrency_recovery = health_recovery.is_some_and(|recovery| {
             recovery.class == crate::state::RouteFailureClass::ConcurrencySaturated
@@ -233,6 +318,7 @@ impl RouteRetryPolicy {
                             sleep_for,
                             remaining_after: remaining - sleep_for,
                             alignment: true,
+                            busy: false,
                         }),
                         None,
                     );
@@ -281,6 +367,7 @@ impl RouteRetryPolicy {
                 sleep_for,
                 remaining_after: remaining - sleep_for,
                 alignment: false,
+                busy: false,
             }),
             None,
         )
@@ -598,6 +685,7 @@ mod tests {
             current_round: 3,
             waited: Duration::from_secs(10),
             alignment_used: false,
+            busy_rounds: 0,
         };
         for class in [
             RouteFailureClass::RateLimited,
@@ -635,6 +723,7 @@ mod tests {
             current_round: 3,
             waited: Duration::from_secs(10),
             alignment_used: false,
+            busy_rounds: 0,
         };
         assert!(
             policy
@@ -665,6 +754,7 @@ mod tests {
             current_round: 3,
             waited: Duration::from_secs(10),
             alignment_used: false,
+            busy_rounds: 0,
         };
         assert!(
             policy
@@ -691,10 +781,11 @@ mod tests {
             current_round: 3,
             waited: Duration::from_secs(10),
             alignment_used: false,
+            busy_rounds: 0,
         };
         assert_eq!(
             policy
-                .decide_with_reason(&budget, terminal, Some(transient), false, "cap")
+                .decide_with_reason(&budget, terminal, Some(transient), false, false, "cap")
                 .1,
             Some(GiveUpReason::RoundCap),
         );
@@ -706,10 +797,18 @@ mod tests {
             current_round: 3,
             waited: Duration::from_secs(10),
             alignment_used: true,
+            busy_rounds: 0,
         };
         assert_eq!(
             policy
-                .decide_with_reason(&exhausted, terminal, Some(transient), false, "cap-again")
+                .decide_with_reason(
+                    &exhausted,
+                    terminal,
+                    Some(transient),
+                    false,
+                    false,
+                    "cap-again"
+                )
                 .1,
             Some(GiveUpReason::AlignmentExhausted),
         );
@@ -718,7 +817,7 @@ mod tests {
         //    -> no_recovery.
         assert_eq!(
             policy
-                .decide_with_reason(&budget, terminal, None, false, "no-recovery")
+                .decide_with_reason(&budget, terminal, None, false, false, "no-recovery")
                 .1,
             Some(GiveUpReason::NoRecovery),
         );
@@ -730,10 +829,11 @@ mod tests {
             current_round: 1,
             waited: Duration::from_secs(29),
             alignment_used: false,
+            busy_rounds: 0,
         };
         assert_eq!(
             policy
-                .decide_with_reason(&small_budget, terminal, None, false, "budget")
+                .decide_with_reason(&small_budget, terminal, None, false, false, "budget")
                 .1,
             Some(GiveUpReason::WaitBudget),
         );
@@ -741,6 +841,7 @@ mod tests {
             current_round: 3,
             waited: Duration::from_secs(29),
             alignment_used: false,
+            busy_rounds: 0,
         };
         let long_recovery = RouteRecovery {
             class: RouteFailureClass::TransientServer,
@@ -753,6 +854,7 @@ mod tests {
                     &aligned_over_budget,
                     terminal,
                     Some(long_recovery),
+                    false,
                     false,
                     "aligned-budget",
                 )
@@ -767,21 +869,22 @@ mod tests {
             current_round: 1,
             waited: Duration::ZERO,
             alignment_used: false,
+            busy_rounds: 0,
         };
         let (wait, reason) =
-            policy.decide_with_reason(&fresh, terminal, Some(transient), false, "granted");
+            policy.decide_with_reason(&fresh, terminal, Some(transient), false, false, "granted");
         assert!(wait.is_some());
         assert_eq!(reason, None);
         let credentials = TerminalFailure::Credentials;
         assert_eq!(
             policy
-                .decide_with_reason(&fresh, credentials, None, false, "credentials")
+                .decide_with_reason(&fresh, credentials, None, false, false, "credentials")
                 .1,
             None,
         );
         assert_eq!(
             policy
-                .decide_with_reason(&fresh, terminal, Some(transient), true, "client-429")
+                .decide_with_reason(&fresh, terminal, Some(transient), true, false, "client-429")
                 .1,
             None,
             "pure 429-family exhaustion is a client signal, not a gateway give-up (B3)"
@@ -813,5 +916,104 @@ mod tests {
                 "client-rate-limited",
             )
             .is_none());
+    }
+
+    #[test]
+    fn half_open_busy_waits_do_not_consume_the_ordinary_round_cap() {
+        // T3: with max_rounds = 1 an all-half-open-busy pool must still wait
+        // out its dedicated busy budget instead of tripping round_cap.
+        let policy = RouteRetryPolicy::new_with_full_tuning(
+            true,
+            Duration::from_secs(30),
+            1,
+            Duration::from_secs(30),
+            1,
+            true,
+            3,
+        );
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(1),
+        };
+        let recovery = RouteRecovery {
+            class: RouteFailureClass::TransientServer,
+            retry_after: Duration::from_secs(1),
+            half_open_remaining: Some(Duration::from_secs(30)),
+        };
+        let mut budget = RouteRetryBudget::default();
+
+        for _ in 0..3 {
+            let (wait, reason) = policy.decide_with_reason(
+                &budget,
+                terminal,
+                Some(recovery),
+                false,
+                true,
+                "busy-waits",
+            );
+            assert_eq!(reason, None, "busy waits must not give up before the cap");
+            let wait = wait.expect("busy wait must be granted");
+            assert!(wait.busy);
+            assert_eq!(wait.required_delay, Duration::from_secs(1));
+            assert_eq!(wait.next_round, budget.current_round);
+            budget.record_wait(wait);
+            assert_eq!(
+                budget.current_round(),
+                1,
+                "busy waits must not advance the ordinary round counter (max_rounds=1)"
+            );
+        }
+        assert_eq!(budget.busy_rounds(), 3);
+
+        let (wait, reason) =
+            policy.decide_with_reason(&budget, terminal, Some(recovery), false, true, "busy-waits");
+        assert!(wait.is_none());
+        assert_eq!(reason, Some(GiveUpReason::HalfOpenBusyCap));
+        assert_eq!(budget.current_round(), 1, "ordinary rounds untouched");
+    }
+
+    #[test]
+    fn half_open_busy_wait_respects_the_total_time_budget() {
+        let policy = RouteRetryPolicy::new_with_full_tuning(
+            true,
+            Duration::from_millis(500),
+            3,
+            Duration::from_millis(500),
+            3,
+            true,
+            10,
+        );
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(1),
+        };
+        // A busy wait (1s + jitter) exceeds the 500ms total budget: the
+        // request must give up as a wait-budget case, not spin forever.
+        let (wait, reason) = policy.decide_with_reason(
+            &RouteRetryBudget::default(),
+            terminal,
+            None,
+            false,
+            true,
+            "busy-over-budget",
+        );
+        assert!(wait.is_none());
+        assert_eq!(reason, Some(GiveUpReason::WaitBudget));
+    }
+
+    #[test]
+    fn busy_flag_does_not_apply_to_ordinary_decisions() {
+        let policy = RouteRetryPolicy::new(true, Duration::from_secs(10), 3);
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(1),
+        };
+        let (wait, _) = policy.decide_with_reason(
+            &RouteRetryBudget::default(),
+            terminal,
+            None,
+            false,
+            false,
+            "ordinary",
+        );
+        let wait = wait.expect("ordinary wait must be granted");
+        assert!(!wait.busy);
     }
 }

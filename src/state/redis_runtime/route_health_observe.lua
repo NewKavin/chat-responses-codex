@@ -121,7 +121,7 @@ end
 redis.call(
   'HDEL', KEYS[1],
   'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
-  'reconcile_pending'
+  'half_open_exclusive_until_ms', 'reconcile_pending'
 )
 if cooldown_ms > 0 then
   redis.call('HSET', KEYS[1], 'cooldown_until_ms', tostring(now_ms + cooldown_ms))

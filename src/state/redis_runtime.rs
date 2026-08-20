@@ -179,6 +179,8 @@ impl RuntimeCoordinationBackend {
                         .upstream_route_health_half_open_ttl_seconds
                         .max(1)
                         .saturating_mul(1_000),
+                    route_health_half_open_exclusive_window_ms: config
+                        .upstream_route_half_open_exclusive_window_ms,
                     concurrency_probe_delays: normalize_concurrency_probe_delays(
                         config.upstream_concurrency_probe_delays_ms.clone(),
                     ),
@@ -187,6 +189,9 @@ impl RuntimeCoordinationBackend {
                     ),
                     transient_route_cooldown_max: Duration::from_secs(
                         config.upstream_transient_route_cooldown_max_seconds,
+                    ),
+                    credentials_first_strike: Duration::from_secs(
+                        config.upstream_credentials_first_strike_seconds.max(1),
                     ),
                 }),
             });
@@ -219,6 +224,8 @@ impl RuntimeCoordinationBackend {
                 settings.upstream_transient_route_cooldown_base_seconds,
                 settings.upstream_transient_route_cooldown_max_seconds,
                 settings.upstream_route_health_half_open_ttl_seconds,
+                settings.upstream_route_half_open_exclusive_window_ms,
+                settings.upstream_credentials_first_strike_seconds,
             );
         }
     }
@@ -241,9 +248,11 @@ struct RedisRuntimeTuning {
     account_probe_ttl_ms: u64,
     route_health_ttl_seconds: u64,
     route_health_half_open_ttl_ms: u64,
+    route_health_half_open_exclusive_window_ms: u64,
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
+    credentials_first_strike: Duration,
 }
 
 impl RedisRuntimeCoordinator {
@@ -254,6 +263,8 @@ impl RedisRuntimeCoordinator {
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
+        half_open_exclusive_window_ms: u64,
+        credentials_first_strike_seconds: u64,
     ) {
         let base_seconds = transient_route_cooldown_base_seconds.max(1);
         let max_seconds = transient_route_cooldown_max_seconds
@@ -265,10 +276,13 @@ impl RedisRuntimeCoordinator {
         tuning.route_health_ttl_seconds =
             route_health_retention_ttl_seconds(Duration::from_secs(max_seconds));
         tuning.route_health_half_open_ttl_ms = half_open_ttl_seconds.max(1).saturating_mul(1_000);
+        tuning.route_health_half_open_exclusive_window_ms = half_open_exclusive_window_ms;
         tuning.concurrency_probe_delays =
             normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         tuning.transient_route_cooldown_base = Duration::from_secs(base_seconds);
         tuning.transient_route_cooldown_max = Duration::from_secs(max_seconds);
+        tuning.credentials_first_strike =
+            Duration::from_secs(credentials_first_strike_seconds.max(1));
     }
 
     fn tuning_snapshot(&self) -> RedisRuntimeTuning {
@@ -1376,7 +1390,11 @@ impl RedisRuntimeCoordinator {
             .arg(lease_id)
             .arg(self.tuning_snapshot().route_health_ttl_seconds)
             .arg(self.tuning_snapshot().route_health_half_open_ttl_ms)
-            .arg(self.legacy_local_admission_cooldown_threshold_ms());
+            .arg(self.legacy_local_admission_cooldown_threshold_ms())
+            .arg(
+                self.tuning_snapshot()
+                    .route_health_half_open_exclusive_window_ms,
+            );
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
         if result.is_err() {
@@ -1446,7 +1464,13 @@ impl RedisRuntimeCoordinator {
             .unwrap_or_default();
         let key_schedule = class
             .filter(|class| key_failure_has_cooldown(*class))
-            .map(|class| key_cooldown_schedule_ms(&lease.key, class))
+            .map(|class| {
+                key_cooldown_schedule_ms(
+                    &lease.key,
+                    class,
+                    self.tuning_snapshot().credentials_first_strike,
+                )
+            })
             .unwrap_or_default();
         let probe_schedule =
             concurrency_probe_schedule_ms(&self.tuning_snapshot().concurrency_probe_delays);
@@ -1559,7 +1583,8 @@ impl RedisRuntimeCoordinator {
         if !key_failure_has_cooldown(class) {
             return self.clear_key_health(key).await;
         }
-        let schedule = key_cooldown_schedule_ms(key, class);
+        let schedule =
+            key_cooldown_schedule_ms(key, class, self.tuning_snapshot().credentials_first_strike);
         self.observe_health_state(
             &self.key_health_state_key(key),
             &self.health_index_key(&key.upstream_id, "keys"),

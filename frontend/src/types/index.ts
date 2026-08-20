@@ -902,6 +902,10 @@ export interface RuntimeSettings {
   upstream_transient_route_cooldown_base_seconds: number
   upstream_transient_route_cooldown_max_seconds: number
   upstream_route_health_half_open_ttl_seconds: number
+  upstream_route_half_open_exclusive_window_ms: number
+  upstream_route_half_open_busy_max_rounds: number
+  upstream_retry_after_cap_seconds: number
+  upstream_credentials_first_strike_seconds: number
   upstream_route_exhaustion_retry_enabled: boolean
   upstream_route_exhaustion_retry_max_wait_ms: number
   upstream_route_exhaustion_retry_max_rounds: number

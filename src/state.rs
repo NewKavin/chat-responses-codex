@@ -132,8 +132,9 @@ pub use model_qualification::{
 pub use route_health::{
     normalize_concurrency_probe_delays, HealthLease, HealthStateSnapshot, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteHealthRegistry, RouteOutcome,
-    RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
-    ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+    RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS, HALF_OPEN_BUSY_RETRY, ROUTE_HEALTH_GLOBAL_CAPACITY,
+    ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 use runtime_settings::differing_runtime_setting_fields;
 pub use runtime_settings::{
@@ -154,13 +155,15 @@ pub use types::{
     DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
-    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
-    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
@@ -610,6 +613,8 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_transient_route_cooldown_base_seconds,
         config.upstream_transient_route_cooldown_max_seconds,
         config.upstream_route_health_half_open_ttl_seconds,
+        config.upstream_route_half_open_exclusive_window_ms,
+        config.upstream_credentials_first_strike_seconds,
     )))
 }
 
@@ -1485,7 +1490,7 @@ impl AppState {
                 .await?;
             return Ok(match availability {
                 RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                    RouteHealthPermit::new_redis(coordinator.clone(), lease),
+                    RouteHealthPermit::new_redis(self.clone(), coordinator.clone(), lease),
                 ),
                 RouteAvailability::Cooling {
                     class,
@@ -1514,7 +1519,7 @@ impl AppState {
             .reserve_route_health_probe(route, key);
         Ok(match availability {
             RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                RouteHealthPermit::new_local(self.route_health.clone(), lease),
+                RouteHealthPermit::new_local(self.clone(), self.route_health.clone(), lease),
             ),
             RouteAvailability::Cooling {
                 class,
@@ -1548,7 +1553,7 @@ impl AppState {
                 .await?;
             return Ok(match availability {
                 RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                    RouteHealthPermit::new_redis(coordinator.clone(), lease),
+                    RouteHealthPermit::new_redis(self.clone(), coordinator.clone(), lease),
                 ),
                 RouteAvailability::Cooling {
                     class,
@@ -1573,7 +1578,7 @@ impl AppState {
         let availability = self.route_health.lock().await.reserve(route, key);
         Ok(match availability {
             RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                RouteHealthPermit::new_local(self.route_health.clone(), lease),
+                RouteHealthPermit::new_local(self.clone(), self.route_health.clone(), lease),
             ),
             RouteAvailability::Cooling {
                 class,
@@ -2922,6 +2927,8 @@ impl AppState {
                 settings.upstream_transient_route_cooldown_base_seconds,
                 settings.upstream_transient_route_cooldown_max_seconds,
                 settings.upstream_route_health_half_open_ttl_seconds,
+                settings.upstream_route_half_open_exclusive_window_ms,
+                settings.upstream_credentials_first_strike_seconds,
             );
         }
         self.account_concurrency.update_runtime_tuning(

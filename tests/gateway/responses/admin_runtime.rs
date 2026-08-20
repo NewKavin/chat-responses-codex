@@ -229,7 +229,6 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
         state_path,
         AppConfig {
             upstream_rate_limit_force_retry_enabled: false,
-            upstream_rate_limit_max_retry_after_seconds: 1,
             ..AppConfig::default()
         },
     );

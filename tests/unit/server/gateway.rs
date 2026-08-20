@@ -7,7 +7,8 @@ use crate::state::PersistedState;
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::to_bytes;
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -113,12 +114,14 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
         upstream_status: Some(503),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(30)),
+        half_open_busy: false,
     });
     ledger.record_cooled(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(429),
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(7)),
+        half_open_busy: false,
     });
 
     assert_eq!(
@@ -165,6 +168,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
             upstream_status: Some(400),
             class,
             retry_after: None,
+            half_open_busy: false,
         });
         assert_eq!(ledger.terminal_failure(), expected);
     }
@@ -178,12 +182,14 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
         upstream_status: Some(401),
         class: FailureClass::Credentials,
         retry_after: None,
+        half_open_busy: false,
     });
     ledger.record(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(400),
         class: FailureClass::ModelUnsupported,
         retry_after: None,
+        half_open_busy: false,
     });
     assert_eq!(
         ledger.terminal_failure(),
@@ -201,9 +207,19 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
             retry_after: class
                 .is_temporary()
                 .then(|| Duration::from_secs(11 + index as u64)),
+            half_open_busy: false,
         });
     }
-    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, classes.len(), None, false)
+    terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        classes.len(),
+        None,
+        false,
+        Duration::from_secs(3600),
+    )
 }
 
 #[test]
@@ -283,9 +299,19 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         upstream_status: Some(503),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_millis(1_001)),
+        half_open_busy: false,
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 1, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        1,
+        None,
+        false,
+        Duration::from_secs(3600),
+    );
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
     // No recovery and no probe: A5 details report the absence explicitly.
@@ -308,6 +334,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         upstream_status: Some(502),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(9)),
+        half_open_busy: false,
     });
 
     let error = terminal_route_failure_error(
@@ -322,6 +349,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         0,
         Some(GiveUpReason::AlignmentExhausted),
         true,
+        Duration::from_secs(3600),
     );
 
     let details = error.safe_details();
@@ -343,12 +371,14 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         upstream_status: Some(429),
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(24)),
+        half_open_busy: false,
     });
     ledger.record_cooled(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         class: FailureClass::ConcurrencySaturated,
         retry_after: Some(Duration::from_secs(2)),
+        half_open_busy: false,
     });
 
     let error = terminal_route_failure_error(
@@ -359,6 +389,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         1,
         None,
         false,
+        Duration::from_secs(3600),
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -396,6 +427,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
             upstream_status: Some(502),
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(3)),
+            half_open_busy: false,
         });
     }
 
@@ -407,6 +439,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         0,
         None,
         false,
+        Duration::from_secs(3600),
     );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
@@ -431,15 +464,26 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         upstream_status: Some(429),
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(24)),
+        half_open_busy: false,
     });
     ledger.record(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(502),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(10)),
+        half_open_busy: false,
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        2,
+        None,
+        false,
+        Duration::from_secs(3600),
+    );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -466,15 +510,26 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         upstream_status: Some(429),
         class: FailureClass::CapacityUnavailable,
         retry_after: Some(Duration::from_secs(2)),
+        half_open_busy: false,
     });
     ledger.record(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         class: FailureClass::CapacityUnavailable,
         retry_after: Some(Duration::from_secs(10)),
+        half_open_busy: false,
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        2,
+        None,
+        false,
+        Duration::from_secs(3600),
+    );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -490,6 +545,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         upstream_status: Some(429),
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(1)),
+        half_open_busy: false,
     });
 
     let error = terminal_route_failure_error(
@@ -504,6 +560,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         1,
         None,
         true,
+        Duration::from_secs(3600),
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -528,7 +585,7 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
         Some(FailureClass::CapacityUnavailable)
     );
     assert_eq!(
-        route_health_outcome(&error, false),
+        route_health_outcome(&error, false, Duration::from_secs(3600)),
         RouteOutcome::RouteFailure {
             class: FailureClass::ConcurrencySaturated,
             upstream_status: None,
@@ -779,12 +836,14 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
         upstream_status: Some(503),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(7)),
+        half_open_busy: false,
     });
     ledger.record(AttemptFailure {
         route_id: "credential-route".into(),
         upstream_status: Some(403),
         class: FailureClass::Credentials,
         retry_after: None,
+        half_open_busy: false,
     });
     let terminal = ledger.terminal_failure();
 
@@ -853,6 +912,7 @@ async fn stream_completion_fixture(
         )),
         downstream_concurrency_guard: DownstreamConcurrencyGuard::new(state, downstream_lease),
         hedge_control: None,
+        health_verdict_pending: Arc::new(AtomicBool::new(false)),
     }
 }
 

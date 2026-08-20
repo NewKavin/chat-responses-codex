@@ -1364,12 +1364,15 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
         .unwrap();
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok()),
-            Some("60")
+        let retry_after_seconds = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.parse::<u64>().expect("numeric Retry-After"))
+            .expect("Retry-After header present");
+        assert!(
+            retry_after_seconds <= 30,
+            "provider Retry-After 60s must be capped to the 30s default, got {retry_after_seconds}s"
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
@@ -1395,7 +1398,15 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
             health.last_failure_class,
             Some(chat_responses_codex::state::RouteFailureClass::RateLimited)
         );
-        assert!(health.cooldown_remaining >= Duration::from_secs(58));
+        // The upstream-provided 60s is capped at 30s; the local RateLimited
+        // backoff floor (30s base +- 20% jitter) still applies, so the route
+        // cooldown lands in [24s, 36s] instead of the raw 60s.
+        assert!(
+            health.cooldown_remaining >= Duration::from_secs(20)
+                && health.cooldown_remaining <= Duration::from_secs(40),
+            "route cooldown must reflect the capped retry-after plus local floor, got {:?}",
+            health.cooldown_remaining
+        );
         assert_eq!(state.snapshot().await.upstreams[0].failure_count, 0);
     })
     .await;

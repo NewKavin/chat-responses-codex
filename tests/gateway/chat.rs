@@ -15,8 +15,14 @@ mod compatibility;
 mod context;
 #[path = "chat/core.rs"]
 mod core;
+#[path = "chat/credentials_first_strike.rs"]
+mod credentials_first_strike;
 #[path = "chat/feedback.rs"]
 mod feedback;
+#[path = "chat/half_open_busy_ledger.rs"]
+mod half_open_busy_ledger;
+#[path = "chat/half_open_verdict.rs"]
+mod half_open_verdict;
 #[path = "chat/rate_limits.rs"]
 mod rate_limits;
 #[path = "chat/routing.rs"]

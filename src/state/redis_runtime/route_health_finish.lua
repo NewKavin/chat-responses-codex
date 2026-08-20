@@ -75,7 +75,8 @@ local function release_half_open(key, generation, upstream_index, global_index)
   end
   redis.call(
     'HDEL', key,
-    'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms'
+    'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
+    'half_open_exclusive_until_ms'
   )
   redis.call('HSET', key, 'last_access_ms', tostring(now_ms))
   redis.call('EXPIRE', key, ttl_seconds)
@@ -204,7 +205,7 @@ local function observe(
   redis.call(
     'HDEL', state_key,
     'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
-    'reconcile_pending'
+    'half_open_exclusive_until_ms', 'reconcile_pending'
   )
   redis.call('EXPIRE', state_key, ttl_seconds)
   redis.call('ZADD', upstream_index, now_ms, state_key)
@@ -223,7 +224,8 @@ local function reapply_concurrency_probe()
   local delay_ms = schedule_value(probe_schedule, probe_schedule_count, step)
   redis.call(
     'HDEL', KEYS[2],
-    'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms'
+    'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
+    'half_open_exclusive_until_ms'
   )
   redis.call('HSET', KEYS[2],
     'cooldown_until_ms', tostring(now_ms + delay_ms),

@@ -506,6 +506,7 @@ struct RouteAttemptContext<'a> {
     route: RouteCapabilityRoute<'a>,
     requested: &'a RequestedFeatures,
     requested_value: Option<&'a str>,
+    retry_after_cap: Duration,
 }
 
 async fn record_route_attempt(
@@ -519,6 +520,7 @@ async fn record_route_attempt(
         route,
         requested,
         requested_value,
+        retry_after_cap,
     } = input;
     let RouteCapabilityRoute {
         snapshot: capability_snapshot,
@@ -554,7 +556,7 @@ async fn record_route_attempt(
         class,
     )
     .await;
-    let retry_after = error.retry_after();
+    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
     route_attempts.record_failure_with_status(
         route_health_key,
         class,
@@ -645,8 +647,16 @@ fn duration_seconds_ceil(duration: Duration) -> u64 {
         .max(1)
 }
 
-fn route_health_outcome(error: &GatewayError, repeat_within_request: bool) -> RouteOutcome {
-    let retry_after = error.retry_after();
+fn clamp_upstream_retry_after(retry_after: Option<Duration>, cap: Duration) -> Option<Duration> {
+    retry_after.map(|retry_after| retry_after.min(cap))
+}
+
+fn route_health_outcome(
+    error: &GatewayError,
+    repeat_within_request: bool,
+    retry_after_cap: Duration,
+) -> RouteOutcome {
+    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
     if matches!(error, GatewayError::ConcurrencyFull { .. }) {
         let upstream_status = error.upstream_status();
         return retry_after
@@ -730,6 +740,7 @@ fn record_cooled_route_attempt(
     class: FailureClass,
     retry_after: Duration,
     upstream_status: Option<u16>,
+    half_open_busy: bool,
 ) {
     route_attempts.record_cooled(AttemptFailure {
         route_id: anonymous_route_id(
@@ -741,6 +752,7 @@ fn record_cooled_route_attempt(
         upstream_status,
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),
+        half_open_busy,
     });
 }
 
@@ -3179,6 +3191,11 @@ struct StreamCompletionContext {
     upstream_request_guard: UpstreamRequestReservation,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
     hedge_control: Option<HedgeAttemptControl>,
+    /// One-shot guard: the stream body sets this once the first semantic
+    /// output is observed, and `mark_healthy_verdict` settles the half-open
+    /// lease as healthy (T2). The atomic makes the settle idempotent across
+    /// the prefetch and body loops and any concurrent cleanup paths.
+    health_verdict_pending: Arc<AtomicBool>,
 }
 
 impl StreamCompletionContext {
@@ -3202,6 +3219,36 @@ impl StreamCompletionContext {
             tracing::error!(
                 error = %error,
                 "failed to finish route health after stream success"
+            );
+        }
+    }
+
+    /// Settle the route-health lease as healthy at the first semantic output
+    /// of a streaming response (T2). The lease is finished with Success (the
+    /// route cooldown is cleared and the half-open exclusive window is
+    /// released) while the stream is still open, so concurrent requests are
+    /// no longer blocked by the probe stream. A settled permit turns later
+    /// stream failures into fresh no-lease observations.
+    async fn mark_healthy_verdict(&self) {
+        if !self.health_verdict_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let permit = self.route_health_permit.lock().await.take();
+        let Some(mut permit) = permit else {
+            return;
+        };
+        let outcome = permit.settle_healthy().await;
+        // Keep the permit in the slot on every path: after a successful
+        // settle it is a `Settled` permit whose later success/cancellation
+        // are no-ops and whose later failures become no-lease observations
+        // (the stream may still fail after the first semantic output); after
+        // a coordination error it is the restored live lease for the normal
+        // completion path. Errors are logged only and never affect request.
+        self.route_health_permit.lock().await.get_or_insert(permit);
+        if let Err(error) = outcome {
+            tracing::error!(
+                error = %error,
+                "failed to settle route health after first semantic output"
             );
         }
     }
@@ -4447,6 +4494,8 @@ async fn process_gateway_request_inner(
     let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let request_path = endpoint.path();
     let started = Instant::now();
+    let upstream_retry_after_cap =
+        Duration::from_secs(runtime_settings.upstream_retry_after_cap_seconds.max(1));
     let inference_strength = extract_inference_strength(&body);
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -6005,11 +6054,6 @@ async fn process_gateway_request_inner(
                                 class,
                                 retry_after,
                                 upstream_status,
-                            }
-                            | RouteAvailability::HalfOpenBusy {
-                                class,
-                                retry_after,
-                                upstream_status,
                             } => {
                                 if last_resort_probe_armed {
                                     // Probe refused (busy lease / per-route
@@ -6052,6 +6096,70 @@ async fn process_gateway_request_inner(
                                     class,
                                     retry_after,
                                     upstream_status,
+                                    false,
+                                );
+                                last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
+                                    "all eligible upstream routes are temporarily unavailable"
+                                        .into(),
+                                ));
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                continue 'key_candidates;
+                            }
+                            RouteAvailability::HalfOpenBusy {
+                                class,
+                                retry_after,
+                                upstream_status,
+                            } => {
+                                if last_resort_probe_armed {
+                                    // Probe refused (busy lease / per-route
+                                    // interval / nothing left to probe): fall
+                                    // back to the ordinary reserve path.
+                                    last_resort_probe_armed = false;
+                                    continue;
+                                }
+                                if account_recovery.active_probe_account() == Some(&account_key) {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(retry_after) => {}
+                                        error = account_recovery.wait_for_probe_interruption() => {
+                                            account_recovery
+                                                .complete_attempt(
+                                                    &account_key,
+                                                    AccountProbeOutcome::Cancelled,
+                                                )
+                                                .await?;
+                                            if error.error_category()
+                                                == "runtime_coordination_unavailable"
+                                            {
+                                                return Err(error);
+                                            }
+                                            last_error = Some(error);
+                                            last_failure_upstream = Some((
+                                                upstream.id.clone(),
+                                                Some(upstream.name.clone()),
+                                            ));
+                                            break None;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                // Half-open exclusive window: the route is
+                                // being probed RIGHT NOW and other requests
+                                // may re-enter in ~1s (T3).  Kept separate
+                                // from real cooldowns in the ledger so the
+                                // busy capability is not counted as a
+                                // transient-server failure, and busy waits do
+                                // not consume the ordinary retry rounds.
+                                record_cooled_route_attempt(
+                                    &request_route_attempts,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    class,
+                                    retry_after,
+                                    upstream_status,
+                                    true,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
                                     "all eligible upstream routes are temporarily unavailable"
@@ -6113,6 +6221,7 @@ async fn process_gateway_request_inner(
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
                                     None,
+                                    false,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream account is waiting for recovery".into(),
@@ -6188,7 +6297,8 @@ async fn process_gateway_request_inner(
                                 // family with retry-after) instead of a
                                 // misleading 502 "upstream_invalid_response".
                                 let retry_after =
-                                    Duration::from_secs(admission_error.retry_after_seconds.max(1));
+                                    Duration::from_secs(admission_error.retry_after_seconds.max(1))
+                                        .min(upstream_retry_after_cap);
                                 record_cooled_route_attempt(
                                     &request_route_attempts,
                                     &upstream,
@@ -6198,6 +6308,7 @@ async fn process_gateway_request_inner(
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
                                     None,
+                                    false,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream request concurrency capacity is full".into(),
@@ -6241,6 +6352,7 @@ async fn process_gateway_request_inner(
                                 upstream_request_guard: upstream_request_guard.clone(),
                                 downstream_concurrency_guard: downstream_concurrency_guard.clone(),
                                 hedge_control: None,
+                                health_verdict_pending: Arc::new(AtomicBool::new(false)),
                             });
                         if let (Some(cancellation), Some(completion)) = (
                             pre_header_cancellation.as_ref(),
@@ -6483,6 +6595,7 @@ async fn process_gateway_request_inner(
                             ),
                             requested: &requested_features,
                             requested_value: inference_strength.as_deref(),
+                            retry_after_cap: upstream_retry_after_cap,
                         };
                         let (account_feedback_sender, account_feedback_receiver) =
                             if account_probe.is_some() {
@@ -6907,6 +7020,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        route_attempt_context.retry_after_cap,
                                     ),
                                 )
                                 .await?;
@@ -6937,6 +7051,10 @@ async fn process_gateway_request_inner(
                                 retry_after,
                                 upstream_status,
                             }) => {
+                                let retry_after = clamp_upstream_retry_after(
+                                    retry_after,
+                                    upstream_retry_after_cap,
+                                );
                                 if stream_only_recovery_leader.is_some()
                                     || stream_only_recovery.consumed
                                 {
@@ -7034,13 +7152,15 @@ async fn process_gateway_request_inner(
                                 message,
                                 retry_after,
                             }) => {
-                                let retry_after = retry_after.unwrap_or_else(|| {
-                                    Duration::from_secs(
-                                        runtime_settings
-                                            .upstream_rate_limit_default_retry_seconds
-                                            .max(1),
-                                    )
-                                });
+                                let retry_after = retry_after
+                                    .unwrap_or_else(|| {
+                                        Duration::from_secs(
+                                            runtime_settings
+                                                .upstream_rate_limit_default_retry_seconds
+                                                .max(1),
+                                        )
+                                    })
+                                    .min(upstream_retry_after_cap);
                                 let retry_after_seconds = duration_seconds_ceil(retry_after);
                                 tracing::warn!(
                                     request_id = %request_id,
@@ -7181,6 +7301,7 @@ async fn process_gateway_request_inner(
                                             &error,
                                             request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
+                                            route_attempt_context.retry_after_cap,
                                         ),
                                     )
                                     .await?;
@@ -7222,6 +7343,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        route_attempt_context.retry_after_cap,
                                     ),
                                 )
                                 .await?;
@@ -7304,6 +7426,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        route_attempt_context.retry_after_cap,
                                     ),
                                 )
                                 .await?;
@@ -7570,6 +7693,10 @@ async fn process_gateway_request_inner(
                 failure,
                 round_recovery,
                 round_ledger.is_pure_client_rate_limit(),
+                // A round that attempted nothing and skipped every candidate
+                // only because of half-open exclusive windows waits on its own
+                // busy budget, not the ordinary round cap (T3).
+                round_ledger.attempt_count() == 0 && round_ledger.is_all_half_open_busy(),
                 &request_id,
             )
         });
@@ -7632,6 +7759,7 @@ async fn process_gateway_request_inner(
                 request_route_attempts.physical_attempt_count(),
                 request_route_attempts.give_up_reason(),
                 request_route_attempts.last_resort_probe_granted(),
+                upstream_retry_after_cap,
             )
         } else {
             last_route_error
@@ -7717,6 +7845,7 @@ async fn process_gateway_request_inner(
             routing_round = request_route_attempts.routing_round(),
             account_recovery_rounds = account_recovery.rounds(),
             physical_attempt_count = request_route_attempts.physical_attempt_count(),
+            half_open_busy_count = attempt_ledger.half_open_busy_count(),
             error_category = %error.error_category(),
             "request failed after exhausting upstream candidates"
         );

@@ -751,6 +751,9 @@ fn send_route_hedge_attempt(
             upstream_request_guard: upstream_request_guard.clone(),
             downstream_concurrency_guard: context.downstream_concurrency_guard.clone(),
             hedge_control: Some(control.clone()),
+            // Internal retry/hedge streams go through the same settle-on-first-
+            // semantic-output machinery as the primary attempt (T2).
+            health_verdict_pending: Arc::new(AtomicBool::new(false)),
         };
         let resolved_route = candidate.resolved_capabilities.clone();
         let attempt_mode = select_upstream_attempt_mode(true, resolved_route.as_ref());
@@ -810,6 +813,9 @@ fn send_route_hedge_attempt(
                 result
             }
             Err(error) => {
+                let retry_after_cap = Duration::from_secs(
+                    context.runtime_settings.upstream_retry_after_cap_seconds.max(1),
+                );
                 super::finish_route_health_permit(
                     &completion.route_health_permit,
                     super::route_health_outcome(
@@ -817,6 +823,7 @@ fn send_route_hedge_attempt(
                         context
                             .route_attempts
                             .has_transient_failure_for(&route_health_key),
+                        retry_after_cap,
                     ),
                 )
                 .await?;
@@ -836,6 +843,7 @@ fn send_route_hedge_attempt(
                             ),
                             requested: &context.requested_features,
                             requested_value: context.inference_strength.as_deref(),
+                            retry_after_cap,
                         },
                         &error,
                     )

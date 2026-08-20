@@ -91,6 +91,7 @@ pub const DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS: u32 = 1;
 pub const DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: u64 = 10;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
+pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 /// Intra-gateway retry wait budget for route exhaustion (B3): the gateway
@@ -103,6 +104,25 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
 /// genuinely distinguishes two models by case alone.
 pub const DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING: bool = true;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+/// Cap on upstream-provided Retry-After (seconds) before it enters any local
+/// cooldown or terminal retry hint (T4).  A single exaggerated upstream
+/// "Retry-After: 105" used to pin a route's cooldown and tell clients to wait
+/// minutes; values beyond the cap are clamped at the observation chokepoints
+/// while the local exponential backoff and the Redis Lua parsing stay
+/// untouched.
+pub const DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS: u64 = 30;
+/// First Credentials-family (401/403) strike cooldown (seconds, T5).  The old
+/// behavior cooled a key for 15min on the very first 401, so a single
+/// misconfigured credential made that key unusable for a quarter hour even
+/// when the next attempt would succeed.  The first strike now gets this short
+/// window; consecutive strikes within the streak window escalate to the
+/// 15min -> 1h CREDENTIAL_KEY_BASE curve.  Range 1..=3600.
+pub const DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS: u64 = 60;
+/// Dedicated half-open-busy round budget (T3): how many 1s busy polls a
+/// request may take when the whole pool is in half-open recovery before
+/// giving up with `give_up_reason = half_open_busy_cap`.  Busy waits never
+/// consume the ordinary `upstream_route_exhaustion_retry_max_rounds`.
+pub const DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS: u32 = 10;
 /// Whether an exhausted request may spend one final budget-aligned wait when
 /// the round cap is hit but a live transient recovery fits the remaining time
 /// budget (Part A / R2: max_rounds bounds blind retries, the time budget
@@ -140,7 +160,6 @@ pub struct AppConfig {
     pub upstream_rate_limit_default_retry_seconds: u64,
     pub upstream_rate_limit_retry_window_seconds: u64,
     pub upstream_rate_limit_retry_attempts: u32,
-    pub upstream_rate_limit_max_retry_after_seconds: u64,
     pub upstream_rate_limit_force_retry_enabled: bool,
     pub context_retry_max_attempts_chat: u32,
     pub context_retry_min_output_tokens_chat: u64,
@@ -202,6 +221,30 @@ pub struct AppConfig {
     /// task, dropped client), the lease must expire so the route can be
     /// probed again instead of blocking every request with a fake 1s retry.
     pub upstream_route_health_half_open_ttl_seconds: u64,
+    /// Maximum time a single half-open probe may exclusively occupy a
+    /// recovering route (milliseconds, default 3s; 0 disables the window).
+    /// Once the window elapses, concurrent requests are admitted without a
+    /// half-open lease while the original probe is still in flight, so a
+    /// stalled probe cannot reduce a recovering route to 1 concurrent
+    /// request for the whole lease lifetime.
+    #[serde(default = "default_upstream_route_half_open_exclusive_window_ms")]
+    pub upstream_route_half_open_exclusive_window_ms: u64,
+    /// Maximum dedicated busy-wait rounds a request may take when every
+    /// candidate is in half-open recovery (T3).  Busy waits do not consume
+    /// `upstream_route_exhaustion_retry_max_rounds`; setting this to 1
+    /// restores the pre-T3 "give up after one busy round" behavior.
+    #[serde(default = "default_upstream_route_half_open_busy_max_rounds")]
+    pub upstream_route_half_open_busy_max_rounds: u32,
+    /// Cap (seconds) applied to upstream-provided Retry-After before it feeds
+    /// cooldowns / terminal hints (T4).  Range 1..=3600; 3600 approximates
+    /// "disable the cap".
+    #[serde(default = "default_upstream_retry_after_cap_seconds")]
+    pub upstream_retry_after_cap_seconds: u64,
+    /// First Credentials-family (401/403) strike cooldown (seconds, T5).
+    /// Range 1..=3600; higher values make the first strike behave more like
+    /// the old 15min quarantine.
+    #[serde(default = "default_upstream_credentials_first_strike_seconds")]
+    pub upstream_credentials_first_strike_seconds: u64,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -251,7 +294,6 @@ impl Default for AppConfig {
             upstream_rate_limit_default_retry_seconds: 30,
             upstream_rate_limit_retry_window_seconds: 300,
             upstream_rate_limit_retry_attempts: 3,
-            upstream_rate_limit_max_retry_after_seconds: 10,
             upstream_rate_limit_force_retry_enabled: true,
             context_retry_max_attempts_chat: 2,
             context_retry_min_output_tokens_chat: 128,
@@ -296,6 +338,13 @@ impl Default for AppConfig {
             upstream_transient_route_cooldown_max_seconds:
                 DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
             upstream_route_health_half_open_ttl_seconds: DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+            upstream_route_half_open_exclusive_window_ms:
+                DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+            upstream_route_half_open_busy_max_rounds:
+                DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
+            upstream_retry_after_cap_seconds: DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+            upstream_credentials_first_strike_seconds:
+                DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -950,6 +999,22 @@ pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {
 
 pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED
+}
+
+pub fn default_upstream_route_half_open_exclusive_window_ms() -> u64 {
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS
+}
+
+pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {
+    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS
+}
+
+pub fn default_upstream_retry_after_cap_seconds() -> u64 {
+    DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS
+}
+
+pub fn default_upstream_credentials_first_strike_seconds() -> u64 {
+    DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

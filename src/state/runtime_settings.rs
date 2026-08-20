@@ -2,8 +2,12 @@ use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_upstream_common_mode_breaker_threshold,
-    default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
+    default_upstream_common_mode_transient_threshold,
+    default_upstream_credentials_first_strike_seconds, default_upstream_max_concurrency,
+    default_upstream_retry_after_cap_seconds,
     default_upstream_route_exhaustion_budget_alignment_enabled,
+    default_upstream_route_half_open_busy_max_rounds,
+    default_upstream_route_half_open_exclusive_window_ms,
     default_upstream_transient_last_resort_probe_enabled,
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
@@ -38,6 +42,10 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_transient_route_cooldown_base_seconds",
     "upstream_transient_route_cooldown_max_seconds",
     "upstream_route_health_half_open_ttl_seconds",
+    "upstream_route_half_open_exclusive_window_ms",
+    "upstream_route_half_open_busy_max_rounds",
+    "upstream_retry_after_cap_seconds",
+    "upstream_credentials_first_strike_seconds",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
@@ -101,6 +109,14 @@ pub struct RuntimeSettings {
     pub upstream_transient_route_cooldown_base_seconds: u64,
     pub upstream_transient_route_cooldown_max_seconds: u64,
     pub upstream_route_health_half_open_ttl_seconds: u64,
+    #[serde(default = "default_upstream_route_half_open_exclusive_window_ms")]
+    pub upstream_route_half_open_exclusive_window_ms: u64,
+    #[serde(default = "default_upstream_route_half_open_busy_max_rounds")]
+    pub upstream_route_half_open_busy_max_rounds: u32,
+    #[serde(default = "default_upstream_retry_after_cap_seconds")]
+    pub upstream_retry_after_cap_seconds: u64,
+    #[serde(default = "default_upstream_credentials_first_strike_seconds")]
+    pub upstream_credentials_first_strike_seconds: u64,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -247,6 +263,13 @@ impl RuntimeSettings {
                 .upstream_transient_route_cooldown_max_seconds,
             upstream_route_health_half_open_ttl_seconds: config
                 .upstream_route_health_half_open_ttl_seconds,
+            upstream_route_half_open_exclusive_window_ms: config
+                .upstream_route_half_open_exclusive_window_ms,
+            upstream_route_half_open_busy_max_rounds: config
+                .upstream_route_half_open_busy_max_rounds,
+            upstream_retry_after_cap_seconds: config.upstream_retry_after_cap_seconds,
+            upstream_credentials_first_strike_seconds: config
+                .upstream_credentials_first_strike_seconds,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
             upstream_route_exhaustion_retry_max_wait_ms: config
                 .upstream_route_exhaustion_retry_max_wait_ms,
@@ -320,6 +343,13 @@ impl RuntimeSettings {
             self.upstream_transient_route_cooldown_max_seconds;
         config.upstream_route_health_half_open_ttl_seconds =
             self.upstream_route_health_half_open_ttl_seconds;
+        config.upstream_route_half_open_exclusive_window_ms =
+            self.upstream_route_half_open_exclusive_window_ms;
+        config.upstream_route_half_open_busy_max_rounds =
+            self.upstream_route_half_open_busy_max_rounds;
+        config.upstream_retry_after_cap_seconds = self.upstream_retry_after_cap_seconds;
+        config.upstream_credentials_first_strike_seconds =
+            self.upstream_credentials_first_strike_seconds;
         config.upstream_route_exhaustion_retry_enabled =
             self.upstream_route_exhaustion_retry_enabled;
         config.upstream_route_exhaustion_retry_max_wait_ms =
@@ -442,6 +472,30 @@ impl RuntimeSettings {
             self.upstream_route_health_half_open_ttl_seconds,
             "upstream_route_health_half_open_ttl_seconds",
         )?;
+        if self.upstream_route_half_open_exclusive_window_ms > 600_000 {
+            return Err(invalid(
+                "upstream_route_half_open_exclusive_window_ms",
+                "must be at most 600000 ms",
+            ));
+        }
+        if !(1..=100).contains(&self.upstream_route_half_open_busy_max_rounds) {
+            return Err(invalid(
+                "upstream_route_half_open_busy_max_rounds",
+                "must be between 1 and 100",
+            ));
+        }
+        if !(1..=3_600).contains(&self.upstream_retry_after_cap_seconds) {
+            return Err(invalid(
+                "upstream_retry_after_cap_seconds",
+                "must be between 1 and 3600",
+            ));
+        }
+        if !(1..=3_600).contains(&self.upstream_credentials_first_strike_seconds) {
+            return Err(invalid(
+                "upstream_credentials_first_strike_seconds",
+                "must be between 1 and 3600",
+            ));
+        }
         require_positive(
             self.upstream_route_exhaustion_retry_max_wait_ms,
             "upstream_route_exhaustion_retry_max_wait_ms",

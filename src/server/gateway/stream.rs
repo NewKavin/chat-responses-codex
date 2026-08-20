@@ -680,6 +680,27 @@ fn log_stream_body_read_diagnostic(
     );
 }
 
+/// T2: settle the half-open route-health lease as soon as the first semantic
+/// output is parsed and the event loop reaches an await point. One-shot:
+/// `StreamCommitTracker` raises its flag on the first semantic trigger and
+/// `StreamCompletionContext::mark_healthy_verdict` is itself idempotent, so
+/// repeat calls are no-ops.
+async fn mark_healthy_verdict_if_due(
+    completion: Option<&StreamCompletionContext>,
+    tracker: &stream_commit::StreamCommitTracker,
+) {
+    if let Some(completion) = completion {
+        if tracker.take_health_settle_pending() {
+            // Arm the context's one-shot guard, then settle. The guard keeps
+            // `mark_healthy_verdict` idempotent against any concurrent caller.
+            completion
+                .health_verdict_pending
+                .store(true, Ordering::Release);
+            completion.mark_healthy_verdict().await;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn proxied_stream_body(
     reader: UpstreamStreamReader,
@@ -722,6 +743,8 @@ pub(super) fn proxied_stream_body(
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
         loop {
+            mark_healthy_verdict_if_due(state.completion_context.as_ref(), &state.commit_tracker)
+                .await;
             if let Some(frame) = state.pending.pop_front() {
                 return Ok::<Option<(Bytes, ProxiedStreamState)>, std::io::Error>(Some((
                     frame, state,
@@ -768,9 +791,25 @@ pub(super) fn proxied_stream_body(
                     }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_usage_from_buffer() {
+                        // A semantic event may have been parsed earlier in the
+                        // same coalesced buffer before the failing frame: settle
+                        // before finalizing the error so the failure is observed
+                        // as a fresh no-lease streak (T2).
+                        mark_healthy_verdict_if_due(
+                            state.completion_context.as_ref(),
+                            &state.commit_tracker,
+                        )
+                        .await;
                         let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
+                    // Settle as soon as the first semantic output is parsed,
+                    // before the frame is delivered downstream (T2).
+                    mark_healthy_verdict_if_due(
+                        state.completion_context.as_ref(),
+                        &state.commit_tracker,
+                    )
+                    .await;
                     if let Some(frame) = state.pending.pop_front() {
                         return Ok(Some((frame, state)));
                     }
@@ -1468,6 +1507,8 @@ pub(super) fn translated_stream_body(
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
         loop {
+            mark_healthy_verdict_if_due(state.completion_context.as_ref(), &state.commit_tracker)
+                .await;
             if state.should_emit_empty_response_error() {
                 let frame = state
                     .finish_with_gateway_error(upstream_empty_response_error())
@@ -1532,9 +1573,24 @@ pub(super) fn translated_stream_body(
                     }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_buffer() {
+                        // A semantic event may have been translated earlier in
+                        // the same coalesced buffer before the failing frame:
+                        // settle before finalizing the error (T2).
+                        mark_healthy_verdict_if_due(
+                            state.completion_context.as_ref(),
+                            &state.commit_tracker,
+                        )
+                        .await;
                         let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
+                    // Settle as soon as the first semantic output is parsed
+                    // (T2); the loop top re-checks before delivering frames.
+                    mark_healthy_verdict_if_due(
+                        state.completion_context.as_ref(),
+                        &state.commit_tracker,
+                    )
+                    .await;
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
                     if let Err(error) = state.finish_stream(StreamEnd::Eof) {
