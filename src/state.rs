@@ -2770,6 +2770,19 @@ impl AppState {
         Ok(logs)
     }
 
+    /// Look up a single downstream configuration without cloning usage logs.
+    ///
+    /// Request-teardown billing only needs the downstream's own billing fields;
+    /// `snapshot()` would deep-copy every usage log in the window for it.
+    pub async fn downstream_config(&self, downstream_id: &str) -> Option<DownstreamConfig> {
+        let state = self.inner.lock().await;
+        state
+            .downstreams
+            .iter()
+            .find(|downstream| downstream.id == downstream_id)
+            .cloned()
+    }
+
     pub async fn routing_snapshot(&self) -> PersistedState {
         let state = self.inner.lock().await;
         PersistedState {

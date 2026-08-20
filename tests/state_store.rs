@@ -1074,3 +1074,76 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
     assert_eq!(page.logs[0].log.id, "pending-log");
     assert_eq!(page.logs[0].log.total_tokens, 24);
 }
+
+#[tokio::test]
+async fn app_state_downstream_config_looks_up_single_downstream_without_usage_log_scan() {
+    let state = AppState::new(
+        PersistedState {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "ds-lookup".to_string(),
+                name: "Lookup Downstream".to_string(),
+                hash: generate_downstream_key("sk").hash,
+                plaintext_key: None,
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".to_string()],
+                rate_limit_enabled: true,
+                per_minute_limit: 10,
+                max_concurrency: 2,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: Some(1000),
+                output_token_price_per_million_cents: Some(3000),
+                daily_cost_limit_cents: Some(3000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "token".into(),
+            }]),
+            usage_logs: vec![UsageLog {
+                id: "log-lookup".to_string(),
+                downstream_key_id: "ds-lookup".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: None,
+                upstream_name: None,
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "gpt-4".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "req-lookup".to_string(),
+                status_code: 200,
+                wire_status_code: 0,
+                stream_diagnostics: None,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                total_cost_cents: Some(4),
+                first_token_latency_ms: None,
+                latency_ms: 100,
+                created_at: 1,
+                compatibility: None,
+            }],
+            upstreams: std::sync::Arc::new(vec![]),
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        unique_state_path(),
+        AppConfig::default(),
+    );
+
+    let found = state.downstream_config("ds-lookup").await;
+    let downstream = found.expect("downstream_config must find configured downstreams");
+    assert_eq!(downstream.id, "ds-lookup");
+    assert_eq!(downstream.daily_cost_limit_cents, Some(3000));
+    assert!(
+        state.downstream_config("missing").await.is_none(),
+        "unknown downstream ids must resolve to None"
+    );
+}

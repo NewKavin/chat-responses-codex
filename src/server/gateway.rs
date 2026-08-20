@@ -1641,6 +1641,9 @@ impl StreamUsageLogContext {
             status.as_u16()
         };
 
+        let (billing_label, total_cost_cents) =
+            downstream_billing_info(&state, &downstream_key_id, usage.0, usage.1).await;
+
         let log = UsageLog {
             id: request_id.clone(),
             downstream_key_id: downstream_key_id.clone(),
@@ -1650,11 +1653,7 @@ impl StreamUsageLogContext {
             endpoint: endpoint.clone(),
             model: model.clone(),
             inference_strength,
-            billing_mode: Some(
-                downstream_billing_info(&state, &downstream_key_id, usage.0, usage.1)
-                    .await
-                    .0,
-            ),
+            billing_mode: Some(billing_label),
             request_count: Some(1),
             user_agent,
             request_id: request_id.clone(),
@@ -1665,9 +1664,7 @@ impl StreamUsageLogContext {
             prompt_tokens: usage.0,
             completion_tokens: usage.1,
             total_tokens: usage.2,
-            total_cost_cents: downstream_billing_info(&state, &downstream_key_id, usage.0, usage.1)
-                .await
-                .1,
+            total_cost_cents,
             first_token_latency_ms: first_token_latency.get(),
             latency_ms: started.elapsed().as_millis() as u64,
             created_at: unix_seconds(),
@@ -1828,12 +1825,7 @@ async fn downstream_billing_info(
     prompt_tokens: u64,
     completion_tokens: u64,
 ) -> (String, Option<u64>) {
-    let snapshot = state.snapshot().await;
-    match snapshot
-        .downstreams
-        .iter()
-        .find(|downstream| downstream.id == downstream_key_id)
-    {
+    match state.downstream_config(downstream_key_id).await.as_ref() {
         Some(downstream) if downstream.token_billing_mode() => {
             let cost = downstream
                 .cost_billing_mode()
