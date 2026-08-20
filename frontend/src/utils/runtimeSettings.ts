@@ -455,6 +455,17 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'gateway_request_body_limit_mb',
+    group: 'http',
+    label: '网关请求体上限',
+    apply: 'restart',
+    control: 'number',
+    unit: 'MiB',
+    min: 1,
+    max: 4_096,
+    description: '限制 /v1/chat/completions、/v1/responses、/v1/messages 等入口的请求体大小，超出返回 413。修改后需重启生效。'
+  },
+  {
     key: 'usage_log_archive_max_files',
     group: 'logs',
     label: '日志归档文件上限',

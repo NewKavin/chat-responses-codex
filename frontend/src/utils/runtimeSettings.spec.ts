@@ -57,7 +57,8 @@ const validSettings = (): RuntimeSettings => ({
   upstream_stream_keepalive_interval_seconds: 15,
   upstream_stream_idle_timeout_seconds: 60,
   upstream_stream_max_duration_seconds: 3_600,
-  upstream_first_semantic_output_timeout_seconds: 180
+  upstream_first_semantic_output_timeout_seconds: 180,
+  gateway_request_body_limit_mb: 32
 })
 
 const expectedKeys: Array<keyof RuntimeSettings> = [
@@ -106,7 +107,8 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_stream_keepalive_interval_seconds',
   'upstream_stream_idle_timeout_seconds',
   'upstream_stream_max_duration_seconds',
-  'upstream_first_semantic_output_timeout_seconds'
+  'upstream_first_semantic_output_timeout_seconds',
+  'gateway_request_body_limit_mb'
 ]
 
 describe('runtime settings catalog', () => {
@@ -119,11 +121,11 @@ describe('runtime settings catalog', () => {
       'http',
       'logs'
     ])
-    expect(runtimeSettingFields).toHaveLength(46)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(46)
+    expect(runtimeSettingFields).toHaveLength(47)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(47)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
     expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(34)
-    expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(12)
+    expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
 

@@ -922,6 +922,7 @@ export interface RuntimeSettings {
   upstream_stream_idle_timeout_seconds: number
   upstream_stream_max_duration_seconds: number
   upstream_first_semantic_output_timeout_seconds: number
+  gateway_request_body_limit_mb: number
 }
 
 export type RuntimeSettingKey = keyof RuntimeSettings

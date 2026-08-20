@@ -194,8 +194,8 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
         90
     );
     // 47 Part A fields after the merge base + Part B's
-    // model_case_insensitive_matching = 48.
-    assert_eq!(body["settings"].as_object().unwrap().len(), 48);
+    // model_case_insensitive_matching = 48, plus gateway_request_body_limit_mb = 49.
+    assert_eq!(body["settings"].as_object().unwrap().len(), 49);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

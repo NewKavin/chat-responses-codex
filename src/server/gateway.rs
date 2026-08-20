@@ -2256,6 +2256,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/key/rotate", post(portal_rotate_key))
         // Frontend assets and SPA fallback
         .fallback(serve_frontend)
+        .layer(axum::extract::DefaultBodyLimit::max(
+            usize::try_from(
+                state
+                    .config
+                    .gateway_request_body_limit_mb
+                    .saturating_mul(1024 * 1024),
+            )
+            .unwrap_or(usize::MAX),
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
@@ -2667,6 +2676,28 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     Json(json!({ "models": model_infos })).into_response()
 }
 
+/// Translate a JSON extractor rejection into the gateway error shape.
+///
+/// Body-size rejections (raised by the router-level `DefaultBodyLimit`)
+/// surface as 413 with a dedicated code so clients can tell oversized
+/// payloads apart from malformed JSON (400).
+fn gateway_json_rejection_response(
+    state: &AppState,
+    rejection: JsonRejection,
+    anthropic: bool,
+) -> Response {
+    let error = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        GatewayError::payload_too_large(state.config.gateway_request_body_limit_mb)
+    } else {
+        GatewayError::BadRequest("invalid json request body".into())
+    };
+    if anthropic {
+        error.into_anthropic_response()
+    } else {
+        error.into_response()
+    }
+}
+
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2674,8 +2705,8 @@ async fn chat_completions(
 ) -> Response {
     let Json(body) = match body {
         Ok(body) => body,
-        Err(_) => {
-            return GatewayError::BadRequest("invalid json request body".into()).into_response();
+        Err(rejection) => {
+            return gateway_json_rejection_response(&state, rejection, false);
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -2696,8 +2727,8 @@ async fn responses(
 ) -> Response {
     let Json(body) = match body {
         Ok(body) => body,
-        Err(_) => {
-            return GatewayError::BadRequest("invalid json request body".into()).into_response();
+        Err(rejection) => {
+            return gateway_json_rejection_response(&state, rejection, false);
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -2717,9 +2748,8 @@ async fn claude_messages(
 ) -> impl IntoResponse {
     let Json(body) = match body {
         Ok(body) => body,
-        Err(_) => {
-            return GatewayError::BadRequest("invalid json request body".into())
-                .into_anthropic_response();
+        Err(rejection) => {
+            return gateway_json_rejection_response(&state, rejection, true);
         }
     };
     let runtime_settings = state.runtime_settings();
@@ -2754,9 +2784,8 @@ async fn claude_count_tokens(
 ) -> impl IntoResponse {
     let Json(body) = match body {
         Ok(body) => body,
-        Err(_) => {
-            return GatewayError::BadRequest("invalid json request body".into())
-                .into_anthropic_response();
+        Err(rejection) => {
+            return gateway_json_rejection_response(&state, rejection, true);
         }
     };
     let Ok(secret) = downstream_secret_from_headers(&headers) else {

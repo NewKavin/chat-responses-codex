@@ -1,6 +1,7 @@
 use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
-    default_model_case_insensitive_matching, default_upstream_common_mode_breaker_threshold,
+    default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
+    default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
     default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_transient_last_resort_probe_enabled,
@@ -64,6 +65,7 @@ pub const RESTART_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_stream_keepalive_interval_seconds",
     "upstream_stream_max_duration_seconds",
     "downstream_lease_ttl_seconds",
+    "gateway_request_body_limit_mb",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +128,8 @@ pub struct RuntimeSettings {
     pub upstream_stream_idle_timeout_seconds: u64,
     pub upstream_stream_max_duration_seconds: u64,
     pub upstream_first_semantic_output_timeout_seconds: u64,
+    #[serde(default = "default_gateway_request_body_limit_mb")]
+    pub gateway_request_body_limit_mb: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -277,6 +281,7 @@ impl RuntimeSettings {
             upstream_stream_max_duration_seconds: config.upstream_stream_max_duration_seconds,
             upstream_first_semantic_output_timeout_seconds: config
                 .upstream_first_semantic_output_timeout_seconds,
+            gateway_request_body_limit_mb: config.gateway_request_body_limit_mb,
         }
     }
 
@@ -348,6 +353,7 @@ impl RuntimeSettings {
         config.upstream_stream_max_duration_seconds = self.upstream_stream_max_duration_seconds;
         config.upstream_first_semantic_output_timeout_seconds =
             self.upstream_first_semantic_output_timeout_seconds;
+        config.gateway_request_body_limit_mb = self.gateway_request_body_limit_mb;
     }
 
     pub fn validate_and_normalize(mut self) -> Result<Self, RuntimeSettingsValidationError> {
@@ -504,6 +510,12 @@ impl RuntimeSettings {
             self.upstream_first_semantic_output_timeout_seconds,
             "upstream_first_semantic_output_timeout_seconds",
         )?;
+        if !(1..=4_096).contains(&self.gateway_request_body_limit_mb) {
+            return Err(invalid(
+                "gateway_request_body_limit_mb",
+                "must be between 1 and 4096 MiB",
+            ));
+        }
         if self.upstream_stream_keepalive_interval_seconds
             >= self.upstream_stream_idle_timeout_seconds
         {

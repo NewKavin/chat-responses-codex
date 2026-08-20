@@ -2135,7 +2135,10 @@ async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
     let result: Value = serde_json::from_slice(&body).unwrap();
 
     let daily = &result["cost_quota"]["daily"];
-    assert!(daily.is_object(), "cost billing must expose cost_quota.daily");
+    assert!(
+        daily.is_object(),
+        "cost billing must expose cost_quota.daily"
+    );
     assert_eq!(daily["used_cents"], 127);
     assert_eq!(daily["limit_cents"], 3000);
     assert_eq!(daily["remaining_cents"], 2873);

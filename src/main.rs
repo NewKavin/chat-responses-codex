@@ -186,6 +186,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .max(1),
         downstream_lease_ttl_seconds: env_u64("DOWNSTREAM_LEASE_TTL_SECONDS", 300).max(60),
+        gateway_request_body_limit_mb: env_u64("GATEWAY_REQUEST_BODY_LIMIT_MB", 32).clamp(1, 4_096),
         admin_upstream_timeout_seconds: env_u64("ADMIN_UPSTREAM_TIMEOUT_SECONDS", 30).max(1),
         upstream_hedge_enabled: env_bool("UPSTREAM_HEDGE_ENABLED", DEFAULT_UPSTREAM_HEDGE_ENABLED),
         upstream_hedge_delay_ms: normalize_hedge_delay_ms(env_u64(

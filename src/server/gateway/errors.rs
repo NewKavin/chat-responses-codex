@@ -633,6 +633,17 @@ impl GatewayError {
             ),
         }
     }
+    pub(super) fn payload_too_large(limit_mb: u64) -> Self {
+        Self::classified(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body exceeds the {limit_mb} MiB gateway limit"),
+            "invalid_request_error",
+            "gateway_request_body_too_large",
+            "gateway_request_body_too_large",
+            None,
+            Some(json!({ "scope": "gateway", "limit_mib": limit_mb })),
+        )
+    }
     pub(super) fn upstream_bad_request(message: impl Into<String>, status: StatusCode) -> Self {
         Self::classified(
             StatusCode::BAD_REQUEST,

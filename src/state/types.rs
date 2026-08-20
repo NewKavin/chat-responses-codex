@@ -215,6 +215,10 @@ pub struct AppConfig {
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
     pub upstream_first_semantic_output_timeout_seconds: u64,
     pub codex_stream_idle_timeout_ms: u64,
+    /// Maximum request body size for gateway API endpoints (MiB). Axum's
+    /// default is 2 MiB; Codex/Claude Code with long contexts or base64
+    /// images easily exceed that.
+    pub gateway_request_body_limit_mb: u64,
 }
 
 impl fmt::Debug for AppConfig {
@@ -315,6 +319,7 @@ impl Default for AppConfig {
                 .to_vec(),
             upstream_first_semantic_output_timeout_seconds: 3_300,
             codex_stream_idle_timeout_ms: 3_600_000,
+            gateway_request_body_limit_mb: default_gateway_request_body_limit_mb(),
         }
     }
 }
@@ -925,6 +930,10 @@ pub fn default_capability_probe_reasoning_timeout_seconds() -> u64 {
 
 pub fn default_upstream_common_mode_breaker_threshold() -> u32 {
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD
+}
+
+pub fn default_gateway_request_body_limit_mb() -> u64 {
+    32
 }
 
 pub fn default_upstream_common_mode_transient_threshold() -> u32 {
