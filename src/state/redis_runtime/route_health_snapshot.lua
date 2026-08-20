@@ -9,9 +9,20 @@ local function state_values(key)
   local cooldown_until = tonumber(redis.call('HGET', key, 'cooldown_until_ms') or '0')
   local active = redis.call('HGET', key, 'half_open_lease')
   local half_open_expires_at = tonumber(redis.call('HGET', key, 'half_open_expires_at_ms') or '0')
+  -- T3: the honest remaining half-open wait is min(remaining exclusive window,
+  -- remaining lease), floored at the optimistic 1s poll interval.  A live
+  -- lease whose exclusive window already elapsed admits concurrent callers, so
+  -- the terminal message must not keep promising the whole lease TTL.
+  local half_open_exclusive_until = tonumber(redis.call('HGET', key, 'half_open_exclusive_until_ms') or '0')
   local half_open_remaining = 0
   if active and active ~= '' and half_open_expires_at > now_ms then
     half_open_remaining = half_open_expires_at - now_ms
+    if half_open_exclusive_until > 0 then
+      half_open_remaining = math.min(half_open_remaining, half_open_exclusive_until - now_ms)
+    end
+    if half_open_remaining < 1000 then
+      half_open_remaining = 1000
+    end
   end
   return {
     key,

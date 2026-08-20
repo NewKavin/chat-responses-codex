@@ -37,7 +37,7 @@ const KEY_COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
 const MODEL_QUARANTINE_BASE: Duration = Duration::from_secs(15 * 60);
 const MODEL_QUARANTINE_MAX: Duration = Duration::from_secs(60 * 60);
 const FAILURE_STREAK_RESET: Duration = Duration::from_secs(10 * 60);
-const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
+pub const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
 const LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN: Duration = Duration::from_secs(60);
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
@@ -512,6 +512,27 @@ impl HealthState {
         self.half_open_expires_at
             .map(|expires_at| expires_at.saturating_duration_since(now))
             .unwrap_or_default()
+    }
+
+    /// Remaining time of the half-open exclusive window (T3).  While this is
+    /// non-zero the route/key reports `HalfOpenBusy` to `reserve`; after it
+    /// elapses concurrent requests are admitted without a lease even though
+    /// the original probe lease is still alive.  Falls back to the lease
+    /// remaining when no window is recorded (legacy states).
+    fn half_open_exclusive_remaining(&self, now: Instant) -> Duration {
+        self.half_open_exclusive_until
+            .map(|until| until.saturating_duration_since(now))
+            .unwrap_or_else(|| self.half_open_remaining(now))
+    }
+
+    /// Honest wait time for a client while the route/key is half-open busy:
+    /// `min(remaining exclusive window, remaining lease)`, floored at the
+    /// optimistic 1s poll interval.  Telling the client to wait the whole
+    /// 300s lease TTL is a lie once the exclusive window has elapsed (T3).
+    fn half_open_busy_wait(&self, now: Instant) -> Duration {
+        self.half_open_remaining(now)
+            .min(self.half_open_exclusive_remaining(now))
+            .max(HALF_OPEN_BUSY_RETRY)
     }
 }
 
@@ -1702,7 +1723,7 @@ fn health_snapshot(state: &HealthState, now: Instant) -> HealthStateSnapshot {
         cooldown_remaining: state.retry_after(now),
         half_open,
         half_open_remaining: if half_open {
-            state.half_open_remaining(now)
+            state.half_open_busy_wait(now)
         } else {
             Duration::ZERO
         },
@@ -1716,7 +1737,7 @@ fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecov
         Some(RouteRecovery {
             class,
             retry_after: HALF_OPEN_BUSY_RETRY,
-            half_open_remaining: Some(state.half_open_remaining(now).max(HALF_OPEN_BUSY_RETRY)),
+            half_open_remaining: Some(state.half_open_busy_wait(now)),
         })
     } else {
         Some(RouteRecovery {

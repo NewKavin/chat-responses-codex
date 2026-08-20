@@ -730,6 +730,7 @@ fn record_cooled_route_attempt(
     class: FailureClass,
     retry_after: Duration,
     upstream_status: Option<u16>,
+    half_open_busy: bool,
 ) {
     route_attempts.record_cooled(AttemptFailure {
         route_id: anonymous_route_id(
@@ -741,6 +742,7 @@ fn record_cooled_route_attempt(
         upstream_status,
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),
+        half_open_busy,
     });
 }
 
@@ -6040,11 +6042,6 @@ async fn process_gateway_request_inner(
                                 class,
                                 retry_after,
                                 upstream_status,
-                            }
-                            | RouteAvailability::HalfOpenBusy {
-                                class,
-                                retry_after,
-                                upstream_status,
                             } => {
                                 if last_resort_probe_armed {
                                     // Probe refused (busy lease / per-route
@@ -6087,6 +6084,70 @@ async fn process_gateway_request_inner(
                                     class,
                                     retry_after,
                                     upstream_status,
+                                    false,
+                                );
+                                last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
+                                    "all eligible upstream routes are temporarily unavailable"
+                                        .into(),
+                                ));
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                continue 'key_candidates;
+                            }
+                            RouteAvailability::HalfOpenBusy {
+                                class,
+                                retry_after,
+                                upstream_status,
+                            } => {
+                                if last_resort_probe_armed {
+                                    // Probe refused (busy lease / per-route
+                                    // interval / nothing left to probe): fall
+                                    // back to the ordinary reserve path.
+                                    last_resort_probe_armed = false;
+                                    continue;
+                                }
+                                if account_recovery.active_probe_account() == Some(&account_key) {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(retry_after) => {}
+                                        error = account_recovery.wait_for_probe_interruption() => {
+                                            account_recovery
+                                                .complete_attempt(
+                                                    &account_key,
+                                                    AccountProbeOutcome::Cancelled,
+                                                )
+                                                .await?;
+                                            if error.error_category()
+                                                == "runtime_coordination_unavailable"
+                                            {
+                                                return Err(error);
+                                            }
+                                            last_error = Some(error);
+                                            last_failure_upstream = Some((
+                                                upstream.id.clone(),
+                                                Some(upstream.name.clone()),
+                                            ));
+                                            break None;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                // Half-open exclusive window: the route is
+                                // being probed RIGHT NOW and other requests
+                                // may re-enter in ~1s (T3).  Kept separate
+                                // from real cooldowns in the ledger so the
+                                // busy capability is not counted as a
+                                // transient-server failure, and busy waits do
+                                // not consume the ordinary retry rounds.
+                                record_cooled_route_attempt(
+                                    &request_route_attempts,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    class,
+                                    retry_after,
+                                    upstream_status,
+                                    true,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
                                     "all eligible upstream routes are temporarily unavailable"
@@ -6148,6 +6209,7 @@ async fn process_gateway_request_inner(
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
                                     None,
+                                    false,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream account is waiting for recovery".into(),
@@ -6233,6 +6295,7 @@ async fn process_gateway_request_inner(
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
                                     None,
+                                    false,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream request concurrency capacity is full".into(),
@@ -7606,6 +7669,10 @@ async fn process_gateway_request_inner(
                 failure,
                 round_recovery,
                 round_ledger.is_pure_client_rate_limit(),
+                // A round that attempted nothing and skipped every candidate
+                // only because of half-open exclusive windows waits on its own
+                // busy budget, not the ordinary round cap (T3).
+                round_ledger.attempt_count() == 0 && round_ledger.is_all_half_open_busy(),
                 &request_id,
             )
         });
@@ -7753,6 +7820,7 @@ async fn process_gateway_request_inner(
             routing_round = request_route_attempts.routing_round(),
             account_recovery_rounds = account_recovery.rounds(),
             physical_attempt_count = request_route_attempts.physical_attempt_count(),
+            half_open_busy_count = attempt_ledger.half_open_busy_count(),
             error_category = %error.error_category(),
             "request failed after exhausting upstream candidates"
         );

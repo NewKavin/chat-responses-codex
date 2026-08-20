@@ -329,36 +329,77 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 7. 上游内部重试/hedge 的 `StreamCompletionContext` 构造点（`upstream.rs:754`）与
    `tests/unit/server/gateway.rs:857` fixture 同样补 `health_verdict_pending` 字段（编译器强制）。
 
-### T3（P0）半开占用与真冷却分账：不吃盲重试轮数、不谎报 retry_after
+### T3（P0）半开占用与真冷却分账：不吃盲重试轮数、不谎报 retry_after —— ✅ commit（见 T4 回填）
 
-- [ ] RED：`tests/gateway/chat/rate_limits.rs` 风格新增用例
-  - 全池仅“半开占用”时：终态 details 出现 `half_open_busy_count > 0`
-    且 `class_counts` 不再把它计成 `transient_server`（或以独立字段区分，见下）；
-  - 该形态下的轮次不消耗 `max_rounds`（把 `max_rounds` 设为 1 也应能等待多轮，
-    直到 busy 轮上限或时间预算耗尽）；
-  - 终态消息里的 `please try again in Ns`：半开占用时 **N ≤ 独占窗口秒数**，不再是租约 TTL；
+- [x] RED（实际落在新增文件 `tests/gateway/chat/half_open_busy_ledger.rs`，注册于 `tests/gateway/chat.rs`）
+  - mock 上游：第 1 次命中 = 半开探针（只发 role-only delta、永不语义输出 → T2 结算不触发），
+    hold 住流 15s；第 2 次命中 = 500 响铃（独占被破坏即测试失败）。
+  - 用例 1 `half_open_busy_pool_terminates_with_busy_count_and_honest_retry`：
+    全池仅半开占用 → 503 `upstream_routes_exhausted`，`physical_attempt_count=0`，
+    `half_open_busy_count=1`，`cooled_candidate_count=1`，`give_up_reason="half_open_busy_cap"`，
+    `class_counts.transient_server=1`（不变量 1：分类不动，独立字段区分）；
+    消息 `please try again in Ns` 中 N ∈ 1..=60 且 <100（窗口 60s，不是租约 TTL），
+    `retry_after_seconds` 与消息一致。
+  - 用例 2 `half_open_busy_rounds_do_not_consume_max_rounds`：`max_rounds=1` + busy 上限 3
+    → `give_up_reason="half_open_busy_cap"`，`routing_rounds>=4`，`waited_ms>=3000`
+    （busy 轮不占普通轮数）。
   - 真冷却路径的既有断言全绿（回归）。
-- [ ] GREEN：
-  - `src/server/gateway/route_attempts.rs`：`AttemptFailure` 增 `half_open_busy: bool`；
-    `AttemptLedger` 增 `half_open_busy_count()` / `is_all_half_open_busy()`。
-  - `src/server/gateway.rs:724` `record_cooled_route_attempt` 增参数；
-    `gateway.rs:6005-6060` 把 `Cooling` 与 `HalfOpenBusy` 两个分支拆开传入（当前是合并 match 臂）。
-  - `src/state/route_health.rs:1486` `health_state_recovery`：半开占用时
-    `half_open_remaining` 改报 `min(剩余独占窗口, 剩余租约)`（下限 `HALF_OPEN_BUSY_RETRY`），
+- [x] GREEN：
+  - `src/server/gateway/route_attempts.rs`：`AttemptFailure` 增 `half_open_busy: bool`（记录路径默认 false）；
+    `AttemptLedger` 增 `half_open_busy_count()` / `is_all_half_open_busy()`
+    （非空 + 全部条目带 busy 标记才算 all-busy）。
+  - `src/server/gateway.rs`（行号已漂移，实际约 :730/:6041-6159）：`record_cooled_route_attempt` 增
+    `half_open_busy: bool` 参数，3 个调用点传值（Cooling=false / HalfOpenBusy=true / ConcurrencySaturated=false）；
+    把合并的 `Cooling | HalfOpenBusy` match 臂拆成两个独立臂。
+    `decide_with_reason` 调用点（:7667）新增
+    `busy_only = round_ledger.attempt_count() == 0 && round_ledger.is_all_half_open_busy()`；
+    `route_action = "routes_exhausted"` 日志（:7820）增 `half_open_busy_count`。
+  - `src/state/route_health.rs`（实际 :1712/:1730 附近，原 :1486 已偏移）：
+    新增 `HealthState::half_open_exclusive_remaining()` 与 `half_open_busy_wait()`
+    = `min(剩余独占窗口, 剩余租约).max(HALF_OPEN_BUSY_RETRY)`；
+    `health_snapshot()` 与 `health_state_recovery()` 的半开占用分支改报 `half_open_busy_wait`，
     修掉“告诉客户端等 287 秒”的问题（`errors.rs:137-140` 的消费点无需改）。
+  - `src/state/redis_runtime/route_health_snapshot.lua`：同步改报
+    `min(剩余租约, 剩余独占窗口)`、下限 1000ms（与本地 `half_open_busy_wait` 对齐；
+    无 `half_open_exclusive_until_ms` 字段的旧状态退回原租约语义）。响应形状（10 字段）不变。
   - `src/server/gateway/route_retry.rs`：
-    - `RouteRetryBudget` 增 `busy_rounds: u32`；
-    - `decide_with_reason` 增分支：`attempt_count == 0 && ledger.is_all_half_open_busy()`
-      → 返回 `required_delay = HALF_OPEN_BUSY_RETRY` 的等待，**不计入 `max_rounds`**，
-      改受新设置 `upstream_route_half_open_busy_max_rounds`（默认 10，范围 1..=100）与总时间预算约束；
-    - `GiveUpReason` 增 `HalfOpenBusyCap`（`as_str() = "half_open_busy_cap"`）。
-      调用方需把 ledger 传入（当前签名只收 `TerminalFailure`，新增一个 `busy_only: bool` 入参即可，
-      与既有 `client_retryable_rate_limit: bool` 同风格）。
-  - `src/server/gateway/errors.rs`：details 增 `half_open_busy_count`；
-    `gateway.rs:7713` 的 `route_action = "routes_exhausted"` 日志增同名字段。
-  - `src/server/admin.rs:498` 的 dashboard 分类：`upstream_routes_exhausted` 已单列，
-    可选地按 `half_open_busy_count > 0` 再分一档（可放到 T7）。
-- [ ] 验证：`rtk cargo test --test gateway --test admin_dashboard`。
+    - `RouteRetryBudget` 增 `busy_rounds: u32` + `busy_rounds()`；`record_wait()` 对
+      `wait.busy` 只增 busy 计数、不推进 `current_round`（debug_assert 双向）；
+    - `RouteRetryWait` 增 `busy: bool`（既有构造全部显式 false）；
+    - `RouteRetryPolicy` 增 `busy_max_rounds`（`from_sources` 读
+      `upstream_route_half_open_busy_max_rounds`；`new_with_full_tuning` 全参数；
+      测试 helper `new_with_tuning` 默认 10）；
+    - `decide_with_reason` 增 `busy_only: bool` 入参（在 enabled/Temporary/B3 检查之后）：
+      busy 分支返回 1s+jitter 等待、`next_round` 不变，受 `busy_max_rounds` 与总时间预算约束；
+      超限给 `GiveUpReason::HalfOpenBusyCap`（`as_str() = "half_open_busy_cap"`）。
+  - `src/server/gateway/errors.rs`：details 增 `half_open_busy_count`。
+  - `src/state/types.rs` / `src/state/runtime_settings.rs` / `src/main.rs`：
+    `AppConfig.upstream_route_half_open_busy_max_rounds`（默认 `DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS=10`，
+    immediate，`validate_and_normalize` 范围 1..=100；env `UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS`, clamp 1..=100）。
+    `src/state.rs` 补常量 re-export；计数断言 49→50 / 50→51。
+  - dashboard 分类细分按方案留到 T7（`upstream_routes_exhausted` 已单列）。
+- [x] 验证：`rtk cargo test --test gateway`（396 通过）、`--test route_health`（43 通过）、
+  `--test unit` / `--test runtime_settings` / `--test admin_runtime_settings` / `--test admin_dashboard` 全绿；
+  fmt / clippy -D warnings / `cargo test --all` 见 T8 复核。
+
+**实现偏离记录（与方案文字不同处，均为等价或更保守选择）：**
+1. RED 放新文件 `tests/gateway/chat/half_open_busy_ledger.rs`（方案写 rate_limits.rs 风格；新文件避免
+   把并发语义埋进既有重试测试）。终端请求用**非流式**（流式终态错误走 SSE 事件而非 JSON details）。
+2. `health_state_recovery` 锚点从方案 :1486 漂移到实际 :1730；`record_cooled_route_attempt` 锚点
+   :724 漂移到 :730。
+3. Redis `route_health_snapshot.lua` 必须同步改报 min（方案只写了本地 `health_state_recovery`；
+   否则 Redis 后端仍报整租约 TTL，违反“本地/Redis 行为一致”）。旧字段缺失时退回原语义。
+4. `is_all_half_open_busy` 要求**全部**条目都带 busy 标记且尝试数为 0 才走 busy 分支；
+   混合池（真冷却 + 忙碌）走原路径，`half_open_busy_count` 仍独立上报。
+5. busy 轮同时受 `busy_max_rounds` 与**共享总时间预算**（`max_wait`，默认 30s）约束
+   （方案未指定时间预算归属；选共享预算，拒绝为 busy 单设时间预算，见 commit trailers）。
+6. A3 提前探测（T1 明确租约期整段 busy）的 `half_open_busy_wait` 退化为租约剩余 —— 语义不变。
+7. 既有测试 `half_open_busy_reports_remaining_lease_time`（曾断言半开占用报整租约 TTL）按 T3 契约
+   改写重命名 `half_open_busy_reports_wait_bounded_by_exclusive_window`（窗口前 = min = 3s；
+   窗口后 = 1s 下限）；Redis 同语义用例 `redis_half_open_busy_reports_remaining_dedicated_lease`
+   在 min 语义下断言仍成立（2s 租约 < 3s 窗口 → min = 租约）。
+8. `HALF_OPEN_BUSY_RETRY` 由 `pub(crate)` 改 `pub` 并经 `state.rs` 的 `pub use route_health` 导出
+   （`crate::state` 是 `gateway_core::state` 的 re-export，`pub(crate)` 跨 crate 不可见）。
 
 ### T4（P1）上游 Retry-After 统一封顶
 

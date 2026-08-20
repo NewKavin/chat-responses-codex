@@ -112,6 +112,10 @@ pub(super) fn terminal_route_failure_error(
             "cooled_candidate_count".to_string(),
             json!(ledger.cooled_candidate_count()),
         ),
+        (
+            "half_open_busy_count".to_string(),
+            json!(ledger.half_open_busy_count()),
+        ),
         ("class_counts".to_string(), Value::Object(class_counts)),
         ("routing_rounds".to_string(), json!(routing_rounds)),
         ("waited_ms".to_string(), json!(waited.as_millis() as u64)),

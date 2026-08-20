@@ -983,7 +983,7 @@ async fn expired_key_half_open_lease_releases_for_next_caller() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn half_open_busy_reports_remaining_lease_time() {
+async fn half_open_busy_reports_wait_bounded_by_exclusive_window() {
     let mut registry =
         RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("fingerprint-busy-recovery", "glm-5.2");
@@ -1003,6 +1003,18 @@ async fn half_open_busy_reports_remaining_lease_time() {
     // 调度语义：busy 时乐观轮询 1s，探针通常在数秒内完成
     assert_eq!(busy, Duration::from_secs(1));
 
+    // T3：独占窗口（3s）还未过去时，诚实等待时间 =
+    // min(剩余独占窗口, 剩余租约) = 当前窗口剩余 3s，而不是 300s 租约 TTL。
+    let early_recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&route))
+        .expect("active half-open route is temporarily busy");
+    assert_eq!(
+        early_recovery.half_open_remaining,
+        Some(Duration::from_secs(3)),
+        "T3: before the exclusive window elapses the honest wait is min(lease, window) = 3s, got {:?}",
+        early_recovery.half_open_remaining
+    );
+
     tokio::time::advance(Duration::from_secs(100)).await;
     let recovery = registry
         .earliest_temporary_recovery(std::slice::from_ref(&route))
@@ -1012,13 +1024,12 @@ async fn half_open_busy_reports_remaining_lease_time() {
         Duration::from_secs(1),
         "gateway must poll optimistically"
     );
-    // 诚实剩余租约：TTL 300s，已过 100s，剩余约 200s
-    assert!(
-        recovery
-            .half_open_remaining
-            .is_some_and(|remaining| remaining > Duration::from_secs(100)
-                && remaining <= Duration::from_secs(200)),
-        "terminal message must report the honest remaining lease, got {:?}",
+    // T3：窗口早已过去（3s vs 已过 100s），再告诉客户端等剩余租约（~200s）
+    // 是谎言——窗口之后并发请求已被放行（T1），诚实等待时间回到 1s 轮询下限。
+    assert_eq!(
+        recovery.half_open_remaining,
+        Some(Duration::from_secs(1)),
+        "T3: after the exclusive window elapses the honest wait is the 1s poll floor, got {:?}",
         recovery.half_open_remaining
     );
 

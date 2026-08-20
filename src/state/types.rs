@@ -104,6 +104,11 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
 /// genuinely distinguishes two models by case alone.
 pub const DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING: bool = true;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+/// Dedicated half-open-busy round budget (T3): how many 1s busy polls a
+/// request may take when the whole pool is in half-open recovery before
+/// giving up with `give_up_reason = half_open_busy_cap`.  Busy waits never
+/// consume the ordinary `upstream_route_exhaustion_retry_max_rounds`.
+pub const DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS: u32 = 10;
 /// Whether an exhausted request may spend one final budget-aligned wait when
 /// the round cap is hit but a live transient recovery fits the remaining time
 /// budget (Part A / R2: max_rounds bounds blind retries, the time budget
@@ -211,6 +216,12 @@ pub struct AppConfig {
     /// request for the whole lease lifetime.
     #[serde(default = "default_upstream_route_half_open_exclusive_window_ms")]
     pub upstream_route_half_open_exclusive_window_ms: u64,
+    /// Maximum dedicated busy-wait rounds a request may take when every
+    /// candidate is in half-open recovery (T3).  Busy waits do not consume
+    /// `upstream_route_exhaustion_retry_max_rounds`; setting this to 1
+    /// restores the pre-T3 "give up after one busy round" behavior.
+    #[serde(default = "default_upstream_route_half_open_busy_max_rounds")]
+    pub upstream_route_half_open_busy_max_rounds: u32,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -307,6 +318,8 @@ impl Default for AppConfig {
             upstream_route_health_half_open_ttl_seconds: DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
             upstream_route_half_open_exclusive_window_ms:
                 DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+            upstream_route_half_open_busy_max_rounds:
+                DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -965,6 +978,10 @@ pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
 
 pub fn default_upstream_route_half_open_exclusive_window_ms() -> u64 {
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS
+}
+
+pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {
+    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {
