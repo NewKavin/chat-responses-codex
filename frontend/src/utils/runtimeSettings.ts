@@ -262,6 +262,50 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'upstream_route_half_open_exclusive_window_ms',
+    group: 'routing',
+    label: '半开独占窗口',
+    apply: 'immediate',
+    control: 'number',
+    unit: '毫秒',
+    min: 0,
+    max: 600_000,
+    description: '路由复检期间独占的最长时间，超过后其它请求可并发进入；0 表示不独占。'
+  },
+  {
+    key: 'upstream_route_half_open_busy_max_rounds',
+    group: 'routing',
+    label: '半开占用最大轮数',
+    apply: 'immediate',
+    control: 'number',
+    unit: '轮',
+    min: 1,
+    max: 100,
+    description: '整池都在复检时，请求最多重试的轮数（不占用普通重试轮数）。'
+  },
+  {
+    key: 'upstream_retry_after_cap_seconds',
+    group: 'routing',
+    label: '上游 Retry-After 上限',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: 3_600,
+    description: '上游 429/503 携带的 Retry-After 超过该值时按该值封顶。'
+  },
+  {
+    key: 'upstream_credentials_first_strike_seconds',
+    group: 'routing',
+    label: '凭证首次失败冷却',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: 3_600,
+    description: '401/403 第一次只短暂隔离 key，连续失败才升级到 15 分钟以上。'
+  },
+  {
     key: 'upstream_route_exhaustion_retry_enabled',
     group: 'routing',
     label: '路由耗尽后重试',

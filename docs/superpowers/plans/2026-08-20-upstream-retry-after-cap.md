@@ -512,7 +512,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 > 4. Redis 与本地 schedule 均由 Rust 预计算，两边输入同一 `credentials_first_strike`，
 >    行为一致；Lua 无改动。
 
-### T6（P2）清理死参数 —— ✅ commit（见 T7 回填）
+### T6（P2）清理死参数 —— ✅ commit `3d59447`
 
 - [x] 删除：行号已漂移（实际 `types.rs:163/:298`、`main.rs:119-121`）——字段定义、Default 赋值、
   env 读取一并删除；grep 确认全仓 src/ 无消费点（runtime_settings.rs / state.rs 均无）。
@@ -523,26 +523,30 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 - [x] 验证：`rtk cargo build --all-targets` 干净；`--test gateway`（398）、`--test docker`（18）全绿；
   fmt/clippy 干净。历史文档（2026-07-18 plan/spec、2026-07-24 plan）保留原样不动。
 
-### T7（P2）前端设置项与部署文档
+### T7（P2）前端设置项与部署文档 —— ✅ commit（见 T8 回填）
 
-- [ ] RED：`frontend/src/utils/runtimeSettings.spec.ts` 字段计数 +N、immediate 计数 +N。
-- [ ] GREEN：
-  - `frontend/src/types/index.ts`：`RuntimeSettings` 增
+- [x] RED：`frontend/src/utils/runtimeSettings.spec.ts` 字段计数 47→51、immediate 34→38；
+  `validSettings` 与 `expectedKeys` 同步补 4 键。
+- [x] GREEN：
+  - `frontend/src/types/index.ts`：`RuntimeSettings` 增 4 字段（置于
+    `upstream_route_health_half_open_ttl_seconds` 之后）：
     `upstream_route_half_open_exclusive_window_ms`、`upstream_route_half_open_busy_max_rounds`、
     `upstream_retry_after_cap_seconds`、`upstream_credentials_first_strike_seconds`。
-  - `frontend/src/utils/runtimeSettings.ts`：设置项定义（group `routing`「路由策略」，immediate），文案：
+  - `frontend/src/utils/runtimeSettings.ts`：4 个设置项定义（group `routing`「路由策略」，immediate），
+    文案与后端范围一致（窗口 0..=600000、busy 轮 1..=100、cap 1..=3600、首击 1..=3600）：
     - 半开独占窗口（毫秒）：路由复检期间独占的最长时间，超过后其它请求可并发进入；0 表示不独占。
     - 半开占用最大轮数：整池都在复检时，请求最多重试的轮数（不占用普通重试轮数）。
     - 上游 Retry-After 上限（秒）：上游 429/503 携带的 Retry-After 超过该值时按该值封顶。
     - 凭证首次失败冷却（秒）：401/403 第一次只短暂隔离 key，连续失败才升级到 15 分钟以上。
-  - `Settings.vue` 按 group 自动渲染，无需改动。
-  - `DEPLOYMENT.md`「Intranet / Aggregated Gateway Deployment」小节：
-    补上述四项与 §3 的建议值表，并把 §1 的排查判据写进排障指引；
-    额外补一段 **并发容量测算**（C6）：单上游可支撑的并发流数 =
-    `max_concurrency`（默认 4，按 (upstream, key) 计），Claude Code / Codex 的并行子任务
-    与长流会长期占用槽位，内网聚合网关建议按实际承载调到 16–64，并说明
-    `requests_per_minute` / 5h 配额只作用于 hedge。
-- [ ] 验证：`rtk npm --prefix frontend test`、`rtk npm --prefix frontend run type-check`。
+  - `Settings.vue` 按 group 自动渲染（`runtimeSettingGroups` + `fieldsForGroup`），确认无需改动。
+  - `DEPLOYMENT.md`「Intranet / Aggregated Gateway Deployment」小节：表格补 4 行；
+    建议值段补四项默认值与 C6 并发容量测算（`max_concurrency` 默认 4 按 (upstream, key) 计，
+    Claude Code / Codex 并行子任务与长流长期占槽，内网聚合网关建议 16–64；
+    `requests_per_minute` / 5h 配额只作用于 hedge）；排障指引补 `give_up_reason=half_open_busy_cap`
+    + `half_open_busy_count` 判据、`physical_attempt_count=0` 语义、`cooldown_seconds ≤ cap`
+    核验口径。
+- [x] 验证：`rtk npm --prefix frontend test`（37 文件 / 271 用例全绿）、
+  `rtk npm --prefix frontend run type-check`（vue-tsc --noEmit 干净）。
 
 ### T8 全量验证与部署
 

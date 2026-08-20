@@ -205,6 +205,10 @@ Relevant settings (see `Runtime Settings Operations`):
 | `upstream_route_exhaustion_retry_max_rounds` | 3 | Routing-round cap for the temporary route-exhaustion retry path. With budget alignment on (default), keep 3: the cap bounds blind retries while the time budget governs evidence-backed aligned waits. If you turn `upstream_route_exhaustion_budget_alignment_enabled` off, raise this to 6 so round count does not bite before the time budget. |
 | `upstream_route_exhaustion_budget_alignment_enabled` | true | When the round cap is hit but a live transient recovery fits the remaining wait budget, grant one final aligned wait before giving up (and never for pure 429-family exhaustions, which are always returned to the client). |
 | `upstream_transient_last_resort_probe_enabled` | true | When a routing round made zero physical attempts because every candidate is cooling, arm the earliest-recovering route as an early half-open probe: the next request itself tests it (single-flight + ≥1s per-route interval). Turns a cooled-down pool into self-healing instead of waiting out the cooldown clock. |
+| `upstream_route_half_open_exclusive_window_ms` | 3000 | Route re-probe exclusivity window: one request probes a recovering route while the pool reports it "half-open busy"; after the window elapses concurrent requests are admitted again. `0` disables exclusivity (everyone may race into the probe). Harmless leftover probe leases are bounded by `upstream_route_health_half_open_ttl_seconds`. |
+| `upstream_route_half_open_busy_max_rounds` | 10 | When the whole pool is only half-open-busy, the request may poll on a dedicated busy-round budget that does **not** consume ordinary `upstream_route_exhaustion_retry_max_rounds`; exhaustion reports `give_up_reason = half_open_busy_cap`. |
+| `upstream_retry_after_cap_seconds` | 30 | Ceiling for upstream-provided `Retry-After` (429/503): larger values are clamped for cooldowns, terminal headers and admin snapshots. Raise to 3600 to trust upstream values verbatim. |
+| `upstream_credentials_first_strike_seconds` | 60 | First 401/403 for an API key cools the key only this long; consecutive strikes escalate onto the 15min→1h exponential curve. |
 
 Recommended values for a single aggregated gateway deployment:
 
@@ -225,6 +229,25 @@ Recommended values for a single aggregated gateway deployment:
 - Keep both new self-healing switches on (defaults):
   `upstream_route_exhaustion_budget_alignment_enabled = true` and
   `upstream_transient_last_resort_probe_enabled = true`.
+- Keep the new half-open governance defaults:
+  `upstream_route_half_open_exclusive_window_ms = 3000` (a recovering route is
+  monopolized by one probe request for at most 3s, then others may race in),
+  `upstream_route_half_open_busy_max_rounds = 10`,
+  `upstream_retry_after_cap_seconds = 30` (do not let a quota-style 429
+  quarantine a route for an hour), and
+  `upstream_credentials_first_strike_seconds = 60` (a single 401/403 should
+  not hide the key for 15 minutes; consecutive strikes still escalate).
+- **Concurrency capacity (the other half of `upstream_routes_exhausted`):**
+  each upstream admits at most `max_concurrency` concurrent streams per
+  (upstream, key) — default **4**. Claude Code / Codex spawn parallel
+  sub-tasks and hold long streams, so a small team can pin 4 slots for
+  minutes. If `details.class_counts.concurrency_saturated` (or the
+  `concurrency_saturated` share of 429s) stays high after the half-open /
+  Retry-After fixes, raise the per-upstream `max_concurrency` to **16–64**
+  for an internal aggregated gateway and raise
+  `default_upstream_max_concurrency` for upstreams without an explicit
+  value. `requests_per_minute` and the 5h quota only gate **hedge** attempts,
+  not primary windows, so they are rarely the limiter here.
 
 Troubleshooting:
 
@@ -246,6 +269,20 @@ Troubleshooting:
     one budget-aligned wait per request was already consumed.
   - `live_recovery_seconds`: the healthy registry's earliest route recovery
     (half-open remaining preferred); the client-side `Retry-After` matches it.
+  - `give_up_reason: half_open_busy_cap` + `half_open_busy_count > 0`:
+    every candidate was merely being re-probed by another request, not really
+    failing — the pool is healthy but the probe (first semantic output) is
+    slow. Check the upstream's first-packet latency and the
+    `upstream_route_half_open_exclusive_window_ms` /
+    `upstream_route_half_open_busy_max_rounds` settings.
+  - `physical_attempt_count = 0` should become rare: it now means the pool was
+    exclusively half-open-busy (or fully cooling), not that routing silently
+    skipped attempts. A persistent large `half_open_busy_count` means probes
+    are slow, not that the pool is failing.
+  - Reported `cooldown_seconds` (logs / admin snapshots) must never exceed
+    `upstream_retry_after_cap_seconds` for upstream-provided values; if a big
+    number appears, an upstream 429 carried a huge `Retry-After` that bypassed
+    the cap (report it).
   - `last_resort_probe_attempted`: whether the current request itself was
     sent as an early half-open probe (true means the pool was fully cooling
     and the probe reached the upstream).
