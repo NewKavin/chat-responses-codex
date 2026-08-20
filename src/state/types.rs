@@ -104,6 +104,13 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
 /// genuinely distinguishes two models by case alone.
 pub const DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING: bool = true;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+/// Cap on upstream-provided Retry-After (seconds) before it enters any local
+/// cooldown or terminal retry hint (T4).  A single exaggerated upstream
+/// "Retry-After: 105" used to pin a route's cooldown and tell clients to wait
+/// minutes; values beyond the cap are clamped at the observation chokepoints
+/// while the local exponential backoff and the Redis Lua parsing stay
+/// untouched.
+pub const DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS: u64 = 30;
 /// Dedicated half-open-busy round budget (T3): how many 1s busy polls a
 /// request may take when the whole pool is in half-open recovery before
 /// giving up with `give_up_reason = half_open_busy_cap`.  Busy waits never
@@ -222,6 +229,11 @@ pub struct AppConfig {
     /// restores the pre-T3 "give up after one busy round" behavior.
     #[serde(default = "default_upstream_route_half_open_busy_max_rounds")]
     pub upstream_route_half_open_busy_max_rounds: u32,
+    /// Cap (seconds) applied to upstream-provided Retry-After before it feeds
+    /// cooldowns / terminal hints (T4).  Range 1..=3600; 3600 approximates
+    /// "disable the cap".
+    #[serde(default = "default_upstream_retry_after_cap_seconds")]
+    pub upstream_retry_after_cap_seconds: u64,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -320,6 +332,7 @@ impl Default for AppConfig {
                 DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
             upstream_route_half_open_busy_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
+            upstream_retry_after_cap_seconds: DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -982,6 +995,10 @@ pub fn default_upstream_route_half_open_exclusive_window_ms() -> u64 {
 
 pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {
     DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS
+}
+
+pub fn default_upstream_retry_after_cap_seconds() -> u64 {
+    DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

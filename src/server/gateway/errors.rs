@@ -76,6 +76,7 @@ pub(super) fn client_error_message(code: &str, message: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // terminal hint assembly; cap added by T4
 pub(super) fn terminal_route_failure_error(
     ledger: &AttemptLedger,
     routing_rounds: u32,
@@ -84,6 +85,7 @@ pub(super) fn terminal_route_failure_error(
     physical_attempt_count: usize,
     give_up_reason: Option<GiveUpReason>,
     last_resort_probe_attempted: bool,
+    retry_after_cap: Duration,
 ) -> GatewayError {
     let terminal = ledger.terminal_failure();
     let summaries = ledger.class_summaries();
@@ -142,7 +144,8 @@ pub(super) fn terminal_route_failure_error(
             // enough to actually succeed on their next attempt.
             let retry_after = live_recovery
                 .map(|recovery| recovery.half_open_remaining.unwrap_or(recovery.retry_after))
-                .unwrap_or(retry_after);
+                .unwrap_or(retry_after)
+                .min(retry_after_cap);
             let retry_after_seconds = duration_seconds_ceil(retry_after);
             details.insert(
                 "retry_after_seconds".to_string(),

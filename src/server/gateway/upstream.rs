@@ -813,6 +813,9 @@ fn send_route_hedge_attempt(
                 result
             }
             Err(error) => {
+                let retry_after_cap = Duration::from_secs(
+                    context.runtime_settings.upstream_retry_after_cap_seconds.max(1),
+                );
                 super::finish_route_health_permit(
                     &completion.route_health_permit,
                     super::route_health_outcome(
@@ -820,6 +823,7 @@ fn send_route_hedge_attempt(
                         context
                             .route_attempts
                             .has_transient_failure_for(&route_health_key),
+                        retry_after_cap,
                     ),
                 )
                 .await?;
@@ -839,6 +843,7 @@ fn send_route_hedge_attempt(
                             ),
                             requested: &context.requested_features,
                             requested_value: context.inference_strength.as_deref(),
+                            retry_after_cap,
                         },
                         &error,
                     )

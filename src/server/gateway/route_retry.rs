@@ -801,7 +801,14 @@ mod tests {
         };
         assert_eq!(
             policy
-                .decide_with_reason(&exhausted, terminal, Some(transient), false, false, "cap-again")
+                .decide_with_reason(
+                    &exhausted,
+                    terminal,
+                    Some(transient),
+                    false,
+                    false,
+                    "cap-again"
+                )
                 .1,
             Some(GiveUpReason::AlignmentExhausted),
         );

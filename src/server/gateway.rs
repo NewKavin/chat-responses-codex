@@ -506,6 +506,7 @@ struct RouteAttemptContext<'a> {
     route: RouteCapabilityRoute<'a>,
     requested: &'a RequestedFeatures,
     requested_value: Option<&'a str>,
+    retry_after_cap: Duration,
 }
 
 async fn record_route_attempt(
@@ -519,6 +520,7 @@ async fn record_route_attempt(
         route,
         requested,
         requested_value,
+        retry_after_cap,
     } = input;
     let RouteCapabilityRoute {
         snapshot: capability_snapshot,
@@ -554,7 +556,7 @@ async fn record_route_attempt(
         class,
     )
     .await;
-    let retry_after = error.retry_after();
+    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
     route_attempts.record_failure_with_status(
         route_health_key,
         class,
@@ -645,8 +647,16 @@ fn duration_seconds_ceil(duration: Duration) -> u64 {
         .max(1)
 }
 
-fn route_health_outcome(error: &GatewayError, repeat_within_request: bool) -> RouteOutcome {
-    let retry_after = error.retry_after();
+fn clamp_upstream_retry_after(retry_after: Option<Duration>, cap: Duration) -> Option<Duration> {
+    retry_after.map(|retry_after| retry_after.min(cap))
+}
+
+fn route_health_outcome(
+    error: &GatewayError,
+    repeat_within_request: bool,
+    retry_after_cap: Duration,
+) -> RouteOutcome {
+    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
     if matches!(error, GatewayError::ConcurrencyFull { .. }) {
         let upstream_status = error.upstream_status();
         return retry_after
@@ -4484,6 +4494,8 @@ async fn process_gateway_request_inner(
     let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let request_path = endpoint.path();
     let started = Instant::now();
+    let upstream_retry_after_cap =
+        Duration::from_secs(runtime_settings.upstream_retry_after_cap_seconds.max(1));
     let inference_strength = extract_inference_strength(&body);
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -6285,7 +6297,8 @@ async fn process_gateway_request_inner(
                                 // family with retry-after) instead of a
                                 // misleading 502 "upstream_invalid_response".
                                 let retry_after =
-                                    Duration::from_secs(admission_error.retry_after_seconds.max(1));
+                                    Duration::from_secs(admission_error.retry_after_seconds.max(1))
+                                        .min(upstream_retry_after_cap);
                                 record_cooled_route_attempt(
                                     &request_route_attempts,
                                     &upstream,
@@ -6582,6 +6595,7 @@ async fn process_gateway_request_inner(
                             ),
                             requested: &requested_features,
                             requested_value: inference_strength.as_deref(),
+                            retry_after_cap: upstream_retry_after_cap,
                         };
                         let (account_feedback_sender, account_feedback_receiver) =
                             if account_probe.is_some() {
@@ -7006,6 +7020,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        route_attempt_context.retry_after_cap,
                                     ),
                                 )
                                 .await?;
@@ -7036,6 +7051,10 @@ async fn process_gateway_request_inner(
                                 retry_after,
                                 upstream_status,
                             }) => {
+                                let retry_after = clamp_upstream_retry_after(
+                                    retry_after,
+                                    upstream_retry_after_cap,
+                                );
                                 if stream_only_recovery_leader.is_some()
                                     || stream_only_recovery.consumed
                                 {
@@ -7133,13 +7152,15 @@ async fn process_gateway_request_inner(
                                 message,
                                 retry_after,
                             }) => {
-                                let retry_after = retry_after.unwrap_or_else(|| {
-                                    Duration::from_secs(
-                                        runtime_settings
-                                            .upstream_rate_limit_default_retry_seconds
-                                            .max(1),
-                                    )
-                                });
+                                let retry_after = retry_after
+                                    .unwrap_or_else(|| {
+                                        Duration::from_secs(
+                                            runtime_settings
+                                                .upstream_rate_limit_default_retry_seconds
+                                                .max(1),
+                                        )
+                                    })
+                                    .min(upstream_retry_after_cap);
                                 let retry_after_seconds = duration_seconds_ceil(retry_after);
                                 tracing::warn!(
                                     request_id = %request_id,
@@ -7280,6 +7301,7 @@ async fn process_gateway_request_inner(
                                             &error,
                                             request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
+                                            route_attempt_context.retry_after_cap,
                                         ),
                                     )
                                     .await?;
@@ -7321,6 +7343,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        route_attempt_context.retry_after_cap,
                                     ),
                                 )
                                 .await?;
@@ -7403,6 +7426,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        route_attempt_context.retry_after_cap,
                                     ),
                                 )
                                 .await?;
@@ -7735,6 +7759,7 @@ async fn process_gateway_request_inner(
                 request_route_attempts.physical_attempt_count(),
                 request_route_attempts.give_up_reason(),
                 request_route_attempts.last_resort_probe_granted(),
+                upstream_retry_after_cap,
             )
         } else {
             last_route_error

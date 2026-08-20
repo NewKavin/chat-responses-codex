@@ -221,7 +221,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 
 ## 5. 任务清单
 
-### T1（P0）半开独占窗口：恢复中的路由不再被单个请求垄断 —— ✅ commit `6b3a3ab`
+### T1（P0）半开独占窗口：恢复中的路由不再被单个请求垄断 —— ✅ commit `589d929`
 
 - [x] RED：`tests/route_health.rs`（6 个新用例）+ `tests/redis_runtime.rs`（1 个新用例，`#[ignore = "requires TEST_REDIS_URL"]`）
   - 路由失败 → 冷却到期 → 第 1 个 `reserve` 拿到半开租约；窗口内第 2 个 `reserve` 仍为 `HalfOpenBusy`；
@@ -273,7 +273,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 4. 行号漂移：`reserve()` busy 判定现位于本地 `route_health.rs` 的 `reserve()` 内（原引用 :661-700 已偏移），
    Redis 侧为 `route_health_reserve.lua` 的 `blocked()`；`state.rs` 传播点现约 :2920（update_runtime_settings）。
 
-### T2（P0）早判健康：流式首个语义输出即结算，独占按首包时长而非整流时长 —— ✅ commit `bc2b222`
+### T2（P0）早判健康：流式首个语义输出即结算，独占按首包时长而非整流时长 —— ✅ commit `be97c97`
 
 - [x] RED（实际落在 `tests/gateway/chat/half_open_verdict.rs`，注册于 `tests/gateway/chat.rs`）
   - mock 上游：先发一个语义事件，然后 hold 住流 10s 不结束。
@@ -329,7 +329,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 7. 上游内部重试/hedge 的 `StreamCompletionContext` 构造点（`upstream.rs:754`）与
    `tests/unit/server/gateway.rs:857` fixture 同样补 `health_verdict_pending` 字段（编译器强制）。
 
-### T3（P0）半开占用与真冷却分账：不吃盲重试轮数、不谎报 retry_after —— ✅ commit（见 T4 回填）
+### T3（P0）半开占用与真冷却分账：不吃盲重试轮数、不谎报 retry_after —— ✅ commit `c42cd88`
 
 - [x] RED（实际落在新增文件 `tests/gateway/chat/half_open_busy_ledger.rs`，注册于 `tests/gateway/chat.rs`）
   - mock 上游：第 1 次命中 = 半开探针（只发 role-only delta、永不语义输出 → T2 结算不触发），
@@ -401,17 +401,26 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 8. `HALF_OPEN_BUSY_RETRY` 由 `pub(crate)` 改 `pub` 并经 `state.rs` 的 `pub use route_health` 导出
    （`crate::state` 是 `gateway_core::state` 的 re-export，`pub(crate)` 跨 crate 不可见）。
 
-### T4（P1）上游 Retry-After 统一封顶
+### T4（P1）上游 Retry-After 统一封顶 —— ✅ commit（见 T5 回填）
 
-- [ ] RED：新增 `tests/upstream_retry_after_cap.rs`
+- [x] RED：新增 `tests/upstream_retry_after_cap.rs`（4 用例）
   - 上游 429 带 `Retry-After: 3600` → 终结错误 status 429，`Retry-After` header ≤ cap，
-    消息内 `please try again in ≤cap s`；
-  - 失败后 `route_health_snapshot` 的 `cooldown_remaining ≤ cap`；
-  - `ConcurrencyFull`（显式并发语义，Lua 与本地都是 `exact_retry` 直接赋值）同样被封顶；
-  - cap=1 时冷却 ≤1s，半开/恢复路径不受影响；
-  - 通过 `PUT /api/admin/runtime-settings` 调整 cap 后对**新失败**立即生效（不回溯存量冷却）。
-  - `tests/runtime_settings.rs` / `tests/admin_runtime_settings.rs` 字段计数 +1；校验用例（0 与 3601 拒绝、1 与 3600 接受）。
-- [ ] GREEN：
+    消息内 `please try again in ≤cap s`；`details.retry_after_seconds ≤ cap`；
+  - 失败后管理台反馈快照（`upstream_runtime_snapshots_with_feedback`）`cooldown_remaining ≤ cap`
+    （严格，见实现记录 2）；
+  - `ConcurrencyFull` 同样被封顶（`local_concurrency_full_retry_after_stays_within_cap`：
+    本地准入拒绝 retry_after=1s，cap=1 下终态 429、消息/header ≤1s；用 oneshot 门控的 mock
+    上游保证第二个请求一定命中准入拒绝，不依赖时间窗）；
+  - cap=1 时消息/header ≤1s，半开/恢复路径不受影响；
+  - `runtime_settings_cap_change_applies_to_new_failures_only`：`PUT /api/admin/runtime-settings`
+    调低 cap 后对**新失败**立即生效（消息/header ≤ 新 cap），且既有 `mark_upstream_*` 快照冷却
+    **不回溯**（`.max()` 保留首个失败的大值）；
+  - `tests/runtime_settings.rs` / `tests/admin_runtime_settings.rs` 字段计数 50→51 / 51→52；
+    校验用例（0 与 3601 拒绝、1 与 3600 接受）落 `runtime_settings.rs`。
+  - 既有两条断言旧契约的用例按新契约改写：`rate_limits.rs` `long_retry_after_returns_immediately_without_second_round`
+    （header 由 `==147822` 改 `<=30`）、`routing.rs` `rate_limit_retry_after_cools_the_route_without_waiting_in_request`
+    （header 由 `==60` 改 `<=30`；路由 registry 冷却由 `>=58s` 改 `20..=40s`，即本地地板）。
+- [x] GREEN：
   - `src/state/types.rs`：`AppConfig.upstream_retry_after_cap_seconds: u64`
     + `default_upstream_retry_after_cap_seconds() = 30` + Default 赋值。
   - `src/state/runtime_settings.rs`：字段 + `IMMEDIATE_RUNTIME_SETTING_FIELDS`
@@ -420,13 +429,39 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
   - `src/server/gateway.rs`：新增
     `fn clamp_upstream_retry_after(retry_after: Option<Duration>, cap: Duration) -> Option<Duration>`；
     - `route_health_outcome(error, repeat_within_request, retry_after_cap)`：构造 `RouteOutcome` 前 clamp
-      —— 覆盖全部 4 处调用点（`gateway.rs:6906/7180/7221/7303` 附近，以实际为准）；
+      —— 覆盖 4 处调用点 + hedge 路径（`upstream.rs:818`）；
     - `record_route_attempt` → `record_failure_with_status` 入参先 clamp（覆盖聚合冷却、
-      终结错误 Retry-After、RouteRetryPolicy 等待、SSE `retry_after_seconds`）。
+      终结错误 Retry-After、RouteRetryPolicy 等待、SSE `retry_after_seconds`）；
+    - `RouteAttemptContext` 增 `retry_after_cap: Duration`（Copy 不变）。
   - 解析层 `parse_retry_after` 与 Redis Lua **不动**（Rust 入口 clamp 已覆盖全部输入路径）。
-  - 实现时 grep 核验：所有向 registry/coordinator `observe*` 传 `Some(retry_after)` 的路径
-    都经过上述两个咽喉点；发现旁路就地补 clamp 并在本文回填。
-- [ ] 验证：`rtk cargo test --test upstream_retry_after_cap --test gateway --test runtime_settings --test admin_runtime_settings`。
+  - 实现时 grep 核验发现 **3 处旁路**（见实现记录 1），就地补 clamp；所有向 registry/coordinator
+    传 `Some(retry_after)` 的路径现都经过 clamp。
+- [x] 验证：`rtk cargo test --test upstream_retry_after_cap --test gateway --test runtime_settings --test admin_runtime_settings`
+
+> **T4 实现记录（2026-08-21，commit 回填于验证后）**
+> 1. **咽喉点旁路（比方案多 3 处补丁点）**：grep 核验发现 `TooManyRequests` 与 `ConcurrencyFull`
+>    两个专用分支在 `route_health_outcome` **之外**直接构造 `RouteOutcome::RouteFailureWithRetry`，
+>    且直接调用 `mark_upstream_rate_limited` / `mark_upstream_concurrency_full`
+>    （`gateway.rs:7064/7110/7162/7193` 附近）传入未 clamp 的 `retry_after` —— 这会绕过两个咽喉点，
+>    让管理台快照继续显示 3600s。处理：在这两个分支解构后立即 clamp（`record_route_attempt` /
+>    `finish_route_health_permit` 因此拿到已 clamp 值）；本地/Redis 并发准入拒绝
+>    （`gateway.rs:6288` 附近，`record_cooled_route_attempt` + `ConcurrencyFull`）同样就地 clamp。
+>    `mark_upstream_*` 快照的 `cooldown_remaining` 因此能严格 ≤ cap（见 RED 断言）。
+> 2. **本地退避地板与「冷却 ≤ cap」的张力**：RateLimited/KeyQuota 的本地退避
+>    `DEFAULT_RATE_LIMIT_BASE=30s` 经 `explicit.max(local)` 合并（route_health.rs:1303），
+>    首击带 ±20% 抖动 → 路由健康 registry 的冷却可为 24–36s，**不随 cap 缩水**（方案 §9 风险表
+>    明言「本地指数退避仍在」）。因此 RED 的 `route_health_snapshot.cooldown_remaining ≤ cap`
+>    断言落在「反馈快照」（`mark_upstream_*` 路径，无地板、严格 ≤ cap）上；路由 registry 冷却只
+>    断言 ≤ 本地地板 + 余量（cap=30 时仍远小于 3600，证明确实封顶）。
+> 3. **终态提示额外 clamp**：`terminal_route_failure_error` 的 `please try again in Ns` /
+>    `Retry-After` header 取自 live recovery（含本地地板），要满足「消息/header ≤ cap」必须
+>    在终态构造处再 clamp 一次：函数新增 `retry_after_cap: Duration` 参数，Temporary 分支
+>    `retry_after = ...min(cap)`；`tests/unit/server/gateway.rs` 8 处调用点传
+>    `Duration::from_secs(3600)`（近似禁用语义不变）。非聚合路径的 `last_route_error` 因分支级
+>    clamp 已天然 ≤ cap。cap=1 时客户端会按 1s 提前重试而路由仍在地板冷却 → 再吃 429（有界抖动，
+>    消息恒 ≤ cap），这是「cap 不信任上游夸大值」的必然取舍，见 commit `Rejected:`。
+> 4. 解析层 `parse_retry_after` 与 Redis Lua 确认未动；Redis 侧所有 `retry_after` 均由 Rust
+>    咽喉点 clamp 后传入，本地/Redis 行为一致。
 
 ### T5（P1）凭证族一击轻惩罚
 

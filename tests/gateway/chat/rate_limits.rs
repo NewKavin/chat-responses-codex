@@ -2014,12 +2014,17 @@ async fn long_retry_after_returns_immediately_without_second_round() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let retry_after_header = response
+    let retry_after_seconds = response
         .headers()
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    assert_eq!(retry_after_header.as_deref(), Some("147822"));
+        .map(str::to_owned)
+        .map(|value| value.parse::<u64>().expect("numeric Retry-After"))
+        .expect("Retry-After header present");
+    assert!(
+        retry_after_seconds <= 30,
+        "provider Retry-After 147822s must be capped to the 30s default, got {retry_after_seconds}s"
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");

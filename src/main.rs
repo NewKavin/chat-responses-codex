@@ -11,7 +11,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
@@ -85,6 +85,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
     ))
     .min(100);
+    let upstream_retry_after_cap_seconds = env_u64(
+        "UPSTREAM_RETRY_AFTER_CAP_SECONDS",
+        DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+    )
+    .clamp(1, 3_600);
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -222,6 +227,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_route_health_half_open_ttl_seconds: route_health_half_open_ttl_seconds,
         upstream_route_half_open_exclusive_window_ms: route_half_open_exclusive_window_ms,
         upstream_route_half_open_busy_max_rounds: route_half_open_busy_max_rounds,
+        upstream_retry_after_cap_seconds,
         upstream_route_exhaustion_retry_enabled: env_bool(
             "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
             DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,

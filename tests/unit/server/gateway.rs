@@ -210,7 +210,16 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
             half_open_busy: false,
         });
     }
-    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, classes.len(), None, false)
+    terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        classes.len(),
+        None,
+        false,
+        Duration::from_secs(3600),
+    )
 }
 
 #[test]
@@ -293,7 +302,16 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         half_open_busy: false,
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 1, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        1,
+        None,
+        false,
+        Duration::from_secs(3600),
+    );
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
     // No recovery and no probe: A5 details report the absence explicitly.
@@ -331,6 +349,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         0,
         Some(GiveUpReason::AlignmentExhausted),
         true,
+        Duration::from_secs(3600),
     );
 
     let details = error.safe_details();
@@ -370,6 +389,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         1,
         None,
         false,
+        Duration::from_secs(3600),
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -419,6 +439,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         0,
         None,
         false,
+        Duration::from_secs(3600),
     );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
@@ -453,7 +474,16 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         half_open_busy: false,
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        2,
+        None,
+        false,
+        Duration::from_secs(3600),
+    );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -490,7 +520,16 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         half_open_busy: false,
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2, None, false);
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        None,
+        2,
+        None,
+        false,
+        Duration::from_secs(3600),
+    );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -521,6 +560,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         1,
         None,
         true,
+        Duration::from_secs(3600),
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -545,7 +585,7 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
         Some(FailureClass::CapacityUnavailable)
     );
     assert_eq!(
-        route_health_outcome(&error, false),
+        route_health_outcome(&error, false, Duration::from_secs(3600)),
         RouteOutcome::RouteFailure {
             class: FailureClass::ConcurrencySaturated,
             upstream_status: None,
