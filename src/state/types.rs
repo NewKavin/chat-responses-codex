@@ -91,6 +91,7 @@ pub const DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS: u32 = 1;
 pub const DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: u64 = 10;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
+pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 /// Intra-gateway retry wait budget for route exhaustion (B3): the gateway
@@ -202,6 +203,14 @@ pub struct AppConfig {
     /// task, dropped client), the lease must expire so the route can be
     /// probed again instead of blocking every request with a fake 1s retry.
     pub upstream_route_health_half_open_ttl_seconds: u64,
+    /// Maximum time a single half-open probe may exclusively occupy a
+    /// recovering route (milliseconds, default 3s; 0 disables the window).
+    /// Once the window elapses, concurrent requests are admitted without a
+    /// half-open lease while the original probe is still in flight, so a
+    /// stalled probe cannot reduce a recovering route to 1 concurrent
+    /// request for the whole lease lifetime.
+    #[serde(default = "default_upstream_route_half_open_exclusive_window_ms")]
+    pub upstream_route_half_open_exclusive_window_ms: u64,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -296,6 +305,8 @@ impl Default for AppConfig {
             upstream_transient_route_cooldown_max_seconds:
                 DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
             upstream_route_health_half_open_ttl_seconds: DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+            upstream_route_half_open_exclusive_window_ms:
+                DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -950,6 +961,10 @@ pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {
 
 pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED
+}
+
+pub fn default_upstream_route_half_open_exclusive_window_ms() -> u64 {
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

@@ -122,7 +122,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
     // failure of the request escalates, later rounds reset the cooldown start
     // without growing the cooldown.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("request-suppressed-step", "glm-5.2");
     let key = key("request-suppressed-step");
 
@@ -165,7 +165,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
 async fn independent_request_failures_still_escalate_the_step() {
     // A1 counter-check: failures from independent requests keep escalating.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("independent-escalation", "glm-5.2");
     let key = key("independent-escalation");
 
@@ -202,7 +202,7 @@ async fn independent_request_failures_still_escalate_the_step() {
 #[tokio::test(start_paused = true)]
 async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("half-open-step-cap", "glm-5.2");
     let key = key("half-open-step-cap");
 
@@ -244,7 +244,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
         RouteFailureClass::Transport,
     ] {
         let mut registry =
-            RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+            RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
         let route = route(class.as_str(), "glm-5.2");
 
         registry.observe_route_failure(&route, class, None);
@@ -263,7 +263,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
 #[tokio::test(start_paused = true)]
 async fn transient_route_cooldown_config_does_not_change_other_classes() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
 
     registry.observe_route_failure(
@@ -309,7 +309,7 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
 #[tokio::test(start_paused = true)]
 async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cooldown() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 60, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 60, 300, 3000);
     let route = route("key-runtime", "model-runtime");
     registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
     assert!(
@@ -320,7 +320,7 @@ async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cool
             > Duration::from_secs(2)
     );
 
-    registry.update_runtime_tuning(vec![7, 11], 1, 2, 5);
+    registry.update_runtime_tuning(vec![7, 11], 1, 2, 5, 3000);
     let clamped = registry.route_health_snapshot(&route).unwrap();
     assert!(clamped.cooldown_remaining <= Duration::from_secs(2));
 
@@ -918,7 +918,7 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
 #[tokio::test(start_paused = true)]
 async fn expired_route_half_open_lease_releases_for_next_caller() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("fingerprint-expired-lease", "glm-5.2");
     let key = key("fingerprint-expired-lease");
 
@@ -953,7 +953,7 @@ async fn expired_route_half_open_lease_releases_for_next_caller() {
 #[tokio::test(start_paused = true)]
 async fn expired_key_half_open_lease_releases_for_next_caller() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let key = key("fingerprint-expired-key-lease");
     let route = route("fingerprint-expired-key-lease", "glm-5.2");
 
@@ -985,7 +985,7 @@ async fn expired_key_half_open_lease_releases_for_next_caller() {
 #[tokio::test(start_paused = true)]
 async fn half_open_busy_reports_remaining_lease_time() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("fingerprint-busy-recovery", "glm-5.2");
     let key = key("fingerprint-busy-recovery");
 
@@ -1070,7 +1070,7 @@ async fn reserve_route_health_probe_ignores_cooldown_and_is_single_flight() {
     // caller is busy until the first finishes, and a successful probe clears
     // the cooldown entirely.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("early-probe-single-flight", "glm-5.2");
     let key = key("early-probe-single-flight");
 
@@ -1110,7 +1110,7 @@ async fn reserve_route_health_probe_enforces_one_second_interval_per_route() {
     // another early probe for HALF_OPEN_BUSY_RETRY (1s); normal reserves stay
     // cooling during the window and a fresh probe is granted after it.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("early-probe-interval", "glm-5.2");
     let key = key("early-probe-interval");
 
@@ -1149,7 +1149,7 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
     // cannot exceed ROUTE_HALF_OPEN_FAILURE_STEP_CAP and the 1s probe window
     // stays armed for the next caller.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000);
     let route = route("early-probe-capped-step", "glm-5.2");
     let key = key("early-probe-capped-step");
 
@@ -1206,4 +1206,167 @@ async fn reserve_route_health_probe_refuses_when_key_cooling_or_route_healthy() 
         registry.reserve_route_health_probe(&route, &key),
         RouteAvailability::Cooling { .. }
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_exclusive_window_admits_requests_after_window_elapses() {
+    // T1: a half-open probe occupies a recovering route only for the
+    // exclusive window (default 3s), not for the whole lease (300s).
+    // After the window, concurrent requests are admitted WITHOUT a half-open
+    // lease; their success still clears the route via `same_observation`.
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("exclusive-window", "glm-5.2");
+    let key = key("exclusive-window");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    // Step-1 transient cooldown is jittered up to 12s (10s base).
+    tokio::time::advance(Duration::from_secs(13)).await;
+    let first = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected first half-open lease, got {other:?}"),
+    };
+
+    // Within the exclusive window the route is still single-flight.
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // The window (3s) elapses while the original lease is still alive
+    // (half-open TTL 300s): concurrent requests must now be admitted.
+    tokio::time::advance(Duration::from_millis(3_001)).await;
+    let second = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if !lease.is_half_open() => lease,
+        other => panic!("expected no-lease admission after window, got {other:?}"),
+    };
+
+    // A successful request admitted after the window clears the route via
+    // the same-observation path, restoring full concurrency.
+    registry.finish(second, RouteOutcome::Success);
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert!(!snapshot.half_open);
+    assert_eq!(snapshot.cooldown_remaining, Duration::ZERO);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(lease) if !lease.is_half_open()
+    ));
+
+    // The original prober can still finish its lease without disturbing the
+    // already-cleared state.
+    registry.finish(first, RouteOutcome::Success);
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_exclusive_window_zero_never_blocks_concurrent_requests() {
+    // T1: window = 0 disables the exclusivity window entirely: the first
+    // prober still holds the half-open lease, but every concurrent request
+    // is admitted without a lease immediately.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 0);
+    let route = route("exclusive-window-zero", "glm-5.2");
+    let key = key("exclusive-window-zero");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(13)).await;
+    let first = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open lease, got {other:?}"),
+    };
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(lease) if !lease.is_half_open()
+    ));
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+    registry.finish(first, RouteOutcome::Success);
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_exclusive_window_max_degrades_to_single_flight() {
+    // T1: a very large window reproduces the pre-T1 behavior: the route stays
+    // busy for the whole half-open lease lifetime and is then reclaimed.
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 600_000);
+    let route = route("exclusive-window-max", "glm-5.2");
+    let key = key("exclusive-window-max");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(13)).await;
+    let first = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open lease, got {other:?}"),
+    };
+    // Still busy long after the default 3s window would have elapsed.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+    // The lease expires at the half-open TTL (300s) and may be reclaimed.
+    tokio::time::advance(Duration::from_secs(240)).await;
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(lease) if lease.is_half_open()
+    ));
+    registry.finish(first, RouteOutcome::Success);
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases() {
+    // T1: shrinking the exclusive window at runtime must apply to leases that
+    // are already in flight (immediate toggle; window=0 unblocks everything).
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 600_000);
+    let route = route("exclusive-window-tuning", "glm-5.2");
+    let key = key("exclusive-window-tuning");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(13)).await;
+    let first = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open lease, got {other:?}"),
+    };
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    registry.update_runtime_tuning(vec![100, 200], 3, 4, 300, 0);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(lease) if !lease.is_half_open()
+    ));
+    registry.finish(first, RouteOutcome::Success);
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_exclusive_window_does_not_affect_early_probe_single_flight() {
+    // T1 invariant: the A3 last-resort early-probe path stays strictly
+    // single-flight regardless of the exclusive window (probe-held leases
+    // pin the route until the probe finishes).
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 0);
+    let route = route("probe-single-flight-window", "glm-5.2");
+    let key = key("probe-single-flight-window");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    // The route is still deep in cooldown; the early probe ignores it.
+    let first = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open probe lease, got {other:?}"),
+    };
+    // Even with window = 0 a second probe must not be admitted while the
+    // first probe lease is alive.
+    assert!(matches!(
+        registry.reserve_route_health_probe(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+    // And the cooling route stays cooling for regular reserves.
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+    registry.finish(first, RouteOutcome::Success);
 }

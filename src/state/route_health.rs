@@ -39,6 +39,7 @@ const FAILURE_STREAK_RESET: Duration = Duration::from_secs(10 * 60);
 const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
 const LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN: Duration = Duration::from_secs(60);
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
+pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct KeyHealthKey {
@@ -269,6 +270,13 @@ struct HealthState {
     cooldown_until: Option<Instant>,
     half_open_generation: Option<u64>,
     half_open_expires_at: Option<Instant>,
+    /// Deadline of the half-open exclusive window: while `now` is before this
+    /// instant, `reserve` reports `HalfOpenBusy` for the route/key; after it
+    /// elapses (but the lease is still alive) concurrent requests are
+    /// admitted without a lease (T1). Mirrors `half_open_expires_at` for the
+    /// single-flight early-probe path, which intentionally ignores the
+    /// window.
+    half_open_exclusive_until: Option<Instant>,
     /// When the last last-resort early probe was granted for this route
     /// (A3).  Early probes are single-flight (the half-open lease) and
     /// rate-limited to one per second per route to avoid hammering a
@@ -289,6 +297,7 @@ impl HealthState {
             cooldown_until: None,
             half_open_generation: None,
             half_open_expires_at: None,
+            half_open_exclusive_until: None,
             last_early_probe_at: None,
             state_generation: 0,
             last_access: now,
@@ -320,6 +329,7 @@ impl HealthState {
         self.cooldown_until = None;
         self.half_open_generation = None;
         self.half_open_expires_at = None;
+        self.half_open_exclusive_until = None;
         self.last_early_probe_at = None;
         self.last_access = now;
     }
@@ -328,6 +338,7 @@ impl HealthState {
         if generation.is_some() && self.half_open_generation == generation {
             self.half_open_generation = None;
             self.half_open_expires_at = None;
+            self.half_open_exclusive_until = None;
         }
         self.last_access = now;
     }
@@ -350,6 +361,7 @@ pub struct RouteHealthRegistry {
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
     half_open_ttl: Duration,
+    half_open_exclusive_window: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -412,6 +424,7 @@ impl RouteHealthRegistry {
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+            DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
         )
     }
 
@@ -422,6 +435,7 @@ impl RouteHealthRegistry {
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
+        half_open_exclusive_window_ms: u64,
     ) -> Self {
         let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
         let transient_route_cooldown_max_seconds =
@@ -441,6 +455,7 @@ impl RouteHealthRegistry {
             ),
             transient_route_cooldown_max: Duration::from_secs(transient_route_cooldown_max_seconds),
             half_open_ttl: Duration::from_secs(half_open_ttl_seconds.max(1)),
+            half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
         }
     }
 
@@ -450,6 +465,7 @@ impl RouteHealthRegistry {
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
         half_open_ttl_seconds: u64,
+        half_open_exclusive_window_ms: u64,
     ) {
         let base = Duration::from_secs(transient_route_cooldown_base_seconds.max(1));
         let max = Duration::from_secs(
@@ -458,15 +474,18 @@ impl RouteHealthRegistry {
                 .max(1),
         );
         let half_open_ttl = Duration::from_secs(half_open_ttl_seconds.max(1));
+        let half_open_exclusive_window = Duration::from_millis(half_open_exclusive_window_ms);
         let now = Instant::now();
         let max_cooldown_until = now + max;
         let max_half_open_until = now + half_open_ttl;
+        let max_exclusive_until = now + half_open_exclusive_window;
 
         self.concurrency_probe_delays =
             normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         self.transient_route_cooldown_base = base;
         self.transient_route_cooldown_max = max;
         self.half_open_ttl = half_open_ttl;
+        self.half_open_exclusive_window = half_open_exclusive_window;
 
         for state in self.routes.values_mut() {
             if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
@@ -483,6 +502,12 @@ impl RouteHealthRegistry {
             {
                 state.half_open_expires_at = Some(max_half_open_until);
             }
+            if state
+                .half_open_exclusive_until
+                .is_some_and(|until| until > max_exclusive_until)
+            {
+                state.half_open_exclusive_until = Some(max_exclusive_until);
+            }
         }
         for state in self.keys.values_mut() {
             if state
@@ -490,6 +515,12 @@ impl RouteHealthRegistry {
                 .is_some_and(|until| until > max_half_open_until)
             {
                 state.half_open_expires_at = Some(max_half_open_until);
+            }
+            if state
+                .half_open_exclusive_until
+                .is_some_and(|until| until > max_exclusive_until)
+            {
+                state.half_open_exclusive_until = Some(max_exclusive_until);
             }
         }
     }
@@ -660,7 +691,11 @@ impl RouteHealthRegistry {
                 {
                     state.half_open_generation = None;
                     state.half_open_expires_at = None;
-                } else {
+                    state.half_open_exclusive_until = None;
+                } else if state
+                    .half_open_exclusive_until
+                    .is_some_and(|until| until > now)
+                {
                     return RouteAvailability::HalfOpenBusy {
                         class: state
                             .last_failure_class
@@ -691,7 +726,11 @@ impl RouteHealthRegistry {
                 {
                     state.half_open_generation = None;
                     state.half_open_expires_at = None;
-                } else {
+                    state.half_open_exclusive_until = None;
+                } else if state
+                    .half_open_exclusive_until
+                    .is_some_and(|until| until > now)
+                {
                     return RouteAvailability::HalfOpenBusy {
                         class: state
                             .last_failure_class
@@ -813,6 +852,10 @@ impl RouteHealthRegistry {
         let state = self.routes.get_mut(route).expect("route state must exist");
         state.half_open_generation = Some(route_generation);
         state.half_open_expires_at = Some(now + self.half_open_ttl);
+        // Early probes (A3) stay strictly single-flight: the exclusive window
+        // for probe-held leases is the full lease lifetime so concurrent
+        // regular reserves cannot bypass a cooling route's probe.
+        state.half_open_exclusive_until = Some(now + self.half_open_ttl);
         state.last_early_probe_at = Some(now);
         RouteAvailability::Ready(HealthLease {
             route: route.clone(),
@@ -840,6 +883,7 @@ impl RouteHealthRegistry {
         let state = self.keys.get_mut(key)?;
         state.half_open_generation = Some(generation);
         state.half_open_expires_at = Some(now + self.half_open_ttl);
+        state.half_open_exclusive_until = Some(now + self.half_open_exclusive_window);
         state.last_access = now;
         Some(generation)
     }
@@ -864,6 +908,7 @@ impl RouteHealthRegistry {
         let state = self.routes.get_mut(route)?;
         state.half_open_generation = Some(generation);
         state.half_open_expires_at = Some(now + self.half_open_ttl);
+        state.half_open_exclusive_until = Some(now + self.half_open_exclusive_window);
         state.last_access = now;
         Some(generation)
     }
@@ -1045,6 +1090,7 @@ impl RouteHealthRegistry {
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
         state.half_open_expires_at = None;
+        state.half_open_exclusive_until = None;
         state.last_access = now;
         let local = route_cooldown_with_concurrency_delays(
             class,
@@ -1096,6 +1142,7 @@ impl RouteHealthRegistry {
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
         state.half_open_expires_at = None;
+        state.half_open_exclusive_until = None;
         state.last_access = now;
         let max = if class == RouteFailureClass::Credentials {
             KEY_COOLDOWN_MAX
@@ -1146,6 +1193,7 @@ impl RouteHealthRegistry {
         }
         state.half_open_generation = None;
         state.half_open_expires_at = None;
+        state.half_open_exclusive_until = None;
         state.cooldown_until = Some(now + delay);
         state.last_access = now;
         true

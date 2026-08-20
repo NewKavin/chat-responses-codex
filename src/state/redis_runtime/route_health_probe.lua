@@ -26,7 +26,8 @@ if key_class then
     end
     redis.call(
       'HDEL', KEYS[1],
-      'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms'
+      'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
+      'half_open_exclusive_until_ms'
     )
   end
 end
@@ -50,7 +51,8 @@ if route_active_lease and route_active_lease ~= '' then
   end
   redis.call(
     'HDEL', KEYS[2],
-    'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms'
+    'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
+    'half_open_exclusive_until_ms'
   )
 end
 
@@ -65,10 +67,14 @@ end
 -- Grant the single-flight early half-open lease on the route.
 local route_state_generation = state_value(KEYS[2], 'state_generation') or ''
 local route_generation = state_value(KEYS[2], 'state_generation') or '0'
+-- Early probes stay strictly single-flight: the exclusive window for a
+-- probe-held lease is the full lease lifetime, so regular reserves cannot
+-- bypass a cooling route's probe.
 redis.call('HSET', KEYS[2],
   'half_open_lease', lease_id,
   'half_open_generation', route_generation,
   'half_open_expires_at_ms', tostring(now_ms + lease_duration_ms),
+  'half_open_exclusive_until_ms', tostring(now_ms + lease_duration_ms),
   'last_early_probe_ms', tostring(now_ms),
   'last_access_ms', tostring(now_ms)
 )
@@ -87,6 +93,7 @@ if key_class then
     'half_open_lease', lease_id,
     'half_open_generation', key_generation,
     'half_open_expires_at_ms', tostring(now_ms + lease_duration_ms),
+    'half_open_exclusive_until_ms', tostring(now_ms + lease_duration_ms),
     'last_access_ms', tostring(now_ms)
   )
   redis.call('EXPIRE', KEYS[1], ttl_seconds)

@@ -132,8 +132,9 @@ pub use model_qualification::{
 pub use route_health::{
     normalize_concurrency_probe_delays, HealthLease, HealthStateSnapshot, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteHealthRegistry, RouteOutcome,
-    RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
-    ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+    RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS, ROUTE_HEALTH_GLOBAL_CAPACITY,
+    ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 use runtime_settings::differing_runtime_setting_fields;
 pub use runtime_settings::{
@@ -610,6 +611,7 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_transient_route_cooldown_base_seconds,
         config.upstream_transient_route_cooldown_max_seconds,
         config.upstream_route_health_half_open_ttl_seconds,
+        config.upstream_route_half_open_exclusive_window_ms,
     )))
 }
 
@@ -2922,6 +2924,7 @@ impl AppState {
                 settings.upstream_transient_route_cooldown_base_seconds,
                 settings.upstream_transient_route_cooldown_max_seconds,
                 settings.upstream_route_health_half_open_ttl_seconds,
+                settings.upstream_route_half_open_exclusive_window_ms,
             );
         }
         self.account_concurrency.update_runtime_tuning(

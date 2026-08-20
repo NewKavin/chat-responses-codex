@@ -2572,6 +2572,54 @@ async fn redis_route_health_cooldown_and_half_open_owner_are_shared() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_exclusive_window_allows_admission_after_window() {
+    // T1 Redis backend: the half-open exclusivity window (150ms here) bounds
+    // how long a probe may exclusively occupy a recovering route. After the
+    // window elapses the route is admitted without a lease while the original
+    // lease is still alive, and a successful no-lease request clears the
+    // route state through the same-observation path.
+    let mut config = redis_test_config();
+    config.upstream_route_half_open_exclusive_window_ms = 150;
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("exclusive-window", "fingerprint-a");
+    let route = redis_test_health_route("exclusive-window", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::TransientServer,
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // Window (150ms) elapses while the lease is still alive.
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    let admission = match second.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if !permit.is_half_open() => permit,
+        other => panic!("expected no-lease admission after window, got {other:?}"),
+    };
+    // The no-lease success clears the route (same-observation); further
+    // reserves are ready without a lease.
+    admission.finish(RouteOutcome::Success).await.unwrap();
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(permit) if !permit.is_half_open()
+    ));
+    permit.finish(RouteOutcome::Success).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_route_health_probe_ignores_cooldown_and_is_single_flight() {
     // A3 Redis backend: while the route is cooling, the last-resort probe API
     // ignores the remaining cooldown and grants a single-flight half-open

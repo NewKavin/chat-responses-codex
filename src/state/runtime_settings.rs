@@ -4,6 +4,7 @@ use super::types::{
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold, default_upstream_max_concurrency,
     default_upstream_route_exhaustion_budget_alignment_enabled,
+    default_upstream_route_half_open_exclusive_window_ms,
     default_upstream_transient_last_resort_probe_enabled,
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
@@ -38,6 +39,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_transient_route_cooldown_base_seconds",
     "upstream_transient_route_cooldown_max_seconds",
     "upstream_route_health_half_open_ttl_seconds",
+    "upstream_route_half_open_exclusive_window_ms",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
@@ -101,6 +103,8 @@ pub struct RuntimeSettings {
     pub upstream_transient_route_cooldown_base_seconds: u64,
     pub upstream_transient_route_cooldown_max_seconds: u64,
     pub upstream_route_health_half_open_ttl_seconds: u64,
+    #[serde(default = "default_upstream_route_half_open_exclusive_window_ms")]
+    pub upstream_route_half_open_exclusive_window_ms: u64,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -247,6 +251,8 @@ impl RuntimeSettings {
                 .upstream_transient_route_cooldown_max_seconds,
             upstream_route_health_half_open_ttl_seconds: config
                 .upstream_route_health_half_open_ttl_seconds,
+            upstream_route_half_open_exclusive_window_ms: config
+                .upstream_route_half_open_exclusive_window_ms,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
             upstream_route_exhaustion_retry_max_wait_ms: config
                 .upstream_route_exhaustion_retry_max_wait_ms,
@@ -320,6 +326,8 @@ impl RuntimeSettings {
             self.upstream_transient_route_cooldown_max_seconds;
         config.upstream_route_health_half_open_ttl_seconds =
             self.upstream_route_health_half_open_ttl_seconds;
+        config.upstream_route_half_open_exclusive_window_ms =
+            self.upstream_route_half_open_exclusive_window_ms;
         config.upstream_route_exhaustion_retry_enabled =
             self.upstream_route_exhaustion_retry_enabled;
         config.upstream_route_exhaustion_retry_max_wait_ms =
@@ -442,6 +450,12 @@ impl RuntimeSettings {
             self.upstream_route_health_half_open_ttl_seconds,
             "upstream_route_health_half_open_ttl_seconds",
         )?;
+        if self.upstream_route_half_open_exclusive_window_ms > 600_000 {
+            return Err(invalid(
+                "upstream_route_half_open_exclusive_window_ms",
+                "must be at most 600000 ms",
+            ));
+        }
         require_positive(
             self.upstream_route_exhaustion_retry_max_wait_ms,
             "upstream_route_exhaustion_retry_max_wait_ms",

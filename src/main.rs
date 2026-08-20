@@ -5,7 +5,8 @@ use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
     ModelKeySyncService, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
-    DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
@@ -73,6 +74,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     )?
     .max(1);
+    let route_half_open_exclusive_window_ms = env_u64(
+        "UPSTREAM_ROUTE_HALF_OPEN_EXCLUSIVE_WINDOW_MS",
+        DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
+    )
+    .min(600_000);
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -208,6 +214,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_transient_route_cooldown_base_seconds: transient_route_cooldown_base_seconds,
         upstream_transient_route_cooldown_max_seconds: transient_route_cooldown_max_seconds,
         upstream_route_health_half_open_ttl_seconds: route_health_half_open_ttl_seconds,
+        upstream_route_half_open_exclusive_window_ms: route_half_open_exclusive_window_ms,
         upstream_route_exhaustion_retry_enabled: env_bool(
             "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
             DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -298,6 +305,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         transient_route_cooldown_base_seconds = config.upstream_transient_route_cooldown_base_seconds,
         transient_route_cooldown_max_seconds = config.upstream_transient_route_cooldown_max_seconds,
         route_health_half_open_ttl_seconds = config.upstream_route_health_half_open_ttl_seconds,
+        route_half_open_exclusive_window_ms = config.upstream_route_half_open_exclusive_window_ms,
         route_exhaustion_retry_enabled = config.upstream_route_exhaustion_retry_enabled,
         route_exhaustion_retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
         route_exhaustion_retry_max_rounds = config.upstream_route_exhaustion_retry_max_rounds,

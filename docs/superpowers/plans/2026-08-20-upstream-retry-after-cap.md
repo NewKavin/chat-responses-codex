@@ -221,44 +221,57 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 
 ## 5. 任务清单
 
-### T1（P0）半开独占窗口：恢复中的路由不再被单个请求垄断
+### T1（P0）半开独占窗口：恢复中的路由不再被单个请求垄断 —— ✅ commit `6b3a3ab`
 
-- [ ] RED：`tests/route_health.rs`（或既有健康注册表用例文件）
-  - 路由失败 → 冷却到期 → 第 1 个 `reserve` 拿到半开租约；
-    窗口内第 2 个 `reserve` 仍为 `HalfOpenBusy`；
+- [x] RED：`tests/route_health.rs`（6 个新用例）+ `tests/redis_runtime.rs`（1 个新用例，`#[ignore = "requires TEST_REDIS_URL"]`）
+  - 路由失败 → 冷却到期 → 第 1 个 `reserve` 拿到半开租约；窗口内第 2 个 `reserve` 仍为 `HalfOpenBusy`；
     窗口过后第 3 个 `reserve` 返回 `Ready`（且 `half_open == false`）。
   - 窗口过后被放行的请求成功时，仍能通过 `same_observation` 清空路由状态。
-  - `reserve_route_health_probe`（仍在冷却中的 A3 提前探测）**不受窗口影响**，保持严格单飞。
-  - 窗口设为 0 → 从不因半开占用拒绝；设为极大值 → 退化为现状。
-  - Redis 后端同套断言（`tests/redis_runtime*.rs` 既有健康用例风格）。
-- [ ] GREEN：
+  - `reserve_route_health_probe`（仍在冷却中的 A3 提前探测）不受窗口影响，保持严格单飞（含 window=0 用例）。
+  - 窗口设为 0 → 从不因半开占用拒绝；设为极大值（600000）→ 退化为现状。
+  - Redis 后端同套断言（窗口 150ms，双 AppState 并发验证）。
+- [x] GREEN：
   - `src/state/types.rs`：`AppConfig.upstream_route_half_open_exclusive_window_ms: u64`
-    + `default_...() = 3_000` + Default 赋值。
+    + `default_upstream_route_half_open_exclusive_window_ms() = 3_000` + Default 赋值 + `#[serde(default)]`。
   - `src/state/runtime_settings.rs`：字段（`#[serde(default)]`）+ 加入
     `IMMEDIATE_RUNTIME_SETTING_FIELDS` + `from_app_config` / `apply_to_app_config`
     + `validate_and_normalize` 范围 `0..=600_000`。
-  - `src/main.rs`：`env_u64("UPSTREAM_ROUTE_HALF_OPEN_EXCLUSIVE_WINDOW_MS", 3_000).min(600_000)`。
+  - `src/main.rs`：`env_u64("UPSTREAM_ROUTE_HALF_OPEN_EXCLUSIVE_WINDOW_MS", 3_000).min(600_000)` + 启动日志。
   - `src/state/route_health.rs`：
-    - `HealthState` 增 `half_open_exclusive_until: Option<Instant>`；`clear()` / `release_half_open()` 一并清理。
-    - `RouteHealthRegistry` 增 `half_open_exclusive_window: Duration`，
-      由 `new_with_runtime_tuning` / `update_runtime_tuning` 传入。
+    - `HealthState` 增 `half_open_exclusive_until: Option<Instant>`；`clear()` / `release_half_open()` /
+      `observe_route_failure_at` / `observe_key_failure_at` / `reapply_concurrency_probe_delay` /
+      `reserve()` 租约回收分支一并清理。
+    - `RouteHealthRegistry` 增 `half_open_exclusive_window: Duration`
+      （`new_with_runtime_tuning` / `update_runtime_tuning` 各增一个参数）。
     - `reserve_expired_half_open_route` / `reserve_expired_half_open_key`：
-      置 `half_open_exclusive_until = Some(now + window)`。
-    - `reserve()` 的 busy 判定改为 `half_open_exclusive_until > now`
-      （`route_health.rs:661-700` 两处）；`is_active()`（租约存活，用于 owns/清理/`health_state_recovery`）**语义不变**。
+      置 `half_open_exclusive_until = Some(now + window)`；`reserve_route_health_probe` 置为租约到期
+      （严格单飞，见下方偏离说明）。
+    - `reserve()` 的 busy 判定两处（key + route）改为 `half_open_exclusive_until > now`；
+      `is_active()`（租约存活，用于 owns/清理/`health_state_recovery`）语义不变。
     - `reserve_route_health_probe` 保持用 `is_active()` 判 busy（不变）。
-  - `src/state/redis_runtime/route_health_reserve.lua`：
-    新增 ARGV `exclusive_window_ms`，reserve 时 `HSET half_open_exclusive_until_ms`；
-    `blocked()` 的第二段改判 `half_open_exclusive_until_ms > now_ms`
-    （`half_open_expires_at_ms` 仍用于“过期租约可被接管”的清理分支）。
-  - `src/state/redis_runtime.rs`：tuning snapshot 增
-    `route_health_half_open_exclusive_window_ms`，reserve 调用点补 `.arg(...)`。
-  - `src/state.rs`（`update_runtime_tuning` 传播点，约 `state.rs:2918`）：把新参数一并下发本地/Redis。
-- [ ] 验证：`rtk cargo test --test route_health --test gateway`；Redis 用例需本地 redis（沿用既有 `#[ignore]`/env 约定）。
+    - `update_runtime_tuning` 对存量 `half_open_exclusive_until` 做上限收紧（immediate 生效）。
+  - `src/state/redis_runtime/route_health_reserve.lua`：新增 ARGV[5] `exclusive_window_ms`，
+    grant 时 `HSET half_open_exclusive_until_ms`；`blocked()` 第二段改判
+    `half_open_exclusive_until_ms > now_ms`（`half_open_expires_at_ms` 仍用于“过期租约可被接管”清理分支）；
+    新增 `can_grant()`：窗口过后不再覆盖存活租约（与本地语义对齐，见偏离说明）。
+  - `src/state/redis_runtime.rs`：tuning snapshot 增 `route_health_half_open_exclusive_window_ms`，
+    reserve 调用点补 `.arg(...)`；`route_health_probe.lua` / `route_health_finish.lua` /
+    `route_health_observe.lua` 的 HDEL 清单补 `half_open_exclusive_until_ms`。
+  - `src/state.rs`（`:606` 注册表构造 + `update_runtime_tuning` 传播点）：新参数一并下发本地/Redis。
+  - 计数断言同步：`tests/runtime_settings.rs` 48→49、`tests/admin_runtime_settings.rs` 49→50。
+- [x] 验证：`rtk cargo test --all` 全绿（1668 passed, 84 ignored）；Redis 用例沿用 `#[ignore]` + `TEST_REDIS_URL` 约定。
 
-**为什么安全**：窗口过后放行的请求走的是“无租约”路径，
-不会篡改别人的半开代次；它成功了照样清状态（`same_observation`），
-失败了照样按新一次失败记账；对故障上游的额外压力被上游并发上限与随后的冷却重新收敛。
+**实现偏离记录（与方案文字不同处，均为等价或更保守选择）：**
+1. 方案未规定 A3 提前探测租约的独占窗口取值；实现选择 `half_open_exclusive_until = 租约到期`（本地与
+   `route_health_probe.lua` 一致），使探针持有的路由对普通 reserve 保持“整租约期 busy”的既有严格单飞语义
+   （满足硬性不变量 3），而非默认 3s 窗口。
+2. Redis `reserve.lua` 增加 `can_grant()` 守卫：窗口过后调用方不带租约放行、不得覆盖仍在存活的探针租约；
+   本地 `reserve_expired_half_open_*` 同样在租约存活且窗口已过时不再发新租约。这是本地/Redis 行为一致的
+   必要条件，方案未显式列出。
+3. `update_runtime_tuning` 会收敛存量 `half_open_exclusive_until`（窗口调小/归零对在途租约立即生效），
+   与“immediate 开关、窗口=0 即退回现状”的要求一致；未触碰冷却（不变量 4）。
+4. 行号漂移：`reserve()` busy 判定现位于本地 `route_health.rs` 的 `reserve()` 内（原引用 :661-700 已偏移），
+   Redis 侧为 `route_health_reserve.lua` 的 `blocked()`；`state.rs` 传播点现约 :2920（update_runtime_settings）。
 
 ### T2（P0）早判健康：流式首个语义输出即结算，独占按首包时长而非整流时长
 
