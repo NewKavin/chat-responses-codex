@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -21,6 +22,11 @@ use super::EndpointKind;
 #[derive(Clone, Debug, Default)]
 pub(super) struct StreamCommitTracker {
     inner: Arc<std::sync::Mutex<StreamCommitState>>,
+    /// Set whenever `observe_json` records a first semantic output. The
+    /// stream body loops consume it once (`take_health_settle_pending`) to
+    /// settle the half-open route-health lease at the first semantic output
+    /// (T2), releasing the exclusive window while the stream is still open.
+    health_settle_pending: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
@@ -78,6 +84,7 @@ impl StreamCommitTracker {
                                 || has_non_empty_string(delta, "reasoning_content")
                             {
                                 guard.semantic_output_observed = true;
+                                self.health_settle_pending.store(true, Ordering::Release);
                                 guard.last_semantic_at = Some(now);
                             }
                             if let Some(tool_calls) =
@@ -92,6 +99,7 @@ impl StreamCommitTracker {
                                         )
                                     {
                                         guard.semantic_output_observed = true;
+                                        self.health_settle_pending.store(true, Ordering::Release);
                                         guard.last_semantic_at = Some(now);
                                     }
                                 }
@@ -113,6 +121,7 @@ impl StreamCommitTracker {
                         if has_non_empty_string(event, "delta") =>
                     {
                         guard.semantic_output_observed = true;
+                        self.health_settle_pending.store(true, Ordering::Release);
                         guard.last_semantic_at = Some(now);
                     }
                     "response.output_item.added" | "response.output_item.done"
@@ -121,12 +130,14 @@ impl StreamCommitTracker {
                             .is_some_and(response_output_item_is_semantic) =>
                     {
                         guard.semantic_output_observed = true;
+                        self.health_settle_pending.store(true, Ordering::Release);
                         guard.last_semantic_at = Some(now);
                     }
                     "response.function_call_arguments.delta"
                         if has_non_empty_string(event, "delta") =>
                     {
                         guard.semantic_output_observed = true;
+                        self.health_settle_pending.store(true, Ordering::Release);
                         guard.last_semantic_at = Some(now);
                     }
                     "response.completed" => {
@@ -147,6 +158,14 @@ impl StreamCommitTracker {
             .lock()
             .expect("poisoned")
             .semantic_output_observed
+    }
+
+    /// One-shot flag: true iff a first semantic output has been observed
+    /// since the last call. The stream body loop calls this once per poll
+    /// (after draining parsed events) and settles the route-health lease when
+    /// it returns true.
+    pub(super) fn take_health_settle_pending(&self) -> bool {
+        self.health_settle_pending.swap(false, Ordering::AcqRel)
     }
 
     pub(super) fn terminal_observed(&self) -> bool {

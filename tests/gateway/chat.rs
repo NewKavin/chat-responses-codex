@@ -17,6 +17,8 @@ mod context;
 mod core;
 #[path = "chat/feedback.rs"]
 mod feedback;
+#[path = "chat/half_open_verdict.rs"]
+mod half_open_verdict;
 #[path = "chat/rate_limits.rs"]
 mod rate_limits;
 #[path = "chat/routing.rs"]

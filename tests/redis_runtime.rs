@@ -2620,6 +2620,99 @@ async fn redis_route_health_exclusive_window_allows_admission_after_window() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_settle_healthy_releases_exclusive_window_for_other_state() {
+    // T2 Redis backend: settling the half-open lease healthy on the first
+    // semantic output releases the exclusive window immediately, so another
+    // AppState gets a fresh lease (or an admission) while the probe stream is
+    // still running; the route state is cleared entirely.
+    let mut config = redis_test_config();
+    config.upstream_route_half_open_exclusive_window_ms = 150;
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("settle-healthy-upstream", "fingerprint-a");
+    let route = redis_test_health_route("settle-healthy-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::TransientServer,
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let mut permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    // While the probe lease is live, a second state sees the route as busy.
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // T2: settle healthy (as if the first semantic output arrived). The
+    // exclusivity is released well before the 150ms window or the lease TTL,
+    // and the route state is cleared.
+    permit.settle_healthy().await.unwrap();
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(permit) if !permit.is_half_open()
+    ));
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_settled_permit_failure_observes_route_without_lease() {
+    // T2 Redis backend: after a healthy settle, a stream failure is recorded
+    // as a fresh no-lease observation (step 1) rather than a half-open probe
+    // failure (which would escalate the streak and needs the lease).
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("settled-observe-upstream", "fingerprint-a");
+    let route = redis_test_health_route("settled-observe-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::Transport, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let mut permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    permit.settle_healthy().await.unwrap();
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+
+    // The settled permit must not call the finish script again (committed
+    // marker); the failure goes through the no-lease observe script.
+    permit
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::Transport,
+            upstream_status: Some(502),
+            repeat_within_request: false,
+        })
+        .await
+        .unwrap();
+    let snapshot = first
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("post-settle failure must be observed");
+    assert_eq!(
+        snapshot.consecutive_failures, 1,
+        "post-settle failure must start a fresh streak, got {snapshot:?}"
+    );
+    assert_eq!(
+        snapshot.last_failure_class,
+        Some(RouteFailureClass::Transport)
+    );
+    assert!(!snapshot.half_open, "{snapshot:?}");
+    assert!(snapshot.cooldown_remaining > Duration::ZERO);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_route_health_probe_ignores_cooldown_and_is_single_flight() {
     // A3 Redis backend: while the route is cooling, the last-resort probe API
     // ignores the remaining cooldown and grants a single-flight half-open

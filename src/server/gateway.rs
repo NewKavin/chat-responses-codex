@@ -3179,6 +3179,11 @@ struct StreamCompletionContext {
     upstream_request_guard: UpstreamRequestReservation,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
     hedge_control: Option<HedgeAttemptControl>,
+    /// One-shot guard: the stream body sets this once the first semantic
+    /// output is observed, and `mark_healthy_verdict` settles the half-open
+    /// lease as healthy (T2). The atomic makes the settle idempotent across
+    /// the prefetch and body loops and any concurrent cleanup paths.
+    health_verdict_pending: Arc<AtomicBool>,
 }
 
 impl StreamCompletionContext {
@@ -3202,6 +3207,36 @@ impl StreamCompletionContext {
             tracing::error!(
                 error = %error,
                 "failed to finish route health after stream success"
+            );
+        }
+    }
+
+    /// Settle the route-health lease as healthy at the first semantic output
+    /// of a streaming response (T2). The lease is finished with Success (the
+    /// route cooldown is cleared and the half-open exclusive window is
+    /// released) while the stream is still open, so concurrent requests are
+    /// no longer blocked by the probe stream. A settled permit turns later
+    /// stream failures into fresh no-lease observations.
+    async fn mark_healthy_verdict(&self) {
+        if !self.health_verdict_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let permit = self.route_health_permit.lock().await.take();
+        let Some(mut permit) = permit else {
+            return;
+        };
+        let outcome = permit.settle_healthy().await;
+        // Keep the permit in the slot on every path: after a successful
+        // settle it is a `Settled` permit whose later success/cancellation
+        // are no-ops and whose later failures become no-lease observations
+        // (the stream may still fail after the first semantic output); after
+        // a coordination error it is the restored live lease for the normal
+        // completion path. Errors are logged only and never affect request.
+        self.route_health_permit.lock().await.get_or_insert(permit);
+        if let Err(error) = outcome {
+            tracing::error!(
+                error = %error,
+                "failed to settle route health after first semantic output"
             );
         }
     }
@@ -6241,6 +6276,7 @@ async fn process_gateway_request_inner(
                                 upstream_request_guard: upstream_request_guard.clone(),
                                 downstream_concurrency_guard: downstream_concurrency_guard.clone(),
                                 hedge_control: None,
+                                health_verdict_pending: Arc::new(AtomicBool::new(false)),
                             });
                         if let (Some(cancellation), Some(completion)) = (
                             pre_header_cancellation.as_ref(),

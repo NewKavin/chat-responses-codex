@@ -11,6 +11,7 @@ use super::types::{
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
+use super::AppState;
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
 use sha2::{Digest, Sha256};
@@ -120,12 +121,24 @@ pub struct RouteHealthPermit {
 
 enum RouteHealthPermitBackend {
     Local {
+        state: AppState,
         registry: Arc<Mutex<RouteHealthRegistry>>,
         lease: HealthLease,
     },
     Redis {
+        state: AppState,
         coordinator: Arc<RedisRuntimeCoordinator>,
         lease: RedisHealthLease,
+    },
+    /// The lease was settled healthy at the first semantic output (T2). The
+    /// permit keeps the identity of the route/key and a state handle so a
+    /// later stream failure can be observed WITHOUT a lease (the finish
+    /// script must not be re-invoked for the same lease; observe goes through
+    /// the plain observe script).
+    Settled {
+        state: AppState,
+        route: RouteHealthKey,
+        key: KeyHealthKey,
     },
 }
 
@@ -149,6 +162,7 @@ impl std::fmt::Debug for RouteHealthPermit {
                 &self.backend.as_ref().map(|backend| match backend {
                     RouteHealthPermitBackend::Local { .. } => "local",
                     RouteHealthPermitBackend::Redis { .. } => "redis",
+                    RouteHealthPermitBackend::Settled { .. } => "settled",
                 }),
             )
             .field("half_open", &self.is_half_open())
@@ -157,18 +171,31 @@ impl std::fmt::Debug for RouteHealthPermit {
 }
 
 impl RouteHealthPermit {
-    pub(crate) fn new_local(registry: Arc<Mutex<RouteHealthRegistry>>, lease: HealthLease) -> Self {
+    pub(crate) fn new_local(
+        state: AppState,
+        registry: Arc<Mutex<RouteHealthRegistry>>,
+        lease: HealthLease,
+    ) -> Self {
         Self {
-            backend: Some(RouteHealthPermitBackend::Local { registry, lease }),
+            backend: Some(RouteHealthPermitBackend::Local {
+                state,
+                registry,
+                lease,
+            }),
         }
     }
 
     pub(crate) fn new_redis(
+        state: AppState,
         coordinator: Arc<RedisRuntimeCoordinator>,
         lease: RedisHealthLease,
     ) -> Self {
         Self {
-            backend: Some(RouteHealthPermitBackend::Redis { coordinator, lease }),
+            backend: Some(RouteHealthPermitBackend::Redis {
+                state,
+                coordinator,
+                lease,
+            }),
         }
     }
 
@@ -176,6 +203,7 @@ impl RouteHealthPermit {
         self.backend.as_ref().is_some_and(|backend| match backend {
             RouteHealthPermitBackend::Local { lease, .. } => lease.is_half_open(),
             RouteHealthPermitBackend::Redis { lease, .. } => lease.half_open,
+            RouteHealthPermitBackend::Settled { .. } => false,
         })
     }
 
@@ -183,6 +211,7 @@ impl RouteHealthPermit {
         self.backend.as_ref().map(|backend| match backend {
             RouteHealthPermitBackend::Local { lease, .. } => lease.route(),
             RouteHealthPermitBackend::Redis { lease, .. } => &lease.route,
+            RouteHealthPermitBackend::Settled { route, .. } => route,
         })
     }
 
@@ -191,12 +220,119 @@ impl RouteHealthPermit {
             return Ok(());
         };
         match backend {
-            RouteHealthPermitBackend::Local { registry, lease } => {
+            RouteHealthPermitBackend::Local {
+                registry, lease, ..
+            } => {
                 registry.lock().await.finish(lease, outcome);
                 Ok(())
             }
-            RouteHealthPermitBackend::Redis { coordinator, lease } => {
-                coordinator.finish_route_health(lease, outcome).await
+            RouteHealthPermitBackend::Redis {
+                coordinator, lease, ..
+            } => coordinator.finish_route_health(lease, outcome).await,
+            RouteHealthPermitBackend::Settled { state, route, key } => {
+                match outcome {
+                    // A settled lease already recorded its success: later
+                    // success / cancellation are no-ops.
+                    RouteOutcome::Success | RouteOutcome::Cancelled => Ok(()),
+                    // Any failure after the first semantic output is a NEW
+                    // independent failure: observe it without a lease so the
+                    // failure streak restarts at 1 and no half-open probe
+                    // escalation applies (T2).
+                    RouteOutcome::RouteFailure {
+                        class,
+                        upstream_status: _,
+                        repeat_within_request: _,
+                    } => state.observe_route_failure(&route, class, None).await,
+                    RouteOutcome::RouteFailureWithRetry {
+                        class,
+                        retry_after,
+                        upstream_status: _,
+                        repeat_within_request: _,
+                    } => {
+                        state
+                            .observe_route_failure(&route, class, Some(retry_after))
+                            .await
+                    }
+                    RouteOutcome::KeyFailure(class) => {
+                        state.observe_key_failure(&key, class, None).await
+                    }
+                    RouteOutcome::KeyFailureWithRetry { class, retry_after } => {
+                        state
+                            .observe_key_failure(&key, class, Some(retry_after))
+                            .await
+                    }
+                    RouteOutcome::UncertainRouteFailure(class) => {
+                        state.observe_route_failure(&route, class, None).await
+                    }
+                }
+            }
+        }
+    }
+
+    /// Settle a live lease as healthy at the first semantic output (T2).
+    ///
+    /// The lease is finished with `RouteOutcome::Success` immediately — while
+    /// the stream is still open — which clears the route cooldown and releases
+    /// the half-open exclusive window. The permit then enters the `Settled`
+    /// state: later stream failures become no-lease observations, and later
+    /// success/cancellation are no-ops.
+    pub async fn settle_healthy(&mut self) -> Result<(), RuntimeCoordinationError> {
+        let Some(backend) = self.backend.take() else {
+            return Ok(());
+        };
+        match backend {
+            RouteHealthPermitBackend::Local {
+                state,
+                registry,
+                lease,
+            } => {
+                let route = lease.route().clone();
+                let key = lease.key().clone();
+                {
+                    let mut registry = registry.lock().await;
+                    registry.finish(lease, RouteOutcome::Success);
+                    // Mirror the Redis success clear_state (DEL): drop the
+                    // now-clear route/key state so a settled probe leaves no
+                    // residue and `route_health_snapshot` reports None (T2).
+                    registry.remove_cleared_route_and_key(&route, &key);
+                }
+                self.backend = Some(RouteHealthPermitBackend::Settled { state, route, key });
+                Ok(())
+            }
+            RouteHealthPermitBackend::Redis {
+                state,
+                coordinator,
+                lease,
+            } => {
+                let route = lease.route.clone();
+                let key = lease.key.clone();
+                match coordinator
+                    .finish_route_health(lease.clone(), RouteOutcome::Success)
+                    .await
+                {
+                    Ok(()) => {
+                        self.backend =
+                            Some(RouteHealthPermitBackend::Settled { state, route, key });
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // Keep the live lease for the normal completion path
+                        // to retry; never lose a lease on a coordination error.
+                        self.backend = Some(RouteHealthPermitBackend::Redis {
+                            state,
+                            coordinator,
+                            lease,
+                        });
+                        Err(error)
+                    }
+                }
+            }
+            RouteHealthPermitBackend::Settled { state, route, key } => {
+                // Idempotent: a second settle on an already-settled permit is
+                // a no-op that preserves the identity (normal flow never
+                // reaches this arm — the gateway settle is atomic-guarded).
+                self.backend = Some(RouteHealthPermitBackend::Settled { state, route, key });
+                Ok(())
             }
         }
     }
@@ -207,16 +343,25 @@ impl Drop for RouteHealthPermit {
         let Some(backend) = self.backend.take() else {
             return;
         };
+        // A settled permit must be a no-op on drop: the lease was already
+        // finished successfully at the first semantic output.
+        if matches!(backend, RouteHealthPermitBackend::Settled { .. }) {
+            return;
+        }
         let Ok(handle) = Handle::try_current() else {
             return;
         };
         match backend {
-            RouteHealthPermitBackend::Local { registry, lease } => {
+            RouteHealthPermitBackend::Local {
+                registry, lease, ..
+            } => {
                 handle.spawn(async move {
                     registry.lock().await.finish(lease, RouteOutcome::Cancelled);
                 });
             }
-            RouteHealthPermitBackend::Redis { coordinator, lease } => {
+            RouteHealthPermitBackend::Redis {
+                coordinator, lease, ..
+            } => {
                 handle.spawn(async move {
                     if let Err(error) = coordinator
                         .finish_route_health(lease, RouteOutcome::Cancelled)
@@ -229,6 +374,9 @@ impl Drop for RouteHealthPermit {
                     }
                 });
             }
+            // Unreachable in practice — the guard above returns first — but
+            // required for exhaustive matching.
+            RouteHealthPermitBackend::Settled { .. } => {}
         }
     }
 }
@@ -332,6 +480,23 @@ impl HealthState {
         self.half_open_exclusive_until = None;
         self.last_early_probe_at = None;
         self.last_access = now;
+    }
+
+    /// Whether the entry carries no health signal: no cooldown, no half-open
+    /// lease and no recorded failure. Such an entry is functionally identical
+    /// to an absent one (reserve() returns `Ready` either way), so the T2
+    /// settle path may drop it — mirroring the Redis success `clear_state`
+    /// which DELETEs the key.
+    fn is_clear(&self) -> bool {
+        self.consecutive_failures == 0
+            && self.last_failure_class.is_none()
+            && self.last_failure_status.is_none()
+            && self.last_failure_at.is_none()
+            && self.cooldown_until.is_none()
+            && self.half_open_generation.is_none()
+            && self.half_open_expires_at.is_none()
+            && self.half_open_exclusive_until.is_none()
+            && self.last_early_probe_at.is_none()
     }
 
     fn release_half_open(&mut self, generation: Option<u64>, now: Instant) {
@@ -994,6 +1159,19 @@ impl RouteHealthRegistry {
 
     pub fn clear_route_health(&mut self, route: &RouteHealthKey) {
         self.clear_route(route, Instant::now());
+    }
+
+    /// T2: after settling a lease healthy, drop the route/key state if it is
+    /// now fully clear — the local mirror of the Redis success `clear_state`
+    /// (which DELETEs the key). If a concurrent observation re-populated the
+    /// state, it is left untouched.
+    pub fn remove_cleared_route_and_key(&mut self, route: &RouteHealthKey, key: &KeyHealthKey) {
+        if self.routes.get(route).is_some_and(HealthState::is_clear) {
+            self.routes.remove(route);
+        }
+        if self.keys.get(key).is_some_and(HealthState::is_clear) {
+            self.keys.remove(key);
+        }
     }
 
     pub fn observe_key_failure(

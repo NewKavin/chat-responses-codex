@@ -7,7 +7,8 @@ use crate::state::PersistedState;
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::to_bytes;
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -853,6 +854,7 @@ async fn stream_completion_fixture(
         )),
         downstream_concurrency_guard: DownstreamConcurrencyGuard::new(state, downstream_lease),
         hedge_control: None,
+        health_verdict_pending: Arc::new(AtomicBool::new(false)),
     }
 }
 

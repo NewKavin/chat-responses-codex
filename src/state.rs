@@ -1487,7 +1487,7 @@ impl AppState {
                 .await?;
             return Ok(match availability {
                 RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                    RouteHealthPermit::new_redis(coordinator.clone(), lease),
+                    RouteHealthPermit::new_redis(self.clone(), coordinator.clone(), lease),
                 ),
                 RouteAvailability::Cooling {
                     class,
@@ -1516,7 +1516,7 @@ impl AppState {
             .reserve_route_health_probe(route, key);
         Ok(match availability {
             RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                RouteHealthPermit::new_local(self.route_health.clone(), lease),
+                RouteHealthPermit::new_local(self.clone(), self.route_health.clone(), lease),
             ),
             RouteAvailability::Cooling {
                 class,
@@ -1550,7 +1550,7 @@ impl AppState {
                 .await?;
             return Ok(match availability {
                 RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                    RouteHealthPermit::new_redis(coordinator.clone(), lease),
+                    RouteHealthPermit::new_redis(self.clone(), coordinator.clone(), lease),
                 ),
                 RouteAvailability::Cooling {
                     class,
@@ -1575,7 +1575,7 @@ impl AppState {
         let availability = self.route_health.lock().await.reserve(route, key);
         Ok(match availability {
             RouteAvailability::Ready(lease) => RouteAvailability::Ready(
-                RouteHealthPermit::new_local(self.route_health.clone(), lease),
+                RouteHealthPermit::new_local(self.clone(), self.route_health.clone(), lease),
             ),
             RouteAvailability::Cooling {
                 class,

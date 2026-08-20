@@ -273,9 +273,9 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 4. 行号漂移：`reserve()` busy 判定现位于本地 `route_health.rs` 的 `reserve()` 内（原引用 :661-700 已偏移），
    Redis 侧为 `route_health_reserve.lua` 的 `blocked()`；`state.rs` 传播点现约 :2920（update_runtime_settings）。
 
-### T2（P0）早判健康：流式首个语义输出即结算，独占按首包时长而非整流时长
+### T2（P0）早判健康：流式首个语义输出即结算，独占按首包时长而非整流时长 —— ✅ commit `bc2b222`
 
-- [ ] RED：`tests/gateway/chat/streaming.rs`（或新建 `tests/route_half_open_verdict.rs`）
+- [x] RED（实际落在 `tests/gateway/chat/half_open_verdict.rs`，注册于 `tests/gateway/chat.rs`）
   - mock 上游：先发一个语义事件，然后 hold 住流 10s 不结束。
     第一个请求作为复检发出后，**第二个并发请求应在首包后立即被放行**（而非等流结束），
     且 `route_health_snapshot` 显示冷却已清空。
@@ -283,7 +283,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
     而不是半开探测失败（不套 `ROUTE_HALF_OPEN_FAILURE_STEP_CAP`）。
   - 首包之前就失败 → 现状路径不变（半开失败、step 受封顶、A1 请求内抑制生效）。
   - 客户端中途断开（499）→ 仍不归因路由失败（回归 `attribute_route_failure`，`gateway.rs:4131`）。
-- [ ] GREEN：
+- [x] GREEN：
   - `src/state/route_health.rs`：`RouteHealthPermit` 增
     ```rust
     pub async fn settle_healthy(&mut self) -> Result<(), RuntimeCoordinationError>
@@ -304,7 +304,30 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
     `health_verdict_pending = true`（首次 `semantic_output_observed()` 由 false→true 时）；
     由所在 async 读循环在处理完当前 chunk 后 `await mark_healthy_verdict()` 一次。
   - **不改非流式 JSON 路径**：其 permit 生命周期本就等于一次请求往返，收益小于改动风险。
-- [ ] 验证：`rtk cargo test --test gateway`（含 streaming 全量）。
+- [x] 验证：`rtk cargo test --test gateway`（394 通过）、`rtk cargo test --all`（60 套件全绿）、clippy -D warnings、fmt 全绿。
+
+**实现偏离记录（与方案文字不同处，均为等价或更保守选择）：**
+1. 方案写"三处 observe_json"（stream.rs:652/:1109/:1744），实际共 **4 处**：除三处外
+   `finish_stream`（:1223，canonicalizer 收尾事件）也走 `observe_json`；prefetch 分类器（:652）
+   与 finish_stream 都由循环顶部的 `mark_healthy_verdict_if_due` 兜底，drain 路径（:1109，translated 为
+   :1744 push_translated_event）在 drain 后立即结算。顺带确认 `stream_commit.rs` 的
+   `health_settle_pending` 标志是每次语义事件都置位（非仅首次），幂等由 `take_health_settle_pending` 的
+   一次性 swap + `mark_healthy_verdict` 的 atomic 双层保证。
+2. 上下文侧的一次性原子由 helper 先 `store(true)` 再调 `mark_healthy_verdict`（其内部 swap(false) 是
+   幂等闸）；方案未指定这层闸由谁置位，取"helper 置位"最小改动。
+3. 结算后的 permit **放回** `route_health_permit` 槽位（Settled 态），使后续 `mark_failure` /
+   `mark_cancelled` / `mark_success` 自然走 Settled 分支：失败变体→无租约 observe、成功/取消→no-op。
+   若不留回槽位，结算后 `mark_failure` 会取到 None 而静默丢失失败（实现中发现并修复）。
+4. 同一次 coalesced 读里"语义事件 + 错误帧"同时到达时（drain-Err 分支），先结算再 finalize 错误，
+   使该失败按"结算后新失败"记账（fresh streak）；方案未显式覆盖此边界。
+5. 本地 `settle_healthy` 的 Success 结算后，用 `remove_cleared_route_and_key` 移除已清空的路由/key
+   条目，镜像 Redis `route_health_finish.lua` 成功分支的 `clear_state`（DEL）——本地预留零值条目的
+   既有行为会使 `route_health_snapshot` 返回 Some(全零)，与 Redis 的 None 不一致；仅 T2 结算路径
+   移除，普通 success finish 行为不变。
+6. Redis 侧 `settle_healthy` 协调错误时**恢复原 live 租约**（不丢租约），由正常收尾路径兜底；
+   方案未指定该错误分支。
+7. 上游内部重试/hedge 的 `StreamCompletionContext` 构造点（`upstream.rs:754`）与
+   `tests/unit/server/gateway.rs:857` fixture 同样补 `health_verdict_pending` 字段（编译器强制）。
 
 ### T3（P0）半开占用与真冷却分账：不吃盲重试轮数、不谎报 retry_after
 
