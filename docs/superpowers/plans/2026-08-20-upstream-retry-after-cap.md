@@ -559,9 +559,12 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 > **T8 部署记录（2026-08-21）**
 > 1. 代码默认值确认：TTL=300s、cooldown base=10/max=300、rounds=3——T1/T2 落地后 TTL 只兜底崩溃残留租约。
 > 2. 部署命令：`rtk bash scripts/deploy.sh`（未加 `--force-copy-config`，保留部署目录既有
->    docker-compose.yml / .env）。镜像构建 + compose up + 健康检查 + 前端资源校验由脚本完成。
-> 3. §3 止血值回退：部署成功后经管理 API 核对运行时设置；半开 TTL 若为 60 则回 300；
->    冷却 base/max 与轮数按 §7 观测再调（本记录提交时观测尚未完成，标记为待办）。
+>    docker-compose.yml / .env）。镜像构建 + compose up + 健康检查 + 前端资源校验由脚本完成，
+>    容器 04:19 起 healthy；新设置默认值（窗口 3000 / busy 轮 10 / cap 30 / 首击 60）
+>    已在实例上确认生效。
+> 3. §3 止血值回退：经管理 API（revision 6→7）把 `upstream_route_health_half_open_ttl_seconds`
+>    120→**300**（immediate，无 restart）。冷却 base=2/max=60、rounds=6 与 DEPLOYMENT.md 内网
+>    建议一致，按 §7 观测（≥24h）后再调——本记录提交时观测未完成，为待办。
 
 ---
 
