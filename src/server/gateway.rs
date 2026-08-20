@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch, Mutex as TokioMutex};
 use tokio::time::Instant as TokioInstant;
 use tower_http::classify::ServerErrorsFailureClass;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -2254,8 +2255,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
-        // Frontend assets and SPA fallback
-        .fallback(serve_frontend)
+        // Frontend assets and SPA fallback (with static-only compression);
+        // merged so the nested router's fallback becomes the app fallback.
+        .merge(static_frontend_router())
         .layer(axum::extract::DefaultBodyLimit::max(
             usize::try_from(
                 state
@@ -2330,13 +2332,33 @@ fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String>
         .map(str::to_string)
 }
 
+/// Static frontend and SPA fallback router.
+///
+/// Kept as a standalone nested router so the compression layer only ever sees
+/// static assets; API and streaming responses bypass it entirely.
+fn static_frontend_router() -> Router<AppState> {
+    Router::new()
+        .fallback(serve_frontend)
+        .layer(CompressionLayer::new())
+}
+
 async fn serve_frontend(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     if let Some(asset) = FrontendAssets::get(path) {
         let mime_type = from_path(path).first_or_octet_stream().as_ref().to_string();
+        // Vite emits content-hashed files under assets/; everything else
+        // (index.html, favicon) must revalidate so deploys take effect.
+        let cache_control = if path.starts_with("assets/") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
         return (
-            [(header::CONTENT_TYPE, mime_type)],
+            [
+                (header::CONTENT_TYPE, mime_type),
+                (header::CACHE_CONTROL, cache_control.to_string()),
+            ],
             asset.data.into_response(),
         )
             .into_response();
@@ -2349,7 +2371,10 @@ async fn serve_frontend(uri: axum::http::Uri) -> Response {
     if let Some(asset) = FrontendAssets::get("index.html") {
         let mime_type = "text/html; charset=utf-8".to_string();
         return (
-            [(header::CONTENT_TYPE, mime_type)],
+            [
+                (header::CONTENT_TYPE, mime_type),
+                (header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
             asset.data.into_response(),
         )
             .into_response();

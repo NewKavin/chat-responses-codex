@@ -254,3 +254,163 @@ async fn test_v1_routes_do_not_fallback_to_spa() {
     // Should return 404 (not found), not 200 with HTML
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+// ============================================================================
+// Cache-Control Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_index_html_is_served_with_no_cache() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let cache_control = response
+        .headers()
+        .get("cache-control")
+        .expect("index.html must carry Cache-Control")
+        .to_str()
+        .unwrap();
+    assert_eq!(cache_control, "no-cache");
+}
+
+#[tokio::test]
+async fn test_hashed_assets_are_served_with_immutable_cache() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    // Vite emits content-hashed filenames (Name-hash.ext); use a real hashed
+    // asset when the frontend has been built so the assertion exercises the
+    // actual serving path.
+    let asset_path = std::fs::read_dir("frontend/dist/assets")
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .find(|name| name.ends_with(".js") && name.len() > 12)
+        });
+
+    let Some(asset_path) = asset_path else {
+        eprintln!("frontend/dist has no hashed assets; skipping immutable-cache assertion");
+        return;
+    };
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/assets/{asset_path}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let cache_control = response
+        .headers()
+        .get("cache-control")
+        .expect("hashed assets must carry Cache-Control")
+        .to_str()
+        .unwrap();
+    assert_eq!(cache_control, "public, max-age=31536000, immutable");
+}
+
+#[tokio::test]
+async fn test_frontend_assets_are_compressed_when_accepted() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    // Compressible static assets must be served gzip-encoded when the client
+    // advertises Accept-Encoding: gzip. The large shared JS bundle guarantees
+    // the payload is above the compression size threshold.
+    let asset_path = std::fs::read_dir("frontend/dist/assets")
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    (name, size)
+                })
+                .filter(|(name, _)| name.ends_with(".js"))
+                .max_by_key(|(_, size)| *size)
+                .map(|(name, _)| name)
+        });
+
+    let Some(asset_path) = asset_path else {
+        eprintln!("frontend/dist has no JS assets; skipping compression assertion");
+        return;
+    };
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/assets/{asset_path}"))
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_encoding = response
+        .headers()
+        .get("content-encoding")
+        .expect("gzip-accepting clients must receive compressed static assets")
+        .to_str()
+        .unwrap();
+    assert_eq!(content_encoding, "gzip");
+    let vary = response
+        .headers()
+        .get("vary")
+        .expect("compressed responses must declare Vary: Accept-Encoding")
+        .to_str()
+        .unwrap();
+    assert!(vary.to_ascii_lowercase().contains("accept-encoding"));
+}
+
+#[tokio::test]
+async fn test_api_routes_are_not_compressed() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 401 JSON from the portal auth path must stay uncompressed so SSE/API
+    // behavior is unchanged.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response.headers().get("content-encoding").is_none(),
+        "API responses must not pass through the static-asset compression layer"
+    );
+}
