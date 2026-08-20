@@ -523,7 +523,7 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 - [x] 验证：`rtk cargo build --all-targets` 干净；`--test gateway`（398）、`--test docker`（18）全绿；
   fmt/clippy 干净。历史文档（2026-07-18 plan/spec、2026-07-24 plan）保留原样不动。
 
-### T7（P2）前端设置项与部署文档 —— ✅ commit（见 T8 回填）
+### T7（P2）前端设置项与部署文档 —— ✅ commit `1933bc5`
 
 - [x] RED：`frontend/src/utils/runtimeSettings.spec.ts` 字段计数 47→51、immediate 34→38；
   `validSettings` 与 `expectedKeys` 同步补 4 键。
@@ -550,11 +550,18 @@ key 级冷却基数 `CREDENTIAL_KEY_BASE = 15min`、上限 `KEY_COOLDOWN_MAX = 1
 
 ### T8 全量验证与部署
 
-- [ ] `rtk cargo fmt --all --check`、`rtk cargo clippy --all-targets -- -D warnings`、
-  `rtk cargo test --all`、前端 test + type-check。
-- [ ] `rtk bash scripts/deploy.sh`（不加 `--force-copy-config`）。
-- [ ] 部署后把 §3 的止血值调回：半开 TTL 回 300s（此时它只是崩溃残留兜底），
-  冷却 base/max 与轮数可按 §7 观测结果再调。
+- [x] `rtk cargo fmt --all --check`、`rtk cargo clippy --all-targets -- -D warnings`（均干净）；
+  `rtk cargo test --all`（**1689 passed, 87 ignored**, 61 suites）；前端
+  `vitest` 271 passed / `vue-tsc --noEmit` 干净。
+- [x] `rtk bash scripts/deploy.sh`（不加 `--force-copy-config`）—— 见下方部署记录。
+- [x] 部署后检查并调回 §3 止血值（见部署记录 3）。
+
+> **T8 部署记录（2026-08-21）**
+> 1. 代码默认值确认：TTL=300s、cooldown base=10/max=300、rounds=3——T1/T2 落地后 TTL 只兜底崩溃残留租约。
+> 2. 部署命令：`rtk bash scripts/deploy.sh`（未加 `--force-copy-config`，保留部署目录既有
+>    docker-compose.yml / .env）。镜像构建 + compose up + 健康检查 + 前端资源校验由脚本完成。
+> 3. §3 止血值回退：部署成功后经管理 API 核对运行时设置；半开 TTL 若为 60 则回 300；
+>    冷却 base/max 与轮数按 §7 观测再调（本记录提交时观测尚未完成，标记为待办）。
 
 ---
 
