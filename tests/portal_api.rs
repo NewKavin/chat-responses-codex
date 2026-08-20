@@ -2048,3 +2048,129 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
         "cost billing should not expose a token daily quota"
     );
 }
+
+#[tokio::test]
+async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+    let now = stable_today_noon();
+
+    let state = PersistedState {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+            id: "downstream-cost".to_string(),
+            name: "Cost Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string()],
+            rate_limit_enabled: true,
+            per_minute_limit: 100,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            input_token_price_per_million_cents: Some(1000),
+            output_token_price_per_million_cents: Some(3000),
+            daily_cost_limit_cents: Some(3000),
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+            billing_mode: "token".into(),
+        }]),
+        usage_logs: vec![UsageLog {
+            id: "cost-log-1".to_string(),
+            downstream_key_id: "downstream-cost".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            downstream_name: None,
+            upstream_name: None,
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            request_id: "req-cost-1".to_string(),
+            status_code: 200,
+            wire_status_code: 0,
+            stream_diagnostics: None,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 124_271,
+            completion_tokens: 1_171,
+            total_tokens: 125_442,
+            total_cost_cents: Some(127),
+            first_token_latency_ms: None,
+            latency_ms: 100,
+            created_at: now - 3600,
+            compatibility: None,
+        }],
+        announcement: None,
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
+        model_aliases: vec![],
+    };
+
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    let app = chat_responses_codex::server::build_router(app_state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/quota")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let daily = &result["cost_quota"]["daily"];
+    assert!(daily.is_object(), "cost billing must expose cost_quota.daily");
+    assert_eq!(daily["used_cents"], 127);
+    assert_eq!(daily["limit_cents"], 3000);
+    assert_eq!(daily["remaining_cents"], 2873);
+    assert_eq!(daily["percentage"], 127.0 / 3000.0 * 100.0);
+    assert!(
+        daily["used"].is_null() && daily["limit"].is_null() && daily["remaining"].is_null(),
+        "daily cost quota must use *_cents field names, not raw token quota names"
+    );
+}
+
+#[tokio::test]
+async fn portal_quota_details_omit_daily_cost_quota_for_request_billing() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/quota")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(
+        result["cost_quota"]["daily"].is_null(),
+        "request-billed downstreams must not expose a daily cost quota"
+    );
+}

@@ -235,11 +235,22 @@ pub(super) async fn portal_quota(
         })
         .collect();
 
+    // Use *_cents field names to match the portal UI contract (the same shape
+    // as overview's cost_daily) instead of the raw TokenQuota field names.
+    let cost_daily = cost_usage.daily.map(|quota| {
+        json!({
+            "used_cents": quota.used,
+            "limit_cents": quota.limit,
+            "remaining_cents": quota.remaining,
+            "percentage": quota.percentage,
+        })
+    });
+
     Json(json!({
         "per_minute_limit": per_minute_limit,
         "request_quota": request_quota,
         "cost_quota": {
-            "daily": cost_usage.daily,
+            "daily": cost_daily,
         },
         "model_allowlist": downstream.model_allowlist,
         "ip_allowlist": downstream.ip_allowlist,
