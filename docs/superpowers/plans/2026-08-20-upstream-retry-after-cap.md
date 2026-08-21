@@ -757,6 +757,19 @@ Redis 侧 `route_health_probe.lua` 新增 ARGV[5] `exclusive_window_ms`，并把
    （`class_counts.concurrency_saturated`）的唯一成因，代码不覆盖。T8 部署记录只回退了半开 TTL，
    未提并发上限，需确认后调整。
 
+> **T10 应用记录（2026-08-21，T9 部署后由管理 API 调整，非代码改动）**
+> 1. `upstream_retry_after_cap_seconds` 30 → **60**：经 `PUT /api/admin/runtime-settings`
+>    （expected_revision 7 → **8**，source=persisted，immediate 生效，无 restart）。
+> 2. 全部 **24** 个上游 `max_concurrency`（原 16 个=4、1 个=5、7 个=10）统一提到 **16**
+>    （16–64 区间保守起点）：`PUT /api/admin/upstreams/{id}` 逐个更新，24/24 成功。
+>    注意该路由方法是 **PUT**（非 PATCH，PATCH 会 405）。
+> 3. T9 已部署：`bash scripts/deploy.sh`（未加 `--force-copy-config`）构建新镜像
+>    （含 F1/F2），容器 09:37 重建 healthy；设置经重启保留（revision=8、cap=60、
+>    ttl=300、window=3000、busy_rounds=10、first_strike=60、cooldown 2/60、rounds=6）。
+>    代码 commit `df17cfa`（T9，见上方）。
+> 4. 观察口径沿用 §7：若 `class_counts.concurrency_saturated` 仍高，可在 16–64 区间继续上调；
+>    §7.6 的 24h 观测仍在进行中。
+
 ## 已知缺陷（本次不修，记录在案）
 
 **key-hedge 胜出时健康归属错位（既有问题，非 T1–T8 引入）**：
