@@ -1041,15 +1041,27 @@ impl RouteHealthRegistry {
         }
 
         let route_state_generation = Some(state.state_generation);
+        let cooldown_until = state.cooldown_until;
         let key_generation = self.reserve_expired_half_open_key(key, now);
         let route_generation = self.next_generation();
+        let half_open_ttl = self.half_open_ttl;
+        let exclusive_window = self.half_open_exclusive_window;
         let state = self.routes.get_mut(route).expect("route state must exist");
         state.half_open_generation = Some(route_generation);
-        state.half_open_expires_at = Some(now + self.half_open_ttl);
-        // Early probes (A3) stay strictly single-flight: the exclusive window
-        // for probe-held leases is the full lease lifetime so concurrent
-        // regular reserves cannot bypass a cooling route's probe.
-        state.half_open_exclusive_until = Some(now + self.half_open_ttl);
+        state.half_open_expires_at = Some(now + half_open_ttl);
+        // Early probes (A3) stay strictly single-flight for as long as the
+        // route would have been unavailable anyway — i.e. until its remaining
+        // cooldown elapses — so a probe never invites a herd onto an upstream
+        // that is still inside its backoff. Past that point the ordinary
+        // exclusive window applies: a probe whose first output is slow (or
+        // that hangs) must not keep a route that is otherwise due for
+        // recovery pinned at one concurrent request for the whole lease (T9).
+        state.half_open_exclusive_until = Some(
+            cooldown_until
+                .unwrap_or(now)
+                .max(now + exclusive_window)
+                .min(now + half_open_ttl),
+        );
         state.last_early_probe_at = Some(now);
         RouteAvailability::Ready(HealthLease {
             route: route.clone(),

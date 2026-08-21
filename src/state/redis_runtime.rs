@@ -1360,7 +1360,11 @@ impl RedisRuntimeCoordinator {
             .arg(self.tuning_snapshot().route_health_half_open_ttl_ms)
             // Aligned with HALF_OPEN_BUSY_RETRY (the optimistic half-open
             // poll interval): one early probe per route per second.
-            .arg(1000u64);
+            .arg(1000u64)
+            .arg(
+                self.tuning_snapshot()
+                    .route_health_half_open_exclusive_window_ms,
+            );
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
         if result.is_err() {

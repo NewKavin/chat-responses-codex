@@ -4,6 +4,7 @@ local lease_id = ARGV[1]
 local ttl_seconds = tonumber(ARGV[2])
 local lease_duration_ms = tonumber(ARGV[3])
 local probe_interval_ms = tonumber(ARGV[4])
+local exclusive_window_ms = tonumber(ARGV[5])
 
 local function state_value(key, field)
   return redis.call('HGET', key, field)
@@ -67,14 +68,22 @@ end
 -- Grant the single-flight early half-open lease on the route.
 local route_state_generation = state_value(KEYS[2], 'state_generation') or ''
 local route_generation = state_value(KEYS[2], 'state_generation') or '0'
--- Early probes stay strictly single-flight: the exclusive window for a
--- probe-held lease is the full lease lifetime, so regular reserves cannot
--- bypass a cooling route's probe.
+-- Early probes stay strictly single-flight for as long as the route would
+-- have been unavailable anyway (its remaining cooldown), so a probe never
+-- invites a herd onto an upstream that is still inside its backoff. Past
+-- that point the ordinary exclusive window applies: a probe with a slow (or
+-- hung) first output must not pin an otherwise-recovered route at one
+-- concurrent request for the whole lease (T9). Mirrors
+-- `reserve_route_health_probe` in route_health.rs.
+local probe_exclusive_until = math.min(
+  now_ms + lease_duration_ms,
+  math.max(route_cooldown_until, now_ms + exclusive_window_ms)
+)
 redis.call('HSET', KEYS[2],
   'half_open_lease', lease_id,
   'half_open_generation', route_generation,
   'half_open_expires_at_ms', tostring(now_ms + lease_duration_ms),
-  'half_open_exclusive_until_ms', tostring(now_ms + lease_duration_ms),
+  'half_open_exclusive_until_ms', tostring(probe_exclusive_until),
   'last_early_probe_ms', tostring(now_ms),
   'last_access_ms', tostring(now_ms)
 )
@@ -93,7 +102,9 @@ if key_class then
     'half_open_lease', lease_id,
     'half_open_generation', key_generation,
     'half_open_expires_at_ms', tostring(now_ms + lease_duration_ms),
-    'half_open_exclusive_until_ms', tostring(now_ms + lease_duration_ms),
+    -- The key lease is granted exactly like the regular reserve path
+    -- (its cooldown already elapsed), so it uses the ordinary window.
+    'half_open_exclusive_until_ms', tostring(now_ms + exclusive_window_ms),
     'last_access_ms', tostring(now_ms)
   )
   redis.call('EXPIRE', KEYS[1], ttl_seconds)

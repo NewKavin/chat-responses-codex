@@ -1458,3 +1458,118 @@ async fn half_open_exclusive_window_does_not_affect_early_probe_single_flight() 
     ));
     registry.finish(first, RouteOutcome::Success);
 }
+
+#[tokio::test(start_paused = true)]
+async fn early_probe_exclusivity_ends_with_the_cooldown_not_the_lease() {
+    // T9/F2: an A3 early-probe lease used to pin its route exclusively for
+    // the whole half-open TTL (300s), so a probe with a slow first output
+    // kept an otherwise-recovered route at one concurrent request long after
+    // its cooldown ended (the tail of C1). The exclusive window now ends with
+    // the route's remaining cooldown — strict single-flight while cooling,
+    // then the ordinary exclusive window instead of the full lease.
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        10,
+        60,
+        300,
+        3_000,
+        60,
+    );
+    let route = route("early-probe-exclusivity", "glm-5.2");
+    let key = key("early-probe-exclusivity");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let cooldown_remaining = registry
+        .route_health_snapshot(&route)
+        .unwrap()
+        .cooldown_remaining;
+
+    // The early probe takes a half-open lease while the route is still
+    // cooling (cooldown itself is deliberately ignored by the probe path).
+    let probe = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open probe lease, got {other:?}"),
+    };
+
+    // Invariant: cooldown checks precede half-open lease checks, so regular
+    // reserves still see Cooling while the route is cooling.
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    // Advance past the cooldown plus the ordinary exclusive window. The probe
+    // lease is still alive (TTL 300s), but its exclusivity ended with the
+    // cooldown: a regular reserve is admitted as a plain ready lease instead
+    // of HalfOpenBusy for the rest of the lease.
+    tokio::time::advance(cooldown_remaining + Duration::from_secs(3) + Duration::from_millis(1))
+        .await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if !lease.is_half_open() => lease,
+        other => panic!("expected plain ready lease after cooldown, got {other:?}"),
+    };
+    registry.finish(probe, RouteOutcome::Success);
+    registry.finish(lease, RouteOutcome::Success);
+}
+
+#[tokio::test(start_paused = true)]
+async fn early_probe_at_cooldown_tail_keeps_a_full_exclusive_window() {
+    // T9/F2 boundary: a probe taken while the remaining cooldown is shorter
+    // than the exclusive window must still hold exclusivity for at least one
+    // full window, measured from the probe — it must not be immediately
+    // pierced when the cooldown ends mid-window.
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        10,
+        60,
+        300,
+        3_000,
+        60,
+    );
+    let route = route("early-probe-tail-window", "glm-5.2");
+    let key = key("early-probe-tail-window");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let cooldown_remaining = registry
+        .route_health_snapshot(&route)
+        .unwrap()
+        .cooldown_remaining;
+    // Walk into the tail so that only 2s of cooldown remain (< 3s window).
+    assert!(cooldown_remaining > Duration::from_secs(3));
+    tokio::time::advance(cooldown_remaining - Duration::from_secs(2)).await;
+
+    let probe = match registry.reserve_route_health_probe(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open probe lease at cooldown tail, got {other:?}"),
+    };
+
+    // Still cooling for 2s more: regular reserves see Cooling (order
+    // invariant), so the probe exclusivity manifesting after the cooldown is
+    // what the next two steps observe.
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    // Cooldown just ended, but the exclusive window (3s from the probe) still
+    // has 1s to run — regular reserves are HalfOpenBusy, not Ready.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // The full window has elapsed: admitted as a plain ready lease (old
+    // behavior kept HalfOpenBusy until the 300s lease expired).
+    tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(100)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if !lease.is_half_open() => lease,
+        other => panic!("expected plain ready lease after full exclusive window, got {other:?}"),
+    };
+    registry.finish(probe, RouteOutcome::Success);
+    registry.finish(lease, RouteOutcome::Success);
+}

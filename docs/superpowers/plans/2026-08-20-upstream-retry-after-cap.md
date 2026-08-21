@@ -644,3 +644,132 @@ T1/T2/T3 属同一根因族，建议同一分支顺序提交并一起部署（�
    这不会自己产生 `upstream_routes_exhausted`，但会让池子变小、更容易耗尽。
    本次未追（属能力探测子系统，见 2026-08-10 / 2026-08-11 两份方案）；
    排查时若发现 `route_count` 明显小于配置路由数，往这个方向查。
+
+---
+
+# T9（收尾）复核发现的两处修复 + 一处已知缺陷记录 —— ✅ commit `6fecb70`
+
+> 来源：2026-08-21 对 T1–T8 的**代码级复核**（逐 commit 读实现，非文档回填复核）。
+> T1–T8 的语义正确、`cargo test --all` 通过（复核时重跑：全量跑到 doc-tests；
+> 单跑 `route_health` 45 passed、`upstream_retry_after_cap` 4 passed、
+> 8 个新 gateway 用例全绿）。以下是复核额外发现的问题。
+
+## T9 现状：代码改动已在工作区（未提交、未加测试）
+
+复核过程中已就地改好两处，**工作区脏、尚未提交**，接手者需要补测试与验证后再提交：
+
+```
+ M src/server/gateway.rs                          （F1）
+ M src/state/route_health.rs                      （F2 本地）
+ M src/state/redis_runtime/route_health_probe.lua （F2 Redis）
+ M src/state/redis_runtime.rs                     （F2 新增 ARGV）
+```
+
+`rtk cargo build --all-targets` 已通过。**接手者请先 `rtk git diff` 读一遍现有改动**，
+不要重写，只补测试/文档/验证。
+
+### F1 `mark_healthy_verdict` 的 take→await→insert 竞态（已改）
+
+**问题**：T2 的 `StreamCompletionContext::mark_healthy_verdict`（`gateway.rs:3232` 附近）原实现
+把 permit 从 `Arc<TokioMutex<Option<..>>>` 里 `take()` 出来、`await` 结算、再 `get_or_insert` 放回。
+在这段窗口内，并发的完成路径（流错误收尾 `mark_failure`、`PreHeaderStreamCancellation`）
+会看到**空槽**并静默跳过——那一次失败观测就丢了。
+
+**改法**：改为持锁结算（`lock().await` 后 `as_mut()`），并发路径改为等待而不是看到空槽。
+`settle_healthy` 内部只 await registry mutex / Redis 往返，不会再取这把锁，无死锁风险。
+
+### F2 A3 提前探测的独占不再持续整个租约（已改）
+
+**问题**：T1 给 A3 提前探测（`reserve_route_health_probe` / `route_health_probe.lua`）设的独占
+是**整个租约期**（`half_open_ttl`，默认 300s）。冷却期内这没问题（其它请求本来就看到 `Cooling`），
+但**冷却结束之后**探针仍然独占该路由，直到探针请求结束——首包慢的模型（内网实测就慢）
+会让一条本该恢复的路由继续被压到 1 并发，最长 300s。这正是 C1 的尾巴。
+
+**改法**：探针独占改为 `min(now + 租约, max(剩余冷却, now + 独占窗口))`：
+
+- 冷却未结束 → 严格单飞（不变，不给故障上游制造惊群）；
+- 冷却结束后 → 退化为普通 3s 独占窗口，与 T1 的常规路径一致；
+- 至少保证一个完整窗口（探针在冷却尾声才拿到租约时不会立刻被穿透）。
+
+Redis 侧 `route_health_probe.lua` 新增 ARGV[5] `exclusive_window_ms`，并把 key 级租约的独占
+改为普通窗口（镜像本地 `reserve_expired_half_open_key`）。
+
+## T9 待办清单
+
+- [x] RED（F2 本地）：`tests/route_health.rs` 新增
+      `early_probe_exclusivity_ends_with_the_cooldown_not_the_lease`：
+  - 构造与断言如方案（含边界用例 `early_probe_at_cooldown_tail_keeps_a_full_exclusive_window`）；
+  - RED 实测：stash 掉 F2 三文件后两条新用例均失败（旧行为 `HalfOpenBusy`，断言 `Ready` 且
+    `!lease.is_half_open()` 处 panic），恢复 F2 后全绿。
+- [x] RED（F2 Redis）：`tests/redis_runtime.rs` 新增
+      `redis_early_probe_exclusivity_ends_with_the_cooldown_not_the_lease`
+      （`#[ignore = "requires TEST_REDIS_URL"]`，用短冷却配置 base=1s/max=2s、窗口 500ms，
+      sleep `cooldown_remaining + 700ms` 实等冷却结束；断言顺序：冷却中 `Cooling` → 冷却后
+      `Ready` 且 `!is_half_open()`；探针 Success 清健康）。**已对真实 Redis 跑通**
+      （`TEST_REDIS_URL=redis://172.18.0.4:6379/0`，1.86s），覆盖 ARGV[5] 新顺序。
+- [x] 回归：`half_open_exclusive_window_does_not_affect_early_probe_single_flight`
+      （探针 vs 探针单飞）与全部 `half_open_verdict` / `half_open_busy_ledger` / 
+      `credentials_first_strike` 用例全绿（`cargo test --all` 1691 passed / 88 ignored）。
+- [x] F1 未写竞态用例；以既有 `half_open_verdict` 4 个用例 + `cargo test --all` 回归。
+      补充人工核验：`settle_healthy` 只取 `self.backend`（permit 内部字段），不重入 slot 锁；
+      `finish_route_health_permit` 在 await 前释放 slot 锁 → 无锁序反转，持锁结算无死锁。
+- [x] 验证门：`rtk cargo fmt --all --check`、`rtk cargo clippy --all-targets -- -D warnings`、
+      `rtk cargo test --all`（1691 passed, 88 ignored, 61 suites）全绿。
+- [x] 提交：一个 commit（trailer 齐全），message 体现 F1+F2 同属 T2/T1 的收尾修复。
+      commit hash = `6fecb70`（见本行上方标题）。
+
+> **T9 实现记录（2026-08-21，复核后补测与提交）**
+> 1. **行号与方案快照的漂移**（改动前已 grep 确认）：F1 `mark_healthy_verdict` 实际在
+>    `gateway.rs` :3224（结算块 :3242-3257，原快照 :3232）；F2 本地
+>    `reserve_route_health_probe` 实际在 `route_health.rs` :971，独占计算块 :1044-1063
+>    （原快照 :1041）；`redis_runtime.rs` 的 ARGV[5] 追加在 :1360-1365（probe 调用点，
+>    原快照 :1360）；`route_health_probe.lua` ARGV[5] 在 :7，独占计算在 :71-77、
+>    key 级普通窗口在 :102-108。
+> 2. **F2 语义确认**：本地与 Lua 公式一致 = `min(now+租约, max(剩余冷却, now+窗口))`，
+>    并保留「至少一个完整窗口」：冷却尾声拿租约时 `剩余冷却 < 窗口` → 独占 = now+窗口；
+>    测试用边界用例覆盖（冷却中 reserve 仍报 `Cooling`——冷却判定先于租约判定，这是顺序
+>    不变量，独占的"完整窗口"在冷却结束后以 `HalfOpenBusy` 形式继续体现）。
+> 3. **Redis 测试只 finish 探针 permit**：无租约准入的 permit 未写入 Redis（generation 空、
+>    lease_id 未入库），finish 会走 finish.lua 的 owns() 失败分支——与既有 Redis 用例
+>    （`redis_route_health_probe_ignores_cooldown_and_is_single_flight`）一致，只 finish
+>    持有租约的探针 permit，无租约 permit 直接 drop。
+> 4. **发现（非 F2 引入，已核对证据）：6 条既有 ignored Redis 用例在真实 Redis 上失败**：
+>    `redis_route_health_exclusive_window_allows_admission_after_window`、
+>    `redis_settle_healthy_releases_exclusive_window_for_other_state`、
+>    `redis_settled_permit_failure_observes_route_without_lease`、
+>    `failed_redis_token_recording_does_not_queue_a_duplicate_usage_log`、
+>    `redis_coordinated_probe_plan_reserves_and_releases_upstream_capacity`、
+>    `redis_downstream_token_replay_preserves_original_score_and_value` +
+>    `redis_token_recording_retries_commit_after_response_loss`。
+>    证据：F2 stash 前后失败集合完全一致（仅新增本任务的 Redis 用例在 base 失败、F2 后通过）；
+>    失败模式为时序敏感（如 observe 的 `explicit.max(local)` 本地地板 ~10s 生效后，
+>    用例只 sleep 60ms 便 expect half-open permit → `Cooling 10.036s`）；这些用例
+>    `#[ignore]` 且 CI 无 Redis service，从未被真正执行过。**不在 T9 范围**，如需修复应单独立项
+>    （把 sleep 改为先读 `cooldown_remaining` 再等）。
+> 5. **T10 两项运维配置**（cap 30→60、`max_concurrency` 4→16–64）未动代码，待用户在管理页调整。
+
+## T10（运维，无需改代码）两项配置必须调
+
+1. **`upstream_retry_after_cap_seconds` 30 → 60**：T4 把终态 `please try again in Ns`
+   也做了 clamp（含本地冷却剩余）。当前内网 `upstream_transient_route_cooldown_max_seconds=60`
+   > cap=30，客户端会提前 30s 重试再吃一个 503。把 cap 抬到与冷却上限一致即可消除。
+2. **每个上游的 `max_concurrency` 4 → 16–64**（C6）：这条是 429 那一支
+   （`class_counts.concurrency_saturated`）的唯一成因，代码不覆盖。T8 部署记录只回退了半开 TTL，
+   未提并发上限，需确认后调整。
+
+## 已知缺陷（本次不修，记录在案）
+
+**key-hedge 胜出时健康归属错位（既有问题，非 T1–T8 引入）**：
+key hedge（`send_hedge_stream_attempt`）与 primary **共享同一个 `StreamCommitTracker`**
+（`upstream.rs:1020` / `1234`），且 key hedge **没有自己的 `StreamCompletionContext`**——
+胜出流的字节可能来自 hedge 的另一把 key，但被结算的是 **primary 路由的健康租约**。
+T2 只是让这次结算发生得更早（首包而非流末），没有改变归属语义。
+
+> 复核时曾怀疑 T2 的 settle 标志（tracker 上的 `AtomicBool`）会被“没出过内容的路由”消费，
+> 进一步核对后**排除**：settle 只在胜出流的 body 循环里触发，而 `prefetch_first_usable_output`
+> 保证胜出方一定产出了 usable output，所以被清冷却的那条路由本身是活的。
+> 真正的错位只有上面这一条“归属到 primary 而非胜出 key”。
+
+修法（若要做，需单独立项）：给 key hedge 各自的 `StreamCompletionContext` 与路由健康租约，
+胜出方结算自己的路由、落败方 `Cancelled` 归还——涉及 hedge 生命周期，风险高于 T9，建议先观测
+`route_id` 与 `selected_upstream_id` 在多 key 上游上的分布再决定。

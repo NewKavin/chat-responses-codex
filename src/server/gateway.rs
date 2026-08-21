@@ -3233,19 +3233,23 @@ impl StreamCompletionContext {
         if !self.health_verdict_pending.swap(false, Ordering::AcqRel) {
             return;
         }
-        let permit = self.route_health_permit.lock().await.take();
-        let Some(mut permit) = permit else {
+        // The permit stays inside the mutex for the whole settle: taking it
+        // out across the await opened a window in which a concurrent
+        // completion path (stream error, pre-header cancellation) found an
+        // empty slot and silently dropped its outcome. Holding the guard
+        // makes those paths wait instead — settle_healthy only awaits the
+        // registry mutex / Redis round-trip, never this slot (T9).
+        let mut slot = self.route_health_permit.lock().await;
+        let Some(permit) = slot.as_mut() else {
             return;
         };
-        let outcome = permit.settle_healthy().await;
-        // Keep the permit in the slot on every path: after a successful
-        // settle it is a `Settled` permit whose later success/cancellation
-        // are no-ops and whose later failures become no-lease observations
-        // (the stream may still fail after the first semantic output); after
-        // a coordination error it is the restored live lease for the normal
-        // completion path. Errors are logged only and never affect request.
-        self.route_health_permit.lock().await.get_or_insert(permit);
-        if let Err(error) = outcome {
+        // After a successful settle the slot holds a `Settled` permit whose
+        // later success/cancellation are no-ops and whose later failures
+        // become no-lease observations (the stream may still fail after the
+        // first semantic output); after a coordination error it keeps the
+        // live lease for the normal completion path. Errors are logged only
+        // and never affect the request.
+        if let Err(error) = permit.settle_healthy().await {
             tracing::error!(
                 error = %error,
                 "failed to settle route health after first semantic output"

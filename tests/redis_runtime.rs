@@ -2764,6 +2764,70 @@ async fn redis_route_health_probe_ignores_cooldown_and_is_single_flight() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_early_probe_exclusivity_ends_with_the_cooldown_not_the_lease() {
+    // T9/F2 Redis backend: mirror of the local registry test. The probe
+    // lease's exclusivity ends with the route's remaining cooldown (the new
+    // ARGV[5] exclusive_window_ms in route_health_probe.lua), so a regular
+    // reserve is admitted as a plain non-half-open lease afterwards although
+    // the probe lease itself is still alive (TTL 300s). While cooling, the
+    // route still refuses regular reserves (order invariant).
+    let config = AppConfig {
+        upstream_transient_route_cooldown_base_seconds: 1,
+        upstream_transient_route_cooldown_max_seconds: 2,
+        upstream_route_half_open_exclusive_window_ms: 500,
+        ..redis_test_config()
+    };
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("early-probe-exclusivity-upstream", "fingerprint-a");
+    let route = redis_test_health_route(
+        "early-probe-exclusivity-upstream",
+        "fingerprint-a",
+        "model-a",
+    );
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    let cooldown_remaining = first
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("route failure must be visible")
+        .cooldown_remaining;
+
+    // The early probe ignores the remaining cooldown and takes the
+    // single-flight half-open lease.
+    let probe = match first
+        .reserve_route_health_probe(&route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected early half-open lease, got {other:?}"),
+    };
+    // Ordering invariant: while still cooling, a regular reserve is Cooling.
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    // Wait out the cooldown plus the exclusive window (500ms, shorter than
+    // the ~1s cooldown so exclusivity ends exactly at the cooldown end). The
+    // probe lease is still alive, but the route admits a plain ready lease.
+    tokio::time::sleep(cooldown_remaining + Duration::from_millis(700)).await;
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(permit) if !permit.is_half_open()
+    ));
+
+    // The probe still owns its lease and clears the route health on success.
+    probe.finish(RouteOutcome::Success).await.unwrap();
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_route_health_probe_enforces_one_second_interval_per_route() {
     // A3 Redis backend: after an early probe (even a cancelled one) the same
     // route refuses another early probe for ~1s; normal reserves stay cooling
