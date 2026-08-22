@@ -2132,7 +2132,11 @@ pub(super) async fn send_to_upstream(
         // Log-facing excerpt: full diagnostic context (status, classification,
         // upstream code, message) for operators reading the server log.
         let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);
-        let upstream_error_message = upstream_client_message(status);
+        let upstream_error_message = upstream_client_message(
+            status,
+            Some(&upstream.name),
+            classified_feedback.upstream_error_code.as_deref(),
+        );
 
         tracing::debug!(
             request_id = %request_id,

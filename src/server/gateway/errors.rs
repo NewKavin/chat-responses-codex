@@ -473,6 +473,9 @@ impl GatewayError {
             if let Some(status) = upstream_status {
                 details.insert("upstream_status".to_string(), json!(status));
             }
+            if let Some(code) = failure.upstream_error_code.as_deref() {
+                details.insert("upstream_error_code".to_string(), json!(code));
+            }
             Value::Object(details)
         };
 
@@ -1118,7 +1121,11 @@ pub(super) fn safe_upstream_body_diagnostics(body: &Value) -> SafeUpstreamBodyDi
 /// Provider bodies are deliberately excluded because they may echo request
 /// content or credentials. Numeric status and the terminal route summary carry
 /// the stable diagnostic contract.
-pub(super) fn upstream_client_message(status: StatusCode) -> String {
+pub(super) fn upstream_client_message(
+    status: StatusCode,
+    upstream_name: Option<&str>,
+    upstream_error_code: Option<&str>,
+) -> String {
     let status_hint = match status.as_u16() {
         401 => "upstream authentication failed (invalid or expired API key)",
         403 => {
@@ -1129,7 +1136,19 @@ pub(super) fn upstream_client_message(status: StatusCode) -> String {
         c if (500..=599).contains(&c) => "upstream server error",
         _ => "upstream rejected the request",
     };
-    format!("{status_hint} (status {})", status.as_u16())
+    // Fixed kv order: status, upstream=, code=.  Missing entries are omitted
+    // entirely - never print an empty `code=`.
+    let mut parts = vec![format!("status {}", status.as_u16())];
+    if let Some(name) = upstream_name.map(str::trim).filter(|name| !name.is_empty()) {
+        parts.push(format!("upstream={name}"));
+    }
+    if let Some(code) = upstream_error_code
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+    {
+        parts.push(format!("code={code}"));
+    }
+    format!("{status_hint} ({})", parts.join(", "))
 }
 
 /// Build a diagnostic summary for an upstream non-success response.
@@ -1150,4 +1169,48 @@ pub(super) fn safe_upstream_error_summary(
         summary.push_str(&format!(", upstream code {code}"));
     }
     summary
+}
+
+#[cfg(test)]
+mod upstream_client_message_tests {
+    use super::*;
+
+    #[test]
+    fn message_carries_status_upstream_and_code_in_fixed_order() {
+        let message = upstream_client_message(
+            StatusCode::BAD_GATEWAY,
+            Some("k-api"),
+            Some("channel_not_found"),
+        );
+        assert_eq!(
+            message,
+            "upstream server error (status 502, upstream=k-api, code=channel_not_found)"
+        );
+    }
+
+    #[test]
+    fn message_omits_missing_kvs_and_never_prints_empty_code() {
+        let message = upstream_client_message(StatusCode::SERVICE_UNAVAILABLE, Some("k-api"), None);
+        assert_eq!(
+            message,
+            "upstream server error (status 503, upstream=k-api)"
+        );
+        let message = upstream_client_message(StatusCode::BAD_GATEWAY, None, None);
+        assert_eq!(message, "upstream server error (status 502)");
+        assert!(!message.contains("code="));
+        assert!(!message.contains("upstream="));
+    }
+
+    #[test]
+    fn message_keeps_punctuation_tokens_and_strips_empty_names() {
+        let message = upstream_client_message(
+            StatusCode::BAD_GATEWAY,
+            Some("   "),
+            Some("model-not-found:gpt-4"),
+        );
+        assert_eq!(
+            message,
+            "upstream server error (status 502, code=model-not-found:gpt-4)"
+        );
+    }
 }
