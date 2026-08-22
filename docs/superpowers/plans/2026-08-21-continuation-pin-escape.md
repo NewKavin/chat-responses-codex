@@ -306,16 +306,22 @@ object.remove("previous_response_id");
 把它标记为无法承接，候选池可能被削到 1 条」；`getDialectProfiles`（原 api 层
 已有、零调用）接通；onMounted 自动加载 + 手动刷新按钮；只读展示，无自动探测。
 
-### P6 前端设置项 + 部署文档
+### P6 前端设置项 + 部署文档 —— ✅ commit `946d625b`
 
-- [ ] `frontend/src/types/index.ts` + `frontend/src/utils/runtimeSettings.ts`：
+- [x] `frontend/src/types/index.ts` + `frontend/src/utils/runtimeSettings.ts`：
       group `routing`，两个设置项：
       ① label「续写路由逃生」（P1 的开关），说明：
       「当上次成功的那条路由不可用时，允许把会话历史净化后转移到其它可用路由；
       关闭后该会话只能等原路由恢复」。
       ② label「本地并发租约上限（秒）」（P7 的 `upstream_local_lease_ttl_seconds`），
       说明：「兜底回收未正常归还的并发槽；小于单次请求最长时长会误回收，勿低于流最大时长」。
-- [ ] `DEPLOYMENT.md`：在排障小节补第 1 节的判据表与第 3 节的立即缓解。
+      （`runtimeSettings.spec.ts` 计数同步 53→55 / immediate 40→42）
+- [x] `DEPLOYMENT.md`：在排障小节补第 1 节的判据表与第 3 节的立即缓解。
+      （Intranet 小节 Troubleshooting 新增「续写 pin 卡死」诊断块：
+      `previous_response_id` / `route_count=1` / `continuation_pinned` /
+      能力档案 Unknown 高亮 / `in_flight` 不归零五条判据 + 四条立即缓解；
+      Intranet 设置表补 `upstream_continuation_pin_escape_enabled` /
+      `upstream_local_lease_ttl_seconds` 两行。）
 
 ---
 
