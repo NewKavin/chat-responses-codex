@@ -2,8 +2,31 @@
 
 use super::*;
 
-#[tokio::test]
-async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream() {
+// The gateway's streaming pipeline (dispatch -> hedge -> proxied stream) forms
+// a deep asynchronous frame chain whose peak stack usage in a debug build sits
+// right at the default 2 MiB test-thread stack, and error-framing changes have
+// repeatedly tipped this deepest-path test over the limit. Run the body on a
+// dedicated thread with a larger stack so the assertions stay stable across
+// rebuilds instead of aborting with a stack overflow.
+#[test]
+fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream() {
+    let handle = std::thread::Builder::new()
+        .name("slow_first_output_hedge_stack_guard".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(
+                slow_first_output_hedge_uses_responses_text_delta_from_next_upstream_body(),
+            );
+        })
+        .expect("spawn stack-guard thread");
+    handle.join().expect("test body panicked");
+}
+
+async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream_body() {
     let slow_hits = Arc::new(AtomicUsize::new(0));
     let fast_hits = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -618,45 +641,35 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     let failed_position = body
         .find("event: response.failed")
         .expect("Responses stream failures must include response.failed");
-    let typed_error_position = body
-        .find("event: error")
-        .expect("Responses stream failures must retain the typed error event");
     let done_position = body
         .find("data: [DONE]")
         .expect("Responses stream failures must terminate with [DONE]");
-    assert!(failed_position < typed_error_position);
-    assert!(typed_error_position < done_position);
+    assert!(failed_position < done_position);
     assert!(body.contains("\"type\":\"response.failed\""));
     assert!(body.contains("\"status\":\"failed\""));
     assert!(body.contains("\"object\":\"response\""));
     assert!(body.contains("\"output\":[]"));
     assert!(body.contains("\"usage\":null"));
+    // Single terminal event only (2026-08-22): both response.failed and a
+    // top-level error event made Responses clients (codex) print the same
+    // error twice. The failure diagnosis lives in response.failed's error block.
     assert!(
-        body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\",\"retry_after_seconds\":null}"),
-        "unexpected SSE body: {body}"
+        !body.contains("event: error"),
+        "Responses failure must not emit a duplicate error event: {body}"
     );
-    assert!(body.contains("\"sequence_number\":4"));
-    assert!(body.contains("event: error"), "unexpected SSE body: {body}");
-    assert!(
-        body.contains("\"type\":\"error\""),
-        "unexpected SSE body: {body}"
-    );
-    assert!(
-        body.contains("\"code\":\"upstream_stream_error_event\""),
-        "unexpected SSE body: {body}"
-    );
+    assert!(body.contains("\"code\":\"upstream_stream_error_event\""));
     assert!(body.contains(
         "\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\""
     ));
+    assert!(body.contains("\"category\":\"upstream_stream_error_event\""));
+    assert!(body.contains("\"retry_after_seconds\":null"));
     assert_eq!(
         body.matches("[upstream_stream_error_event]").count(),
-        2,
-        "each Responses error carrier should contain one stable prefix: {body}"
+        1,
+        "single Responses error carrier should contain one stable prefix: {body}"
     );
-    assert!(body.contains("\"param\":null"));
     assert!(body.contains("\"delta\":\"one\""));
-    assert!(body.contains("\"sequence_number\":5"));
-    assert!(body.contains("\"category\":\"upstream_stream_error_event\""));
+    assert!(!body.contains("\"param\":null"));
     assert!(!body.contains("data: {\"error\":"));
     assert!(body.contains("data: [DONE]"));
     assert!(!body.contains("upstream-secret"));
@@ -818,7 +831,8 @@ async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() 
         .expect("translated stream must expose the stable body-decode category");
     assert!(output_position < error_position, "{body}");
     assert!(body.contains("event: response.failed"), "{body}");
-    assert!(body.contains("event: error"), "{body}");
+    // Single terminal event only (2026-08-22): no redundant top-level error event.
+    assert!(!body.contains("event: error"), "{body}");
     assert!(!body.contains("unexpected-replay"), "{body}");
     assert_eq!(first_hits.load(Ordering::SeqCst), 1);
     assert_eq!(second_hits.load(Ordering::SeqCst), 0);

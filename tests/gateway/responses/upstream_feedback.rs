@@ -166,19 +166,18 @@ async fn committed_concurrency_exhaustion_is_a_typed_responses_failure() {
             .expect("response.failed data"),
     )
     .unwrap();
-    let error: Value = serde_json::from_str(
-        body.split("event: error\ndata: ")
-            .nth(1)
-            .and_then(|frame| frame.split("\n\n").next())
-            .expect("error event data"),
-    )
-    .unwrap();
-    for error in [&failed["response"]["error"], &error] {
-        assert_eq!(error["code"], "upstream_routes_exhausted");
-        let message = error["message"].as_str().expect("Responses error message");
-        assert!(message.starts_with("[upstream_routes_exhausted] "));
-        assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 1);
-    }
+    // Single terminal event only (2026-08-22): emitting both response.failed
+    // and a top-level error event made Responses clients (codex) print the
+    // same error twice. The failure diagnosis lives in response.failed.
+    let error = &failed["response"]["error"];
+    assert_eq!(error["code"], "upstream_routes_exhausted");
+    let message = error["message"].as_str().expect("Responses error message");
+    assert!(message.starts_with("[upstream_routes_exhausted] "));
+    assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 1);
+    assert!(
+        !body.contains("event: error"),
+        "Responses failure must not emit a duplicate error event: {body}"
+    );
     assert!(body.contains("\"retry_after_seconds\":"));
     assert_eq!(harness.logical_status_for_last_request().await, 429);
 }

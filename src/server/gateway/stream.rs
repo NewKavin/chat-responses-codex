@@ -247,6 +247,8 @@ fn sse_error_frame_for_endpoint(
                     "error": {
                         "code": error.error_code(),
                         "message": message,
+                        "category": error.error_category(),
+                        "details": error.safe_details(),
                         "retry_after_seconds": error.retry_after_seconds(),
                     },
                     "incomplete_details": Value::Null,
@@ -274,18 +276,15 @@ fn sse_error_frame_for_endpoint(
                 },
                 "sequence_number": responses_sequence_number,
             });
-            let error_event = json!({
-                "type": "error",
-                "code": error.error_code(),
-                "message": message,
-                "param": Value::Null,
-                "sequence_number": responses_sequence_number.saturating_add(1),
-                "category": error.error_category(),
-                "details": error.safe_details(),
-                "retry_after_seconds": error.retry_after_seconds(),
-            });
+            // Single terminal event only: codex and other Responses clients
+            // render BOTH `response.failed` and `error` events, so emitting the
+            // same message twice surfaced as a duplicate error print (reported
+            // 2026-08-22). `response.failed` carries the full diagnosis
+            // (code/message/category/details/retry_after) and is the terminal
+            // event the clients already consume; the redundant top-level
+            // `error` event is dropped.
             Bytes::from(format!(
-                "event: response.failed\ndata: {failed}\n\nevent: error\ndata: {error_event}\n\ndata: [DONE]\n\n"
+                "event: response.failed\ndata: {failed}\n\ndata: [DONE]\n\n"
             ))
         }
     }
@@ -2576,8 +2575,13 @@ mod diagnostic_tests {
             "\"message\":\"[stream_processing_error] request processing channel closed\""
         ));
 
-        // Must contain the error event with category and details
-        assert!(text.contains("event: error"));
+        // Must NOT emit a redundant top-level error event: Responses clients
+        // (codex) render both events, which surfaced as a duplicate error
+        // print. The diagnosis lives in response.failed's error block.
+        assert!(
+            !text.contains("event: error"),
+            "Responses failure frame must not duplicate an error event: {text}"
+        );
         assert!(text.contains("\"category\":\"stream_processing_error\""));
         assert!(text.contains("\"details\":{\"scope\":\"gateway\"}"));
 
@@ -2586,7 +2590,7 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn sse_error_frame_responses_carries_retry_after_in_both_events() {
+    fn sse_error_frame_responses_carries_retry_after_in_response_failed_event() {
         let error = GatewayError::classified(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             "downstream daily token quota exceeded",
@@ -2599,7 +2603,8 @@ mod diagnostic_tests {
         let frame = sse_error_frame_for_endpoint(EndpointKind::Responses, &error, 7);
         let text = std::str::from_utf8(&frame).expect("frame is UTF-8");
 
-        // retry_after_seconds must appear in both the response.failed error block and the error event
+        // retry_after_seconds must appear in the response.failed error block
+        // (the single terminal event on the Responses failure frame)
         assert!(
             text.contains("\"retry_after_seconds\":3600"),
             "retry hint missing: {text}"
