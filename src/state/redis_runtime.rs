@@ -1287,6 +1287,37 @@ impl RedisRuntimeCoordinator {
         .await
     }
 
+    /// Extends an upstream request lease (P7) via the shared
+    /// `lease_renew.lua` (the same script `renew_downstream_lease` uses).
+    /// Idempotent: a lease that is already gone returns 0 and maps to Ok.
+    pub(super) async fn renew_upstream_request(
+        &self,
+        account: &AccountConcurrencyKey,
+        lease_id: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let upstream_identity = stable_identity(&account.upstream_id);
+        let account_identity = account_identity(account);
+        let account_lease_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "leases");
+        self.retry_coordination_once(|| {
+            let mut connection = self.connection();
+            let account_lease_key = account_lease_key.clone();
+            let lease_id = lease_id.to_string();
+            async move {
+                let script = redis::Script::new(include_str!("redis_runtime/lease_renew.lua"));
+                let mut invocation = script.prepare_invoke();
+                invocation
+                    .key(account_lease_key)
+                    .arg(lease_id)
+                    .arg(self.lease_duration_ms);
+                timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
+    }
+
     pub(super) async fn mark_upstream_cooldown(
         &self,
         upstream_id: &str,
@@ -2914,6 +2945,7 @@ fn parse_upstream_snapshot(
         minute_cost,
         five_hour_cost,
         cooldown_until,
+        leaked_reclaimed_total: 0,
     })
 }
 
@@ -2945,6 +2977,7 @@ fn parse_upstream_snapshot_with_feedback(
         cooldown_remaining: snapshot.cooldown_until.saturating_sub(now),
         last_feedback_type,
         last_retry_after_seconds,
+        leaked_reclaimed_total: 0,
     })
 }
 

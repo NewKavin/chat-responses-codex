@@ -3057,11 +3057,24 @@ impl UpstreamRequestGuardInner {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
-                tracing::error!(
-                    upstream_id = %self.lease.upstream_id(),
-                    error = %error,
-                    "upstream request guard dropped outside Tokio runtime"
-                );
+                // Synchronous fallback (P7): the release task cannot be
+                // spawned, so mark the lease immediately expired instead of
+                // only logging and pinning the slot until the TTL sweep.
+                // Only the local backend can be touched synchronously; the
+                // Redis backend self-heals via its own lease TTL.
+                if self.state.expire_upstream_request_lease_sync(&self.lease) {
+                    tracing::warn!(
+                        upstream_id = %self.lease.upstream_id(),
+                        error = %error,
+                        "upstream request guard dropped outside Tokio runtime; lease reclaimed synchronously"
+                    );
+                } else {
+                    tracing::error!(
+                        upstream_id = %self.lease.upstream_id(),
+                        error = %error,
+                        "upstream request guard dropped outside Tokio runtime; lease left for TTL reclamation"
+                    );
+                }
                 return Ok(None);
             }
         };
@@ -3111,6 +3124,13 @@ impl UpstreamRequestGuard {
         }
     }
 
+    async fn renew(&self) -> Result<(), RuntimeCoordinationError> {
+        self.inner
+            .state
+            .renew_upstream_request(&self.inner.lease)
+            .await
+    }
+
     async fn release(&self) -> Result<(), RuntimeCoordinationError> {
         match self.inner.spawn_release()? {
             Some(task) => match task.await {
@@ -3132,12 +3152,51 @@ impl UpstreamRequestGuard {
 #[derive(Clone)]
 struct UpstreamRequestReservation {
     guard: Arc<TokioMutex<Option<UpstreamRequestGuard>>>,
+    /// Last renewal wall-clock ms (P7).  Long streaming requests renew their
+    /// local/Redis upstream lease at half the configured TTL so the slot is
+    /// never reclaimed mid-stream; leaked guards (dropped without release)
+    /// stop producing chunks and therefore stop renewing, letting the TTL
+    /// lapse and the lazy sweep reclaim the slot.
+    last_renewed_at: Arc<AtomicU64>,
 }
 
 impl UpstreamRequestReservation {
     fn new(guard: UpstreamRequestGuard) -> Self {
         Self {
             guard: Arc::new(TokioMutex::new(Some(guard))),
+            last_renewed_at: Arc::new(AtomicU64::new(unix_millis())),
+        }
+    }
+
+    /// Renews the upstream lease if due, mirroring
+    /// `DownstreamConcurrencyGuard::renew_if_due`: throttled to half the
+    /// configured local lease TTL and never fatal (coordination errors are
+    /// logged and the next chunk retries).  Called per chunk from the
+    /// streaming body loop.
+    async fn renew_if_due(&self) {
+        let Some(guard) = self.guard.lock().await.clone() else {
+            return;
+        };
+        let interval_secs = (guard.inner.state.config.upstream_local_lease_ttl_seconds / 2).max(1);
+        let interval_ms = interval_secs.saturating_mul(1_000);
+        let now_ms = unix_millis();
+        let last = self.last_renewed_at.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < interval_ms {
+            return;
+        }
+        if self
+            .last_renewed_at
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        if let Err(error) = guard.renew().await {
+            tracing::warn!(
+                upstream_id = %guard.inner.lease.upstream_id(),
+                error = %error,
+                "failed to renew upstream request lease; retrying on next chunk"
+            );
         }
     }
 

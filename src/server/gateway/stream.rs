@@ -788,6 +788,10 @@ pub(super) fn proxied_stream_body(
                             .downstream_concurrency_guard
                             .renew_if_due()
                             .await;
+                        completion_context
+                            .upstream_request_guard
+                            .renew_if_due()
+                            .await;
                     }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_usage_from_buffer() {
@@ -1568,6 +1572,10 @@ pub(super) fn translated_stream_body(
                     if let Some(completion_context) = state.completion_context.as_ref() {
                         completion_context
                             .downstream_concurrency_guard
+                            .renew_if_due()
+                            .await;
+                        completion_context
+                            .upstream_request_guard
                             .renew_if_due()
                             .await;
                     }

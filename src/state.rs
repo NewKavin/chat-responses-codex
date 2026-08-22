@@ -158,7 +158,8 @@ pub use types::{
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
+    DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
@@ -3623,6 +3624,10 @@ impl AppState {
             .entry(upstream.id.clone())
             .or_insert_with(UpstreamRuntimeState::default);
 
+        let now_instant = tokio::time::Instant::now();
+        let lease_ttl =
+            tokio::time::Duration::from_secs(self.config.upstream_local_lease_ttl_seconds.max(1));
+        prune_expired_upstream_leases(state, now_instant);
         let now = unix_seconds();
         prune_quota_events(&mut state.minute_events, now, 60);
         prune_quota_events(
@@ -3631,7 +3636,7 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
-        if state.active_leases.get(&account).map_or(0, HashSet::len)
+        if state.active_leases.get(&account).map_or(0, HashMap::len)
             >= upstream.max_concurrency.max(1) as usize
         {
             return Err(UpstreamAdmissionError::new(
@@ -3645,7 +3650,7 @@ impl AppState {
             .active_leases
             .entry(account.clone())
             .or_default()
-            .insert(lease_id.clone());
+            .insert(lease_id.clone(), now_instant + lease_ttl);
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
             cost: request_cost,
@@ -3705,6 +3710,10 @@ impl AppState {
         let state = runtime_state
             .entry(upstream.id.clone())
             .or_insert_with(UpstreamRuntimeState::default);
+        let now_instant = tokio::time::Instant::now();
+        let lease_ttl =
+            tokio::time::Duration::from_secs(self.config.upstream_local_lease_ttl_seconds.max(1));
+        prune_expired_upstream_leases(state, now_instant);
         let now = unix_seconds();
         prune_quota_events(&mut state.minute_events, now, 60);
         prune_quota_events(
@@ -3713,7 +3722,7 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
-        if state.active_leases.get(&account).map_or(0, HashSet::len)
+        if state.active_leases.get(&account).map_or(0, HashMap::len)
             >= upstream.max_concurrency.max(1) as usize
         {
             return Err(UpstreamAdmissionError::new(
@@ -3743,7 +3752,7 @@ impl AppState {
             ));
         }
 
-        if state.active_leases.get(&account).map_or(0, HashSet::len)
+        if state.active_leases.get(&account).map_or(0, HashMap::len)
             >= upstream.max_concurrency.max(1) as usize
         {
             return Err(UpstreamAdmissionError::new(
@@ -3757,7 +3766,7 @@ impl AppState {
             .active_leases
             .entry(account.clone())
             .or_default()
-            .insert(lease_id.clone());
+            .insert(lease_id.clone(), now_instant + lease_ttl);
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
             cost: request_cost,
@@ -3819,13 +3828,15 @@ impl AppState {
                     now,
                     request_quota_window_seconds,
                 );
+                let leaked_reclaimed_total = state.leaked_reclaimed_total;
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
-                        in_flight: active_upstream_lease_count(state),
+                        in_flight: active_upstream_lease_count(state, tokio::time::Instant::now()),
                         minute_cost: quota_event_cost(&state.minute_events),
                         five_hour_cost: quota_event_cost(&state.five_hour_events),
                         cooldown_until: state.cooldown_until,
+                        leaked_reclaimed_total,
                     },
                 )
             })
@@ -3860,6 +3871,61 @@ impl AppState {
             release_guard.complete();
         }
         result
+    }
+
+    /// Extends an upstream request lease (P7): the long-stream counterpart of
+    /// the downstream `renew_downstream_concurrency` hook.  The streaming body
+    /// loop calls `UpstreamRequestReservation::renew_if_due` per chunk,
+    /// throttled to half the configured local lease TTL, so a stream may run
+    /// far longer than the TTL without its slot being reclaimed.  Idempotent:
+    /// renewing a lease that was already released (or whose slot was reclaimed)
+    /// is a no-op success, mirroring the Redis `lease_renew.lua` semantics.
+    pub async fn renew_upstream_request(
+        &self,
+        lease: &UpstreamRequestLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .renew_upstream_request(&lease.account, &lease.lease_id)
+                .await;
+        }
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        if let Some(state) = runtime_state.get_mut(&lease.account.upstream_id) {
+            let now = tokio::time::Instant::now();
+            prune_expired_upstream_leases(state, now);
+            let ttl = tokio::time::Duration::from_secs(
+                self.config.upstream_local_lease_ttl_seconds.max(1),
+            );
+            if let Some(leases) = state.active_leases.get_mut(&lease.account) {
+                leases.insert(lease.lease_id.clone(), now + ttl);
+            }
+        }
+        Ok(())
+    }
+
+    /// Synchronous fallback for an `UpstreamRequestGuard` dropped outside a
+    /// Tokio runtime (P7): the release task cannot be spawned (`spawn_release`
+    /// gets `Handle::try_current` back `Err`), so instead of only logging and
+    /// leaving the slot pinned until the TTL sweep, remove the lease right
+    /// away.  Uses `try_lock` because this runs from `Drop`; when the mutex is
+    /// contended the caller falls back to the lazy TTL reclamation.  Returns
+    /// true when the lease was actually removed (a release that never ran).
+    /// Redis-lease guards simply log (the Redis TTL self-heals natively).
+    pub fn expire_upstream_request_lease_sync(&self, lease: &UpstreamRequestLease) -> bool {
+        let Ok(mut runtime_state) = self.upstream_runtime_state.try_lock() else {
+            return false;
+        };
+        let Some(state) = runtime_state.get_mut(&lease.account.upstream_id) else {
+            return false;
+        };
+        let Some(leases) = state.active_leases.get_mut(&lease.account) else {
+            return false;
+        };
+        let removed = leases.remove(&lease.lease_id).is_some();
+        if leases.is_empty() {
+            state.active_leases.remove(&lease.account);
+        }
+        removed
     }
 
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
@@ -3999,13 +4065,14 @@ impl AppState {
                 let five_hour_cost = state.five_hour_events.iter().map(|event| event.cost).sum();
 
                 let snapshot = UpstreamRuntimeSnapshotWithFeedback {
-                    in_flight: active_upstream_lease_count(state),
+                    in_flight: active_upstream_lease_count(state, tokio::time::Instant::now()),
                     minute_cost,
                     five_hour_cost,
                     cooldown_until: state.cooldown_until,
                     cooldown_remaining: state.cooldown_until.saturating_sub(now),
                     last_feedback_type: state.last_feedback_type.clone(),
                     last_retry_after_seconds: state.last_retry_after_seconds,
+                    leaked_reclaimed_total: state.leaked_reclaimed_total,
                 };
 
                 (upstream_id, snapshot)
@@ -6317,19 +6384,47 @@ fn truncate_active_request_user_agent(user_agent: String) -> String {
 
 #[derive(Debug, Clone, Default)]
 struct UpstreamRuntimeState {
-    active_leases: HashMap<AccountConcurrencyKey, HashSet<String>>,
+    /// lease_id -> absolute expiry.  Mirrors the Redis `upstream_reserve.lua`
+    /// ZSET which carries `lease_duration_ms` per member: leases are pruned
+    /// lazily (P7) so a guard whose release path never ran (for example a
+    /// drop outside the Tokio runtime) stops pinning capacity once the TTL
+    /// lapses instead of pinning it forever.
+    active_leases: HashMap<AccountConcurrencyKey, HashMap<String, tokio::time::Instant>>,
     minute_events: VecDeque<QuotaEvent>,
     five_hour_events: VecDeque<QuotaEvent>,
     cooldown_until: u64,
     last_feedback_type: Option<String>,
     last_retry_after_seconds: Option<u64>,
+    /// Total expired local leases reclaimed by the lazy sweeps (P7
+    /// observability): zero means no leak has ever actually happened.
+    leaked_reclaimed_total: u64,
 }
 
-fn active_upstream_lease_count(state: &UpstreamRuntimeState) -> u32 {
+/// Lazy reclamation of expired local upstream leases (P7): the in-memory
+/// counterpart of the Lua `ZREMRANGEBYSCORE` sweep at the top of
+/// `upstream_reserve.lua`.  Returns how many expired leases were reclaimed
+/// on this call and accumulates the running total for observability.
+fn prune_expired_upstream_leases(
+    state: &mut UpstreamRuntimeState,
+    now: tokio::time::Instant,
+) -> u64 {
+    let mut reclaimed = 0u64;
+    for leases in state.active_leases.values_mut() {
+        let before = leases.len();
+        leases.retain(|_, expiry| *expiry > now);
+        reclaimed += (before - leases.len()) as u64;
+    }
+    state.active_leases.retain(|_, leases| !leases.is_empty());
+    state.leaked_reclaimed_total += reclaimed;
+    reclaimed
+}
+
+fn active_upstream_lease_count(state: &mut UpstreamRuntimeState, now: tokio::time::Instant) -> u32 {
+    prune_expired_upstream_leases(state, now);
     state
         .active_leases
         .values()
-        .map(HashSet::len)
+        .map(HashMap::len)
         .sum::<usize>()
         .min(u32::MAX as usize) as u32
 }
@@ -6340,6 +6435,9 @@ pub struct UpstreamRuntimeSnapshot {
     pub minute_cost: f64,
     pub five_hour_cost: f64,
     pub cooldown_until: u64,
+    /// Local backend only: expired leases reclaimed by lazy sweeps (P7).
+    /// Always 0 on the Redis backend (its Lua sweeps self-heal natively).
+    pub leaked_reclaimed_total: u64,
 }
 
 impl UpstreamRuntimeSnapshot {
@@ -6361,6 +6459,7 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub cooldown_remaining: u64,
     pub last_feedback_type: Option<String>,
     pub last_retry_after_seconds: Option<u64>,
+    pub leaked_reclaimed_total: u64,
 }
 
 #[derive(Debug, Clone)]
