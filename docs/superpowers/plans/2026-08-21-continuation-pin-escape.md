@@ -263,16 +263,32 @@ object.remove("previous_response_id");
   - `continuation_pin_escaped: bool`（是否已经逃生过）。
 - [ ] 理由：这次排查最大的成本就是「从错误里完全看不出候选池被削到 1 条」。
 
-### P4 单候选场景不再自我升级冷却（治 R3）
+### P4 单候选场景不再自我升级冷却（治 R3） —— ✅ commit `4ae02986`
 
-- [ ] RED：`tests/route_health.rs` —— 同一路由**跨请求**连续失败，但每次都是
+- [x] RED：`tests/route_health.rs` —— 同一路由**跨请求**连续失败，但每次都是
       「该请求的唯一候选」时，step 不应逐次升级到 max。
-- [ ] GREEN：两选一（实现者判断后在本文记录选择与理由）：
+      → `sole_candidate_cross_request_failures_keep_step_flat`
+      （`#[tokio::test(start_paused = true)]`，跨请求两次失败断言 step=1、cooling 持平；
+      实现前实测 RED：step 升级到 2）
+- [x] GREEN：两选一（实现者判断后在本文记录选择与理由）：
   - (a) `RouteOutcome::RouteFailure*` 增加 `sole_candidate: bool`，为真时按
     `repeat_within_request` 的既有语义处理（重置冷却起点、不升级 step）；
   - (b) 不改健康层，改在 gateway 侧：当候选集大小为 1 且受续写约束时，
     传 `repeat_within_request = true`。
   - **注意**：(b) 改动小但语义被复用，需在注释里写清楚；两者都必须同时覆盖本地与 Redis 后端。
+
+**P4 实现记录（2026-08-22）**：选方案 (a)。
+
+- 判定：`sole_contract_candidate = continuation_profile_key.is_some() && continuation_candidate_count == 1`
+  （`gateway.rs:5708` 一带，P3 快照值、逃生前）；`route_health_outcome` 增
+  `sole_candidate` 参数（`src/server/gateway.rs:657-696`），4 处调用点 + 3 处手写构造
+  （ConcurrencyFull/RateLimited/TemporaryUpstreamUnavailable）已全部接通；
+  `send_to_upstream` 的直接派发路径（`upstream.rs:822`）无续写契约，恒传 `false`。
+- 健康层 `observe_route_failure_at`（`src/state/route_health.rs:1320`）：
+  `effective_repeat = repeat_within_request || sole_candidate`，step 不升级、冷却起点重置。
+- Redis 后端：Lua 不收新参，`route_outcome_parts()`（`redis_runtime.rs`）在发往 Lua 前合并
+  `repeat_within_request || sole_candidate`，两边行为一致。
+- 非续写/多候选请求恒为 false，完全不受影响；429/分类语义不动。
 
 ### P5 能力探测覆盖率可见性（治 R2）
 
