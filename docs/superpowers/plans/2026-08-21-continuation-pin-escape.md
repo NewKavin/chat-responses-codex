@@ -254,14 +254,18 @@ object.remove("previous_response_id");
 >   加进 `terminal_route_failure_error` 的 details（参数 +1），P3 再补另两个。
 
 
-### P3 终态可观测性
+### P3 终态可观测性 —— ✅ commit `a2c29209`
 
-- [ ] RED：断言终态 details 新增三个字段。
-- [ ] GREEN（`src/server/gateway/errors.rs` + `gateway.rs` 的 routes_exhausted 日志）：
+- [x] RED：断言终态 details 新增三个字段。
+- [x] GREEN（`src/server/gateway/errors.rs` + `gateway.rs` 的 routes_exhausted 日志）：
   - `continuation_pinned: bool`（本次请求是否受续写契约约束）；
   - `continuation_candidate_count: usize`（契约过滤后的候选路由数）；
   - `continuation_pin_escaped: bool`（是否已经逃生过）。
-- [ ] 理由：这次排查最大的成本就是「从错误里完全看不出候选池被削到 1 条」。
+- [x] 理由：这次排查最大的成本就是「从错误里完全看不出候选池被削到 1 条」。
+      实现：三字段写入 `terminal_route_failure_error` 的 details 表
+      （`errors.rs:218-227`）与 `routes_exhausted` 终态日志（`gateway.rs:8042-8063`）；
+      `continuation_pin_escaped` 为 `AtomicBool`（`gateway.rs:5268`），
+      `continuation_candidate_count` 取候选集初始化后的快照（`gateway.rs:5713`）。
 
 ### P4 单候选场景不再自我升级冷却（治 R3） —— ✅ commit `4ae02986`
 
