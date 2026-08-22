@@ -114,6 +114,25 @@ fn runtime_settings_accept_boundary_retry_after_cap() {
 }
 
 #[test]
+fn runtime_settings_reject_invalid_body_excerpt_max_chars() {
+    for value in [0_u64, 49, 2_001] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_error_body_excerpt_max_chars = value;
+        let error = settings.validate_and_normalize().unwrap_err();
+        assert_eq!(error.field(), "upstream_error_body_excerpt_max_chars");
+    }
+}
+
+#[test]
+fn runtime_settings_accept_boundary_body_excerpt_max_chars() {
+    for value in [50_u64, 2_000] {
+        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        settings.upstream_error_body_excerpt_max_chars = value;
+        settings.validate_and_normalize().unwrap();
+    }
+}
+
+#[test]
 fn runtime_settings_reject_invalid_credentials_first_strike() {
     for value in [0_u64, 3_601] {
         let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
@@ -151,7 +170,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 54);
+    assert_eq!(all.len(), 56);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()

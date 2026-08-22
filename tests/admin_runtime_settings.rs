@@ -200,8 +200,10 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_retry_after_cap_seconds = 52,
     // plus upstream_credentials_first_strike_seconds = 53,
     // plus upstream_local_lease_ttl_seconds = 54,
-    // plus upstream_continuation_pin_escape_enabled = 55.
-    assert_eq!(body["settings"].as_object().unwrap().len(), 55);
+    // plus upstream_continuation_pin_escape_enabled = 55,
+    // plus upstream_error_body_excerpt_enabled = 56,
+    // plus upstream_error_body_excerpt_max_chars = 57.
+    assert_eq!(body["settings"].as_object().unwrap().len(), 57);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

@@ -4,7 +4,8 @@ use super::types::{
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold,
     default_upstream_continuation_pin_escape_enabled,
-    default_upstream_credentials_first_strike_seconds, default_upstream_local_lease_ttl_seconds,
+    default_upstream_credentials_first_strike_seconds, default_upstream_error_body_excerpt_enabled,
+    default_upstream_error_body_excerpt_max_chars, default_upstream_local_lease_ttl_seconds,
     default_upstream_max_concurrency, default_upstream_retry_after_cap_seconds,
     default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_route_half_open_busy_max_rounds,
@@ -46,6 +47,8 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_route_half_open_exclusive_window_ms",
     "upstream_route_half_open_busy_max_rounds",
     "upstream_retry_after_cap_seconds",
+    "upstream_error_body_excerpt_enabled",
+    "upstream_error_body_excerpt_max_chars",
     "upstream_credentials_first_strike_seconds",
     "upstream_local_lease_ttl_seconds",
     "upstream_continuation_pin_escape_enabled",
@@ -118,6 +121,10 @@ pub struct RuntimeSettings {
     pub upstream_route_half_open_busy_max_rounds: u32,
     #[serde(default = "default_upstream_retry_after_cap_seconds")]
     pub upstream_retry_after_cap_seconds: u64,
+    #[serde(default = "default_upstream_error_body_excerpt_enabled")]
+    pub upstream_error_body_excerpt_enabled: bool,
+    #[serde(default = "default_upstream_error_body_excerpt_max_chars")]
+    pub upstream_error_body_excerpt_max_chars: u64,
     #[serde(default = "default_upstream_credentials_first_strike_seconds")]
     pub upstream_credentials_first_strike_seconds: u64,
     #[serde(default = "default_upstream_local_lease_ttl_seconds")]
@@ -275,6 +282,8 @@ impl RuntimeSettings {
             upstream_route_half_open_busy_max_rounds: config
                 .upstream_route_half_open_busy_max_rounds,
             upstream_retry_after_cap_seconds: config.upstream_retry_after_cap_seconds,
+            upstream_error_body_excerpt_enabled: config.upstream_error_body_excerpt_enabled,
+            upstream_error_body_excerpt_max_chars: config.upstream_error_body_excerpt_max_chars,
             upstream_credentials_first_strike_seconds: config
                 .upstream_credentials_first_strike_seconds,
             upstream_local_lease_ttl_seconds: config.upstream_local_lease_ttl_seconds,
@@ -358,6 +367,8 @@ impl RuntimeSettings {
         config.upstream_route_half_open_busy_max_rounds =
             self.upstream_route_half_open_busy_max_rounds;
         config.upstream_retry_after_cap_seconds = self.upstream_retry_after_cap_seconds;
+        config.upstream_error_body_excerpt_enabled = self.upstream_error_body_excerpt_enabled;
+        config.upstream_error_body_excerpt_max_chars = self.upstream_error_body_excerpt_max_chars;
         config.upstream_credentials_first_strike_seconds =
             self.upstream_credentials_first_strike_seconds;
         config.upstream_local_lease_ttl_seconds = self.upstream_local_lease_ttl_seconds;
@@ -501,6 +512,12 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_retry_after_cap_seconds",
                 "must be between 1 and 3600",
+            ));
+        }
+        if !(50..=2_000).contains(&self.upstream_error_body_excerpt_max_chars) {
+            return Err(invalid(
+                "upstream_error_body_excerpt_max_chars",
+                "must be between 50 and 2000",
             ));
         }
         if !(1..=3_600).contains(&self.upstream_credentials_first_strike_seconds) {

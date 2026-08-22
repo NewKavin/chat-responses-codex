@@ -26,6 +26,11 @@ pub struct ClassifiedUpstreamFailure {
     /// whitelist sanitizer, if any (E1).  Pure-numeric codes are excluded
     /// (they are captured as statuses); body text never reaches this field.
     pub upstream_error_code: Option<String>,
+    /// Bounded, sanitized upstream error-body excerpt, present only when the
+    /// `upstream_error_body_excerpt_enabled` runtime switch is on (E5).
+    /// Never present by default; the client-facing token whitelist above is
+    /// the only body-derived value that flows without the explicit switch.
+    pub upstream_error_body_excerpt: Option<String>,
 }
 
 pub struct UpstreamFeedbackInput<'a> {
@@ -246,6 +251,115 @@ pub fn sanitize_upstream_error_token(raw: &str) -> Option<String> {
         return None;
     }
     Some(token)
+}
+
+/// Build a bounded, sanitized excerpt of an upstream error body for client
+/// messages (E5).  Opt-in only: `None` for empty/whitespace-only input, and
+/// the result is capped at `max_chars` characters (a trailing ellipsis marks
+/// truncation).  Secret-shaped substrings (`sk-...` keys, `Bearer ...`
+/// tokens, JSON `"secret_key":"value"` pairs) are replaced with
+/// `[redacted]` before anything else happens, so an excerpt can never echo
+/// credentials even when the operator explicitly enabled the feature.
+pub fn sanitize_upstream_body_excerpt(raw: &str, max_chars: usize) -> Option<String> {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = redact_upstream_body_secrets(&collapsed);
+    let redacted = redacted.trim();
+    if redacted.is_empty() || max_chars == 0 {
+        return None;
+    }
+    let chars: Vec<char> = redacted.chars().collect();
+    if chars.len() <= max_chars {
+        Some(chars.into_iter().collect())
+    } else {
+        let mut out: String = chars[..max_chars].iter().collect();
+        out.push('\u{2026}');
+        Some(out)
+    }
+}
+
+/// Hand-rolled secret-shape scanner (no regex dependency).  Covers the
+/// shapes that actually leak credentials in error bodies: `sk-` key
+/// material, `Bearer` tokens, and JSON string pairs whose key is a
+/// secret-ish name.  Everything else passes through verbatim.
+fn redact_upstream_body_secrets(text: &str) -> String {
+    const SECRET_KEYS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "access_key",
+        "access_token",
+        "client_secret",
+        "secret",
+        "secret_key",
+        "token",
+        "password",
+        "authorization",
+        "credential",
+    ];
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < n {
+        // `sk-` followed by >= 6 key-material chars.
+        if chars[i] == 's' && i + 2 < n && chars[i + 1] == 'k' && chars[i + 2] == '-' {
+            let mut j = i + 3;
+            while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
+            {
+                j += 1;
+            }
+            if j - (i + 3) >= 6 {
+                out.push_str("[redacted]");
+                i = j;
+                continue;
+            }
+        }
+        // `Bearer ` (case-insensitive) followed by >= 4 bare-token chars.
+        if i + 7 <= n
+            && chars[i..i + 7]
+                .iter()
+                .zip("bearer ".chars())
+                .all(|(a, b)| a.eq_ignore_ascii_case(&b))
+        {
+            let mut j = i + 7;
+            while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '.' | '_' | '-'))
+            {
+                j += 1;
+            }
+            if j - (i + 7) >= 4 {
+                out.push_str("[redacted]");
+                i = j;
+                continue;
+            }
+        }
+        // JSON-style `"key":"value"` pair with a secret-ish key.
+        if chars[i] == '"' && i + 1 < n {
+            let mut end = i + 1;
+            while end < n && chars[end] != '"' {
+                end += 1;
+            }
+            if end < n && end + 2 < n && chars[end + 1] == ':' && chars[end + 2] == '"' {
+                let key: String = chars[i + 1..end]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                if SECRET_KEYS.contains(&key.as_str()) {
+                    let mut j = end + 3;
+                    while j < n && chars[j] != '"' {
+                        j += 1;
+                    }
+                    if j < n {
+                        out.push_str(&chars[i..=end].iter().collect::<String>());
+                        out.push_str(":\"[redacted]\"");
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
@@ -640,6 +754,7 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
         upstream_status: (input.status != 0).then_some(input.status),
         retry_after,
         upstream_error_code,
+        upstream_error_body_excerpt: None,
     }
 }
 

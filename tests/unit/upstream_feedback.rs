@@ -614,3 +614,68 @@ fn sanitized_token_preserves_hyphen_and_colon_whitelist() {
         Some("model-not-found:gpt-4".to_string())
     );
 }
+
+#[test]
+fn sanitize_body_excerpt_strips_secret_shapes_and_collapses_whitespace() {
+    // `sk-` key material and `Bearer` tokens must never reach the client.
+    let raw = r#"{"error":{"message":"bad request sk-live-abcdefghijklmnopqrst"}}"#;
+    let excerpt = sanitize_upstream_body_excerpt(raw, 200).unwrap();
+    assert!(
+        !excerpt.contains("sk-live"),
+        "key material must be redacted"
+    );
+    assert!(excerpt.contains("[redacted]"));
+    assert!(excerpt.contains("bad request"));
+
+    let raw = "authentication failed: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0";
+    let excerpt = sanitize_upstream_body_excerpt(raw, 200).unwrap();
+    assert!(
+        !excerpt.contains("eyJhbGci"),
+        "bearer token must be redacted"
+    );
+    assert!(excerpt.contains("[redacted]"));
+}
+
+#[test]
+fn sanitize_body_excerpt_redacts_json_secret_pairs() {
+    let raw = r#"{"error":{"secret_key":"s3cr3t-value-123","message":"quota exceeded"}}"#;
+    let excerpt = sanitize_upstream_body_excerpt(raw, 200).unwrap();
+    assert!(
+        !excerpt.contains("s3cr3t-value-123"),
+        "json secret pair value must be redacted"
+    );
+    assert!(excerpt.contains("\"secret_key\":\"[redacted]\""));
+    assert!(excerpt.contains("quota exceeded"));
+}
+
+#[test]
+fn sanitize_body_excerpt_truncates_to_max_chars_with_ellipsis() {
+    let raw = "x".repeat(500);
+    let excerpt = sanitize_upstream_body_excerpt(&raw, 200).unwrap();
+    assert_eq!(
+        excerpt.chars().count(),
+        201,
+        "200 chars + trailing ellipsis"
+    );
+    assert!(excerpt.ends_with('\u{2026}'));
+    // No truncation when within the bound.
+    let short = "short error text";
+    assert_eq!(sanitize_upstream_body_excerpt(short, 200).unwrap(), short);
+}
+
+#[test]
+fn sanitize_body_excerpt_returns_none_for_empty_or_whitespace_body() {
+    assert_eq!(sanitize_upstream_body_excerpt("", 200), None);
+    assert_eq!(sanitize_upstream_body_excerpt("   \n\t  ", 200), None);
+    assert_eq!(sanitize_upstream_body_excerpt("", 0), None);
+    // A body that is *only* secret material still produces a redacted marker.
+    let raw = "sk-live-abcdefghijklmnopqrst";
+    let excerpt = sanitize_upstream_body_excerpt(raw, 200).unwrap();
+    assert!(!excerpt.contains("sk-live"));
+}
+
+#[test]
+fn sanitize_body_excerpt_passes_through_plain_text_unchanged() {
+    let raw = "upstream channel temporarily unavailable, please retry later";
+    assert_eq!(sanitize_upstream_body_excerpt(raw, 200).unwrap(), raw);
+}

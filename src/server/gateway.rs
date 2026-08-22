@@ -563,6 +563,7 @@ async fn record_route_attempt(
         retry_after,
         error.upstream_status(),
         error.upstream_error_code().map(str::to_owned),
+        error.upstream_error_body_excerpt().map(str::to_owned),
         Some(upstream.name.clone()),
     );
     for observation in route_attempts.take_newly_exhausted() {
@@ -754,6 +755,7 @@ fn record_cooled_route_attempt(
         ),
         upstream_status,
         upstream_error_code,
+        upstream_error_body_excerpt: None,
         upstream_name: Some(upstream.name.clone()),
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),

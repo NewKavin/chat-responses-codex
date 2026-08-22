@@ -19,6 +19,10 @@ pub(super) struct AttemptFailure {
     /// Upstream display name recorded alongside the status/code so the
     /// terminal summary can point at *which* upstream failed (E2).
     pub upstream_name: Option<String>,
+    /// Bounded, sanitized excerpt of the upstream error body (E5).  Present
+    /// only when the `upstream_error_body_excerpt_enabled` runtime switch is
+    /// on; `None` otherwise and for pre-existing cooldowns.
+    pub upstream_error_body_excerpt: Option<String>,
     pub class: FailureClass,
     pub retry_after: Option<Duration>,
     /// True when the route was skipped not because it is cooling but because
@@ -317,9 +321,10 @@ impl RequestRouteAttempts {
         class: FailureClass,
         retry_after: Option<Duration>,
     ) {
-        self.record_failure_with_status(route, class, retry_after, None, None, None);
+        self.record_failure_with_status(route, class, retry_after, None, None, None, None);
     }
 
+    #[allow(clippy::too_many_arguments)] // E3/E5 diagnostics threading; bundled context refactor pending
     pub fn record_failure_with_status(
         &self,
         route: &RouteHealthKey,
@@ -327,6 +332,7 @@ impl RequestRouteAttempts {
         retry_after: Option<Duration>,
         upstream_status: Option<u16>,
         upstream_error_code: Option<String>,
+        upstream_error_body_excerpt: Option<String>,
         upstream_name: Option<String>,
     ) {
         if !self.tracker().record_failure(route, class, retry_after) {
@@ -353,6 +359,7 @@ impl RequestRouteAttempts {
             route_id,
             upstream_status,
             upstream_error_code,
+            upstream_error_body_excerpt,
             upstream_name,
             class,
             retry_after,
@@ -504,6 +511,9 @@ pub(super) struct FailureClassSummary {
     /// Most common upstream display name for this class (E2 message-level
     /// name on the terminal path).
     pub upstream_name: Option<String>,
+    /// Most common sanitized upstream error-body excerpt for this class
+    /// (E5), present only when the opt-in runtime switch is on.
+    pub upstream_error_body_excerpt: Option<String>,
 }
 
 impl AttemptLedger {
@@ -691,6 +701,7 @@ impl AttemptLedger {
             // class, with a deterministic lexicographic tie-break.
             let mut code_counts: HashMap<&str, usize> = HashMap::new();
             let mut name_counts: HashMap<&str, usize> = HashMap::new();
+            let mut body_counts: HashMap<&str, usize> = HashMap::new();
             for failure in self
                 .failures
                 .iter()
@@ -703,6 +714,9 @@ impl AttemptLedger {
                 if let Some(name) = failure.upstream_name.as_deref() {
                     *name_counts.entry(name).or_default() += 1;
                 }
+                if let Some(body) = failure.upstream_error_body_excerpt.as_deref() {
+                    *body_counts.entry(body).or_default() += 1;
+                }
             }
             let upstream_error_code = code_counts
                 .into_iter()
@@ -712,12 +726,17 @@ impl AttemptLedger {
                 .into_iter()
                 .max_by_key(|(name, count)| (*count, std::cmp::Reverse(*name)))
                 .map(|(name, _)| name.to_string());
+            let upstream_error_body_excerpt = body_counts
+                .into_iter()
+                .max_by_key(|(body, count)| (*count, std::cmp::Reverse(*body)))
+                .map(|(body, _)| body.to_string());
             summaries.push(FailureClassSummary {
                 class,
                 routes,
                 upstream_status,
                 upstream_error_code,
                 upstream_name,
+                upstream_error_body_excerpt,
             });
         }
         summaries.sort_by(|a, b| {
@@ -740,6 +759,22 @@ impl AttemptLedger {
             }
         }
         counts
+    }
+
+    /// Most common sanitized upstream error-body excerpt across ledger
+    /// entries (E5), mirroring the code/name "most common" pick.  Present
+    /// only when the opt-in runtime switch produced at least one excerpt.
+    pub fn upstream_error_body_excerpt(&self) -> Option<String> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for failure in self.failures.iter().chain(self.cooled_candidates.iter()) {
+            if let Some(body) = failure.upstream_error_body_excerpt.as_deref() {
+                *counts.entry(body).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(body, count)| (*count, std::cmp::Reverse(*body)))
+            .map(|(body, _)| body.to_string())
     }
 
     pub fn terminal_observation(&self) -> Option<AttemptFailure> {

@@ -750,6 +750,7 @@ async fn chat_stream_request_rejects_empty_upstream_sse_success_before_done() {
 async fn feedback_502_state(
     delay_ms: Option<u64>,
     error_code: Option<&'static str>,
+    excerpt_enabled: bool,
 ) -> (AppState, GeneratedDownstreamKey) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -767,9 +768,12 @@ async fn feedback_502_state(
                 // `error_code` and `type` all as code-token candidates, so a
                 // "no code" probe must omit them entirely, otherwise
                 // `type: "server_error"` would itself become the token.
+                // The marker text plus a key-shaped substring: the E5 opt-in
+                // excerpt path asserts redaction end-to-end while the default
+                // path must never expose either.
                 let mut body = json!({
                     "error": {
-                        "message": "UPSTREAM_SECRET_BODY_MUST_NOT_LEAK"
+                        "message": "UPSTREAM_SECRET_BODY_MUST_NOT_LEAK sk-live-abcdefghijklmnopqrst DRAINING_MAINTENANCE_WINDOW"
                     }
                 });
                 if let Some(code) = error_code {
@@ -826,6 +830,7 @@ async fn feedback_502_state(
         AppConfig {
             upstream_route_exhaustion_retry_enabled: false,
             upstream_transient_last_resort_probe_enabled: false,
+            upstream_error_body_excerpt_enabled: excerpt_enabled,
             ..AppConfig::default()
         },
     );
@@ -855,7 +860,7 @@ fn feedback_chat_request(downstream_key: &GeneratedDownstreamKey, stream: bool) 
 
 #[tokio::test(flavor = "current_thread")]
 async fn upstream_error_message_carries_code_name_and_status_non_stream() {
-    let (state, downstream_key) = feedback_502_state(None, Some("channel_not_found")).await;
+    let (state, downstream_key) = feedback_502_state(None, Some("channel_not_found"), false).await;
     let response = build_router(state.clone())
         .oneshot(feedback_chat_request(&downstream_key, false))
         .await
@@ -889,7 +894,7 @@ async fn upstream_error_message_carries_code_name_and_status_non_stream() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn upstream_error_message_without_code_omits_code_kv() {
-    let (state, downstream_key) = feedback_502_state(None, None).await;
+    let (state, downstream_key) = feedback_502_state(None, None, false).await;
     let response = build_router(state.clone())
         .oneshot(feedback_chat_request(&downstream_key, false))
         .await
@@ -913,7 +918,8 @@ async fn upstream_error_message_without_code_omits_code_kv() {
 async fn upstream_error_message_carries_code_on_sse_path() {
     // Delay the 503 past the 10ms early-failure window so the terminal error
     // is emitted as an SSE error frame, where message is the only carrier.
-    let (state, downstream_key) = feedback_502_state(Some(80), Some("channel_not_found")).await;
+    let (state, downstream_key) =
+        feedback_502_state(Some(80), Some("channel_not_found"), false).await;
     let response = build_router(state.clone())
         .oneshot(feedback_chat_request(&downstream_key, true))
         .await
@@ -949,5 +955,81 @@ async fn upstream_error_message_carries_code_on_sse_path() {
     assert!(
         !text.contains("UPSTREAM_SECRET_BODY_MUST_NOT_LEAK"),
         "privacy red line on SSE: upstream body text must never leak: {text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_error_body_excerpt_opt_in_carries_sanitized_excerpt() {
+    let (state, downstream_key) = feedback_502_state(None, Some("channel_not_found"), true).await;
+    let response = build_router(state.clone())
+        .oneshot(feedback_chat_request(&downstream_key, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let message = payload["error"]["message"].as_str().unwrap();
+    // The excerpt is the sanitized upstream body (full JSON, bounded), with
+    // quotes escaped inside the human-readable body= kv.
+    let sanitized_marker =
+        "UPSTREAM_SECRET_BODY_MUST_NOT_LEAK [redacted] DRAINING_MAINTENANCE_WINDOW";
+    assert!(
+        message.contains(sanitized_marker),
+        "opt-in excerpt must carry the sanitized body: {message}"
+    );
+    assert!(
+        message.contains("body=\""),
+        "terminal summary must carry the body= kv: {message}"
+    );
+    assert!(
+        !message.contains("sk-live-abcdefghijklmnopqrst"),
+        "key-shaped material must be redacted even with the switch on: {message}"
+    );
+    assert!(
+        !message.contains("sk-live-"),
+        "no key prefix may survive in the excerpt: {message}"
+    );
+    let excerpt_from_details = payload["error"]["details"]["upstream_error_body_excerpt"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        excerpt_from_details.contains(sanitized_marker),
+        "details must carry the same sanitized excerpt: {excerpt_from_details}"
+    );
+    assert!(
+        !excerpt_from_details.contains("sk-live-"),
+        "details excerpt must be redacted too: {excerpt_from_details}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_error_body_excerpt_off_keeps_body_red_line() {
+    // Regression guard: with the switch off the terminal message stays
+    // byte-compatible with E2 - no body material, no upstream_body= tail.
+    let (state, downstream_key) = feedback_502_state(None, Some("channel_not_found"), false).await;
+    let response = build_router(state.clone())
+        .oneshot(feedback_chat_request(&downstream_key, false))
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        !message.contains("UPSTREAM_SECRET_BODY_MUST_NOT_LEAK"),
+        "privacy red line with the switch off: {message}"
+    );
+    assert!(
+        !message.contains("sk-live-"),
+        "key material must never reach the client: {message}"
+    );
+    assert!(
+        !message.contains("upstream_body="),
+        "no upstream_body= tail without the switch: {message}"
+    );
+    assert!(
+        payload["error"]["details"]
+            .get("upstream_error_body_excerpt")
+            .is_none(),
+        "details must not carry the excerpt when the switch is off"
     );
 }

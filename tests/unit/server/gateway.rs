@@ -113,6 +113,7 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(30)),
@@ -122,6 +123,7 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
         route_id: "route-b".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(7)),
@@ -171,6 +173,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
             route_id: "route".into(),
             upstream_status: Some(400),
             upstream_error_code: None,
+            upstream_error_body_excerpt: None,
             upstream_name: None,
             class,
             retry_after: None,
@@ -187,6 +190,7 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
         route_id: "route-a".into(),
         upstream_status: Some(401),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::Credentials,
         retry_after: None,
@@ -196,6 +200,7 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
         route_id: "route-b".into(),
         upstream_status: Some(400),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::ModelUnsupported,
         retry_after: None,
@@ -214,6 +219,7 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
             route_id: format!("route-secret-{index}"),
             upstream_status: Some(400),
             upstream_error_code: None,
+            upstream_error_body_excerpt: None,
             upstream_name: None,
             class,
             retry_after: class
@@ -310,6 +316,7 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         route_id: "route".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_millis(1_001)),
@@ -347,6 +354,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         route_id: "route".into(),
         upstream_status: Some(502),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(9)),
@@ -386,6 +394,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(24)),
@@ -395,6 +404,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::ConcurrencySaturated,
         retry_after: Some(Duration::from_secs(2)),
@@ -446,6 +456,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
             route_id: format!("route-{index}"),
             upstream_status: Some(502),
             upstream_error_code: None,
+            upstream_error_body_excerpt: None,
             upstream_name: None,
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(3)),
@@ -485,6 +496,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(24)),
@@ -494,6 +506,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         route_id: "route-b".into(),
         upstream_status: Some(502),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(10)),
@@ -535,6 +548,7 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::CapacityUnavailable,
         retry_after: Some(Duration::from_secs(2)),
@@ -544,6 +558,7 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::CapacityUnavailable,
         retry_after: Some(Duration::from_secs(10)),
@@ -574,6 +589,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         route_id: "route".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(1)),
@@ -867,6 +883,7 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
         route_id: "temporary-route".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(7)),
@@ -876,6 +893,7 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
         route_id: "credential-route".into(),
         upstream_status: Some(403),
         upstream_error_code: None,
+        upstream_error_body_excerpt: None,
         upstream_name: None,
         class: FailureClass::Credentials,
         retry_after: None,
@@ -1891,6 +1909,7 @@ fn route_attempts_converts_classified_upstream_feedback_before_aggregation() {
             upstream_status: Some(400),
             retry_after: None,
             upstream_error_code: None,
+            upstream_error_body_excerpt: None,
         },
         "provider model rejection",
     );
@@ -1911,6 +1930,7 @@ fn explicit_concurrency_5xx_maps_to_account_recovery_with_provider_status() {
             upstream_status: Some(502),
             retry_after: Some(Duration::from_secs(3)),
             upstream_error_code: None,
+            upstream_error_body_excerpt: None,
         },
         "provider concurrency rejection",
     );
@@ -3221,6 +3241,7 @@ fn e3_class_summary_picks_most_common_code_and_name() {
             route_id: format!("route-{index}"),
             upstream_status: status,
             upstream_error_code: code.map(str::to_string),
+            upstream_error_body_excerpt: None,
             upstream_name: Some(name.to_string()),
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(30)),
@@ -3258,6 +3279,7 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
+        upstream_error_body_excerpt: None,
         upstream_name: Some("k-api".to_string()),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(30)),
@@ -3267,6 +3289,7 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
+        upstream_error_body_excerpt: None,
         upstream_name: Some("k-api".to_string()),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(7)),
@@ -3297,5 +3320,114 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         details["upstream_error_codes"]["channel_not_found"],
         serde_json::json!(2),
         "terminal details must carry the token->count map"
+    );
+}
+
+#[test]
+fn e5_from_classified_failure_appends_bounded_body_excerpt_to_message_and_details() {
+    // Mirror the real pipeline: the raw upstream body is run through the
+    // sanitizer before it ever reaches the client message.
+    let raw = "bad gateway, please retry later sk-live-abcdefghijklmnopqrst";
+    let excerpt = crate::upstream_feedback::sanitize_upstream_body_excerpt(raw, 200)
+        .expect("sanitizer must produce an excerpt");
+    assert!(
+        !excerpt.contains("sk-live"),
+        "sanitizer must redact the key material"
+    );
+    assert_eq!(excerpt, "bad gateway, please retry later [redacted]");
+
+    let error = GatewayError::from_classified_upstream_failure(
+        crate::upstream_feedback::ClassifiedUpstreamFailure {
+            class: FailureClass::TransientServer,
+            semantic: crate::upstream_feedback::UpstreamResponseSemantic::Generic,
+            upstream_status: Some(503),
+            retry_after: None,
+            upstream_error_code: Some("channel_not_found".to_string()),
+            upstream_error_body_excerpt: Some(excerpt),
+        },
+        "upstream server error (status 503, upstream=k-api, code=channel_not_found)",
+    );
+    let message = error.message();
+    assert!(
+        message.contains("; upstream_body=\"bad gateway, please retry later [redacted]\""),
+        "message must carry the bounded body tail: {message}"
+    );
+    assert!(
+        !message.contains("sk-live-abc"),
+        "key material must not leak: {message}"
+    );
+    assert_eq!(
+        error.upstream_error_body_excerpt(),
+        Some("bad gateway, please retry later [redacted]"),
+        "accessor must read the excerpt from details"
+    );
+    let details = error.safe_details();
+    assert_eq!(
+        details["upstream_error_body_excerpt"],
+        serde_json::json!("bad gateway, please retry later [redacted]")
+    );
+}
+
+#[test]
+fn e5_no_excerpt_keeps_e2_message_shape_exactly() {
+    let error = GatewayError::from_classified_upstream_failure(
+        crate::upstream_feedback::ClassifiedUpstreamFailure {
+            class: FailureClass::TransientServer,
+            semantic: crate::upstream_feedback::UpstreamResponseSemantic::Generic,
+            upstream_status: Some(502),
+            retry_after: None,
+            upstream_error_code: Some("channel_not_found".to_string()),
+            upstream_error_body_excerpt: None,
+        },
+        "upstream server error (status 502, upstream=k-api, code=channel_not_found)",
+    );
+    assert_eq!(
+        error.message(),
+        "upstream server error (status 502, upstream=k-api, code=channel_not_found)",
+        "switch off must be byte-identical to E2"
+    );
+    assert_eq!(error.upstream_error_body_excerpt(), None);
+    let details = error.safe_details();
+    assert!(details.get("upstream_error_body_excerpt").is_none());
+}
+
+#[test]
+fn e5_terminal_summary_appends_body_excerpt_when_present() {
+    let mut ledger = AttemptLedger::default();
+    // Mirror the real pipeline: the sanitizer strips secret material before
+    // the excerpt is recorded into the ledger.
+    let excerpt = crate::upstream_feedback::sanitize_upstream_body_excerpt(
+        "svc draining sk-live-abcdefghijklmnopqrst",
+        200,
+    )
+    .expect("sanitizer must produce an excerpt");
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(503),
+        upstream_error_code: Some("channel_not_found".to_string()),
+        upstream_error_body_excerpt: Some(excerpt),
+        upstream_name: Some("k-api".to_string()),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_secs(30)),
+        half_open_busy: false,
+    });
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::from_millis(300),
+        None,
+        1,
+        None,
+        false,
+        Duration::from_secs(60),
+    );
+    let message = error.message();
+    assert!(
+        message.contains("body=\"svc draining [redacted]\""),
+        "terminal message must carry the sanitized body: {message}"
+    );
+    assert!(
+        !message.contains("sk-live-abcdefghijklmnopqrst"),
+        "key material must not leak: {message}"
     );
 }

@@ -7,7 +7,8 @@ use crate::capabilities::{
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::image_adapter::ImageDialect;
 use crate::upstream_feedback::{
-    classify_upstream_response, UpstreamFeedbackInput, UpstreamResponseSemantic,
+    classify_upstream_response, sanitize_upstream_body_excerpt, UpstreamFeedbackInput,
+    UpstreamResponseSemantic,
 };
 use std::collections::BTreeSet;
 
@@ -2059,12 +2060,22 @@ pub(super) async fn send_to_upstream(
         let error_text = String::from_utf8_lossy(&error_body).to_string();
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
-        let classified_feedback = classify_upstream_response(UpstreamFeedbackInput {
+        let mut classified_feedback = classify_upstream_response(UpstreamFeedbackInput {
             status: status.as_u16(),
             headers: &headers,
             body: Some(&error_text),
             target_model: Some(&final_upstream_model),
         });
+        // E5: opt-in bounded body excerpt for client messages.  The
+        // sanitizer strips secret-shaped substrings (`sk-` keys, `Bearer`
+        // tokens, JSON secret pairs) before anything is exposed, so the
+        // excerpt can never echo credentials even with the switch on.
+        if runtime_settings.upstream_error_body_excerpt_enabled {
+            classified_feedback.upstream_error_body_excerpt = sanitize_upstream_body_excerpt(
+                &error_text,
+                runtime_settings.upstream_error_body_excerpt_max_chars as usize,
+            );
+        }
 
         if !stream_only_recovery.consumed && !dialect_retry_attempted {
             if let Some(rule) = super::dialect_retry::correction_for_response(

@@ -67,6 +67,15 @@ fn ledger_failure_summary(summaries: &[FailureClassSummary]) -> String {
             {
                 parts.push(format!("code={code}"));
             }
+            if let Some(body) = summary
+                .upstream_error_body_excerpt
+                .as_deref()
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+            {
+                let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
+                parts.push(format!("body=\"{escaped}\""));
+            }
             if parts.is_empty() {
                 format!("{} ({routes})", failure_class_phrase(summary.class))
             } else {
@@ -205,6 +214,11 @@ pub(super) fn terminal_route_failure_error(
             json!(last_resort_probe_attempted),
         ),
     ]);
+    // E5: opt-in sanitized body excerpt surfaces in the terminal details for
+    // programmatic consumers.  Absent entirely when the switch is off.
+    if let Some(excerpt) = ledger.upstream_error_body_excerpt() {
+        details.insert("upstream_error_body_excerpt".to_string(), json!(excerpt));
+    }
 
     let (status, message, error_type, code, retry_after_seconds) = match terminal {
         TerminalFailure::Temporary { retry_after } => {
@@ -497,7 +511,18 @@ impl GatewayError {
         failure: ClassifiedUpstreamFailure,
         message: impl Into<String>,
     ) -> Self {
-        let message = message.into();
+        let snippet = failure
+            .upstream_error_body_excerpt
+            .as_deref()
+            .map(str::trim)
+            .filter(|snippet| !snippet.is_empty());
+        let message = match snippet {
+            Some(snippet) => {
+                let escaped = snippet.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("{}; upstream_body=\"{escaped}\"", message.into())
+            }
+            None => message.into(),
+        };
         let upstream_status = failure.upstream_status;
         let retry_after = failure.retry_after;
         let details = || {
@@ -507,6 +532,9 @@ impl GatewayError {
             }
             if let Some(code) = failure.upstream_error_code.as_deref() {
                 details.insert("upstream_error_code".to_string(), json!(code));
+            }
+            if let Some(body) = snippet {
+                details.insert("upstream_error_body_excerpt".to_string(), json!(body));
             }
             Value::Object(details)
         };
@@ -906,6 +934,19 @@ impl GatewayError {
                 .details
                 .as_ref()
                 .and_then(|details| details.get("upstream_error_code"))
+                .and_then(Value::as_str),
+            _ => None,
+        }
+    }
+    /// Bounded, sanitized upstream error-body excerpt carried by a
+    /// classified failure (E5).  Only present when the opt-in runtime switch
+    /// is on; plain/terminal variants never fabricate one.
+    pub(super) fn upstream_error_body_excerpt(&self) -> Option<&str> {
+        match self {
+            GatewayError::Classified { meta, .. } => meta
+                .details
+                .as_ref()
+                .and_then(|details| details.get("upstream_error_body_excerpt"))
                 .and_then(Value::as_str),
             _ => None,
         }

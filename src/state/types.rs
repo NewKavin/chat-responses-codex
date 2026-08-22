@@ -118,6 +118,16 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 /// while the local exponential backoff and the Redis Lua parsing stay
 /// untouched.
 pub const DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS: u64 = 30;
+/// Whether upstream error responses may surface a bounded, sanitized body
+/// excerpt in client messages (E5).  Opt-in: off by default because provider
+/// bodies can echo prompts / tool arguments / credentials even after
+/// sanitization; only intranet deployments that own both sides should turn
+/// it on.
+pub const DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED: bool = false;
+/// Upper bound (chars) for the sanitized upstream body excerpt appended to
+/// client messages when `upstream_error_body_excerpt_enabled` is on (E5).
+/// Range 50..=2000.
+pub const DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS: u64 = 200;
 /// First Credentials-family (401/403) strike cooldown (seconds, T5).  The old
 /// behavior cooled a key for 15min on the very first 401, so a single
 /// misconfigured credential made that key unusable for a quarter hour even
@@ -257,6 +267,16 @@ pub struct AppConfig {
     /// "disable the cap".
     #[serde(default = "default_upstream_retry_after_cap_seconds")]
     pub upstream_retry_after_cap_seconds: u64,
+    /// Surfacing of a bounded, sanitized upstream error-body excerpt in
+    /// client messages (E5).  Default off: even sanitized excerpts can echo
+    /// conversation content; enable only for intranet deployments that own
+    /// both upstream and downstream.
+    #[serde(default = "default_upstream_error_body_excerpt_enabled")]
+    pub upstream_error_body_excerpt_enabled: bool,
+    /// Upper bound (chars) for the sanitized upstream error-body excerpt
+    /// (E5).  Range 50..=2000.
+    #[serde(default = "default_upstream_error_body_excerpt_max_chars")]
+    pub upstream_error_body_excerpt_max_chars: u64,
     /// First Credentials-family (401/403) strike cooldown (seconds, T5).
     /// Range 1..=3600; higher values make the first strike behave more like
     /// the old 15min quarantine.
@@ -365,6 +385,8 @@ impl Default for AppConfig {
             upstream_route_half_open_busy_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
             upstream_retry_after_cap_seconds: DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+            upstream_error_body_excerpt_enabled: DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED,
+            upstream_error_body_excerpt_max_chars: DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS,
             upstream_credentials_first_strike_seconds:
                 DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_local_lease_ttl_seconds: DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
@@ -1036,6 +1058,14 @@ pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {
 
 pub fn default_upstream_retry_after_cap_seconds() -> u64 {
     DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS
+}
+
+pub fn default_upstream_error_body_excerpt_enabled() -> bool {
+    DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED
+}
+
+pub fn default_upstream_error_body_excerpt_max_chars() -> u64 {
+    DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS
 }
 
 pub fn default_upstream_credentials_first_strike_seconds() -> u64 {
