@@ -657,6 +657,7 @@ fn clamp_upstream_retry_after(retry_after: Option<Duration>, cap: Duration) -> O
 fn route_health_outcome(
     error: &GatewayError,
     repeat_within_request: bool,
+    sole_candidate: bool,
     retry_after_cap: Duration,
 ) -> RouteOutcome {
     let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
@@ -668,11 +669,13 @@ fn route_health_outcome(
                 retry_after,
                 upstream_status,
                 repeat_within_request,
+                sole_candidate,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
                 class: FailureClass::ConcurrencySaturated,
                 upstream_status,
                 repeat_within_request,
+                sole_candidate,
             });
     }
     let upstream_status = error.upstream_status();
@@ -687,11 +690,13 @@ fn route_health_outcome(
                 retry_after,
                 upstream_status,
                 repeat_within_request,
+                sole_candidate,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
                 class,
                 upstream_status,
                 repeat_within_request,
+                sole_candidate,
             }),
         None => RouteOutcome::Cancelled,
     }
@@ -5706,6 +5711,13 @@ async fn process_gateway_request_inner(
     // round re-assigns candidate_passes to the relaxed full pool, so the
     // terminal details must read this immutable snapshot, not candidate_passes.
     let continuation_candidate_count = candidate_passes.len();
+    // P4/R3: when a continuation pin narrows the contract-filtered pool to a
+    // single candidate, cross-request failures on that sole route must not
+    // escalate its cooldown step (the route would pin itself at max and the
+    // session stays stuck). These failures are marked sole_candidate so the
+    // health layer applies the repeat_within_request semantics.
+    let sole_contract_candidate =
+        continuation_profile_key.is_some() && continuation_candidate_count == 1;
     let route_retry_policy =
         RouteRetryPolicy::from_sources(&state.config, runtime_settings.as_ref());
     let mut route_retry_budget = RouteRetryBudget::default();
@@ -7187,6 +7199,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
                                     ),
                                 )
@@ -7301,6 +7314,7 @@ async fn process_gateway_request_inner(
                                                         .has_transient_failure_for(
                                                             &route_health_key,
                                                         ),
+                                                    sole_candidate: sole_contract_candidate,
                                                 }
                                             })
                                             .unwrap_or(RouteOutcome::RouteFailure {
@@ -7308,6 +7322,7 @@ async fn process_gateway_request_inner(
                                                 upstream_status,
                                                 repeat_within_request: request_route_attempts
                                                     .has_transient_failure_for(&route_health_key),
+                                                sole_candidate: sole_contract_candidate,
                                             })
                                     },
                                 )
@@ -7384,6 +7399,7 @@ async fn process_gateway_request_inner(
                                             upstream_status: None,
                                             repeat_within_request: request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
+                                            sole_candidate: sole_contract_candidate,
                                         }
                                     },
                                 )
@@ -7468,6 +7484,7 @@ async fn process_gateway_request_inner(
                                             &error,
                                             request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
+                                            sole_contract_candidate,
                                             route_attempt_context.retry_after_cap,
                                         ),
                                     )
@@ -7510,6 +7527,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
                                     ),
                                 )
@@ -7555,6 +7573,7 @@ async fn process_gateway_request_inner(
                                             upstream_status: None,
                                             repeat_within_request: request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
+                                            sole_candidate: sole_contract_candidate,
                                         }
                                     },
                                 )
@@ -7593,6 +7612,7 @@ async fn process_gateway_request_inner(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
+                                        sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
                                     ),
                                 )

@@ -657,11 +657,12 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
         Some(FailureClass::CapacityUnavailable)
     );
     assert_eq!(
-        route_health_outcome(&error, false, Duration::from_secs(3600)),
+        route_health_outcome(&error, false, false, Duration::from_secs(3600)),
         RouteOutcome::RouteFailure {
             class: FailureClass::ConcurrencySaturated,
             upstream_status: None,
             repeat_within_request: false,
+            sole_candidate: false,
         }
     );
 }

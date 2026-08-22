@@ -824,6 +824,7 @@ fn send_route_hedge_attempt(
                         context
                             .route_attempts
                             .has_transient_failure_for(&route_health_key),
+                        false,
                         retry_after_cap,
                     ),
                 )

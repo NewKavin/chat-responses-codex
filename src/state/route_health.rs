@@ -243,12 +243,14 @@ impl RouteHealthPermit {
                         class,
                         upstream_status: _,
                         repeat_within_request: _,
+                        sole_candidate: _,
                     } => state.observe_route_failure(&route, class, None).await,
                     RouteOutcome::RouteFailureWithRetry {
                         class,
                         retry_after,
                         upstream_status: _,
                         repeat_within_request: _,
+                        sole_candidate: _,
                     } => {
                         state
                             .observe_route_failure(&route, class, Some(retry_after))
@@ -394,12 +396,19 @@ pub enum RouteOutcome {
         /// a request's internal routing rounds cannot amplify a short outage
         /// into a long pool-wide cooldown (R1).
         repeat_within_request: bool,
+        /// Whether this route is the sole candidate of the request (e.g. a
+        /// continuation-pinned pool of one). Cross-request failures on the
+        /// sole route are treated like repeat_within_request: the cooldown
+        /// start resets and the step stays flat, so the only reachable route
+        /// cannot pin its own cooldown at max (P4/R3).
+        sole_candidate: bool,
     },
     RouteFailureWithRetry {
         class: RouteFailureClass,
         retry_after: Duration,
         upstream_status: Option<u16>,
         repeat_within_request: bool,
+        sole_candidate: bool,
     },
     KeyFailure(RouteFailureClass),
     KeyFailureWithRetry {
@@ -1139,6 +1148,7 @@ impl RouteHealthRegistry {
                 class,
                 upstream_status,
                 repeat_within_request,
+                sole_candidate,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 self.observe_route_failure_at(
@@ -1148,6 +1158,7 @@ impl RouteHealthRegistry {
                     upstream_status,
                     now,
                     repeat_within_request,
+                    sole_candidate,
                 );
             }
             RouteOutcome::RouteFailureWithRetry {
@@ -1155,6 +1166,7 @@ impl RouteHealthRegistry {
                 retry_after,
                 upstream_status,
                 repeat_within_request,
+                sole_candidate,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 self.observe_route_failure_at(
@@ -1164,6 +1176,7 @@ impl RouteHealthRegistry {
                     upstream_status,
                     now,
                     repeat_within_request,
+                    sole_candidate,
                 );
             }
             RouteOutcome::KeyFailure(class) => {
@@ -1177,7 +1190,15 @@ impl RouteHealthRegistry {
             RouteOutcome::UncertainRouteFailure(class) => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 if !self.reapply_concurrency_probe_delay(&lease, now) {
-                    self.observe_route_failure_at(&lease.route, class, None, None, now, false);
+                    self.observe_route_failure_at(
+                        &lease.route,
+                        class,
+                        None,
+                        None,
+                        now,
+                        false,
+                        false,
+                    );
                 }
             }
             RouteOutcome::Cancelled => {
@@ -1195,7 +1216,15 @@ impl RouteHealthRegistry {
         class: RouteFailureClass,
         retry_after: Option<Duration>,
     ) {
-        self.observe_route_failure_at(route, class, retry_after, None, Instant::now(), false);
+        self.observe_route_failure_at(
+            route,
+            class,
+            retry_after,
+            None,
+            Instant::now(),
+            false,
+            false,
+        );
     }
 
     pub fn clear_route_health(&mut self, route: &RouteHealthKey) {
@@ -1280,6 +1309,7 @@ impl RouteHealthRegistry {
         upstream_status: Option<u16>,
         now: Instant,
         repeat_within_request: bool,
+        sole_candidate: bool,
     ) {
         if !route_failure_has_cooldown(class) {
             self.clear_route(route, now);
@@ -1295,13 +1325,14 @@ impl RouteHealthRegistry {
             .routes
             .entry(route.clone())
             .or_insert_with(|| HealthState::new(now));
-        let step_suppressed = repeat_within_request
+        let effective_repeat = repeat_within_request || sole_candidate;
+        let step_suppressed = effective_repeat
             && class != RouteFailureClass::EdgeProxyError
             && state.last_failure_class == Some(class)
             && state
                 .last_failure_at
                 .is_some_and(|last| now.duration_since(last) <= FAILURE_STREAK_RESET);
-        let step = failure_step(state, class, now, repeat_within_request);
+        let step = failure_step(state, class, now, effective_repeat);
         state.state_generation = state.state_generation.wrapping_add(1).max(1);
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);

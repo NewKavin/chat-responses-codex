@@ -2550,24 +2550,26 @@ fn route_outcome_parts(
             class,
             upstream_status,
             repeat_within_request,
+            sole_candidate,
         } => (
             "route_failure",
             Some(class),
             None,
             upstream_status,
-            repeat_within_request,
+            repeat_within_request || sole_candidate,
         ),
         RouteOutcome::RouteFailureWithRetry {
             class,
             retry_after,
             upstream_status,
             repeat_within_request,
+            sole_candidate,
         } => (
             "route_failure_with_retry",
             Some(class),
             Some(retry_after),
             upstream_status,
-            repeat_within_request,
+            repeat_within_request || sole_candidate,
         ),
         RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None, false),
         RouteOutcome::KeyFailureWithRetry { class, retry_after } => (

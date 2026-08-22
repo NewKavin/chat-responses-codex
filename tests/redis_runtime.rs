@@ -2691,6 +2691,7 @@ async fn redis_settled_permit_failure_observes_route_without_lease() {
             class: RouteFailureClass::Transport,
             upstream_status: Some(502),
             repeat_within_request: false,
+            sole_candidate: false,
         })
         .await
         .unwrap();
@@ -2920,6 +2921,7 @@ async fn redis_route_health_probe_failure_stays_capped_and_keeps_interval() {
             class: RouteFailureClass::TransientServer,
             upstream_status: Some(502),
             repeat_within_request: false,
+            sole_candidate: false,
         })
         .await
         .unwrap();
@@ -3397,6 +3399,7 @@ async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
             repeat_within_request: false,
+            sole_candidate: false,
         })
         .await
         .unwrap();
@@ -3528,6 +3531,7 @@ async fn redis_route_health_reconcile_defers_active_lease_then_removes_on_finish
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
             repeat_within_request: false,
+            sole_candidate: false,
         })
         .await
         .unwrap();
@@ -3568,6 +3572,7 @@ async fn redis_repeated_transient_failure_within_same_request_keeps_step_flat() 
                 class: RouteFailureClass::TransientServer,
                 upstream_status: None,
                 repeat_within_request: true,
+                sole_candidate: false,
             })
             .await
             .unwrap();
@@ -3612,6 +3617,7 @@ async fn redis_independent_request_failures_still_escalate_the_step() {
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
             repeat_within_request: false,
+            sole_candidate: false,
         })
         .await
         .unwrap();
@@ -4161,6 +4167,7 @@ async fn redis_route_health_finish_retry_is_idempotent() {
             class: RouteFailureClass::TransientServer,
             upstream_status: None,
             repeat_within_request: false,
+            sole_candidate: false,
         })
         .await
         .unwrap();

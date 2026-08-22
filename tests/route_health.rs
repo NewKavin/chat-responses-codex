@@ -147,6 +147,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
                 class: RouteFailureClass::TransientServer,
                 upstream_status: Some(500),
                 repeat_within_request: true,
+                sole_candidate: false,
             },
         );
         let snapshot = registry.route_health_snapshot(&route).unwrap();
@@ -159,6 +160,51 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
             "round {round} of the same request must not grow the cooldown"
         );
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sole_candidate_cross_request_failures_keep_step_flat() {
+    // P4 (R3): when every request can only reach one route (e.g. a
+    // continuation-pinned pool of one), independent-request failures must
+    // not escalate the cooldown step — otherwise the sole route pins its
+    // own cooldown at max and the session stays stuck until the max lapses.
+    // The gateway marks such failures with sole_candidate = true; the health
+    // layer then applies the repeat_within_request semantics (reset the
+    // cooldown start, keep the step flat).
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+    let route = route("sole-candidate-pinned", "glm-5.2");
+    let key = key("sole-candidate-pinned");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let first_step = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(first_step.consecutive_failures, 1);
+    let first_cooldown = first_step.cooldown_remaining;
+
+    // A later, independent request fails on the same sole-candidate route.
+    tokio::time::advance(first_cooldown + Duration::from_millis(1)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    registry.finish(
+        lease,
+        RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: Some(500),
+            repeat_within_request: false,
+            sole_candidate: true,
+        },
+    );
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.consecutive_failures, 1,
+        "a sole-candidate failure must not escalate the failure step"
+    );
+    assert_eq!(
+        snapshot.cooldown_remaining, first_cooldown,
+        "a sole-candidate failure must not grow the cooldown"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -186,6 +232,7 @@ async fn independent_request_failures_still_escalate_the_step() {
             class: RouteFailureClass::TransientServer,
             upstream_status: Some(500),
             repeat_within_request: false,
+            sole_candidate: false,
         },
     );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
@@ -224,6 +271,7 @@ async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() 
                 class: RouteFailureClass::TransientServer,
                 upstream_status: Some(500),
                 repeat_within_request: false,
+                sole_candidate: false,
             },
         );
         streak = registry
@@ -537,6 +585,7 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
                 class: RouteFailureClass::ConcurrencySaturated,
                 upstream_status: None,
                 repeat_within_request: false,
+                sole_candidate: false,
             },
         );
         let expected_delay = Duration::from_millis(expected_delay);
@@ -1243,6 +1292,7 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
             class: RouteFailureClass::TransientServer,
             upstream_status: Some(502),
             repeat_within_request: false,
+            sole_candidate: false,
         },
     );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
