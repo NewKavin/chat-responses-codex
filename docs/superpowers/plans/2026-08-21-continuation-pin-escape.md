@@ -215,6 +215,40 @@ object.remove("previous_response_id");
 - [ ] 验证：新用例 + `rtk cargo test --test gateway`（全量回归，重点
       `tests/gateway/responses/history.rs` / `reasoning.rs` / `tools.rs`）。
 
+> **P2 实现记录（实现时回填，先记录再改代码）**
+> - **偏离①（候选协议锁死）**：方案未覆盖 `candidate_protocols` 的续写锁死。
+>   原代码在 `continuation_profile_key` 存在时把候选协议锁为
+>   `ChatCompletions→[ChatCompletions]` / `Responses→[Responses]` /
+>   `Messages→[]`。`Messages` 场景下候选协议为空数组，逃生轮连候选都没有，
+>   逃生必然无效。实现时把 `candidate_protocols` / `candidate_passes` 改为可变并在
+>   逃生时按 `responses_route_strategy` 的 NoReplay 分支语义重建（ProtocolAgnostic →
+>   [native, opposite]，Responses → [Responses]，ChatFallback → [ChatCompletions]）。
+>   这样 Messages 场景逃生后也能放开到 endpoint 的原生/对侧协议。
+> - **决策②（能力集不重算）**：逃生轮**不**重新计算 `requested_features` /
+>   `route_capability_cache`。理由：净化只剥字段、不删 item（不变量 6 要求文本逐条保留），
+>   历史里的 `reasoning` item 仍会被 `scan_responses_reasoning` 扫到，`ReasoningOutput` /
+>   `ReasoningReplay` 仍是 required；因此逃生目标路由必须支持与原始请求相同的能力集，
+>   这与方案正文一致（逃生只解决「路由不可用」，不解决「能力不匹配」）。
+> - **决策④（chat-only fallback 续写不逃生，2026-08-22 全量回归发现）**：逃生 GREEN 后
+>   `tests/gateway/responses/fallback.rs::chat_only_fallback_loads_exact_continuation_before_candidate_failover`
+>   失败（断言 729 `is_server_error` / alternative_hits == 0）。原因：P2 逃生把续写请求打到
+>   fallback alternative（ChatCompletions，priority 1）。该用例是 chat-only fallback 功能的既有契约：
+>   续写契约 pin 在 exact 路由，即使 exact 503 也**不** failover 到 alternative（避免打
+>   非 continuation-aware 兜底路由），直接 503 交还客户端。方案正文未覆盖此场景。
+>   **实现决策**：逃生判定增加 `&& !chat_only_responses_fallback`（该变量在
+>   `process_gateway_request_inner` 顶层 5093 行定义：
+>   `endpoint == Responses && eligible_responses_routes == 0 && eligible_chat_routes > 0`）。
+>   纯 chat-only 池（responses 路由数为 0）的续写由 fallback 机制管辖，逃生不越界；
+>   P2 主用例（Responses 协议池）不受影响。备选（Rejected）：更新 fallback 测试断言允许
+>   逃生打 alternative——会推翻上一功能明确契约（该测试命名即
+>   "loads_exact_continuation_before_candidate_failover"），且 alternative mock 语义
+>   就是 "wrong route"，客户端会收到错误内容，拒绝。
+> - **决策③（details 字段）**：`continuation_pin_escaped` 在 P2 一并落地
+>   （P3 计划里还有 `continuation_pinned` / `continuation_candidate_count` 两个字段）。
+>   P2 RED 的「逃生也失败」用例断言该字段，为避免 P2 测试挂到 P3 才绿，P2 就把这一个字段
+>   加进 `terminal_route_failure_error` 的 details（参数 +1），P3 再补另两个。
+
+
 ### P3 终态可观测性
 
 - [ ] RED：断言终态 details 新增三个字段。

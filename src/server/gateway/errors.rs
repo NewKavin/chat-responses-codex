@@ -156,6 +156,7 @@ pub(super) fn terminal_route_failure_error(
     give_up_reason: Option<GiveUpReason>,
     last_resort_probe_attempted: bool,
     retry_after_cap: Duration,
+    continuation_pin_escaped: bool,
 ) -> GatewayError {
     let terminal = ledger.terminal_failure();
     let summaries = ledger.class_summaries();
@@ -212,6 +213,10 @@ pub(super) fn terminal_route_failure_error(
         (
             "last_resort_probe_attempted".to_string(),
             json!(last_resort_probe_attempted),
+        ),
+        (
+            "continuation_pin_escaped".to_string(),
+            json!(continuation_pin_escaped),
         ),
     ]);
     // E5: opt-in sanitized body excerpt surfaces in the terminal details for

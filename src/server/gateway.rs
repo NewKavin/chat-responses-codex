@@ -3901,6 +3901,68 @@ async fn prepare_response_history_context_with_replay(
     })
 }
 
+/// P2: strip supplier-bound fields from replayed conversation history before
+/// it is dispatched to a different provider on the continuation-pin escape
+/// pass.  The whitelist removes only vendor-bound artifacts:
+///
+/// - `encrypted_content` on reasoning / message items (opaque vendor payload,
+///   meaningless and unsafe to replay elsewhere);
+/// - gateway-issued thinking signatures (`gw1.` prefix) and the gateway's own
+///   `_gateway_claude_thinking` carrier (single-provider internal state);
+/// - the originating provider's item `id` (identity is supplier-scoped).
+///
+/// Every text and tool-call payload is preserved item-for-item: only the
+/// whitelist above is removed, nothing else (invariant 6).
+fn sanitize_history_for_cross_provider_replay(body: &mut Value) {
+    fn sanitize_item(value: &mut Value) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    sanitize_item(item);
+                }
+            }
+            Value::Object(object) => {
+                object.remove("id");
+                object.remove("encrypted_content");
+                object.remove("_gateway_claude_thinking");
+                if object
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .is_some_and(thinking_signature::is_gateway_issued_thinking_signature)
+                {
+                    object.remove("signature");
+                }
+                for child in object.values_mut() {
+                    sanitize_item(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(input) = body.get_mut("input") {
+        sanitize_item(input);
+    }
+}
+
+/// P2: candidate protocol list used once the continuation-pin escape lifts
+/// the per-pinned-protocol lock.  Reuses the unconstrained routing strategy
+/// (the same choice the gateway makes when no continuation pin is active), so
+/// a `Messages`-pinned continuation can still reach the endpoint's native or
+/// opposite protocol on the escape pass.
+fn continuation_escape_candidate_protocols(
+    endpoint: EndpointKind,
+    responses_strategy: ResponsesRouteStrategy,
+) -> Vec<UpstreamProtocol> {
+    match responses_strategy {
+        ResponsesRouteStrategy::ProtocolAgnostic => {
+            vec![endpoint.native_protocol(), endpoint.opposite()]
+        }
+        ResponsesRouteStrategy::Responses => vec![UpstreamProtocol::Responses],
+        ResponsesRouteStrategy::ChatFallback => vec![UpstreamProtocol::ChatCompletions],
+        ResponsesRouteStrategy::Unavailable => Vec::new(),
+    }
+}
+
 fn apply_chat_fallback_stage(body: &mut Value, stage: ChatFallbackStage) {
     match stage {
         ChatFallbackStage::HighFidelity => {}
@@ -5192,8 +5254,21 @@ async fn process_gateway_request_inner(
         .map(|continuation| continuation.preferred_profile().clone())
         .or(legacy_continuation_profile);
     let route_profile_constraint_active = continuation_profile_key.is_some();
+    // P2 continuation-pin escape: once armed, the profile constraint is
+    // relaxed for every remaining routing round of this request and the
+    // candidate protocol lock is rebuilt, so a continuation whose pinned
+    // route is down can reach other providers.  Each escape fires at most
+    // once per request.
+    let continuation_constraint_relaxed = AtomicBool::new(false);
+    let continuation_pin_escaped = AtomicBool::new(false);
     let route_matches_profile_constraint =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            if continuation_constraint_relaxed.load(Ordering::Relaxed) {
+                // P2 escape pass: the continuation pin is suspended for the
+                // rest of this request; every otherwise-eligible route is a
+                // candidate (capability / health constraints still apply).
+                return true;
+            }
             let Some(runtime_model_slug) =
                 upstream.resolved_model_name_with(&normalized_model, case_insensitive)
             else {
@@ -5532,7 +5607,7 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
     let mut last_failure_upstream: Option<(String, Option<String>)> = None;
-    let candidate_protocols = if let Some(profile_key) = continuation_profile_key.as_ref() {
+    let mut candidate_protocols = if let Some(profile_key) = continuation_profile_key.as_ref() {
         match profile_key.protocol {
             WireProtocol::ChatCompletions => vec![UpstreamProtocol::ChatCompletions],
             WireProtocol::Responses => vec![UpstreamProtocol::Responses],
@@ -5587,42 +5662,46 @@ async fn process_gateway_request_inner(
                 route_is_candidate(upstream, &key_fingerprint, protocol)
             })
     };
-    let candidate_passes = if requested_features.optional.is_empty() {
-        candidate_protocols
-            .iter()
-            .copied()
-            .map(|protocol| (None, protocol))
-            .collect::<Vec<_>>()
-    } else {
-        let mut miss_tiers = std::collections::BTreeSet::new();
-        for protocol in candidate_protocols.iter().copied() {
-            for upstream in routing_snapshot.upstreams.iter() {
-                let Some(runtime_model_slug) =
-                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)
-                else {
-                    continue;
-                };
-                for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
-                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
-                    if route_is_candidate(upstream, &key_fingerprint, protocol) {
-                        if let Some(route) = route_capability(upstream, &key_fingerprint, protocol)
-                        {
-                            miss_tiers.insert(route.optional_misses);
+    let compute_candidate_passes = |protocols: &[UpstreamProtocol]| {
+        if requested_features.optional.is_empty() {
+            protocols
+                .iter()
+                .copied()
+                .map(|protocol| (None, protocol))
+                .collect::<Vec<_>>()
+        } else {
+            let mut miss_tiers = std::collections::BTreeSet::new();
+            for protocol in protocols.iter().copied() {
+                for upstream in routing_snapshot.upstreams.iter() {
+                    let Some(runtime_model_slug) =
+                        upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+                    else {
+                        continue;
+                    };
+                    for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
+                        let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                        if route_is_candidate(upstream, &key_fingerprint, protocol) {
+                            if let Some(route) =
+                                route_capability(upstream, &key_fingerprint, protocol)
+                            {
+                                miss_tiers.insert(route.optional_misses);
+                            }
                         }
                     }
                 }
             }
+            miss_tiers
+                .into_iter()
+                .flat_map(|misses| {
+                    protocols
+                        .iter()
+                        .copied()
+                        .map(move |protocol| (Some(misses), protocol))
+                })
+                .collect::<Vec<_>>()
         }
-        miss_tiers
-            .into_iter()
-            .flat_map(|misses| {
-                candidate_protocols
-                    .iter()
-                    .copied()
-                    .map(move |protocol| (Some(misses), protocol))
-            })
-            .collect::<Vec<_>>()
     };
+    let mut candidate_passes = compute_candidate_passes(&candidate_protocols);
     let route_retry_policy =
         RouteRetryPolicy::from_sources(&state.config, runtime_settings.as_ref());
     let mut route_retry_budget = RouteRetryBudget::default();
@@ -7805,6 +7884,54 @@ async fn process_gateway_request_inner(
                 continue 'routing_rounds;
             }
         }
+        // ── P2 continuation-pin escape ────────────────────────────────
+        // The routing rounds are about to give up.  When this request is
+        // bound to a continuation pin and the failure is a plain transient /
+        // mixed exhaustion (NOT a request-shape rejection and NOT a pure
+        // client rate limit, B3), run one extra pass with the pin constraint
+        // relaxed and the history sanitized for cross-provider replay.  At
+        // most one escape per request; a success re-pins the continuation to
+        // the new route via the existing store-back path.
+        let escape_eligible = runtime_settings.upstream_continuation_pin_escape_enabled
+            && route_profile_constraint_active
+            && !chat_only_responses_fallback
+            && !continuation_pin_escaped.load(Ordering::Relaxed)
+            && !payload_rejected
+            && !round_ledger.is_pure_client_rate_limit()
+            && matches!(
+                round_terminal,
+                Some(TerminalFailure::Temporary { .. } | TerminalFailure::MixedRoutesExhausted)
+            );
+        if escape_eligible {
+            let pinned_route_id = continuation_profile_key
+                .as_ref()
+                .map(|key| key.upstream_id.as_str())
+                .unwrap_or("");
+            tracing::warn!(
+                request_id = %request_id,
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %&normalized_model,
+                route_action = "continuation_pin_escape",
+                pinned_route_id,
+                routing_round = request_route_attempts.routing_round(),
+                physical_attempt_count = request_route_attempts.physical_attempt_count(),
+                candidate_capacity = candidate_passes.len(),
+                "continuation pin escape: relaxing the profile constraint and retrying with a sanitized cross-provider history"
+            );
+            sanitize_history_for_cross_provider_replay(&mut body);
+            continuation_constraint_relaxed.store(true, Ordering::Relaxed);
+            continuation_pin_escaped.store(true, Ordering::Relaxed);
+            // The continuation lock on candidate protocols is lifted: reuse
+            // the unconstrained routing strategy so Messages-pinned
+            // continuations can also reach a route on this round.
+            candidate_protocols =
+                continuation_escape_candidate_protocols(endpoint, responses_strategy);
+            candidate_passes = compute_candidate_passes(&candidate_protocols);
+            request_route_attempts = request_route_attempts.next_round();
+            continue 'routing_rounds;
+        }
         break 'routing_rounds;
     }
 
@@ -7844,6 +7971,7 @@ async fn process_gateway_request_inner(
                 request_route_attempts.give_up_reason(),
                 request_route_attempts.last_resort_probe_granted(),
                 upstream_retry_after_cap,
+                continuation_pin_escaped.load(Ordering::Relaxed),
             )
         } else {
             last_route_error

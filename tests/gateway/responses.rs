@@ -28,6 +28,8 @@ async fn wait_for_upstream_in_flight(state: &AppState, upstream_id: &str, expect
 
 #[path = "responses/admin_runtime.rs"]
 mod admin_runtime;
+#[path = "responses/continuation_escape.rs"]
+mod continuation_escape;
 #[path = "responses/core.rs"]
 mod core;
 #[path = "responses/fallback.rs"]
