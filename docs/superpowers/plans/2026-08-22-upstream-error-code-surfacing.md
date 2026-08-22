@@ -222,7 +222,7 @@ upstream routes are temporarily unavailable: transient upstream server errors
 ### E6 前端 + 文档
 
 - [x] 前端设置项（group `observability`，模式 `immediate`）：E5 的两个设置。
-      commit: `<E6_COMMIT>`；`frontend/src/types/index.ts`、
+      commit: `c57a666`；`frontend/src/types/index.ts`、
       `frontend/src/utils/runtimeSettings.ts`（新 group + 两条目）、
       `runtimeSettings.spec.ts`（fixture +2、expectedKeys +2、51→53、immediate 38→40、
       groups 断言 + observability）。
