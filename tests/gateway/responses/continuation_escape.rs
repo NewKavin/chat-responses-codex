@@ -554,6 +554,21 @@ async fn continuation_pin_escape_disabled_keeps_current_routes_exhausted() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let payload = response_json(response).await;
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["continuation_pinned"],
+        json!(true),
+        "terminal error must surface that the request was continuation-constrained"
+    );
+    assert_eq!(
+        payload["error"]["details"]["continuation_candidate_count"],
+        json!(1),
+        "terminal error must surface the contract-filtered candidate count"
+    );
+    assert_eq!(
+        payload["error"]["details"]["continuation_pin_escaped"],
+        json!(false),
+        "the escape switch is off, so no escape pass ran"
+    );
     assert_eq!(hits.lock().unwrap().clone(), vec!["A", "A"]);
     assert!(captured_bodies.lock().unwrap().is_empty());
 }
@@ -634,6 +649,16 @@ async fn continuation_pin_escape_failure_reports_pin_escaped() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let payload = response_json(response).await;
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["continuation_pinned"],
+        json!(true),
+        "terminal error must surface that the request was continuation-constrained"
+    );
+    assert_eq!(
+        payload["error"]["details"]["continuation_candidate_count"],
+        json!(1),
+        "the contract-filtered candidate count is the pinned single route"
+    );
     assert_eq!(
         payload["error"]["details"]["continuation_pin_escaped"],
         json!(true),

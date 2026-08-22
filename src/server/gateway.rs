@@ -5702,6 +5702,10 @@ async fn process_gateway_request_inner(
         }
     };
     let mut candidate_passes = compute_candidate_passes(&candidate_protocols);
+    // P3: the contract-filtered candidate count at request start.  The escape
+    // round re-assigns candidate_passes to the relaxed full pool, so the
+    // terminal details must read this immutable snapshot, not candidate_passes.
+    let continuation_candidate_count = candidate_passes.len();
     let route_retry_policy =
         RouteRetryPolicy::from_sources(&state.config, runtime_settings.as_ref());
     let mut route_retry_budget = RouteRetryBudget::default();
@@ -7972,6 +7976,8 @@ async fn process_gateway_request_inner(
                 request_route_attempts.last_resort_probe_granted(),
                 upstream_retry_after_cap,
                 continuation_pin_escaped.load(Ordering::Relaxed),
+                continuation_profile_key.is_some(),
+                continuation_candidate_count,
             )
         } else {
             last_route_error
@@ -8059,6 +8065,9 @@ async fn process_gateway_request_inner(
             physical_attempt_count = request_route_attempts.physical_attempt_count(),
             half_open_busy_count = attempt_ledger.half_open_busy_count(),
             error_category = %error.error_category(),
+            continuation_pinned = continuation_profile_key.is_some(),
+            continuation_candidate_count,
+            continuation_pin_escaped = continuation_pin_escaped.load(Ordering::Relaxed),
             "request failed after exhausting upstream candidates"
         );
         return Err(error);

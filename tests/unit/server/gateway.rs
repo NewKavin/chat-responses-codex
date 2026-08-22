@@ -238,6 +238,8 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
         false,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     )
 }
 
@@ -334,6 +336,8 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         false,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
@@ -377,6 +381,8 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         true,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
 
     let details = error.safe_details();
@@ -424,6 +430,8 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         false,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -478,6 +486,8 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         false,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
@@ -528,6 +538,8 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         false,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
@@ -581,6 +593,8 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         false,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
@@ -617,6 +631,8 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         true,
         Duration::from_secs(3600),
         false,
+        false,
+        0,
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -3314,6 +3330,8 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         false,
         Duration::from_secs(60),
         false,
+        false,
+        0,
     );
     let message = error.message();
     assert!(
@@ -3430,6 +3448,8 @@ fn e5_terminal_summary_appends_body_excerpt_when_present() {
         false,
         Duration::from_secs(60),
         false,
+        false,
+        0,
     );
     let message = error.message();
     assert!(
