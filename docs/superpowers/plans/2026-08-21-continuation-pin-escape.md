@@ -290,7 +290,7 @@ object.remove("previous_response_id");
   `repeat_within_request || sole_candidate`，两边行为一致。
 - 非续写/多候选请求恒为 false，完全不受影响；429/分类语义不动。
 
-### P5 能力探测覆盖率可见性（治 R2） —— ✅ commit 待回填
+### P5 能力探测覆盖率可见性（治 R2） —— ✅ commit `8b222b9c`
 
 - [x] GREEN：管理页/诊断接口暴露「每个 (上游, key) 的档案状态」，把
       `DialectProfileState::Unknown` 的 key 高亮为「无法承接续写」。
