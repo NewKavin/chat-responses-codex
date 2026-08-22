@@ -1,5 +1,14 @@
 use super::*;
 
+/// E4: every Anthropic error exit (JSON and SSE) carries the gateway request
+/// id so the message tail and `details.request_id` correlate with the usage
+/// log, matching the OpenAI-shaped JSON/SSE exits.
+fn claude_error_response(error: GatewayError, request_id: &str) -> Response {
+    error
+        .with_request_id(Some(request_id.to_string()))
+        .into_anthropic_response()
+}
+
 pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)
         .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
@@ -30,10 +39,13 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                                 )
                                 .await
                             {
-                                return coordination_error.into_anthropic_response();
+                                return claude_error_response(
+                                    coordination_error,
+                                    &result.request_id,
+                                );
                             }
                         }
-                        return error.into_anthropic_response();
+                        return claude_error_response(error, &result.request_id);
                     }
                 };
 
@@ -56,7 +68,7 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                             if let Err(error) =
                                 context.emit_fail_closed(status, None, None, usage).await
                             {
-                                return error.into_anthropic_response();
+                                return claude_error_response(error, &result.request_id);
                             }
                         }
                         (status, headers, body).into_response()
@@ -72,10 +84,13 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                                 )
                                 .await
                             {
-                                return coordination_error.into_anthropic_response();
+                                return claude_error_response(
+                                    coordination_error,
+                                    &result.request_id,
+                                );
                             }
                         }
-                        error.into_anthropic_response()
+                        claude_error_response(error, &result.request_id)
                     }
                 }
             } else {
@@ -85,7 +100,7 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                 );
                 if let Some(context) = usage_log_context.take() {
                     if let Err(error) = context.emit_fail_closed(status, None, None, usage).await {
-                        return error.into_anthropic_response();
+                        return claude_error_response(error, &result.request_id);
                     }
                 }
                 (status, headers, Json(claude_body)).into_response()
@@ -106,10 +121,10 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                         )
                         .await
                     {
-                        return coordination_error.into_anthropic_response();
+                        return claude_error_response(coordination_error, &result.request_id);
                     }
                 }
-                return error.into_anthropic_response();
+                return claude_error_response(error, &result.request_id);
             }
 
             headers.insert(
@@ -126,7 +141,7 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
             );
             if let Some(context) = usage_log_context.take() {
                 if let Err(error) = context.emit_fail_closed(status, None, None, usage).await {
-                    return error.into_anthropic_response();
+                    return claude_error_response(error, &result.request_id);
                 }
             }
             (

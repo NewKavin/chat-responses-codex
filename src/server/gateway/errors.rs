@@ -67,6 +67,45 @@ fn message_with_summary(base: &str, summary: &str) -> String {
     }
 }
 
+/// Append `; request_id=<rid>` to a client-facing message when the error
+/// carries the gateway request id (E4).  Idempotent and never prints an empty
+/// value.
+pub(super) fn append_request_id_hint(message: String, request_id: Option<&str>) -> String {
+    match request_id {
+        Some(rid) if !rid.is_empty() && !message.contains("request_id=") => {
+            format!("{message}; request_id={rid}")
+        }
+        _ => message,
+    }
+}
+
+/// Inject `details.request_id` into a JSON error payload (E4).  The payload
+/// nests the error object under `"error"` for both the OpenAI and Anthropic
+/// shapes; nothing is injected when the details are not an object.
+fn inject_response_details_request_id(payload: &mut Value, request_id: &str) {
+    let details = payload
+        .get_mut("error")
+        .and_then(Value::as_object_mut)
+        .and_then(|error| error.get_mut("details"))
+        .and_then(Value::as_object_mut);
+    if let Some(details) = details {
+        details.insert("request_id".to_string(), json!(request_id));
+    }
+}
+
+/// Merge `request_id` into a details object for SSE frames (E4): on the
+/// stream path `details` is the only structured carrier besides the message
+/// tail.  Non-object details pass through untouched.
+pub(super) fn details_with_request_id(details: Value, request_id: Option<&str>) -> Value {
+    match (details, request_id) {
+        (Value::Object(mut map), Some(rid)) if !rid.is_empty() => {
+            map.insert("request_id".to_string(), json!(rid));
+            Value::Object(map)
+        }
+        (details, _) => details,
+    }
+}
+
 pub(super) fn client_error_message(code: &str, message: &str) -> String {
     let prefix = format!("[{code}] ");
     if message.starts_with(&prefix) {
@@ -312,6 +351,12 @@ pub(super) struct GatewayErrorMeta {
     pub(super) code: &'static str,
     pub(super) category: &'static str,
     pub(super) details: Option<Value>,
+    /// Gateway-generated request id (E4), injected at the response
+    /// boundaries so every client-visible error exit carries the same id the
+    /// server logs under.  Only the Classified variant can carry it; plain
+    /// variants are converted on injection, which happens strictly at the
+    /// response boundary where classification semantics are already settled.
+    pub(super) request_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -336,7 +381,7 @@ pub(super) enum GatewayError {
         status: StatusCode,
         message: String,
         retry_after: Option<Duration>,
-        meta: GatewayErrorMeta,
+        meta: Box<GatewayErrorMeta>,
     },
 }
 
@@ -406,12 +451,13 @@ impl GatewayError {
             status,
             message: message.into(),
             retry_after,
-            meta: GatewayErrorMeta {
+            meta: Box::new(GatewayErrorMeta {
                 error_type,
                 code,
                 category,
                 details,
-            },
+                request_id: None,
+            }),
         }
     }
 
@@ -755,6 +801,44 @@ impl GatewayError {
             _ => None,
         }
     }
+    pub(super) fn request_id(&self) -> Option<&str> {
+        match self {
+            GatewayError::Classified { meta, .. } => meta.request_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Attach the gateway-generated request id before the error crosses into
+    /// a client-visible response (E4).  Called only at the response boundary
+    /// where classification semantics are already settled: plain variants are
+    /// converted to `Classified` preserving status / message / retry_after /
+    /// error_type / error_code / error_category / safe_details exactly.
+    pub(super) fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        if let GatewayError::Classified { meta, .. } = &mut self {
+            meta.request_id = request_id;
+            return self;
+        }
+        let status = self.status_code();
+        let message = self.message().to_string();
+        let retry_after = self.retry_after();
+        let error_type = self.error_type();
+        let code = self.error_code();
+        let category = self.error_category();
+        let details = self.safe_details();
+        Self::Classified {
+            status,
+            message,
+            retry_after,
+            meta: Box::new(GatewayErrorMeta {
+                error_type,
+                code,
+                category,
+                details: Some(details),
+                request_id,
+            }),
+        }
+    }
+
     pub(super) fn upstream_status(&self) -> Option<u16> {
         match self {
             GatewayError::TooManyRequests { .. } => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
@@ -917,7 +1001,10 @@ impl GatewayError {
     pub(super) fn into_response(self) -> Response {
         let error_type = self.error_type();
         let error_code = self.error_code();
-        let message = client_error_message(error_code, self.message());
+        let message = append_request_id_hint(
+            client_error_message(error_code, self.message()),
+            self.request_id(),
+        );
         let details = self.safe_details();
         let category = self.error_category();
 
@@ -935,7 +1022,10 @@ impl GatewayError {
     pub(super) fn into_anthropic_response(self) -> Response {
         let error_type = self.anthropic_error_type();
         let error_code = self.error_code();
-        let message = client_error_message(error_code, self.message());
+        let message = append_request_id_hint(
+            client_error_message(error_code, self.message()),
+            self.request_id(),
+        );
         let details = self.safe_details();
         let category = self.error_category();
 
@@ -950,9 +1040,10 @@ impl GatewayError {
             }
         }))
     }
-    pub(super) fn into_json_response(self, payload: Value) -> Response {
+    pub(super) fn into_json_response(self, mut payload: Value) -> Response {
         let status = self.status_code();
         let retry_after_seconds = self.retry_after_seconds();
+        let request_id = self.request_id().map(str::to_string);
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -963,6 +1054,15 @@ impl GatewayError {
             if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
                 headers.insert(header::RETRY_AFTER, value);
             }
+        }
+        if let Some(request_id) = request_id.as_deref() {
+            if let Ok(value) = HeaderValue::from_str(request_id) {
+                headers.insert(
+                    header::HeaderName::from_static("x-gateway-request-id"),
+                    value,
+                );
+            }
+            inject_response_details_request_id(&mut payload, request_id);
         }
 
         (status, headers, Json(payload)).into_response()

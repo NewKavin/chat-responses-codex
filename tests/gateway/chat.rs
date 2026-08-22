@@ -25,6 +25,8 @@ mod half_open_busy_ledger;
 mod half_open_verdict;
 #[path = "chat/rate_limits.rs"]
 mod rate_limits;
+#[path = "chat/request_id_surfacing.rs"]
+mod request_id_surfacing;
 #[path = "chat/routing.rs"]
 mod routing;
 #[path = "chat/streaming.rs"]

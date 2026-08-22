@@ -2796,6 +2796,9 @@ async fn claude_messages(
         Err(message) => return GatewayError::BadRequest(message).into_anthropic_response(),
     };
 
+    // E4: the Anthropic exit carries the same gateway request id as every
+    // other client-visible error/success response.
+    let request_id = Uuid::new_v4().to_string();
     match process_gateway_request_inner(
         state,
         headers,
@@ -2804,13 +2807,15 @@ async fn claude_messages(
         runtime_settings,
         true,
         None,
-        None,
+        Some(request_id.clone()),
         None,
     )
     .await
     {
         Ok(result) => dispatch_claude_success(result, claude_stream).await,
-        Err(error) => error.into_anthropic_response(),
+        Err(error) => error
+            .with_request_id(Some(request_id))
+            .into_anthropic_response(),
     }
 }
 
@@ -4496,6 +4501,9 @@ async fn process_gateway_request_with_runtime_settings(
     endpoint: EndpointKind,
     runtime_settings: Arc<RuntimeSettings>,
 ) -> Result<DispatchResult, GatewayError> {
+    // E4: generate the gateway request id up front so error exits (and the
+    // success response header) carry the same id the usage log stores under.
+    let request_id = Uuid::new_v4().to_string();
     process_gateway_request_inner(
         state,
         headers,
@@ -4504,10 +4512,11 @@ async fn process_gateway_request_with_runtime_settings(
         runtime_settings,
         false,
         None,
-        None,
+        Some(request_id.clone()),
         None,
     )
     .await
+    .map_err(|error| error.with_request_id(Some(request_id)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4529,10 +4538,11 @@ async fn process_gateway_request_with_pre_header_cancellation(
         runtime_settings,
         false,
         Some(cancellation),
-        Some(request_id),
+        Some(request_id.clone()),
         Some(first_semantic_deadline),
     )
     .await
+    .map_err(|error| error.with_request_id(Some(request_id)))
 }
 
 #[allow(unused_assignments)]

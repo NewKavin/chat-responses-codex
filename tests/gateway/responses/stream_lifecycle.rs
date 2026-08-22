@@ -659,7 +659,7 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     );
     assert!(body.contains("\"code\":\"upstream_stream_error_event\""));
     assert!(body.contains(
-        "\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\""
+        "\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure; request_id="
     ));
     assert!(body.contains("\"category\":\"upstream_stream_error_event\""));
     assert!(body.contains("\"retry_after_seconds\":null"));

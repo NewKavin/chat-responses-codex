@@ -850,9 +850,16 @@ async fn downstream_daily_cost_quota_error_uses_cost_code_and_message() {
         payload["error"]["code"],
         "gateway_daily_cost_quota_exceeded"
     );
-    assert_eq!(
-        payload["error"]["message"],
-        "[gateway_daily_cost_quota_exceeded] downstream daily cost quota exceeded"
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "[gateway_daily_cost_quota_exceeded] downstream daily cost quota exceeded"
+        ),
+        "quota message must keep its stable prefix: {message}"
+    );
+    assert!(
+        message.contains("request_id="),
+        "E4: quota error message must carry the gateway request_id tail: {message}"
     );
     assert_eq!(payload["error"]["details"]["quota"], "daily_cost");
     assert_eq!(payload["error"]["details"]["limit"], 10);

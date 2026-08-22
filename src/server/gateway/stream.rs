@@ -18,12 +18,14 @@ fn early_keepalive_stream(
     rx: mpsc::Receiver<Result<DispatchResult, GatewayError>>,
     endpoint: EndpointKind,
     keepalive_interval: Duration,
+    request_id: String,
 ) -> Body {
     let stream = futures_stream::unfold(
         EarlyStreamState::Waiting {
             rx,
             last_heartbeat_at: TokioInstant::now(),
             keepalive_interval,
+            request_id,
         },
         move |state| async move {
             match state {
@@ -31,6 +33,7 @@ fn early_keepalive_stream(
                     mut rx,
                     last_heartbeat_at,
                     keepalive_interval,
+                    request_id,
                 } => {
                     let deadline = last_heartbeat_at + keepalive_interval;
                     tokio::select! {
@@ -71,6 +74,7 @@ fn early_keepalive_stream(
                                                     }
                                                 }
                                                 Err(error) => {
+                                                    let error = error.with_request_id(Some(request_id.clone()));
                                                     Some((Ok(sse_gateway_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                                 }
                                             }
@@ -78,6 +82,7 @@ fn early_keepalive_stream(
                                     }
                                 }
                                 Some(Err(error)) => {
+                                    let error = error.with_request_id(Some(request_id.clone()));
                                     Some((Ok(sse_gateway_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                 }
                                 None => {
@@ -89,7 +94,8 @@ fn early_keepalive_stream(
                                         "stream_processing_error",
                                         None,
                                         Some(json!({ "scope": "gateway" })),
-                                    );
+                                    )
+                                    .with_request_id(Some(request_id.clone()));
                                     Some((Ok(sse_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                 }
                             }
@@ -101,6 +107,7 @@ fn early_keepalive_stream(
                                     rx,
                                     last_heartbeat_at: TokioInstant::now(),
                                     keepalive_interval,
+                                    request_id,
                                 },
                             ))
                         }
@@ -148,6 +155,7 @@ enum EarlyStreamState {
         rx: mpsc::Receiver<Result<DispatchResult, GatewayError>>,
         last_heartbeat_at: TokioInstant,
         keepalive_interval: Duration,
+        request_id: String,
     },
     DrainingBody {
         body: BodyDataStream,
@@ -196,12 +204,16 @@ fn sse_error_frame(
 }
 
 fn sse_gateway_error_frame(error: &GatewayError) -> Bytes {
+    let message = append_request_id_hint(
+        client_error_message(error.error_code(), error.message()),
+        error.request_id(),
+    );
     sse_error_frame(
-        &client_error_message(error.error_code(), error.message()),
+        &message,
         error.error_type(),
         error.error_code(),
         error.error_category(),
-        error.safe_details(),
+        details_with_request_id(error.safe_details(), error.request_id()),
         error.retry_after_seconds(),
     )
 }
@@ -221,17 +233,21 @@ fn sse_error_frame_for_endpoint(
     error: &GatewayError,
     responses_sequence_number: u64,
 ) -> Bytes {
-    let message = decorate_retry_hint(
-        &client_error_message(error.error_code(), error.message()),
-        error.retry_after_seconds(),
+    let message = append_request_id_hint(
+        decorate_retry_hint(
+            &client_error_message(error.error_code(), error.message()),
+            error.retry_after_seconds(),
+        ),
+        error.request_id(),
     );
+    let details = details_with_request_id(error.safe_details(), error.request_id());
     match endpoint {
         EndpointKind::ChatCompletions => sse_error_frame(
             &message,
             error.error_type(),
             error.error_code(),
             error.error_category(),
-            error.safe_details(),
+            details,
             error.retry_after_seconds(),
         ),
         EndpointKind::Responses => {
@@ -248,7 +264,7 @@ fn sse_error_frame_for_endpoint(
                         "code": error.error_code(),
                         "message": message,
                         "category": error.error_category(),
-                        "details": error.safe_details(),
+                        "details": details,
                         "retry_after_seconds": error.retry_after_seconds(),
                     },
                     "incomplete_details": Value::Null,
@@ -392,12 +408,12 @@ pub(super) async fn dispatch_streaming_request(
                 error.into_response()
             }
         }
-        Ok(None) => {
-            GatewayError::Upstream("request processing channel closed".into()).into_response()
-        }
+        Ok(None) => GatewayError::Upstream("request processing channel closed".into())
+            .with_request_id(Some(request_id))
+            .into_response(),
         Err(_) => {
             // Still running — start the SSE keepalive stream.
-            let body = early_keepalive_stream(rx, endpoint, keepalive_interval);
+            let body = early_keepalive_stream(rx, endpoint, keepalive_interval, request_id.clone());
             dispatch_stream_response(body, request_id)
         }
     }
@@ -1306,6 +1322,13 @@ impl ProxiedStreamState {
     }
 
     async fn finish_with_gateway_error(&mut self, error: GatewayError) -> Bytes {
+        // E4: every client-visible SSE error frame carries the same gateway
+        // request id the response header advertised, so replays and log
+        // correlation work on mid-stream failures too.
+        let error = match self.log_context.as_ref() {
+            Some(context) => error.with_request_id(Some(context.request_id.clone())),
+            None => error,
+        };
         let status = error.status_code();
         let error_category = error.error_category();
         let error_message = error.message().to_string();
@@ -2051,6 +2074,13 @@ impl TranslatedStreamState {
     }
 
     async fn finish_with_gateway_error(&mut self, error: GatewayError) -> Bytes {
+        // E4: every client-visible SSE error frame carries the same gateway
+        // request id the response header advertised, so replays and log
+        // correlation work on mid-stream failures too.
+        let error = match self.log_context.as_ref() {
+            Some(context) => error.with_request_id(Some(context.request_id.clone())),
+            None => error,
+        };
         let status = error.status_code();
         let error_category = error.error_category();
         let error_message = error.message().to_string();
