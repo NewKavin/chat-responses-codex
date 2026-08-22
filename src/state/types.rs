@@ -94,6 +94,13 @@ pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
+/// Whether a continuation-pinned request may escape the pinned route once
+/// the constrained candidate set is exhausted (P2): relaxes the hard
+/// continuation contract, sanitizes the replayed history, and retries
+/// against the full route pool.  Default true; setting false restores the
+/// pre-P2 behaviour exactly (pinned session waits for the route to
+/// recover).
+pub const DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED: bool = true;
 /// Intra-gateway retry wait budget for route exhaustion (B3): the gateway
 /// sleeps until the earliest route cooldown expires (up to this budget)
 /// instead of failing fast, so a 10s transient cooldown recovers inside the
@@ -258,6 +265,8 @@ pub struct AppConfig {
     #[serde(default = "default_upstream_local_lease_ttl_seconds")]
     pub upstream_local_lease_ttl_seconds: u64,
 
+    #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
+    pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -359,6 +368,8 @@ impl Default for AppConfig {
             upstream_credentials_first_strike_seconds:
                 DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_local_lease_ttl_seconds: DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
+            upstream_continuation_pin_escape_enabled:
+                DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -1029,6 +1040,10 @@ pub fn default_upstream_retry_after_cap_seconds() -> u64 {
 
 pub fn default_upstream_credentials_first_strike_seconds() -> u64 {
     DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS
+}
+
+pub fn default_upstream_continuation_pin_escape_enabled() -> bool {
+    DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED
 }
 pub fn default_upstream_local_lease_ttl_seconds() -> u64 {
     DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS

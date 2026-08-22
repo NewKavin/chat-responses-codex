@@ -151,7 +151,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 53);
+    assert_eq!(all.len(), 54);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -172,6 +172,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_route_exhaustion_budget_alignment_enabled",
         "upstream_transient_last_resort_probe_enabled",
         "upstream_local_lease_ttl_seconds",
+        "upstream_continuation_pin_escape_enabled",
         "model_case_insensitive_matching",
     ] {
         assert!(
@@ -252,6 +253,22 @@ fn runtime_settings_upstream_local_lease_ttl_round_trip() {
         RuntimeSettings::from_app_config(&config).upstream_local_lease_ttl_seconds,
         7_200
     );
+}
+
+#[test]
+fn runtime_settings_continuation_pin_escape_round_trip() {
+    let settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    assert!(
+        settings.upstream_continuation_pin_escape_enabled,
+        "escape must default to enabled"
+    );
+
+    let mut mutated = settings.clone();
+    mutated.upstream_continuation_pin_escape_enabled = false;
+    let mut config = AppConfig::default();
+    mutated.apply_to_app_config(&mut config);
+    assert!(!config.upstream_continuation_pin_escape_enabled);
+    assert!(!RuntimeSettings::from_app_config(&config).upstream_continuation_pin_escape_enabled);
 }
 
 #[test]

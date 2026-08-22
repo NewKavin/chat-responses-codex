@@ -3,6 +3,7 @@ use super::types::{
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold,
+    default_upstream_continuation_pin_escape_enabled,
     default_upstream_credentials_first_strike_seconds, default_upstream_local_lease_ttl_seconds,
     default_upstream_max_concurrency, default_upstream_retry_after_cap_seconds,
     default_upstream_route_exhaustion_budget_alignment_enabled,
@@ -47,6 +48,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_retry_after_cap_seconds",
     "upstream_credentials_first_strike_seconds",
     "upstream_local_lease_ttl_seconds",
+    "upstream_continuation_pin_escape_enabled",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
@@ -120,6 +122,8 @@ pub struct RuntimeSettings {
     pub upstream_credentials_first_strike_seconds: u64,
     #[serde(default = "default_upstream_local_lease_ttl_seconds")]
     pub upstream_local_lease_ttl_seconds: u64,
+    #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
+    pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
@@ -274,6 +278,8 @@ impl RuntimeSettings {
             upstream_credentials_first_strike_seconds: config
                 .upstream_credentials_first_strike_seconds,
             upstream_local_lease_ttl_seconds: config.upstream_local_lease_ttl_seconds,
+            upstream_continuation_pin_escape_enabled: config
+                .upstream_continuation_pin_escape_enabled,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
             upstream_route_exhaustion_retry_max_wait_ms: config
                 .upstream_route_exhaustion_retry_max_wait_ms,
@@ -355,6 +361,8 @@ impl RuntimeSettings {
         config.upstream_credentials_first_strike_seconds =
             self.upstream_credentials_first_strike_seconds;
         config.upstream_local_lease_ttl_seconds = self.upstream_local_lease_ttl_seconds;
+        config.upstream_continuation_pin_escape_enabled =
+            self.upstream_continuation_pin_escape_enabled;
         config.upstream_route_exhaustion_retry_enabled =
             self.upstream_route_exhaustion_retry_enabled;
         config.upstream_route_exhaustion_retry_max_wait_ms =
