@@ -42,6 +42,8 @@ const validSettings = (): RuntimeSettings => ({
   upstream_route_half_open_busy_max_rounds: 10,
   upstream_retry_after_cap_seconds: 30,
   upstream_credentials_first_strike_seconds: 60,
+  upstream_error_body_excerpt_enabled: false,
+  upstream_error_body_excerpt_max_chars: 200,
   upstream_route_exhaustion_retry_enabled: true,
   upstream_route_exhaustion_retry_max_wait_ms: 15_000,
   upstream_route_exhaustion_retry_max_rounds: 3,
@@ -96,6 +98,8 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_route_half_open_busy_max_rounds',
   'upstream_retry_after_cap_seconds',
   'upstream_credentials_first_strike_seconds',
+  'upstream_error_body_excerpt_enabled',
+  'upstream_error_body_excerpt_max_chars',
   'upstream_route_exhaustion_retry_enabled',
   'upstream_route_exhaustion_retry_max_wait_ms',
   'upstream_route_exhaustion_retry_max_rounds',
@@ -127,12 +131,13 @@ describe('runtime settings catalog', () => {
       'routing',
       'concurrency',
       'http',
-      'logs'
+      'logs',
+      'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(51)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(51)
+    expect(runtimeSettingFields).toHaveLength(53)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(53)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(38)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(40)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

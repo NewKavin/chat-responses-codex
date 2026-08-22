@@ -209,6 +209,8 @@ Relevant settings (see `Runtime Settings Operations`):
 | `upstream_route_half_open_busy_max_rounds` | 10 | When the whole pool is only half-open-busy, the request may poll on a dedicated busy-round budget that does **not** consume ordinary `upstream_route_exhaustion_retry_max_rounds`; exhaustion reports `give_up_reason = half_open_busy_cap`. |
 | `upstream_retry_after_cap_seconds` | 30 | Ceiling for upstream-provided `Retry-After` (429/503): larger values are clamped for cooldowns, terminal headers and admin snapshots. Raise to 3600 to trust upstream values verbatim. |
 | `upstream_credentials_first_strike_seconds` | 60 | First 401/403 for an API key cools the key only this long; consecutive strikes escalate onto the 15min→1h exponential curve. |
+| `upstream_error_body_excerpt_enabled` | false | Append a bounded, sanitized excerpt of the upstream error body to client error messages (`body=\"…\"` in the terminal summary, `; upstream_body=\"…\"` on single-attempt errors). The excerpt passes a secret-shaped redactor (`sk-…` keys, `Bearer` tokens, JSON secret pairs) before it is exposed. **Only enable for intranet self-owned upstreams where you operate both sides; keep off for public / multi-tenant deployments.** |
+| `upstream_error_body_excerpt_max_chars` | 200 | Maximum excerpt length (50–2000); longer bodies are truncated with `…`. Only read when the excerpt switch is on. |
 
 Recommended values for a single aggregated gateway deployment:
 
@@ -517,6 +519,35 @@ MODEL_SLUG='<exposed_model_slug>' scripts/installed_client_smoke.sh
 ```
 
 The matrix fails on semantic check failures and unpermitted downgrades. The installed-client smoke pins verified CLI versions, executes text and read-only tool tasks in a temporary directory, and never prints the downstream key. Preserve the existing image and data volumes before an upgrade; do not prune images or volumes during rollback preparation.
+
+## Reading A Gateway Error
+
+Every client-visible gateway error carries the same anatomy, so a support
+ticket or server log line can be parsed in one pass:
+
+```
+[upstream_routes_exhausted] all eligible upstream routes are temporarily
+unavailable: transient upstream server errors (1 route, upstream HTTP 503,
+upstream=k-api, code=channel_not_found, body="…"); please try again in 12s;
+gateway already retried for 0.3s across 1 routing rounds; request_id=…
+```
+
+| Piece | Meaning |
+|-------|---------|
+| `[…]` | Stable machine-readable gateway code (`upstream_routes_exhausted`, `upstream_temporary_unavailable`, `upstream_auth_error`, …). |
+| `(…, upstream HTTP 503, upstream=k-api, code=channel_not_found, …)` | Terminal class summary: how many routes failed, each class's most common upstream HTTP status, the upstream display name, the sanitized upstream error-code token, and (only when `upstream_error_body_excerpt_enabled` is on for intranet upstreams) a redacted body excerpt. |
+| `please try again in Ns` | How long the gateway itself estimates before an eligible route recovers; honor it before retrying. |
+| `request_id=…` | The gateway-generated request id for this request. |
+
+When investigating, take `request_id=…` from the client message and grep the
+server runtime log (`LOG_PATH`) for that exact id: the gateway logs every
+routing decision, upstream attempt, retry wait and classification under that
+request id (`request_id=…` in each structured log line), including the
+`error_excerpt` field with the full classification and upstream code.
+
+`error_message` in the admin usage log (Admin > Logs) stores the same
+client-facing message, so the code and upstream name are searchable there
+without touching the runtime log.
 
 ## Operational Notes
 

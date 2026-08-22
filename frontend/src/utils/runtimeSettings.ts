@@ -7,6 +7,7 @@ export type RuntimeSettingGroupId =
   | 'concurrency'
   | 'http'
   | 'logs'
+  | 'observability'
 
 export type RuntimeSettingApplyMode = 'immediate' | 'restart'
 export type RuntimeSettingControl = 'text' | 'switch' | 'number' | 'number-list'
@@ -43,7 +44,8 @@ export const runtimeSettingGroups: RuntimeSettingGroup[] = [
   { id: 'routing', label: '路由策略' },
   { id: 'concurrency', label: '并发恢复' },
   { id: 'http', label: 'HTTP 与流式' },
-  { id: 'logs', label: '日志' }
+  { id: 'logs', label: '日志' },
+  { id: 'observability', label: '可观测性' }
 ]
 
 export const runtimeSettingFields: RuntimeSettingField[] = [
@@ -304,6 +306,25 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     min: 1,
     max: 3_600,
     description: '401/403 第一次只短暂隔离 key，连续失败才升级到 15 分钟以上。'
+  },
+  {
+    key: 'upstream_error_body_excerpt_enabled',
+    group: 'observability',
+    label: '错误正文摘录',
+    apply: 'immediate',
+    control: 'switch',
+    description: '开启后客户端错误消息尾部会带上脱敏后的上游错误正文（剥 key/token）。仅建议内网自有上游时开启，公网/多租户保持关闭。'
+  },
+  {
+    key: 'upstream_error_body_excerpt_max_chars',
+    group: 'observability',
+    label: '正文摘录最大字符数',
+    apply: 'immediate',
+    control: 'number',
+    unit: '字符',
+    min: 50,
+    max: 2_000,
+    description: '正文摘录的最大长度，超出部分以省略号截断。'
   },
   {
     key: 'upstream_route_exhaustion_retry_enabled',
