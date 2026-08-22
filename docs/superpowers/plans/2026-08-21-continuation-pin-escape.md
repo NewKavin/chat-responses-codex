@@ -162,20 +162,23 @@ object.remove("previous_response_id");
 
 ### P1 逃生开关与设置项接线
 
-- [ ] RED：`tests/runtime_settings.rs` / `tests/admin_runtime_settings.rs` 字段计数 +1；
+- [x] RED：`tests/runtime_settings.rs` / `tests/admin_runtime_settings.rs` 字段计数 +1；
       校验用例（默认 true、PUT 后 GET 回读）。
-- [ ] GREEN：
+      commit: `09da5b82`。
+- [x] GREEN：
   - `src/state/types.rs`：`AppConfig.upstream_continuation_pin_escape_enabled: bool`
     + `default_upstream_continuation_pin_escape_enabled() = true`；
   - `src/state/runtime_settings.rs`：字段（`#[serde(default)]`）+ 加入
     `IMMEDIATE_RUNTIME_SETTING_FIELDS` + `from_app_config` / `apply_to_app_config`；
   - `src/main.rs`：`env_bool("UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED", true)`。
-- [ ] 验证：`rtk cargo test --test runtime_settings --test admin_runtime_settings`。
+      commit: `09da5b82`。
+- [x] 验证：`rtk cargo test --test runtime_settings --test admin_runtime_settings`。
 
 ### P2（核心）续写逃生轮
 
-- [ ] RED：新增 `tests/gateway/responses/continuation_escape.rs`（注册到
+- [x] RED：新增 `tests/gateway/responses/continuation_escape.rs`（注册到
       `tests/gateway/responses.rs`）：
+      commit: `76b21e2e`（含主用例 4 个测试与下面 GREEN））。
   - **主用例**：两个上游（同 base_url、不同 key，均有 Verified 档案）。
     第一次请求成功并落 pin 到 up-A；把 up-A 打成冷却；带 `previous_response_id` 再请求
     → **必须成功**（走 up-B），而不是 `upstream_routes_exhausted`；
@@ -187,7 +190,8 @@ object.remove("previous_response_id");
   - **开关关闭** → 现状行为（`upstream_routes_exhausted`）；
   - **逃生也失败** → 终态 details 含 `continuation_pin_escaped: true`，
     错误码仍为 `upstream_routes_exhausted`。
-- [ ] GREEN（`src/server/gateway.rs`）：
+- [x] GREEN（`src/server/gateway.rs`）：
+      commit: `76b21e2e`。
   1. 把 `route_profile_constraint_active` / `route_matches_profile_constraint` 从「常量闭包」
      改成受一个 `continuation_constraint_relaxed: bool` 控制：relaxed 时该闭包恒返回 `true`
      （其余候选条件不变）。注意 `route_is_candidate` / `upstream_has_candidate_route` /
@@ -212,8 +216,9 @@ object.remove("previous_response_id");
      （`upstream.rs:1274/1605/1694` 一带已有「把选中路由存为新 preference」的逻辑，
      确认它在逃生路径上同样生效；不生效就补）。
   5. 日志：逃生时 `tracing::warn!(route_action = "continuation_pin_escape", pinned_route_id, ...)`。
-- [ ] 验证：新用例 + `rtk cargo test --test gateway`（全量回归，重点
+- [x] 验证：新用例 + `rtk cargo test --test gateway`（全量回归，重点
       `tests/gateway/responses/history.rs` / `reasoning.rs` / `tools.rs`）。
+      `cargo test --all` 1728 passed；fmt / clippy -D warnings 干净。
 
 > **P2 实现记录（实现时回填，先记录再改代码）**
 > - **偏离①（候选协议锁死）**：方案未覆盖 `candidate_protocols` 的续写锁死。

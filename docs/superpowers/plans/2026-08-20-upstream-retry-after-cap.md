@@ -647,7 +647,7 @@ T1/T2/T3 属同一根因族，建议同一分支顺序提交并一起部署（�
 
 ---
 
-# T9（收尾）复核发现的两处修复 + 一处已知缺陷记录 —— ✅ commit `6fecb70`
+# T9（收尾）复核发现的两处修复 + 一处已知缺陷记录 —— ✅ commit `df17cfa7`
 
 > 来源：2026-08-21 对 T1–T8 的**代码级复核**（逐 commit 读实现，非文档回填复核）。
 > T1–T8 的语义正确、`cargo test --all` 通过（复核时重跑：全量跑到 doc-tests；
@@ -716,7 +716,7 @@ Redis 侧 `route_health_probe.lua` 新增 ARGV[5] `exclusive_window_ms`，并把
 - [x] 验证门：`rtk cargo fmt --all --check`、`rtk cargo clippy --all-targets -- -D warnings`、
       `rtk cargo test --all`（1691 passed, 88 ignored, 61 suites）全绿。
 - [x] 提交：一个 commit（trailer 齐全），message 体现 F1+F2 同属 T2/T1 的收尾修复。
-      commit hash = `6fecb70`（见本行上方标题）。
+      commit hash = `df17cfa7`（见本行上方标题）。
 
 > **T9 实现记录（2026-08-21，复核后补测与提交）**
 > 1. **行号与方案快照的漂移**（改动前已 grep 确认）：F1 `mark_healthy_verdict` 实际在
