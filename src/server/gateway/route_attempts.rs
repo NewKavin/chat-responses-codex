@@ -11,6 +11,14 @@ use std::time::Duration;
 pub(super) struct AttemptFailure {
     pub route_id: String,
     pub upstream_status: Option<u16>,
+    /// Sanitized upstream error-code token (E1) carried through to the
+    /// terminal class summary so clients/ops can see *why* a class failed
+    /// (E3).  `None` for attempts that carried no code (or a code that did
+    /// not survive sanitization) and for pre-existing cooldowns.
+    pub upstream_error_code: Option<String>,
+    /// Upstream display name recorded alongside the status/code so the
+    /// terminal summary can point at *which* upstream failed (E2).
+    pub upstream_name: Option<String>,
     pub class: FailureClass,
     pub retry_after: Option<Duration>,
     /// True when the route was skipped not because it is cooling but because
@@ -309,7 +317,7 @@ impl RequestRouteAttempts {
         class: FailureClass,
         retry_after: Option<Duration>,
     ) {
-        self.record_failure_with_status(route, class, retry_after, None);
+        self.record_failure_with_status(route, class, retry_after, None, None, None);
     }
 
     pub fn record_failure_with_status(
@@ -318,6 +326,8 @@ impl RequestRouteAttempts {
         class: FailureClass,
         retry_after: Option<Duration>,
         upstream_status: Option<u16>,
+        upstream_error_code: Option<String>,
+        upstream_name: Option<String>,
     ) {
         if !self.tracker().record_failure(route, class, retry_after) {
             return;
@@ -342,6 +352,8 @@ impl RequestRouteAttempts {
         self.ledger().record(AttemptFailure {
             route_id,
             upstream_status,
+            upstream_error_code,
+            upstream_name,
             class,
             retry_after,
             half_open_busy: false,
@@ -487,6 +499,11 @@ pub(super) struct FailureClassSummary {
     /// current request, counting both physical failures and pre-existing
     /// cooldowns (which now carry the status that caused the cooldown).
     pub upstream_status: Option<u16>,
+    /// Most common sanitized upstream error-code token for this class (E3).
+    pub upstream_error_code: Option<String>,
+    /// Most common upstream display name for this class (E2 message-level
+    /// name on the terminal path).
+    pub upstream_name: Option<String>,
 }
 
 impl AttemptLedger {
@@ -669,10 +686,38 @@ impl AttemptLedger {
                 .into_iter()
                 .max_by_key(|(status, count)| (*count, std::cmp::Reverse(*status)))
                 .map(|(status, _)| status);
+            // Same "most common" pick as the status: whichever sanitized
+            // error-code token / upstream name appeared most often for this
+            // class, with a deterministic lexicographic tie-break.
+            let mut code_counts: HashMap<&str, usize> = HashMap::new();
+            let mut name_counts: HashMap<&str, usize> = HashMap::new();
+            for failure in self
+                .failures
+                .iter()
+                .chain(self.cooled_candidates.iter())
+                .filter(|failure| failure.class == class)
+            {
+                if let Some(code) = failure.upstream_error_code.as_deref() {
+                    *code_counts.entry(code).or_default() += 1;
+                }
+                if let Some(name) = failure.upstream_name.as_deref() {
+                    *name_counts.entry(name).or_default() += 1;
+                }
+            }
+            let upstream_error_code = code_counts
+                .into_iter()
+                .max_by_key(|(code, count)| (*count, std::cmp::Reverse(*code)))
+                .map(|(code, _)| code.to_string());
+            let upstream_name = name_counts
+                .into_iter()
+                .max_by_key(|(name, count)| (*count, std::cmp::Reverse(*name)))
+                .map(|(name, _)| name.to_string());
             summaries.push(FailureClassSummary {
                 class,
                 routes,
                 upstream_status,
+                upstream_error_code,
+                upstream_name,
             });
         }
         summaries.sort_by(|a, b| {
@@ -681,6 +726,20 @@ impl AttemptLedger {
                 .then_with(|| a.class.as_str().cmp(b.class.as_str()))
         });
         summaries
+    }
+
+    /// Sanitized upstream error-code token -> how many ledger entries
+    /// (physical failures and pre-existing cooldowns) carried it.  Only
+    /// present in the terminal details once at least one token survived
+    /// sanitization (E3).
+    pub fn upstream_error_code_counts(&self) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        for failure in self.failures.iter().chain(self.cooled_candidates.iter()) {
+            if let Some(code) = failure.upstream_error_code.as_deref() {
+                *counts.entry(code.to_string()).or_default() += 1;
+            }
+        }
+        counts
     }
 
     pub fn terminal_observation(&self) -> Option<AttemptFailure> {

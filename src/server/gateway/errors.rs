@@ -47,12 +47,34 @@ fn ledger_failure_summary(summaries: &[FailureClassSummary]) -> String {
             } else {
                 format!("{} routes", summary.routes)
             };
-            match summary.upstream_status {
-                Some(status) => format!(
-                    "{} ({routes}, upstream HTTP {status})",
-                    failure_class_phrase(summary.class)
-                ),
-                None => format!("{} ({routes})", failure_class_phrase(summary.class)),
+            let mut parts = vec![];
+            if let Some(status) = summary.upstream_status {
+                parts.push(format!("upstream HTTP {status}"));
+            }
+            if let Some(name) = summary
+                .upstream_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                parts.push(format!("upstream={name}"));
+            }
+            if let Some(code) = summary
+                .upstream_error_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+            {
+                parts.push(format!("code={code}"));
+            }
+            if parts.is_empty() {
+                format!("{} ({routes})", failure_class_phrase(summary.class))
+            } else {
+                format!(
+                    "{} ({routes}, {})",
+                    failure_class_phrase(summary.class),
+                    parts.join(", ")
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -158,6 +180,16 @@ pub(super) fn terminal_route_failure_error(
             json!(ledger.half_open_busy_count()),
         ),
         ("class_counts".to_string(), Value::Object(class_counts)),
+        (
+            "upstream_error_codes".to_string(),
+            Value::Object(
+                ledger
+                    .upstream_error_code_counts()
+                    .into_iter()
+                    .map(|(code, count)| (code, json!(count)))
+                    .collect::<Map<String, Value>>(),
+            ),
+        ),
         ("routing_rounds".to_string(), json!(routing_rounds)),
         ("waited_ms".to_string(), json!(waited.as_millis() as u64)),
         (
@@ -863,6 +895,19 @@ impl GatewayError {
                 .and_then(Value::as_u64)
                 .and_then(|status| u16::try_from(status).ok())
                 .or_else(|| Some(status.as_u16())),
+        }
+    }
+    /// Sanitized upstream error-code token carried by a classified failure
+    /// (E1/E3).  Only `Classified` errors carry a real token; plain variants
+    /// never fabricate one.
+    pub(super) fn upstream_error_code(&self) -> Option<&str> {
+        match self {
+            GatewayError::Classified { meta, .. } => meta
+                .details
+                .as_ref()
+                .and_then(|details| details.get("upstream_error_code"))
+                .and_then(Value::as_str),
+            _ => None,
         }
     }
     pub(super) fn error_type(&self) -> &'static str {

@@ -562,6 +562,8 @@ async fn record_route_attempt(
         class,
         retry_after,
         error.upstream_status(),
+        error.upstream_error_code().map(str::to_owned),
+        Some(upstream.name.clone()),
     );
     for observation in route_attempts.take_newly_exhausted() {
         state
@@ -740,6 +742,7 @@ fn record_cooled_route_attempt(
     class: FailureClass,
     retry_after: Duration,
     upstream_status: Option<u16>,
+    upstream_error_code: Option<String>,
     half_open_busy: bool,
 ) {
     route_attempts.record_cooled(AttemptFailure {
@@ -750,6 +753,8 @@ fn record_cooled_route_attempt(
             WireProtocol::from(protocol),
         ),
         upstream_status,
+        upstream_error_code,
+        upstream_name: Some(upstream.name.clone()),
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),
         half_open_busy,
@@ -6169,6 +6174,7 @@ async fn process_gateway_request_inner(
                                     class,
                                     retry_after,
                                     upstream_status,
+                                    None,
                                     false,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
@@ -6232,6 +6238,7 @@ async fn process_gateway_request_inner(
                                     class,
                                     retry_after,
                                     upstream_status,
+                                    None,
                                     true,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
@@ -6293,6 +6300,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
+                                    None,
                                     None,
                                     false,
                                 );
@@ -6380,6 +6388,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
+                                    None,
                                     None,
                                     false,
                                 );

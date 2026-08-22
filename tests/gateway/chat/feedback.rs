@@ -744,3 +744,210 @@ async fn chat_stream_request_rejects_empty_upstream_sse_success_before_done() {
     })
     .await;
 }
+
+// ---- E2: upstream error-code token + upstream name reach the client message ----
+
+async fn feedback_502_state(
+    delay_ms: Option<u64>,
+    error_code: Option<&'static str>,
+) -> (AppState, GeneratedDownstreamKey) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let error_code = error_code.map(str::to_string);
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_request: Request<Body>| {
+            let error_code = error_code.clone();
+            let delay = delay_ms;
+            async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                // No code-like fields by default: E1 treats `code`,
+                // `error_code` and `type` all as code-token candidates, so a
+                // "no code" probe must omit them entirely, otherwise
+                // `type: "server_error"` would itself become the token.
+                let mut body = json!({
+                    "error": {
+                        "message": "UPSTREAM_SECRET_BODY_MUST_NOT_LEAK"
+                    }
+                });
+                if let Some(code) = error_code {
+                    body["error"]["code"] = json!(code);
+                }
+                (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "e2-upstream".into(),
+                name: "k-api".into(),
+                base_url: format!("http://{address}"),
+                api_key: "e2-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-e2".into(),
+                name: "e2 client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_route_exhaustion_retry_enabled: false,
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    let _ = directory;
+    (state, downstream_key)
+}
+
+fn feedback_chat_request(downstream_key: &GeneratedDownstreamKey, stream: bool) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": stream
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_error_message_carries_code_name_and_status_non_stream() {
+    let (state, downstream_key) = feedback_502_state(None, Some("channel_not_found")).await;
+    let response = build_router(state.clone())
+        .oneshot(feedback_chat_request(&downstream_key, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("code=channel_not_found"),
+        "client message must carry the upstream error-code token: {message}"
+    );
+    assert!(
+        message.contains("upstream=k-api"),
+        "client message must carry the upstream name: {message}"
+    );
+    assert!(
+        message.contains("upstream HTTP 503"),
+        "client message must keep status: {message}"
+    );
+    assert_eq!(
+        payload["error"]["details"]["upstream_error_codes"]["channel_not_found"],
+        json!(1),
+        "terminal details must carry the token->count map for programmatic consumers"
+    );
+    assert!(
+        !message.contains("UPSTREAM_SECRET_BODY_MUST_NOT_LEAK"),
+        "privacy red line: upstream body text must never reach the client: {message}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_error_message_without_code_omits_code_kv() {
+    let (state, downstream_key) = feedback_502_state(None, None).await;
+    let response = build_router(state.clone())
+        .oneshot(feedback_chat_request(&downstream_key, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("upstream=k-api"),
+        "upstream name must still appear: {message}"
+    );
+    assert!(message.contains("upstream HTTP 503"));
+    assert!(
+        !message.contains("code="),
+        "no code must not print an empty code= kv: {message}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_error_message_carries_code_on_sse_path() {
+    // Delay the 503 past the 10ms early-failure window so the terminal error
+    // is emitted as an SSE error frame, where message is the only carrier.
+    let (state, downstream_key) = feedback_502_state(Some(80), Some("channel_not_found")).await;
+    let response = build_router(state.clone())
+        .oneshot(feedback_chat_request(&downstream_key, true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut text = String::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .expect("timed out reading SSE frames");
+        match frame {
+            Some(Ok(frame)) => {
+                if let Ok(bytes) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&bytes));
+                }
+            }
+            Some(Err(error)) => panic!("unexpected stream error: {error}"),
+            None => break,
+        }
+        if text.contains("[DONE]") {
+            break;
+        }
+    }
+    assert!(
+        text.contains("code=channel_not_found"),
+        "SSE message must carry the upstream error-code token: {text}"
+    );
+    assert!(
+        text.contains("upstream=k-api"),
+        "SSE message must carry the upstream name: {text}"
+    );
+    assert!(
+        !text.contains("UPSTREAM_SECRET_BODY_MUST_NOT_LEAK"),
+        "privacy red line on SSE: upstream body text must never leak: {text}"
+    );
+}
