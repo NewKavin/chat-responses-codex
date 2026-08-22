@@ -915,6 +915,8 @@ export interface RuntimeSettings {
   upstream_transient_last_resort_probe_enabled: boolean
   upstream_common_mode_breaker_threshold: number
   upstream_common_mode_transient_threshold: number
+  upstream_continuation_pin_escape_enabled: boolean
+  upstream_local_lease_ttl_seconds: number
   default_upstream_max_concurrency: number
   downstream_lease_ttl_seconds: number
   upstream_concurrency_recovery_max_wait_ms: number

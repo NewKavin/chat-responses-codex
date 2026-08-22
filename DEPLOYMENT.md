@@ -211,6 +211,8 @@ Relevant settings (see `Runtime Settings Operations`):
 | `upstream_credentials_first_strike_seconds` | 60 | First 401/403 for an API key cools the key only this long; consecutive strikes escalate onto the 15min→1h exponential curve. |
 | `upstream_error_body_excerpt_enabled` | false | Append a bounded, sanitized excerpt of the upstream error body to client error messages (`body=\"…\"` in the terminal summary, `; upstream_body=\"…\"` on single-attempt errors). The excerpt passes a secret-shaped redactor (`sk-…` keys, `Bearer` tokens, JSON secret pairs) before it is exposed. **Only enable for intranet self-owned upstreams where you operate both sides; keep off for public / multi-tenant deployments.** |
 | `upstream_error_body_excerpt_max_chars` | 200 | Maximum excerpt length (50–2000); longer bodies are truncated with `…`. Only read when the excerpt switch is on. |
+| `upstream_continuation_pin_escape_enabled` | true | When the previously-successful continuation route is unavailable, allow the gateway to purge supplier-bound artifacts from the session history and re-run the full candidate pool, re-pinning the session to a working route. Off = the session can only wait for the original route to recover. |
+| `upstream_local_lease_ttl_seconds` | 3600 | Local-backend fallback TTL for upstream concurrency leases that were never released (reclaimed lazily, renewed for running streams). Lower than the longest stream duration would reclaim live slots; keep above `upstream_stream_max_duration_seconds`. Redis backend ignores this (its leases already carry a TTL). |
 
 Recommended values for a single aggregated gateway deployment:
 
@@ -295,6 +297,41 @@ Troubleshooting:
 - A single intra-request replay round already happened for transient trips;
   the `Retry-After` header on `upstream_transient_pool_failure` tells the
   client when to retry.
+- Downstream sees the **same session** return `503 upstream_routes_exhausted`
+  on every "continue" (same error over and over, idle or not), while a brand
+  new session works immediately: that is continuation-pin (session-level)
+  pinning, not load. Diagnosis:
+  - The stuck request carries `previous_response_id`; a new session has none.
+  - `details.route_count` / `details.cooled_candidate_count` are **1** (or
+    tiny) although the pool has N routes — the continuation contract filtered
+    the pool down to the previously-successful key.
+  - `details.class_counts` has one class and is byte-identical across
+    "continue" attempts — the request keeps hitting the same pinned route.
+  - `continuation_pinned = true`, `continuation_candidate_count = 1` and
+    (after an escape round ran) `continuation_pin_escaped = true` are now
+    surfaced in the terminal error details.
+  - Admin → 模型探测 → **能力档案** tab: keys without a Verified profile are
+    marked **无法承接续写**; a pool whose other keys were never probed cannot
+    fail over (capability-based failover needs a Verified profile per key).
+  - Admin upstream runtime snapshot: an `in_flight` that does **not** return
+    to 0 while idle means a local concurrency lease leaked (it now self-heals
+    after `upstream_local_lease_ttl_seconds`, but a leaked slot lasting
+    longer than that is a bug — report it).
+  Immediate mitigation without code changes:
+  - Run capability probing on **every key** of every upstream so each gets a
+    Verified profile; the contract-based failover then works across keys.
+  - Raise per-upstream `max_concurrency` from 4 to **16–64** (a pin parks the
+    whole session on one key's slots; parallel Codex sub-tasks exhaust 4
+    easily).
+  - Lower `upstream_transient_route_cooldown_max_seconds` to ~20 so a pinned
+    route recovers faster (shortens backoff against genuinely failing
+    upstreams as a side effect).
+  - Emergency: exit Codex and start a new session (drops
+    `previous_response_id`). With the escape round (default on) this should
+    no longer be necessary; `upstream_continuation_pin_escape_enabled = false`
+    restores the old behavior.
+  - If a pool looks dead *only* for existing sessions and `in_flight` never
+    returns to 0, restart the gateway to reclaim leaked slots immediately.
 
 ## Build The Image
 

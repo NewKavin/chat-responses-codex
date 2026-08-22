@@ -51,6 +51,8 @@ const validSettings = (): RuntimeSettings => ({
   upstream_transient_last_resort_probe_enabled: true,
   upstream_common_mode_breaker_threshold: 2,
   upstream_common_mode_transient_threshold: 4,
+  upstream_continuation_pin_escape_enabled: true,
+  upstream_local_lease_ttl_seconds: 3_600,
   default_upstream_max_concurrency: 4,
   downstream_lease_ttl_seconds: 120,
   upstream_concurrency_recovery_max_wait_ms: 30_000,
@@ -107,6 +109,8 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_transient_last_resort_probe_enabled',
   'upstream_common_mode_breaker_threshold',
   'upstream_common_mode_transient_threshold',
+  'upstream_continuation_pin_escape_enabled',
+  'upstream_local_lease_ttl_seconds',
   'default_upstream_max_concurrency',
   'downstream_lease_ttl_seconds',
   'upstream_concurrency_recovery_max_wait_ms',
@@ -134,10 +138,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(53)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(53)
+    expect(runtimeSettingFields).toHaveLength(55)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(55)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(40)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(42)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

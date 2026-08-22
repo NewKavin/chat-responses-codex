@@ -394,6 +394,27 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: 'TransientServer/EdgeProxyError（5xx/网关错误）跨不同上游 host 连续相同失败达到阈值时，先延迟重放一轮，仍失败才返回 502 upstream_transient_pool_failure。同 host 多 key 不累计。0 禁用。'
   },
   {
+    key: 'upstream_continuation_pin_escape_enabled',
+    group: 'routing',
+    label: '续写路由逃生',
+    apply: 'immediate',
+    control: 'switch',
+    description:
+      '当上次成功的那条路由不可用时，允许把会话历史净化后转移到其它可用路由；关闭后该会话只能等原路由恢复。'
+  },
+  {
+    key: 'upstream_local_lease_ttl_seconds',
+    group: 'routing',
+    label: '本地并发租约上限（秒）',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: MAX_U32,
+    description:
+      '兜底回收未正常归还的并发槽；小于单次请求最长时长会误回收，勿低于流最大时长。'
+  },
+  {
     key: 'default_upstream_max_concurrency',
     group: 'concurrency',
     label: '新建上游每 Key 默认最大并发',
