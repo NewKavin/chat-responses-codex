@@ -424,6 +424,89 @@
           />
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="能力档案" name="profiles">
+        <div class="model-probe-tab-panel profile-coverage-panel">
+          <div class="profile-coverage-toolbar">
+            <p>
+              每个 (上游, 路由) 的能力档案状态。
+              <el-tag type="danger" effect="plain" size="small">无法承接续写</el-tag>
+              表示该 key 没有已验证档案，续写 pin 可能把候选池削到无法逃生。
+            </p>
+            <el-button
+              size="small"
+              :loading="profilesLoading"
+              :icon="RefreshCw"
+              @click="loadDialectProfiles"
+            >
+              刷新
+            </el-button>
+          </div>
+          <div class="crc-table-shell">
+            <el-table
+              :data="dialectProfiles"
+              size="small"
+              empty-text="暂无能力档案（可先运行一键探测）"
+              v-loading="profilesLoading"
+            >
+              <el-table-column prop="upstream_id" label="上游" min-width="140" show-overflow-tooltip />
+              <el-table-column label="路由" min-width="150" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span class="capability-probe-results__route">{{ row.key.route_id }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="runtime_model_slug" label="模型" min-width="170" show-overflow-tooltip />
+              <el-table-column label="协议" width="130">
+                <template #default="{ row }">{{ profileProtocolLabel(row.protocol) }}</template>
+              </el-table-column>
+              <el-table-column label="档案状态" width="140">
+                <template #default="{ row }">
+                  <el-tooltip
+                    v-if="row.state === 'unknown'"
+                    content="无已验证档案：续写 pin 会把它标记为无法承接，候选池可能被削到 1 条"
+                    placement="top"
+                  >
+                    <el-tag type="danger" effect="plain" size="small">
+                      {{ profileStateLabel(row.state) }}
+                    </el-tag>
+                  </el-tooltip>
+                  <el-tag
+                    v-else
+                    :type="profileStateTagType(row.state)"
+                    effect="plain"
+                    size="small"
+                  >
+                    {{ profileStateLabel(row.state) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="时效" width="110">
+                <template #default="{ row }">
+                  <el-tag
+                    :type="profileCurrentnessTagType(row.currentness)"
+                    effect="plain"
+                    size="small"
+                  >
+                    {{ profileCurrentnessLabel(row.currentness) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="档案年龄" width="120" align="right">
+                <template #default="{ row }">
+                  {{ formatProfileAge(row.profile_age_seconds) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="能力证据" min-width="150" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.state === 'unknown'" class="profile-coverage-none">未探测</span>
+                  <span v-else>{{ profileCapabilitySummary(row) }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <p v-if="profilesError" class="profile-coverage-error">{{ profilesError }}</p>
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <el-dialog
@@ -527,6 +610,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { BadgeCheck, Pencil, Radar, RefreshCw, RotateCcw } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
+import type { DialectProfileSummary } from '@/types'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
 import type {
   CapabilityDiscoveryResponse,
@@ -563,7 +647,7 @@ import {
   getModelProbeRefreshDelayMs
 } from '@/utils/modelProbePolling'
 
-type ProbeTab = 'status' | 'reasoning'
+type ProbeTab = 'status' | 'reasoning' | 'profiles'
 type EditableReasoningRoute = CapabilityRouteDiscoverySummary & {
   exposed_model_slug: string
 }
@@ -595,6 +679,9 @@ const probeData = ref<ModelProbeResponse>({
   models: []
 })
 const capabilityDiscovery = ref<CapabilityDiscoveryResponse>({ models: [] })
+const dialectProfiles = ref<DialectProfileSummary[]>([])
+const profilesLoading = ref(false)
+const profilesError = ref('')
 const capabilityProbeProgress = ref(0)
 const capabilityProbeCompleted = ref(0)
 const capabilityProbeTotal = ref(0)
@@ -833,6 +920,58 @@ const waitForProbesToSettle = async (
 const capabilityProtocolLabel = (protocol: CapabilityWireProtocol) =>
   protocol === 'responses' ? 'Responses' : 'Chat Completions'
 
+const profileProtocolLabel = (protocol: 'chat_completions' | 'responses') =>
+  protocol === 'responses' ? 'Responses' : 'Chat Completions'
+
+const profileStateLabel = (state: DialectProfileSummary['state']) =>
+  ({ verified: '已验证', partial: '部分验证', unsupported: '不支持', unknown: '无法承接续写' })[state]
+
+const profileStateTagType = (state: DialectProfileSummary['state']) =>
+  ({ verified: 'success', partial: 'warning', unsupported: 'info', unknown: 'danger' })[state]
+
+const profileCurrentnessLabel = (currentness: DialectProfileSummary['currentness']) =>
+  ({ current: '当前', stale: '过期', missing: '缺失' })[currentness]
+
+const profileCurrentnessTagType = (currentness: DialectProfileSummary['currentness']) =>
+  ({ current: 'success', stale: 'warning', missing: 'danger' })[currentness]
+
+const formatProfileAge = (ageSeconds: number | null) => {
+  if (ageSeconds === null) return '-'
+  if (ageSeconds < 60) return `${ageSeconds}s`
+  if (ageSeconds < 3600) return `${Math.round(ageSeconds / 60)}m`
+  if (ageSeconds < 86400) return `${(ageSeconds / 3600).toFixed(1)}h`
+  return `${(ageSeconds / 86400).toFixed(1)}d`
+}
+
+const profileCapabilitySummary = (row: DialectProfileSummary) => {
+  const states = Object.values(row.evidence.capabilities ?? {})
+  const supported = states.filter((v) => v === 'supported').length
+  const rejected = states.filter((v) => v === 'rejected').length
+  const unobserved = states.filter((v) => v === 'unobserved').length
+  const parts: string[] = []
+  if (supported > 0) parts.push(`${supported} 支持`)
+  if (rejected > 0) parts.push(`${rejected} 拒绝`)
+  if (unobserved > 0) parts.push(`${unobserved} 未观测`)
+  return parts.length > 0 ? parts.join(' · ') : '无能力项'
+}
+
+const loadDialectProfiles = async () => {
+  if (profilesLoading.value || isUnmounted) return
+  profilesLoading.value = true
+  profilesError.value = ''
+  try {
+    const { data } = await adminApi.getDialectProfiles()
+    if (isUnmounted) return
+    dialectProfiles.value = data.profiles
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.error?.message || '加载能力档案失败'
+    profilesError.value = errorMsg
+    ElMessage.error(errorMsg)
+  } finally {
+    profilesLoading.value = false
+  }
+}
+
 const formatProbeRetry = (nextProbeAt: number | null) => {
   if (nextProbeAt === null) return '-'
   return new Date(nextProbeAt * 1000).toLocaleTimeString('zh-CN', { hour12: false })
@@ -1021,6 +1160,7 @@ onMounted(() => {
   void loadData()
   void loadProbeModelScope()
   void refreshCapabilityDiscovery().catch(() => undefined)
+  void loadDialectProfiles().catch(() => undefined)
 })
 
 onUnmounted(() => {
@@ -1371,5 +1511,33 @@ onUnmounted(() => {
   .reasoning-override-footer {
     flex-wrap: wrap;
   }
+}
+</style>
+
+<style scoped>
+.profile-coverage-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.profile-coverage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.profile-coverage-toolbar p {
+  margin: 0;
+  color: var(--crc-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.profile-coverage-error {
+  margin: 0;
+  color: var(--el-color-danger, #f56c6c);
+  font-size: 13px;
+}
+.profile-coverage-none {
+  color: var(--crc-text-muted);
 }
 </style>

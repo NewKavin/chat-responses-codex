@@ -290,12 +290,21 @@ object.remove("previous_response_id");
   `repeat_within_request || sole_candidate`，两边行为一致。
 - 非续写/多候选请求恒为 false，完全不受影响；429/分类语义不动。
 
-### P5 能力探测覆盖率可见性（治 R2）
+### P5 能力探测覆盖率可见性（治 R2） —— ✅ commit 待回填
 
-- [ ] GREEN：管理页/诊断接口暴露「每个 (上游, key) 的档案状态」，把
+- [x] GREEN：管理页/诊断接口暴露「每个 (上游, key) 的档案状态」，把
       `DialectProfileState::Unknown` 的 key 高亮为「无法承接续写」。
       优先做只读展示，不做自动探测（自动探测有配额风险）。
-- [ ] 若后端已有等价接口（先 grep `capability_admin.rs` 的档案列表接口），只补前端展示即可。
+- [x] 若后端已有等价接口（先 grep `capability_admin.rs` 的档案列表接口），只补前端展示即可。
+
+**P5 实现记录（2026-08-22）**：后端接口已存在
+（`GET /api/admin/capabilities/profiles`，`capability_admin.rs:190-212`，含
+`state`/`currentness`/`key`/`evidence`），只补前端展示：
+`frontend/src/views/admin/ModelProbe.vue` 新增「能力档案」tab（`name=profiles`），
+表格列：上游/路由/模型/协议/档案状态/时效/档案年龄/能力证据；
+`unknown` 状态以 danger tag 高亮并 tooltip 说明「无已验证档案：续写 pin 会
+把它标记为无法承接，候选池可能被削到 1 条」；`getDialectProfiles`（原 api 层
+已有、零调用）接通；onMounted 自动加载 + 手动刷新按钮；只读展示，无自动探测。
 
 ### P6 前端设置项 + 部署文档
 
