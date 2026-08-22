@@ -47,7 +47,7 @@
     </el-form>
       
     <div class="crc-table-shell downstreams-table-shell">
-      <el-table class="compact-downstreams-table" :data="downstreams" v-loading="loading" stripe @selection-change="handleSelectionChange">
+      <el-table class="compact-downstreams-table" :data="pagedDownstreams" v-loading="loading" stripe @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="45" />
         <el-table-column v-if="isColumnVisible('id')" prop="id" label="ID" width="150" />
         <el-table-column v-if="isColumnVisible('name')" prop="name" label="名称" width="200" />
@@ -149,6 +149,17 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <div v-if="downstreams.length > 0" class="downstream-table-pagination">
+        <el-pagination
+          v-model:current-page="downstreamPage"
+          v-model:page-size="downstreamPageSize"
+          :total="downstreams.length"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          background
+        />
+      </div>
     </div>
 
     <el-alert
@@ -392,7 +403,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Activity,
@@ -416,6 +427,8 @@ import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils
 
 const loading = ref(false)
 const downstreams = ref<DownstreamConfig[]>([])
+const downstreamPage = ref(1)
+const downstreamPageSize = ref(10)
 const dialogVisible = ref(false)
 const rotateDialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
@@ -532,6 +545,29 @@ const loadData = async () => {
     loading.value = false
   }
 }
+
+/** 客户端切片分页：下游数据一次性全量拉取，表格只渲染当前页 */
+const pagedDownstreams = computed(() => {
+  const start = (downstreamPage.value - 1) * downstreamPageSize.value
+  return downstreams.value.slice(start, start + downstreamPageSize.value)
+})
+
+// 筛选条件变化时回到第一页
+watch(
+  () => [filters.value.status, filters.value.lifecycle, filters.value.search],
+  () => {
+    downstreamPage.value = 1
+  }
+)
+
+// 数据变化导致行数减少时，页码自动回落到有效范围
+watch(
+  () => downstreams.value.length,
+  () => {
+    const maxPage = Math.max(1, Math.ceil(downstreams.value.length / downstreamPageSize.value))
+    if (downstreamPage.value > maxPage) downstreamPage.value = maxPage
+  }
+)
 
 const loadModels = async () => {
   try {

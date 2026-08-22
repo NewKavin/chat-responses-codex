@@ -76,7 +76,7 @@
     </el-form>
 
     <div class="crc-table-shell">
-      <el-table :data="filteredUpstreams" v-loading="loading" stripe style="width: 100%"
+      <el-table :data="pagedUpstreams" v-loading="loading" stripe style="width: 100%"
         empty-text="当前筛选条件下暂无上游" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="48" />
         <el-table-column v-if="isColumnVisible('id')" label="ID" width="72" align="center">
@@ -228,6 +228,17 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <div v-if="filteredUpstreams.length > 0" class="upstream-table-pagination">
+        <el-pagination
+          v-model:current-page="upstreamPage"
+          v-model:page-size="upstreamPageSize"
+          :total="filteredUpstreams.length"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          background
+        />
+      </div>
     </div>
     
     <!-- Create/Edit Drawer -->
@@ -449,7 +460,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { Activity, CircleCheck, CircleSlash, PlugZap, Plus, RefreshCw, Search, Trash2 } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -472,6 +483,8 @@ const filters = ref({
   credentials: 'all',
   search: ''
 })
+const upstreamPage = ref(1)
+const upstreamPageSize = ref(10)
 const tableColumns: TableColumnDefinition[] = [
   { key: 'id', label: 'ID' },
   { key: 'name', label: '名称' },
@@ -721,6 +734,29 @@ const filteredUpstreams = computed(() => {
     return true
   })
 })
+
+/** 客户端切片分页：上游数据一次性全量拉取，表格只渲染当前页 */
+const pagedUpstreams = computed(() => {
+  const start = (upstreamPage.value - 1) * upstreamPageSize.value
+  return filteredUpstreams.value.slice(start, start + upstreamPageSize.value)
+})
+
+// 筛选条件变化时回到第一页
+watch(
+  () => [filters.value.status, filters.value.protocol, filters.value.credentials, filters.value.search],
+  () => {
+    upstreamPage.value = 1
+  }
+)
+
+// 数据变化导致行数减少时，页码自动回落到有效范围
+watch(
+  () => filteredUpstreams.value.length,
+  () => {
+    const maxPage = Math.max(1, Math.ceil(filteredUpstreams.value.length / upstreamPageSize.value))
+    if (upstreamPage.value > maxPage) upstreamPage.value = maxPage
+  }
+)
 
 const isOfficialOpenAIBaseUrl = (baseUrl?: string) => {
   const value = String(baseUrl || '').trim().toLowerCase()
@@ -1349,6 +1385,12 @@ onMounted(() => {
 
 .filter-label :deep(svg) {
   color: var(--crc-accent);
+}
+
+.upstream-table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 @media (max-width: 767px) {
