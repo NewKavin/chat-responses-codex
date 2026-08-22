@@ -1854,6 +1854,7 @@ fn route_attempts_converts_classified_upstream_feedback_before_aggregation() {
             semantic: crate::upstream_feedback::UpstreamResponseSemantic::Generic,
             upstream_status: Some(400),
             retry_after: None,
+            upstream_error_code: None,
         },
         "provider model rejection",
     );
@@ -1873,6 +1874,7 @@ fn explicit_concurrency_5xx_maps_to_account_recovery_with_provider_status() {
             semantic: crate::upstream_feedback::UpstreamResponseSemantic::ExplicitConcurrency,
             upstream_status: Some(502),
             retry_after: Some(Duration::from_secs(3)),
+            upstream_error_code: None,
         },
         "provider concurrency rejection",
     );

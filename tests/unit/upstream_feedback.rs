@@ -1,4 +1,7 @@
-use super::*;
+use chat_responses_codex::upstream_feedback::{
+    classify_upstream_response, retry_after_deadline_duration, sanitize_upstream_error_token,
+    FailureClass, UpstreamFeedbackClassification, UpstreamFeedbackInput, UpstreamResponseSemantic,
+};
 
 fn assert_class(status: u16, body: &str, expected: FailureClass) {
     let headers = reqwest::header::HeaderMap::new();
@@ -533,5 +536,84 @@ fn json_503_service_busy_stays_transient_server() {
         503,
         r#"{"error":{"message":"server busy"}}"#,
         FailureClass::TransientServer,
+    );
+}
+
+// ---- E1: upstream error-code token survives classification ----
+
+#[test]
+fn string_error_code_token_survives_classification() {
+    let headers = reqwest::header::HeaderMap::new();
+    let classified = classify_upstream_response(UpstreamFeedbackInput {
+        status: 502,
+        headers: &headers,
+        body: Some(r#"{"error":{"code":"channel_not_found","message":"channel gone"}}"#),
+        target_model: Some("glm-5.2"),
+    });
+    assert_eq!(
+        classified.upstream_error_code.as_deref(),
+        Some("channel_not_found"),
+        "string code must survive as a sanitized token"
+    );
+    // classification semantics unchanged
+    assert_eq!(classified.class, FailureClass::TransientServer);
+    assert_eq!(classified.upstream_status, Some(502));
+}
+
+#[test]
+fn numeric_error_code_stays_out_of_token_but_preserves_status() {
+    let headers = reqwest::header::HeaderMap::new();
+    let classified = classify_upstream_response(UpstreamFeedbackInput {
+        status: 429,
+        headers: &headers,
+        body: Some(r#"{"error":{"code":429,"message":"rate limited"}}"#),
+        target_model: Some("glm-5.2"),
+    });
+    assert_eq!(
+        classified.upstream_error_code, None,
+        "pure-numeric codes must not become client tokens"
+    );
+    assert_eq!(classified.upstream_status, Some(429));
+    assert_eq!(classified.class, FailureClass::RateLimited);
+}
+
+#[test]
+fn sanitize_upstream_error_token_rejects_whitespace_and_foreign_chars() {
+    assert_eq!(
+        sanitize_upstream_error_token("  channel_not_found  "),
+        Some("channel_not_found".to_string())
+    );
+    assert_eq!(
+        sanitize_upstream_error_token("insufficient_user_quota"),
+        Some("insufficient_user_quota".to_string())
+    );
+    // space inside the token => drop
+    assert_eq!(sanitize_upstream_error_token("channel not found"), None);
+    // foreign characters => drop
+    assert_eq!(sanitize_upstream_error_token("渠道不可用"), None);
+    assert_eq!(sanitize_upstream_error_token("code$with#symbols"), None);
+    assert_eq!(
+        sanitize_upstream_error_token("UPPER_case"),
+        Some("upper_case".to_string())
+    );
+}
+
+#[test]
+fn sanitize_upstream_error_token_drops_overlong_and_empty() {
+    let long = "x".repeat(65);
+    assert_eq!(sanitize_upstream_error_token(&long), None);
+    assert_eq!(
+        sanitize_upstream_error_token(&"x".repeat(64)).map(|token| token.len()),
+        Some(64)
+    );
+    assert_eq!(sanitize_upstream_error_token(""), None);
+    assert_eq!(sanitize_upstream_error_token("   "), None);
+}
+
+#[test]
+fn sanitized_token_preserves_hyphen_and_colon_whitelist() {
+    assert_eq!(
+        sanitize_upstream_error_token("model-not-found:gpt-4"),
+        Some("model-not-found:gpt-4".to_string())
     );
 }

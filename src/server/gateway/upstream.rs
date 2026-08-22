@@ -2128,7 +2128,7 @@ pub(super) async fn send_to_upstream(
         }
         // Retain the legacy summary label for log compatibility while routing
         // decisions use the precise Key-route classification above.
-        let feedback = classified_feedback.summary_classification();
+        let feedback = classified_feedback.clone().summary_classification();
         // Log-facing excerpt: full diagnostic context (status, classification,
         // upstream code, message) for operators reading the server log.
         let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);

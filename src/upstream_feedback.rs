@@ -16,12 +16,16 @@ pub enum UpstreamResponseSemantic {
     EdgeProxyError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedUpstreamFailure {
     pub class: FailureClass,
     pub semantic: UpstreamResponseSemantic,
     pub upstream_status: Option<u16>,
     pub retry_after: Option<Duration>,
+    /// First upstream error-code token that passed the client-facing
+    /// whitelist sanitizer, if any (E1).  Pure-numeric codes are excluded
+    /// (they are captured as statuses); body text never reaches this field.
+    pub upstream_error_code: Option<String>,
 }
 
 pub struct UpstreamFeedbackInput<'a> {
@@ -34,6 +38,9 @@ pub struct UpstreamFeedbackInput<'a> {
 #[derive(Default)]
 struct StructuredError {
     codes: Vec<String>,
+    /// Raw (un-normalized) code tokens in collection order, used only for the
+    /// client-facing sanitizer (E1).  Classification continues to use `codes`.
+    raw_codes: Vec<String>,
     messages: Vec<String>,
     scopes: Vec<String>,
     statuses: Vec<u16>,
@@ -66,6 +73,7 @@ impl StructuredError {
                                     self.statuses.push(status);
                                 }
                                 self.codes.push(normalize_token(&code));
+                                self.raw_codes.push(code.trim().to_string());
                             }
                         }
                         "status" | "status_code" | "http_status" | "inner_code" => {
@@ -73,6 +81,7 @@ impl StructuredError {
                                 self.statuses.push(status);
                             } else if let Some(code) = scalar_string(value) {
                                 self.codes.push(normalize_token(&code));
+                                self.raw_codes.push(code.trim().to_string());
                             }
                         }
                         "scope" | "quota_scope" => {
@@ -219,6 +228,26 @@ fn normalize_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
+/// Client-facing sanitizer for upstream error-code tokens (E1).  Lowercases
+/// and trims, then enforces a strict whitelist: only `[a-z0-9_.:-]`, at most
+/// 64 chars.  Anything else (spaces, CJK, symbols) drops the whole token —
+/// this is the privacy gate that keeps the `code` field from becoming a body
+/// exfiltration back-channel.
+pub fn sanitize_upstream_error_token(raw: &str) -> Option<String> {
+    let token = raw.trim().to_ascii_lowercase();
+    if token.is_empty() || token.len() > 64 {
+        return None;
+    }
+    if !token.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '_' | '.' | ':' | '-')
+    }) {
+        return None;
+    }
+    Some(token)
+}
+
 fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
@@ -232,7 +261,10 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     retry_after_deadline_duration(retry_at, Utc::now())
 }
 
-fn retry_after_deadline_duration(retry_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Duration> {
+pub fn retry_after_deadline_duration(
+    retry_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<Duration> {
     let duration = retry_at.signed_duration_since(now);
     if duration <= chrono::Duration::zero() {
         return Some(Duration::ZERO);
@@ -598,11 +630,16 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
         )
     };
 
+    let upstream_error_code = parsed.raw_codes.iter().find_map(|raw| {
+        sanitize_upstream_error_token(raw).filter(|token| token.parse::<u16>().is_err())
+    });
+
     ClassifiedUpstreamFailure {
         class,
         semantic,
         upstream_status: (input.status != 0).then_some(input.status),
         retry_after,
+        upstream_error_code,
     }
 }
 
