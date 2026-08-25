@@ -1752,12 +1752,14 @@ pub(crate) fn normalize_tool_arguments_for_request(
 ) -> Result<String, ProtocolError> {
     let (normalized, repair) = normalize_tool_arguments(raw);
     if let Some(reason) = repair {
-        // P2.3: the old `(model, diagnostics)` pair is replaced by the borrowed
-        // context.  The request-direction call sites historically passed
-        // `None` for both attribution fields, so passing `ctx.model, None`
-        // here is behavior-neutral; request_id / upstream_id get wired through
-        // by the P2.4 change.
-        log_tool_call_arguments_anomaly(reason.as_str(), call_id, raw, ctx.model, None);
+        log_tool_call_arguments_anomaly(
+            reason.as_str(),
+            call_id,
+            raw,
+            ctx.model,
+            ctx.request_id,
+            ctx.upstream_id,
+        );
         if ctx.strict && reason == ToolArgumentsRepairReason::Unparseable {
             return Err(ProtocolError::InvalidPayload(format!(
                 "tool call `{call_id}` has arguments that are not valid JSON (tool_arguments_strict)"
@@ -2657,7 +2659,8 @@ fn merge_tool_call_arguments(
     fragment: &str,
     strict: bool,
     model: Option<&str>,
-    diagnostics: Option<&TranslatorDiagnostics>,
+    request_id: Option<&str>,
+    upstream_id: Option<&str>,
 ) -> ToolCallArgumentsMerge {
     if strict
         && !entry.arguments.is_empty()
@@ -2672,7 +2675,8 @@ fn merge_tool_call_arguments(
             &entry.call_id,
             fragment,
             model,
-            diagnostics,
+            request_id,
+            upstream_id,
         );
         tracing::warn!(
             previous_arguments = %entry.arguments,
@@ -2696,19 +2700,16 @@ fn log_tool_call_arguments_anomaly(
     call_id: &str,
     fragment: &str,
     model: Option<&str>,
-    diagnostics: Option<&TranslatorDiagnostics>,
+    request_id: Option<&str>,
+    upstream_id: Option<&str>,
 ) {
     tracing::warn!(
         event = "tool_call_arguments_anomaly",
         reason,
         call_id,
         model = %model.unwrap_or(""),
-        request_id = %diagnostics
-            .map(|diagnostics| diagnostics.request_id.as_str())
-            .unwrap_or(""),
-        upstream_id = %diagnostics
-            .map(|diagnostics| diagnostics.upstream_id.as_str())
-            .unwrap_or(""),
+        request_id = %request_id.unwrap_or(""),
+        upstream_id = %upstream_id.unwrap_or(""),
         fragment = %fragment,
         "tool call arguments anomaly"
     );
@@ -2742,6 +2743,18 @@ impl ChatToResponsesState {
             tool_call_merge_strict,
             diagnostics,
         }
+    }
+
+    /// Resolve the three attribution fields for anomaly events from this
+    /// translator's request-scoped diagnostics (P2.4).  Returns owned values
+    /// so callers can use them while holding a mutable borrow of `self`
+    /// (e.g. the tool-call accumulator entry).
+    fn anomaly_attribution(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.model.clone(),
+            self.diagnostics.as_ref().map(|d| d.request_id.clone()),
+            self.diagnostics.as_ref().map(|d| d.upstream_id.clone()),
+        )
     }
 
     fn translate_event(&mut self, event: &Value) -> Result<Vec<Value>, ProtocolError> {
@@ -3134,12 +3147,14 @@ impl ChatToResponsesState {
             let raw_arguments = arguments;
             let (arguments, repair) = normalize_tool_arguments(&raw_arguments);
             if let Some(reason) = repair {
+                let (model, request_id, upstream_id) = self.anomaly_attribution();
                 log_tool_call_arguments_anomaly(
                     reason.as_str(),
                     &call_id,
                     &raw_arguments,
-                    self.model.as_deref(),
-                    self.diagnostics.as_ref(),
+                    model.as_deref(),
+                    request_id.as_deref(),
+                    upstream_id.as_deref(),
                 );
             }
             let arguments = arguments.into_owned();
@@ -3257,12 +3272,15 @@ impl ChatToResponsesState {
                                         .get(&open_index)
                                         .map(|state| state.call_id.clone())
                                         .unwrap_or_default();
+                                    let (model, request_id, upstream_id) =
+                                        self.anomaly_attribution();
                                     log_tool_call_arguments_anomaly(
                                         "name_mismatch",
                                         &open_call_id,
                                         &arguments,
-                                        self.model.as_deref(),
-                                        self.diagnostics.as_ref(),
+                                        model.as_deref(),
+                                        request_id.as_deref(),
+                                        upstream_id.as_deref(),
                                     );
                                     self.tool_calls.keys().next_back().map_or(0, |max| max + 1)
                                 } else {
@@ -3270,12 +3288,14 @@ impl ChatToResponsesState {
                                 }
                             }
                             _ => {
+                                let (model, request_id, upstream_id) = self.anomaly_attribution();
                                 log_tool_call_arguments_anomaly(
                                     "ambiguous_continuation",
                                     "<none>",
                                     &arguments,
-                                    self.model.as_deref(),
-                                    self.diagnostics.as_ref(),
+                                    model.as_deref(),
+                                    request_id.as_deref(),
+                                    upstream_id.as_deref(),
                                 );
                                 self.tool_calls.keys().next_back().map_or(0, |max| max + 1)
                             }
@@ -3295,6 +3315,9 @@ impl ChatToResponsesState {
             .map(|tool_call| tool_call.output_index)
             .unwrap_or_else(|| self.allocate_output_index());
 
+        // Attribution fields for anomaly events must be resolved before the
+        // mutable `entry` borrow below (P2.4).
+        let (model, request_id, upstream_id) = self.anomaly_attribution();
         {
             let entry = self
                 .tool_calls
@@ -3329,8 +3352,9 @@ impl ChatToResponsesState {
                         "index_name_mismatch",
                         &entry.call_id,
                         &arguments,
-                        self.model.as_deref(),
-                        self.diagnostics.as_ref(),
+                        model.as_deref(),
+                        request_id.as_deref(),
+                        upstream_id.as_deref(),
                     );
                 }
             }
@@ -3349,8 +3373,9 @@ impl ChatToResponsesState {
                     entry,
                     &arguments,
                     self.tool_call_merge_strict,
-                    self.model.as_deref(),
-                    self.diagnostics.as_ref(),
+                    model.as_deref(),
+                    request_id.as_deref(),
+                    upstream_id.as_deref(),
                 );
                 // A complete-then-new replacement is not streamed as a delta:
                 // the client already accumulated the stale placeholder, and
@@ -3459,6 +3484,9 @@ impl ChatToResponsesState {
             .map(|tool_call| tool_call.output_index)
             .unwrap_or_else(|| self.allocate_output_index());
 
+        // Attribution fields for anomaly events must be resolved before the
+        // mutable `entry` borrow below (P2.4).
+        let (model, request_id, upstream_id) = self.anomaly_attribution();
         {
             let entry = self
                 .tool_calls
@@ -3497,8 +3525,9 @@ impl ChatToResponsesState {
                     entry,
                     arguments,
                     self.tool_call_merge_strict,
-                    self.model.as_deref(),
-                    self.diagnostics.as_ref(),
+                    model.as_deref(),
+                    request_id.as_deref(),
+                    upstream_id.as_deref(),
                 );
                 if merge == ToolCallArgumentsMerge::Appended && !entry.client_delta_desynced {
                     delta_event = Some((entry.item_id.clone(), arguments.to_string()));
@@ -3570,12 +3599,14 @@ impl ChatToResponsesState {
             let raw_arguments = tool_call.arguments.clone();
             let (arguments, repair) = normalize_tool_arguments(&raw_arguments);
             if let Some(reason) = repair {
+                let (model, request_id, upstream_id) = self.anomaly_attribution();
                 log_tool_call_arguments_anomaly(
                     reason.as_str(),
                     &tool_call.call_id,
                     &raw_arguments,
-                    self.model.as_deref(),
-                    self.diagnostics.as_ref(),
+                    model.as_deref(),
+                    request_id.as_deref(),
+                    upstream_id.as_deref(),
                 );
             }
             let arguments = arguments.into_owned();

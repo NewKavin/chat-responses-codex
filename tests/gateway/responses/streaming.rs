@@ -2204,3 +2204,95 @@ async fn tool_call_empty_name_without_index_continues_open_call() {
     assert_eq!(done[0].0, "shell");
     assert_eq!(done[0].1, "{\"command\":[\"ls\"]}");
 }
+
+/// §3.3 guard: on a NORMAL (non-anomalous) multi-fragment tool call, the
+/// `response.function_call_arguments.delta` fragments for a given item must
+/// concatenate byte-for-byte to the `response.function_call_arguments.done`
+/// `arguments` for the same item.  This locks in that the `client_delta_desynced`
+/// suppression introduced with the T1.2 complete-then-new guard does not leak
+/// into the ordinary incremental-split path.
+#[tokio::test]
+async fn normal_fragmented_tool_call_deltas_concatenate_bytewise_to_done_arguments() {
+    // True incremental splits (index carried, no placeholder): the normal
+    // upstream shape that must keep appending.
+    let text = run_fragmented_tool_call_stream(vec![
+        json!({
+            "index": 0,
+            "id": "call_incr",
+            "function": {
+                "name": "shell",
+                "arguments": "{\"comm"
+            }
+        }),
+        json!({
+            "index": 0,
+            "function": {
+                "arguments": "and\":[\"ls\"]}"
+            }
+        }),
+    ])
+    .await;
+
+    assert!(
+        text.contains("response.function_call_arguments.done"),
+        "{text}"
+    );
+    assert!(
+        text.contains("response.function_call_arguments.delta"),
+        "{text}"
+    );
+
+    // Collect (item_id -> concatenated deltas) and (item_id -> done arguments).
+    let mut deltas: std::collections::BTreeMap<String, String> = Default::default();
+    let mut done: std::collections::BTreeMap<String, String> = Default::default();
+    for event in text.split("\n\n") {
+        let is_delta = event.contains("response.function_call_arguments.delta");
+        let is_done = event.contains("response.function_call_arguments.done");
+        if !is_delta && !is_done {
+            continue;
+        }
+        let data_line = event
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .expect("event must carry a data line");
+        let value: Value =
+            serde_json::from_str(data_line.trim_start_matches("data: ")).expect("JSON");
+        let item_id = value
+            .get("item_id")
+            .and_then(Value::as_str)
+            .expect("events must carry item_id")
+            .to_string();
+        if is_delta {
+            let delta = value
+                .get("delta")
+                .and_then(Value::as_str)
+                .expect("delta event must carry delta");
+            deltas.entry(item_id).or_default().push_str(delta);
+        } else {
+            let arguments = value
+                .get("arguments")
+                .and_then(Value::as_str)
+                .expect("done event must carry arguments")
+                .to_string();
+            done.insert(item_id, arguments);
+        }
+    }
+
+    assert_eq!(
+        done.len(),
+        1,
+        "expected exactly one done event, got {done:?}"
+    );
+    let item_id = done.keys().next().unwrap().clone();
+    let concatenated = deltas
+        .get(&item_id)
+        .unwrap_or_else(|| panic!("missing deltas for {item_id}"));
+    assert_eq!(
+        concatenated, &done[&item_id],
+        "concatenated deltas must equal the done arguments byte-for-byte"
+    );
+    assert_eq!(
+        done[&item_id], "{\"command\":[\"ls\"]}",
+        "expected the incrementally accumulated arguments"
+    );
+}

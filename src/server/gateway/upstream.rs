@@ -1502,6 +1502,9 @@ pub(super) async fn send_to_upstream(
                     .as_ref()
                     .and_then(ResponseHistoryContext::tool_registry),
                 runtime_settings.tool_arguments_strict,
+                Some(&final_upstream_model),
+                Some(&request_id),
+                Some(&upstream.id),
                 &mut downgrade_codes,
             )
             .map_err(protocol_error_to_gateway)?

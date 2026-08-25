@@ -2319,3 +2319,301 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
         .get("tools")
         .is_some());
 }
+
+// ============================================================================
+// P2 acceptance: a poisoned `function_call.arguments` replayed from response
+// history is repaired on the Responses->Chat conversion path, and the
+// resulting `tool_call_arguments_anomaly` event carries non-empty
+// upstream_id / model / request_id attribution (the three dimensions P2 adds
+// via ToolArgumentsContext on the dispatch path).
+// ============================================================================
+
+/// Extract the rendered value of `field=` from a tracing fmt line, handling
+/// both quoted and unquoted values.
+fn tracing_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let marker = format!("{field}=");
+    let start = line.find(&marker)? + marker.len();
+    let rest = &line[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(&stripped[..end])
+    } else {
+        let end = rest.find(' ').unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn polluted_replayed_history_repairs_and_anomaly_carries_dispatch_attribution() {
+    // Scoped, thread-local tracing dispatch so this test never claims the
+    // process-global subscriber slot (model_mappings.rs pattern).
+    let capture = TracingCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(capture.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _capture_guard = tracing::dispatcher::set_default(&dispatch);
+
+    let captured_requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = captured_requests.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let captured = capture_clone.clone();
+            async move {
+                let (_parts, body) = request.into_parts();
+                let body = to_bytes(body, usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                let request_index = {
+                    let mut lock = captured.lock().unwrap();
+                    let index = lock.len();
+                    lock.push(payload);
+                    index
+                };
+                let body = if request_index == 0 {
+                    // Round 1: a tool-calling assistant so the gateway stores a
+                    // function_call item (with arguments) into response history.
+                    axum::Json(json!({
+                        "id": "chatcmpl-polluted",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "synthetic/polluted-replay",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "call-polluted",
+                                    "type": "function",
+                                    "function": {"name": "shell", "arguments": "{\"command\":[\"ls\"]}"}
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                } else {
+                    axum::Json(json!({
+                        "id": "chatcmpl-polluted-2",
+                        "object": "chat.completion",
+                        "created": 2,
+                        "model": "synthetic/polluted-replay",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "replayed-ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                };
+                (StatusCode::OK, body)
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/polluted-replay";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-polluted-replay".into(),
+                name: "polluted replay".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: "up-polluted-replay".into(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [
+        Capability::TextInput,
+        Capability::NonStreamingResponse,
+        Capability::FunctionTools,
+        Capability::ToolContinuation,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let state_for_history = state.clone();
+    let app = build_router(state);
+    let auth = HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap();
+    let tools = json!([{
+        "type": "function",
+        "function": {"name": "shell", "description": "Run a command", "parameters": {"type": "object"}}
+    }]);
+
+    // Round 1: store a history whose function_call item carries valid args.
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, auth.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": "start",
+                        "tools": tools,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let response_id = first_payload["id"].as_str().unwrap().to_string();
+    let stored = state_for_history
+        .response_history("down-1", &response_id)
+        .await
+        .expect("round 1 history must be stored");
+    assert!(
+        stored
+            .items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call")),
+        "round 1 history must carry a function_call item"
+    );
+
+    // Simulate legacy pollution: history written before T2 could carry the
+    // `{}` + real arguments concatenation.
+    let mut polluted_items = stored.items.clone();
+    for item in polluted_items.iter_mut() {
+        if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            item["arguments"] = json!("{}{\"command\":[\"ls\"]}");
+        }
+    }
+    state_for_history.store_response_history(
+        "down-1",
+        &response_id,
+        polluted_items,
+        stored.request_state.clone(),
+    );
+
+    // Round 2: same-profile replay (only upstream), so the cross-profile
+    // history sanitizer does NOT pre-repair; the poisoned arguments must reach
+    // the Responses->Chat conversion path, which repairs and attributes them.
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, auth)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "previous_response_id": response_id,
+                        "input": "continue",
+                        "tools": tools,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    // Assertion 1: what was actually sent upstream has parseable, unprefixed
+    // tool-call arguments.
+    let requests = captured_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "round 1 + round 2 must reach upstream");
+    let messages = requests[1]["messages"]
+        .as_array()
+        .expect("round 2 chat body");
+    let assistant = messages
+        .iter()
+        .find(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .unwrap_or_else(|| panic!("round 2 must replay the tool call, got {messages:?}"));
+    let tool_calls = assistant["tool_calls"].as_array().unwrap();
+    assert_eq!(tool_calls.len(), 1);
+    let raw = tool_calls[0]["function"]["arguments"]
+        .as_str()
+        .expect("replayed arguments");
+    let parsed: Value =
+        serde_json::from_str(raw).unwrap_or_else(|error| panic!("unparseable {raw:?}: {error}"));
+    assert_eq!(parsed, json!({"command": ["ls"]}));
+    assert!(
+        !raw.starts_with("{}"),
+        "must not carry a placeholder prefix: {raw}"
+    );
+
+    // Assertion 2 (core P2 acceptance): the request-direction anomaly event
+    // carries non-empty upstream_id / model / request_id.
+    drop(requests);
+    let logs = capture.contents();
+    let anomaly_line = logs
+        .lines()
+        .find(|line| {
+            line.contains("event=\"tool_call_arguments_anomaly\"")
+                && line.contains("reason=\"trailing_data\"")
+        })
+        .unwrap_or_else(|| panic!("missing trailing_data anomaly in logs:\n{logs}"));
+    for field in ["upstream_id", "model", "request_id"] {
+        let value = tracing_field_value(anomaly_line, field)
+            .unwrap_or_else(|| panic!("anomaly line missing {field}: {anomaly_line}"));
+        assert!(
+            !value.is_empty(),
+            "{field} must be non-empty on the anomaly event: {anomaly_line}"
+        );
+    }
+}

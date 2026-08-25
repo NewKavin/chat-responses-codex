@@ -43,6 +43,9 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
     resolved_capabilities: Option<&ResolvedCapabilities>,
     inherited_tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
     tool_arguments_strict: bool,
+    model: Option<&str>,
+    request_id: Option<&str>,
+    upstream_id: Option<&str>,
     downgrade_codes: &mut BTreeSet<String>,
 ) -> Result<Value, ProtocolError> {
     let mut sanitized = body.clone();
@@ -107,6 +110,11 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
         }
     };
     conversion_context.tool_arguments_strict = tool_arguments_strict;
+    // P2.5: fill the attribution fields so request-direction anomaly events
+    // emitted while converting this dispatch are attributable to the account.
+    conversion_context.model = model.map(str::to_owned);
+    conversion_context.request_id = request_id.map(str::to_owned);
+    conversion_context.upstream_id = upstream_id.map(str::to_owned);
     if !preserves_reasoning && responses_input_contains_reasoning(&sanitized) {
         downgrade_codes.insert("reasoning_history_dropped".to_string());
     }
