@@ -352,6 +352,20 @@ impl ChatStreamCanonicalizer {
     }
 }
 
+/// Borrowed, request-scoped context for tool-call argument normalization
+/// on the request direction (T2.1/P2).  Carries the strict policy plus the
+/// attribution fields (model / request_id / upstream_id) so anomaly events
+/// emitted while converting an incoming request back to the upstream dialect
+/// can be attributed to the upstream account.  The dispatch path fills these
+/// fields (P2.5); all other constructors (tests, tools) default them to `None`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ToolArgumentsContext<'a> {
+    pub strict: bool,
+    pub model: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+    pub upstream_id: Option<&'a str>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ConversionContext {
     pub image_dialect: image_adapter::ImageDialect,
@@ -361,6 +375,11 @@ pub struct ConversionContext {
     /// are not valid JSON with a 400 instead of forwarding them upstream
     /// (T2.1, runtime switch `tool_arguments_strict`).
     pub tool_arguments_strict: bool,
+    /// Request-scoped attribution fields for request-direction tool-call
+    /// argument anomalies (P2.2).  Populated only by the dispatch path.
+    pub model: Option<String>,
+    pub request_id: Option<String>,
+    pub upstream_id: Option<String>,
 }
 
 impl ConversionContext {
@@ -373,6 +392,9 @@ impl ConversionContext {
             reasoning_carrier: resolved.reasoning_carrier,
             tool_registry,
             tool_arguments_strict: false,
+            model: None,
+            request_id: None,
+            upstream_id: None,
         }
     }
 
@@ -382,6 +404,9 @@ impl ConversionContext {
             reasoning_carrier: ReasoningCarrier::ReasoningContent,
             tool_registry: tool_adapter::ToolAdapterRegistry::empty(),
             tool_arguments_strict: false,
+            model: None,
+            request_id: None,
+            upstream_id: None,
         }
     }
 }
@@ -393,6 +418,23 @@ impl Default for ConversionContext {
             reasoning_carrier: ReasoningCarrier::None,
             tool_registry: tool_adapter::ToolAdapterRegistry::empty(),
             tool_arguments_strict: false,
+            model: None,
+            request_id: None,
+            upstream_id: None,
+        }
+    }
+}
+
+impl ConversionContext {
+    /// Build the borrowed tool-call argument context from this conversion
+    /// context (P2.2).  `strict` is mirrored from `tool_arguments_strict`;
+    /// the attribution fields default to `None` outside the dispatch path.
+    pub fn tool_arguments_context(&self) -> ToolArgumentsContext<'_> {
+        ToolArgumentsContext {
+            strict: self.tool_arguments_strict,
+            model: self.model.as_deref(),
+            request_id: self.request_id.as_deref(),
+            upstream_id: self.upstream_id.as_deref(),
         }
     }
 }
@@ -523,6 +565,9 @@ pub fn responses_request_to_chat_payload_with_tool_registry(
             .cloned()
             .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty),
         tool_arguments_strict: false,
+        model: None,
+        request_id: None,
+        upstream_id: None,
     };
 
     responses_request_to_chat_payload_with_context(input, &context)
@@ -673,6 +718,9 @@ pub fn chat_response_to_responses_payload_with_tool_registry(
             .cloned()
             .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty),
         tool_arguments_strict: false,
+        model: None,
+        request_id: None,
+        upstream_id: None,
     };
 
     chat_response_to_responses_payload_with_context(input, &context)
@@ -739,13 +787,13 @@ pub fn chat_response_to_responses_payload_with_context(
         for tool_call in tool_calls {
             output_items.push(chat_tool_call_to_function_call(
                 tool_call,
-                context.tool_arguments_strict,
+                context.tool_arguments_context(),
             )?);
         }
     } else if let Some(function_call) = message.get("function_call") {
         output_items.push(chat_function_call_to_function_call(
             function_call,
-            context.tool_arguments_strict,
+            context.tool_arguments_context(),
         )?);
     }
 
@@ -833,8 +881,11 @@ pub fn responses_response_to_chat_payload_with_tool_registry(
             continue;
         }
 
-        if let Some(tool_call) = response_output_item_to_chat_tool_call(item, tool_registry, false)?
-        {
+        if let Some(tool_call) = response_output_item_to_chat_tool_call(
+            item,
+            tool_registry,
+            ToolArgumentsContext::default(),
+        )? {
             tool_calls.push(tool_call);
         }
     }
@@ -1072,7 +1123,7 @@ fn translate_chat_message_to_responses(
                 for tool_call in tool_calls {
                     response_input.push(chat_tool_call_to_function_call(
                         tool_call,
-                        context.tool_arguments_strict,
+                        context.tool_arguments_context(),
                     )?);
                 }
                 has_payload = true;
@@ -1081,7 +1132,7 @@ fn translate_chat_message_to_responses(
             if let Some(function_call) = message.get("function_call") {
                 response_input.push(chat_function_call_to_function_call(
                     function_call,
-                    context.tool_arguments_strict,
+                    context.tool_arguments_context(),
                 )?);
                 has_payload = true;
             }
@@ -1149,7 +1200,7 @@ fn translate_responses_input_item(
                 Some("function_call") => {
                     let tool_call = context
                         .tool_registry
-                        .adapt_responses_function_call(item, context.tool_arguments_strict)?;
+                        .adapt_responses_function_call(item, context.tool_arguments_context())?;
                     merge_assistant_chat_message(
                         pending_assistant,
                         json!({
@@ -1163,7 +1214,7 @@ fn translate_responses_input_item(
                 Some("custom_tool_call") => {
                     let tool_call = context
                         .tool_registry
-                        .adapt_responses_function_call(item, context.tool_arguments_strict)?;
+                        .adapt_responses_function_call(item, context.tool_arguments_context())?;
                     merge_assistant_chat_message(
                         pending_assistant,
                         json!({
@@ -1192,7 +1243,7 @@ fn translate_responses_input_item(
                     let message = responses_message_object_to_chat_message_with_dialect(
                         object,
                         context.image_dialect,
-                        context.tool_arguments_strict,
+                        context.tool_arguments_context(),
                     )?;
                     if object.get("role").and_then(Value::as_str) == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
@@ -1219,7 +1270,7 @@ fn translate_responses_input_item(
                     let message = responses_message_object_to_chat_message_with_dialect(
                         &cloned,
                         context.image_dialect,
-                        context.tool_arguments_strict,
+                        context.tool_arguments_context(),
                     )?;
                     if cloned.get("role").and_then(Value::as_str) == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
@@ -1237,7 +1288,7 @@ fn translate_responses_input_item(
                     let message = responses_message_object_to_chat_message_with_dialect(
                         object,
                         context.image_dialect,
-                        context.tool_arguments_strict,
+                        context.tool_arguments_context(),
                     )?;
                     let role = message.get("role").and_then(Value::as_str);
                     if role == Some("assistant") {
@@ -1450,14 +1501,14 @@ fn responses_message_object_to_chat_message(
     responses_message_object_to_chat_message_with_dialect(
         object,
         image_adapter::ImageDialect::all(),
-        false,
+        ToolArgumentsContext::default(),
     )
 }
 
 fn responses_message_object_to_chat_message_with_dialect(
     object: &Map<String, Value>,
     dialect: image_adapter::ImageDialect,
-    tool_arguments_strict: bool,
+    tool_arguments_context: ToolArgumentsContext<'_>,
 ) -> Result<Value, ProtocolError> {
     let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
 
@@ -1502,7 +1553,7 @@ fn responses_message_object_to_chat_message_with_dialect(
                 response_function_call_item_to_chat_tool_call(
                     tool_call,
                     None,
-                    tool_arguments_strict,
+                    tool_arguments_context,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1573,7 +1624,7 @@ fn response_output_message_item_to_chat_message(
 fn response_output_item_to_chat_tool_call(
     item: &Value,
     tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
-    tool_arguments_strict: bool,
+    tool_arguments_context: ToolArgumentsContext<'_>,
 ) -> Result<Option<Value>, ProtocolError> {
     let object = item
         .as_object()
@@ -1584,7 +1635,7 @@ fn response_output_item_to_chat_tool_call(
             Ok(Some(response_function_call_item_to_chat_tool_call(
                 object,
                 tool_registry,
-                tool_arguments_strict,
+                tool_arguments_context,
             )?))
         }
         ResponseOutputItemKind::CustomToolCall => Ok(Some(
@@ -1690,20 +1741,24 @@ pub fn normalize_tool_arguments(raw: &str) -> (Cow<'_, str>, Option<ToolArgument
 }
 
 /// Apply `normalize_tool_arguments` at a conversion site together with the
-/// `tool_arguments_strict` policy: any repair is logged (`T2.4`), and an
-/// unparseable string is turned into a 400 when strict mode is enabled instead
-/// of being forwarded upstream byte-for-byte.
+/// `ToolArgumentsContext` policy: any repair is logged with the context's
+/// attribution fields (`T2.4`), and an unparseable string is turned into a
+/// 400 when strict mode is enabled instead of being forwarded upstream
+/// byte-for-byte.
 pub(crate) fn normalize_tool_arguments_for_request(
     raw: &str,
-    strict: bool,
+    ctx: ToolArgumentsContext<'_>,
     call_id: &str,
-    model: Option<&str>,
-    diagnostics: Option<&TranslatorDiagnostics>,
 ) -> Result<String, ProtocolError> {
     let (normalized, repair) = normalize_tool_arguments(raw);
     if let Some(reason) = repair {
-        log_tool_call_arguments_anomaly(reason.as_str(), call_id, raw, model, diagnostics);
-        if strict && reason == ToolArgumentsRepairReason::Unparseable {
+        // P2.3: the old `(model, diagnostics)` pair is replaced by the borrowed
+        // context.  The request-direction call sites historically passed
+        // `None` for both attribution fields, so passing `ctx.model, None`
+        // here is behavior-neutral; request_id / upstream_id get wired through
+        // by the P2.4 change.
+        log_tool_call_arguments_anomaly(reason.as_str(), call_id, raw, ctx.model, None);
+        if ctx.strict && reason == ToolArgumentsRepairReason::Unparseable {
             return Err(ProtocolError::InvalidPayload(format!(
                 "tool call `{call_id}` has arguments that are not valid JSON (tool_arguments_strict)"
             )));
@@ -1715,7 +1770,7 @@ pub(crate) fn normalize_tool_arguments_for_request(
 fn response_function_call_item_to_chat_tool_call(
     object: &Map<String, Value>,
     tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
-    tool_arguments_strict: bool,
+    tool_arguments_context: ToolArgumentsContext<'_>,
 ) -> Result<Value, ProtocolError> {
     let call_id = object
         .get("call_id")
@@ -1731,13 +1786,8 @@ fn response_function_call_item_to_chat_tool_call(
         .get("arguments")
         .and_then(Value::as_str)
         .unwrap_or("{}");
-    let arguments = normalize_tool_arguments_for_request(
-        raw_arguments,
-        tool_arguments_strict,
-        call_id,
-        None,
-        None,
-    )?;
+    let arguments =
+        normalize_tool_arguments_for_request(raw_arguments, tool_arguments_context, call_id)?;
 
     Ok(json!({
         "id": call_id,
@@ -1872,7 +1922,11 @@ fn response_output_message_object_to_chat_message(
                 let tool_call = tool_call
                     .as_object()
                     .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
-                response_function_call_item_to_chat_tool_call(tool_call, None, false)
+                response_function_call_item_to_chat_tool_call(
+                    tool_call,
+                    None,
+                    ToolArgumentsContext::default(),
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         if !converted.is_empty() {
@@ -1885,7 +1939,7 @@ fn response_output_message_object_to_chat_message(
 
 fn chat_tool_call_to_function_call(
     tool_call: &Value,
-    tool_arguments_strict: bool,
+    tool_arguments_context: ToolArgumentsContext<'_>,
 ) -> Result<Value, ProtocolError> {
     let object = tool_call
         .as_object()
@@ -1902,13 +1956,7 @@ fn chat_tool_call_to_function_call(
     let arguments = if arguments.is_empty() {
         "{}".to_string()
     } else {
-        normalize_tool_arguments_for_request(
-            &arguments,
-            tool_arguments_strict,
-            &call_id,
-            None,
-            None,
-        )?
+        normalize_tool_arguments_for_request(&arguments, tool_arguments_context, &call_id)?
     };
 
     Ok(json!({
@@ -1923,7 +1971,7 @@ fn chat_tool_call_to_function_call(
 
 fn chat_function_call_to_function_call(
     function_call: &Value,
-    tool_arguments_strict: bool,
+    tool_arguments_context: ToolArgumentsContext<'_>,
 ) -> Result<Value, ProtocolError> {
     let object = function_call.as_object().ok_or_else(|| {
         ProtocolError::InvalidPayload(format!("unsupported function call: {function_call}"))
@@ -1941,13 +1989,8 @@ fn chat_function_call_to_function_call(
         .get("arguments")
         .and_then(Value::as_str)
         .unwrap_or("{}");
-    let arguments = normalize_tool_arguments_for_request(
-        raw_arguments,
-        tool_arguments_strict,
-        call_id,
-        None,
-        None,
-    )?;
+    let arguments =
+        normalize_tool_arguments_for_request(raw_arguments, tool_arguments_context, call_id)?;
 
     Ok(json!({
         "type": "function_call",
@@ -4319,7 +4362,11 @@ impl ResponsesToChatState {
 
             match response_output_item_kind(object)? {
                 ResponseOutputItemKind::FunctionCall => {
-                    response_function_call_item_to_chat_tool_call(object, None, false)?;
+                    response_function_call_item_to_chat_tool_call(
+                        object,
+                        None,
+                        ToolArgumentsContext::default(),
+                    )?;
                 }
                 ResponseOutputItemKind::CustomToolCall => {
                     response_custom_tool_call_item_to_chat_tool_call(object, None)?;

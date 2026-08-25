@@ -1,4 +1,4 @@
-use super::ProtocolError;
+use super::{ProtocolError, ToolArgumentsContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -162,13 +162,15 @@ impl ToolAdapterRegistry {
     }
 
     /// Adapt a Responses-format function call into a chat-completions
-    /// `tool_calls[]` entry.  `tool_arguments_strict` (runtime switch
+    /// `tool_calls[]` entry.  `tool_arguments_context.strict` (runtime switch
     /// `tool_arguments_strict`, T2.1/T2.2) makes an unparseable `arguments`
     /// string a hard 400 instead of forwarding it upstream byte-for-byte.
+    /// The context also carries the attribution fields (model / request_id /
+    /// upstream_id) used to tag request-direction anomaly events (P2).
     pub fn adapt_responses_function_call(
         &self,
         call: &Value,
-        tool_arguments_strict: bool,
+        tool_arguments_context: ToolArgumentsContext<'_>,
     ) -> Result<Value, ProtocolError> {
         let object = call.as_object().ok_or(ProtocolError::InvalidPayload(
             "unsupported Responses function call".into(),
@@ -202,10 +204,8 @@ impl ToolAdapterRegistry {
                     .unwrap_or("{}");
                 let arguments = super::normalize_tool_arguments_for_request(
                     raw_arguments,
-                    tool_arguments_strict,
+                    tool_arguments_context,
                     &call_id,
-                    None,
-                    None,
                 )?;
                 (identity, arguments)
             }

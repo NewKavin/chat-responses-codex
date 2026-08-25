@@ -80,7 +80,7 @@ fn adapts_responses_calls_for_chat_with_registry_and_preserves_identity() {
                 "namespace":"multi_agent_v1",
                 "arguments":"{}"
             }),
-            false,
+            Default::default(),
         )
         .unwrap();
     assert_eq!(namespace_call["id"], "call-a");
@@ -101,7 +101,7 @@ fn adapts_responses_calls_for_chat_with_registry_and_preserves_identity() {
                 "name":"apply_patch",
                 "input":"patch-body"
             }),
-            false,
+            Default::default(),
         )
         .unwrap();
     assert_eq!(custom_call["id"], "call-b");
@@ -120,7 +120,7 @@ fn adapts_responses_calls_for_chat_with_registry_and_preserves_identity() {
                 "name":"unregistered",
                 "arguments":"{}"
             }),
-            false,
+            Default::default(),
         )
         .unwrap();
     assert_eq!(passthrough["function"]["name"], "unregistered");
