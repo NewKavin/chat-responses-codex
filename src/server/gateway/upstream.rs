@@ -1452,6 +1452,12 @@ pub(super) async fn send_to_upstream(
                 .map(|resolved| ConversionContext::new(resolved, ToolAdapterRegistry::empty()))
                 .unwrap_or_default();
             conversion_context.tool_arguments_strict = runtime_settings.tool_arguments_strict;
+            // P2.6: this arm is a dispatch path too, so the request-direction
+            // anomaly events raised while converting Chat tool calls carry the
+            // same attribution as the Responses->Chat arm below.
+            conversion_context.model = Some(final_upstream_model.clone());
+            conversion_context.request_id = Some(request_id.to_string());
+            conversion_context.upstream_id = Some(upstream.id.clone());
             chat_request_to_responses_payload_with_context(&canonical_body, &conversion_context)
                 .map_err(protocol_error_to_gateway)?
         }

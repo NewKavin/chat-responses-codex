@@ -2328,21 +2328,6 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
 // via ToolArgumentsContext on the dispatch path).
 // ============================================================================
 
-/// Extract the rendered value of `field=` from a tracing fmt line, handling
-/// both quoted and unquoted values.
-fn tracing_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
-    let marker = format!("{field}=");
-    let start = line.find(&marker)? + marker.len();
-    let rest = &line[start..];
-    if let Some(stripped) = rest.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        Some(&stripped[..end])
-    } else {
-        let end = rest.find(' ').unwrap_or(rest.len());
-        Some(&rest[..end])
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn polluted_replayed_history_repairs_and_anomaly_carries_dispatch_attribution() {
     // Scoped, thread-local tracing dispatch so this test never claims the

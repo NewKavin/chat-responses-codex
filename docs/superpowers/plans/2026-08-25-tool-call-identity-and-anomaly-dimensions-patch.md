@@ -252,6 +252,7 @@ rtk cargo test
 | P2.4 统一 anomaly 事件形状 | `f18a489` | ✅ |
 | P2.5 dispatch 路径填充 | `f18a489` + `4b8969e` | ✅ |
 | P3 rustfmt | `dfe725fa` | ✅ |
+| P2.6 Chat→Responses arm 归属补齐（复审新增） | `PENDING` | ✅ |
 
 ### 测试
 
@@ -262,6 +263,7 @@ rtk cargo test
 | name 空串 ⇒ 视为缺失 | `tests/gateway/responses/streaming.rs:2176` `tool_call_empty_name_without_index_continues_open_call` | `7f356b64` | ✅ |
 | 存量污染重放 + anomaly 维度非空 | `tests/gateway/responses/fallback.rs:2347` `polluted_replayed_history_repairs_and_anomaly_carries_dispatch_attribution` | `f18a489` | ✅ |
 | delta/done 一致性 | `tests/gateway/responses/streaming.rs:2215` `normal_fragmented_tool_call_deltas_concatenate_bytewise_to_done_arguments` | `f18a489` | ✅ |
+| Chat→Responses 方向 anomaly 维度非空 | `tests/gateway/chat/core.rs:1857` `chat_to_responses_dispatch_anomaly_carries_dispatch_attribution` | `PENDING` | ✅ |
 
 验证链（实际执行于隔离 worktree @ `4b8969e`，不含并行进程的路由耗尽 WIP）：
 
@@ -272,3 +274,60 @@ rtk cargo test
 > 注：主工作树因并行进程（路由耗尽缺陷）的 WIP 会间歇性编译失败 / 3 个路由域测试失败
 > （`upstream_5xx_with_nested_rate_limit_code_remains_transient` ×2、`route_exhaustion_budget_invariant`），
 > 均与本轮改动无关；本轮全部新增测试在两种环境下均通过。
+
+---
+
+## 7. 复审补丁 P2.6（本轮实施后由复审发现）
+
+### 7.1 缺口归属：本方案 §2 P2.5 写漏，不是实施偏差
+
+P2.5 只点名了 `server/gateway/upstream.rs:1498` 一个调用点，并写明「其他非 dispatch 构造点保持 `None`」。实施者照字面执行是正确的。
+
+但 `upstream.rs` 的 `match (endpoint, upstream_protocol)` 里有**两个** dispatch 分支会做请求方向的工具调用参数转换：
+
+| 分支 | 转换函数 | P2.5 是否覆盖 |
+|---|---|---|
+| `(Responses, ChatCompletions)` | `responses_request_to_chat_payload_with_fallback` | ✅ 已接线 |
+| `(ChatCompletions, Responses)` | `chat_request_to_responses_payload_with_context` | ❌ **漏了** |
+
+第二条分支只赋了 `tool_arguments_strict`，三个归属字段仍为 `None`。因此 Chat 进 → Responses 上游方向（请求方向站点为 `protocol.rs:1974` 的 `chat_function_call_to_function_call`，经 `:1133` 可达）发出的 `tool_call_arguments_anomaly` 三个维度仍渲染为空串，即 §3.5 验收标准第 4 条在该方向上不成立。
+
+### 7.2 反向对照已验证
+
+临时注释掉修复后跑守卫测试，实际捕获到的日志行为：
+
+```
+WARN ...: tool call arguments anomaly event="tool_call_arguments_anomaly"
+  reason="trailing_data" call_id="call-polluted"
+  model= request_id= upstream_id= fragment={}{"command":["ls"]}
+```
+
+三个维度确认全空 ⇒ 缺口真实存在，且守卫测试对该缺口有判别力（不是空跑通过）。恢复修复后测试通过。
+
+### 7.3 改动
+
+`src/server/gateway/upstream.rs` 的 `(EndpointKind::ChatCompletions, UpstreamProtocol::Responses)` 分支，在 `tool_arguments_strict` 赋值之后补三行，与另一分支保持一致：
+
+```rust
+conversion_context.model = Some(final_upstream_model.clone());
+conversion_context.request_id = Some(request_id.to_string());
+conversion_context.upstream_id = Some(upstream.id.clone());
+```
+
+纯观测接线，无行为变更，不新增运行时开关。
+
+顺带把 `tracing_field_value` 辅助函数从 `tests/gateway/responses/fallback.rs` 上移到 `tests/gateway/common.rs`（`pub(crate)`），供两个方向的守卫测试共用，避免复制。
+
+### 7.4 对本部署的影响
+
+**为零。** 当前内网形态是 codex 打 `/v1/responses`、new-api 后面是 GLM / deepseek 的 chat 接口，走的正是已接线的 `(Responses, ChatCompletions)` 分支。P2.6 只在「客户端打 `/v1/chat/completions` 且上游是 Responses 原生协议」时才可达。
+
+### 7.5 验证（逐条执行，未使用 `&&` 串联）
+
+- `rustfmt --edition 2021 --check`（仅本补丁 4 个文件）→ **通过**
+  （**未**运行 `rtk cargo fmt --all`：并行进程的路由耗尽 WIP 尚未格式化，全仓 fmt 会串味）
+- `rtk cargo clippy --lib --all-features -- -D warnings` → **0 问题**
+- `rtk cargo clippy --test gateway --all-features -- -D warnings` → **0 问题**
+- `rtk cargo test --test gateway` → **422 passed / 0 failed（211.29s）**
+  （此时并行进程的路由耗尽 WIP 已在同一工作树内，其新增的 `route_exhaustion_budget_invariant`
+  与两条 `upstream_5xx_with_nested_rate_limit_code_remains_transient` 已一并转绿）

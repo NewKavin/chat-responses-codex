@@ -168,6 +168,21 @@ pub(crate) async fn stamp_current_dialect_profile(
     profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
 }
 
+/// Extract the rendered value of `field=` from a tracing fmt line, handling
+/// both quoted and unquoted values.
+pub(crate) fn tracing_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let marker = format!("{field}=");
+    let start = line.find(&marker)? + marker.len();
+    let rest = &line[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(&stripped[..end])
+    } else {
+        let end = rest.find(' ').unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+}
+
 fn proxy_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

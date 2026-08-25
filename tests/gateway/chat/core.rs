@@ -1731,3 +1731,218 @@ async fn downstream_chat_completions_supports_configured_portal_models() {
         );
     }
 }
+
+// ============================================================================
+// P2.6 guard: the Chat->Responses dispatch arm fills the same three attribution
+// fields as the Responses->Chat arm, so a request-direction
+// `tool_call_arguments_anomaly` raised while converting a replayed Chat tool
+// call is attributable to the account that produced it.
+// ============================================================================
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_to_responses_dispatch_anomaly_carries_dispatch_attribution() {
+    let capture = TracingCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(capture.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _capture_guard = tracing::dispatcher::set_default(&dispatch);
+
+    let captured_requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = captured_requests.clone();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let captured = capture_clone.clone();
+            async move {
+                let (_parts, body) = request.into_parts();
+                let body = to_bytes(body, usize::MAX).await.unwrap();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap());
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "resp-chat-to-responses",
+                        "object": "response",
+                        "created_at": 1,
+                        "status": "completed",
+                        "model": "synthetic/chat-to-responses",
+                        "output": [{
+                            "id": "msg-chat-to-responses",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "converted-ok",
+                                "annotations": []
+                            }]
+                        }],
+                        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/chat-to-responses";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-chat-to-responses".into(),
+                name: "chat to responses".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: false,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: "up-chat-to-responses".into(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::Responses,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [
+        Capability::TextInput,
+        Capability::NonStreamingResponse,
+        Capability::FunctionTools,
+        Capability::ToolContinuation,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    // The assistant turn replays a tool call whose arguments carry the legacy
+    // `{}` + real-arguments concatenation, which the request-direction
+    // conversion repairs and reports as `trailing_data`.
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "messages": [
+                            {"role": "user", "content": "list the files"},
+                            {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "call-polluted",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": "{}{\"command\":[\"ls\"]}"
+                                    }
+                                }]
+                            },
+                            {
+                                "role": "tool",
+                                "tool_call_id": "call-polluted",
+                                "content": "a.txt"
+                            }
+                        ],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The converted Responses payload carries repaired, parseable arguments.
+    let requests = captured_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "exactly one upstream dispatch");
+    let input = requests[0]["input"]
+        .as_array()
+        .expect("converted responses input");
+    let function_call = input
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .unwrap_or_else(|| panic!("converted input must carry a function_call: {input:?}"));
+    let raw = function_call["arguments"]
+        .as_str()
+        .expect("function_call arguments");
+    assert_eq!(
+        serde_json::from_str::<Value>(raw)
+            .unwrap_or_else(|error| panic!("unparseable {raw:?}: {error}")),
+        json!({"command": ["ls"]})
+    );
+    assert!(
+        !raw.starts_with("{}"),
+        "must not carry a placeholder prefix: {raw}"
+    );
+    drop(requests);
+
+    // Core assertion: the anomaly carries all three attribution dimensions.
+    let logs = capture.contents();
+    let anomaly_line = logs
+        .lines()
+        .find(|line| {
+            line.contains("event=\"tool_call_arguments_anomaly\"")
+                && line.contains("reason=\"trailing_data\"")
+        })
+        .unwrap_or_else(|| panic!("missing trailing_data anomaly in logs:\n{logs}"));
+    for field in ["upstream_id", "model", "request_id"] {
+        let value = tracing_field_value(anomaly_line, field)
+            .unwrap_or_else(|| panic!("anomaly line missing {field}: {anomaly_line}"));
+        assert!(
+            !value.is_empty(),
+            "{field} must be non-empty on the anomaly event: {anomaly_line}"
+        );
+    }
+}
