@@ -335,6 +335,29 @@ fn retry_after_is_preserved_without_legacy_clipping() {
     );
 }
 
+/// Root-cause guard (2026-08-25 route-exhaustion): a 502 that carries
+/// `Retry-After: 28` must still be parsed into `retry_after` AND classified as
+/// `TransientServer`.  `parse_retry_after` runs at the top of
+/// `classify_upstream_response`, independent of failure class — if a future
+/// refactor "helpfully" skips parsing for 502s, this test locks the class
+/// independence that feeds the cooldown budget invariant analysis.
+#[test]
+fn retry_after_parsed_even_for_transient_502() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, "28".parse().unwrap());
+    let classified = classify_upstream_response(UpstreamFeedbackInput {
+        status: 502,
+        headers: &headers,
+        body: Some(r#"{"error":{"message":"upstream unavailable"}}"#),
+        target_model: Some("glm-5.2"),
+    });
+    assert_eq!(classified.class, FailureClass::TransientServer);
+    assert_eq!(
+        classified.retry_after,
+        Some(std::time::Duration::from_secs(28))
+    );
+}
+
 #[test]
 fn retry_after_http_date_preserves_future_subsecond_deadline() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-07-27T12:00:00.250Z")

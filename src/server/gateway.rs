@@ -507,6 +507,11 @@ struct RouteAttemptContext<'a> {
     requested: &'a RequestedFeatures,
     requested_value: Option<&'a str>,
     retry_after_cap: Duration,
+    /// T1.2: bounds upstream Retry-After before it may influence the
+    /// gateway's own route/key cooldown and the attempt ledger (the value
+    /// surfaced as `cooldown_seconds`).  Distinct from `retry_after_cap`,
+    /// which only bounds the client-facing Retry-After header/message.
+    retry_after_cooldown_cap: Duration,
 }
 
 async fn record_route_attempt(
@@ -521,6 +526,7 @@ async fn record_route_attempt(
         requested,
         requested_value,
         retry_after_cap,
+        retry_after_cooldown_cap,
     } = input;
     let RouteCapabilityRoute {
         snapshot: capability_snapshot,
@@ -556,7 +562,17 @@ async fn record_route_attempt(
         class,
     )
     .await;
-    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
+    // T1.2: upstream Retry-After is a client-side hint, not a route-removal
+    // duration; bound it with the dedicated cooldown cap so it cannot starve
+    // the intra-gateway wait budget.  ConcurrencySaturated is exempt because
+    // a concurrency-limited upstream's Retry-After is real slot information
+    // (the client-facing cap still applies there).
+    let ledger_cap = if class == FailureClass::ConcurrencySaturated {
+        retry_after_cap
+    } else {
+        retry_after_cooldown_cap
+    };
+    let retry_after = clamp_upstream_retry_after(error.retry_after(), ledger_cap);
     route_attempts.record_failure_with_status(
         route_health_key,
         class,
@@ -660,8 +676,29 @@ fn route_health_outcome(
     sole_candidate: bool,
     retry_after_cap: Duration,
 ) -> RouteOutcome {
-    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
+    route_health_outcome_with_cooldown_cap(
+        error,
+        repeat_within_request,
+        sole_candidate,
+        retry_after_cap,
+        retry_after_cap,
+    )
+}
+
+/// T1.2: `retry_after_cooldown_cap` bounds the upstream Retry-After before it
+/// may influence the gateway's own route/key cooldown, while `retry_after_cap`
+/// (client-facing) is used for the `ConcurrencyFull` branch only: a
+/// concurrency-saturated upstream's Retry-After is real slot information and
+/// must not be cut, otherwise recovery probes storm the upstream.
+fn route_health_outcome_with_cooldown_cap(
+    error: &GatewayError,
+    repeat_within_request: bool,
+    sole_candidate: bool,
+    retry_after_cap: Duration,
+    retry_after_cooldown_cap: Duration,
+) -> RouteOutcome {
     if matches!(error, GatewayError::ConcurrencyFull { .. }) {
+        let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
         let upstream_status = error.upstream_status();
         return retry_after
             .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
@@ -678,6 +715,7 @@ fn route_health_outcome(
                 sole_candidate,
             });
     }
+    let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cooldown_cap);
     let upstream_status = error.upstream_status();
     match error.route_failure_class() {
         Some(class @ (FailureClass::Credentials | FailureClass::KeyQuota)) => retry_after
@@ -4752,6 +4790,15 @@ async fn process_gateway_request_inner(
     let started = Instant::now();
     let upstream_retry_after_cap =
         Duration::from_secs(runtime_settings.upstream_retry_after_cap_seconds.max(1));
+    // T1.2: separate, tighter cap for upstream Retry-After entering the
+    // gateway's own route/key cooldown and the attempt ledger.  The upstream
+    // hint tells *clients* when to retry; the local backoff owns route
+    // removal, so a large hint must not starve the intra-gateway wait budget.
+    let upstream_retry_after_cooldown_cap = Duration::from_secs(
+        runtime_settings
+            .upstream_retry_after_cooldown_cap_seconds
+            .max(1),
+    );
     let inference_strength = extract_inference_strength(&body);
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -6929,6 +6976,7 @@ async fn process_gateway_request_inner(
                             requested: &requested_features,
                             requested_value: inference_strength.as_deref(),
                             retry_after_cap: upstream_retry_after_cap,
+                            retry_after_cooldown_cap: upstream_retry_after_cooldown_cap,
                         };
                         let (account_feedback_sender, account_feedback_receiver) =
                             if account_probe.is_some() {
@@ -7349,12 +7397,13 @@ async fn process_gateway_request_inner(
                             {
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(
+                                    route_health_outcome_with_cooldown_cap(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
                                         sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
+                                        route_attempt_context.retry_after_cooldown_cap,
                                     ),
                                 )
                                 .await?;
@@ -7634,12 +7683,13 @@ async fn process_gateway_request_inner(
                                 if class.is_some() {
                                     finish_route_health_permit(
                                         &route_health_permit,
-                                        route_health_outcome(
+                                        route_health_outcome_with_cooldown_cap(
                                             &error,
                                             request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
                                             sole_contract_candidate,
                                             route_attempt_context.retry_after_cap,
+                                            route_attempt_context.retry_after_cooldown_cap,
                                         ),
                                     )
                                     .await?;
@@ -7677,12 +7727,13 @@ async fn process_gateway_request_inner(
                             {
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(
+                                    route_health_outcome_with_cooldown_cap(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
                                         sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
+                                        route_attempt_context.retry_after_cooldown_cap,
                                     ),
                                 )
                                 .await?;
@@ -7762,12 +7813,13 @@ async fn process_gateway_request_inner(
                                 );
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    route_health_outcome(
+                                    route_health_outcome_with_cooldown_cap(
                                         &error,
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
                                         sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
+                                        route_attempt_context.retry_after_cooldown_cap,
                                     ),
                                 )
                                 .await?;

@@ -1350,6 +1350,15 @@ impl RouteHealthRegistry {
             transient_route_cooldown_base,
             transient_route_cooldown_max,
         );
+        // T1.2 dimension note: the upstream `Retry-After` header is advice
+        // for *clients* ("come back in N seconds"), not a reason for the
+        // gateway to unilaterally remove the route for N seconds — route
+        // removal must be driven by the local backoff curve.  `retry_after`
+        // arriving here has already been clamped by
+        // `upstream_retry_after_cooldown_cap_seconds` at the observation
+        // chokepoints; the `ConcurrencySaturated` branch is deliberately
+        // exempt (its Retry-After is real slot information, and cutting it
+        // would cause ineffective probe storms).
         let cooldown = match (class, retry_after) {
             (RouteFailureClass::ConcurrencySaturated, Some(explicit)) => explicit,
             (_, Some(explicit)) => explicit.max(local),

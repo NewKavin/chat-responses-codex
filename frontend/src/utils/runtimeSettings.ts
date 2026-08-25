@@ -297,6 +297,17 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '上游 429/503 携带的 Retry-After 超过该值时按该值封顶。'
   },
   {
+    key: 'upstream_retry_after_cooldown_cap_seconds',
+    group: 'routing',
+    label: '上游 Retry-After 冷却上限',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: 300,
+    description: '上游 Retry-After 只是给客户端的重试建议，不是网关摘除路由的时长；该值限定其参与本地冷却的封顶，避免单个大值吃穿轮间等待预算。'
+  },
+  {
     key: 'upstream_credentials_first_strike_seconds',
     group: 'routing',
     label: '凭证首次失败冷却',

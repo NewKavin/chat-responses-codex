@@ -1627,13 +1627,20 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
         .await
         .unwrap();
 
+    // Post-T1.2 the client hint reflects the route's *effective* recovery
+    // (local backoff curve, upstream hint bounded by the 5s cooldown cap),
+    // not a raw echo of the upstream `Retry-After: 30`.  Default transient
+    // base = 10s, step-1 deterministic jitter -> ~9s effective cooldown,
+    // ceil -> 9.  The upstream hint only governs route health up to
+    // `upstream_retry_after_cooldown_cap_seconds`; 
+    // `upstream_retry_after_cap_seconds` still bounds the client header.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         response
             .headers()
             .get(header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok()),
-        Some("30")
+        Some("9")
     );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();

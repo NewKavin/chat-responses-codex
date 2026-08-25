@@ -228,6 +228,14 @@ pub(super) fn terminal_route_failure_error(
             "continuation_candidate_count".to_string(),
             json!(continuation_candidate_count),
         ),
+        // The route-removal cooldown that the gateway actually applied
+        // (what `cooldown_seconds` means in the exhaustion log line).  For a
+        // Temporary terminal failure this is the ledger's recorded cooldown
+        // — the local backoff curve, capped by
+        // `upstream_retry_after_cooldown_cap_seconds` when the upstream
+        // `Retry-After` hint would pin it higher.  `null` for non-Temporary
+        // terminations where no cooldown applies.
+        ("cooldown_seconds".to_string(), Value::Null),
     ]);
     // E5: opt-in sanitized body excerpt surfaces in the terminal details for
     // programmatic consumers.  Absent entirely when the switch is off.
@@ -250,6 +258,16 @@ pub(super) fn terminal_route_failure_error(
             details.insert(
                 "retry_after_seconds".to_string(),
                 json!(retry_after_seconds),
+            );
+            // The cooldown actually recorded against the route (ledger), not
+            // the client-facing hint above.  Pre-T1.2 this echoed the raw
+            // upstream `Retry-After` (e.g. 28s) which is what starved the
+            // retry wait budget; the assertion pair
+            // `retry_after_seconds`/`cooldown_seconds` lets an operator see
+            // both quantities side by side in the same log line.
+            details.insert(
+                "cooldown_seconds".to_string(),
+                json!(duration_seconds_ceil(retry_after)),
             );
             // A pure rate-limit/concurrency/quota exhaustion is a 429 for the
             // client: codex-style clients honor Retry-After on 429 and keep

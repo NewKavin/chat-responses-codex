@@ -846,6 +846,15 @@ fn send_route_hedge_attempt(
                             requested: &context.requested_features,
                             requested_value: context.inference_strength.as_deref(),
                             retry_after_cap,
+                            // T1.2: mirror of the gateway.rs construction; the
+                            // cooldown cap is a separate, tighter bound so the
+                            // upstream client hint cannot starve the wait budget.
+                            retry_after_cooldown_cap: Duration::from_secs(
+                                context
+                                    .runtime_settings
+                                    .upstream_retry_after_cooldown_cap_seconds
+                                    .max(1),
+                            ),
                         },
                         &error,
                     )

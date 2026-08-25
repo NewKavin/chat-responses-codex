@@ -16,7 +16,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
-    DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+    DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
@@ -95,6 +95,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
     )
     .clamp(1, 3_600);
+    let upstream_retry_after_cooldown_cap_seconds = env_u64(
+        "UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS",
+        DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
+    )
+    .clamp(1, 300);
     let upstream_error_body_excerpt_enabled = env_bool(
         "UPSTREAM_ERROR_BODY_EXCERPT_ENABLED",
         DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED,
@@ -249,6 +254,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_route_half_open_exclusive_window_ms: route_half_open_exclusive_window_ms,
         upstream_route_half_open_busy_max_rounds: route_half_open_busy_max_rounds,
         upstream_retry_after_cap_seconds,
+        upstream_retry_after_cooldown_cap_seconds,
         upstream_error_body_excerpt_enabled,
         upstream_error_body_excerpt_max_chars,
         tool_call_merge_strict,

@@ -204,8 +204,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_error_body_excerpt_enabled = 56,
     // plus upstream_error_body_excerpt_max_chars = 57,
     // plus tool_call_merge_strict = 58,
-    // plus tool_arguments_strict = 59.
-    assert_eq!(body["settings"].as_object().unwrap().len(), 59);
+    // plus tool_arguments_strict = 59,
+    // plus upstream_retry_after_cooldown_cap_seconds = 60 (T1.2).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 60);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

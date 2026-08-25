@@ -905,6 +905,7 @@ export interface RuntimeSettings {
   upstream_route_half_open_exclusive_window_ms: number
   upstream_route_half_open_busy_max_rounds: number
   upstream_retry_after_cap_seconds: number
+  upstream_retry_after_cooldown_cap_seconds: number
   upstream_credentials_first_strike_seconds: number
   upstream_error_body_excerpt_enabled: boolean
   upstream_error_body_excerpt_max_chars: number

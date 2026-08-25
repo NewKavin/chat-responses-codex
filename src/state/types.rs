@@ -118,6 +118,16 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 /// while the local exponential backoff and the Redis Lua parsing stay
 /// untouched.
 pub const DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS: u64 = 30;
+/// Cap (seconds) on upstream-provided Retry-After before it may influence the
+/// *gateway's own* route/key cooldown (T1.2).  Upstream Retry-After is a
+/// hint to *clients* ("come back in N seconds"), not a reason to unilaterally
+/// remove a route for N seconds; the route-removal duration must be driven by
+/// the local backoff curve.  Values beyond the cap are clamped at the health
+/// observation chokepoints so a single "Retry-After: 28" cannot starve the
+/// intra-gateway wait budget (default 30s).  This is distinct from
+/// `DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS` (30s) which only governs the
+/// Retry-After header / message returned to the *downstream* client.
+pub const DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS: u64 = 5;
 /// Whether upstream error responses may surface a bounded, sanitized body
 /// excerpt in client messages (E5).  Opt-in: off by default because provider
 /// bodies can echo prompts / tool arguments / credentials even after
@@ -276,8 +286,16 @@ pub struct AppConfig {
     /// Cap (seconds) applied to upstream-provided Retry-After before it feeds
     /// cooldowns / terminal hints (T4).  Range 1..=3600; 3600 approximates
     /// "disable the cap".
+    /// Cap (seconds) applied to upstream-provided Retry-After before it feeds
+    /// cooldowns / terminal hints (T4).  Range 1..=3600; 3600 approximates
+    /// "disable the cap".
     #[serde(default = "default_upstream_retry_after_cap_seconds")]
     pub upstream_retry_after_cap_seconds: u64,
+    /// Cap (seconds) applied to upstream-provided Retry-After before it may
+    /// influence the gateway's own route/key cooldown (T1.2).  Range 1..=300;
+    /// the local backoff curve must own route removal, not the upstream hint.
+    #[serde(default = "default_upstream_retry_after_cooldown_cap_seconds")]
+    pub upstream_retry_after_cooldown_cap_seconds: u64,
     /// Surfacing of a bounded, sanitized upstream error-body excerpt in
     /// client messages (E5).  Default off: even sanitized excerpts can echo
     /// conversation content; enable only for intranet deployments that own
@@ -404,6 +422,8 @@ impl Default for AppConfig {
             upstream_route_half_open_busy_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
             upstream_retry_after_cap_seconds: DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
+            upstream_retry_after_cooldown_cap_seconds:
+                DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
             upstream_error_body_excerpt_enabled: DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED,
             upstream_error_body_excerpt_max_chars: DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS,
             tool_call_merge_strict: DEFAULT_TOOL_CALL_MERGE_STRICT,
@@ -1079,6 +1099,10 @@ pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {
 
 pub fn default_upstream_retry_after_cap_seconds() -> u64 {
     DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS
+}
+
+pub fn default_upstream_retry_after_cooldown_cap_seconds() -> u64 {
+    DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS
 }
 
 pub fn default_upstream_error_body_excerpt_enabled() -> bool {

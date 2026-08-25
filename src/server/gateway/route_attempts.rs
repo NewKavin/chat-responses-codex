@@ -879,3 +879,60 @@ impl AttemptLedger {
         TerminalFailure::MixedRoutesExhausted
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Root-cause guard (2026-08-25 route-exhaustion): a sequence of 502s
+    /// *without* an upstream `Retry-After` header must fall back to the 1s
+    /// placeholder in `TerminalFailure::Temporary` — the local `jittered_backoff`
+    /// value never enters the attempt ledger.  `cooldown_seconds=28` in
+    /// production logs therefore can only come from the upstream header.
+    #[test]
+    fn temporary_without_upstream_retry_after_falls_back_to_one_second() {
+        let mut ledger = AttemptLedger::default();
+        for i in 0..6 {
+            ledger.record(AttemptFailure {
+                route_id: format!("route-{i}"),
+                upstream_status: Some(502),
+                upstream_error_code: None,
+                upstream_error_body_excerpt: None,
+                upstream_name: None,
+                class: FailureClass::TransientServer,
+                retry_after: None,
+                half_open_busy: false,
+            });
+        }
+        assert_eq!(
+            ledger.terminal_failure(),
+            TerminalFailure::Temporary {
+                retry_after: Duration::from_secs(1)
+            }
+        );
+    }
+
+    /// Mirror guard with explicit Retry-After: the upstream value is what
+    /// surfaces as `cooldown_seconds`, proving the ledger carries upstream
+    /// hints (and nothing else).
+    #[test]
+    fn temporary_carries_upstream_retry_after_into_terminal_failure() {
+        let mut ledger = AttemptLedger::default();
+        ledger.record(AttemptFailure {
+            route_id: "route-a".into(),
+            upstream_status: Some(502),
+            upstream_error_code: None,
+            upstream_error_body_excerpt: None,
+            upstream_name: None,
+            class: FailureClass::TransientServer,
+            retry_after: Some(Duration::from_secs(28)),
+            half_open_busy: false,
+        });
+        assert_eq!(
+            ledger.terminal_failure(),
+            TerminalFailure::Temporary {
+                retry_after: Duration::from_secs(28)
+            }
+        );
+    }
+}
