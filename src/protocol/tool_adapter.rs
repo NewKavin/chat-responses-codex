@@ -161,7 +161,15 @@ impl ToolAdapterRegistry {
         <Self as ReversibleToolAdapter>::restore_function_call(self, call)
     }
 
-    pub fn adapt_responses_function_call(&self, call: &Value) -> Result<Value, ProtocolError> {
+    /// Adapt a Responses-format function call into a chat-completions
+    /// `tool_calls[]` entry.  `tool_arguments_strict` (runtime switch
+    /// `tool_arguments_strict`, T2.1/T2.2) makes an unparseable `arguments`
+    /// string a hard 400 instead of forwarding it upstream byte-for-byte.
+    pub fn adapt_responses_function_call(
+        &self,
+        call: &Value,
+        tool_arguments_strict: bool,
+    ) -> Result<Value, ProtocolError> {
         let object = call.as_object().ok_or(ProtocolError::InvalidPayload(
             "unsupported Responses function call".into(),
         ))?;
@@ -188,11 +196,18 @@ impl ToolAdapterRegistry {
                 let identity = namespace
                     .map(|namespace| ToolIdentity::namespace(namespace, name))
                     .unwrap_or_else(|| ToolIdentity::function(name));
-                let arguments = object
+                let raw_arguments = object
                     .get("arguments")
                     .and_then(Value::as_str)
                     .unwrap_or("{}");
-                (identity, arguments.to_string())
+                let arguments = super::normalize_tool_arguments_for_request(
+                    raw_arguments,
+                    tool_arguments_strict,
+                    &call_id,
+                    None,
+                    None,
+                )?;
+                (identity, arguments)
             }
             "custom_tool_call" => {
                 let identity = ToolIdentity::custom(namespace, name);

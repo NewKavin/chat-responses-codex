@@ -16,6 +16,7 @@ use crate::capabilities::{ReasoningCarrier, ResolvedCapabilities};
 use crate::routing::UpstreamProtocol;
 use crate::state::unix_seconds;
 use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -356,6 +357,10 @@ pub struct ConversionContext {
     pub image_dialect: image_adapter::ImageDialect,
     pub reasoning_carrier: ReasoningCarrier,
     pub tool_registry: tool_adapter::ToolAdapterRegistry,
+    /// When set, request-direction conversions reject tool-call arguments that
+    /// are not valid JSON with a 400 instead of forwarding them upstream
+    /// (T2.1, runtime switch `tool_arguments_strict`).
+    pub tool_arguments_strict: bool,
 }
 
 impl ConversionContext {
@@ -367,6 +372,7 @@ impl ConversionContext {
             image_dialect: image_adapter::ImageDialect::from_resolved(resolved),
             reasoning_carrier: resolved.reasoning_carrier,
             tool_registry,
+            tool_arguments_strict: false,
         }
     }
 
@@ -375,6 +381,7 @@ impl ConversionContext {
             image_dialect: image_adapter::ImageDialect::all(),
             reasoning_carrier: ReasoningCarrier::ReasoningContent,
             tool_registry: tool_adapter::ToolAdapterRegistry::empty(),
+            tool_arguments_strict: false,
         }
     }
 }
@@ -385,6 +392,7 @@ impl Default for ConversionContext {
             image_dialect: image_adapter::ImageDialect::all(),
             reasoning_carrier: ReasoningCarrier::None,
             tool_registry: tool_adapter::ToolAdapterRegistry::empty(),
+            tool_arguments_strict: false,
         }
     }
 }
@@ -514,7 +522,9 @@ pub fn responses_request_to_chat_payload_with_tool_registry(
         tool_registry: tool_registry
             .cloned()
             .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty),
+        tool_arguments_strict: false,
     };
+
     responses_request_to_chat_payload_with_context(input, &context)
 }
 
@@ -662,7 +672,9 @@ pub fn chat_response_to_responses_payload_with_tool_registry(
         tool_registry: tool_registry
             .cloned()
             .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty),
+        tool_arguments_strict: false,
     };
+
     chat_response_to_responses_payload_with_context(input, &context)
 }
 
@@ -725,10 +737,16 @@ pub fn chat_response_to_responses_payload_with_context(
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
         for tool_call in tool_calls {
-            output_items.push(chat_tool_call_to_function_call(tool_call)?);
+            output_items.push(chat_tool_call_to_function_call(
+                tool_call,
+                context.tool_arguments_strict,
+            )?);
         }
     } else if let Some(function_call) = message.get("function_call") {
-        output_items.push(chat_function_call_to_function_call(function_call)?);
+        output_items.push(chat_function_call_to_function_call(
+            function_call,
+            context.tool_arguments_strict,
+        )?);
     }
 
     if output_items.is_empty() {
@@ -815,7 +833,8 @@ pub fn responses_response_to_chat_payload_with_tool_registry(
             continue;
         }
 
-        if let Some(tool_call) = response_output_item_to_chat_tool_call(item, tool_registry)? {
+        if let Some(tool_call) = response_output_item_to_chat_tool_call(item, tool_registry, false)?
+        {
             tool_calls.push(tool_call);
         }
     }
@@ -1051,13 +1070,19 @@ fn translate_chat_message_to_responses(
 
             if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
                 for tool_call in tool_calls {
-                    response_input.push(chat_tool_call_to_function_call(tool_call)?);
+                    response_input.push(chat_tool_call_to_function_call(
+                        tool_call,
+                        context.tool_arguments_strict,
+                    )?);
                 }
                 has_payload = true;
             }
 
             if let Some(function_call) = message.get("function_call") {
-                response_input.push(chat_function_call_to_function_call(function_call)?);
+                response_input.push(chat_function_call_to_function_call(
+                    function_call,
+                    context.tool_arguments_strict,
+                )?);
                 has_payload = true;
             }
 
@@ -1122,7 +1147,9 @@ fn translate_responses_input_item(
                     Ok(())
                 }
                 Some("function_call") => {
-                    let tool_call = context.tool_registry.adapt_responses_function_call(item)?;
+                    let tool_call = context
+                        .tool_registry
+                        .adapt_responses_function_call(item, context.tool_arguments_strict)?;
                     merge_assistant_chat_message(
                         pending_assistant,
                         json!({
@@ -1134,7 +1161,9 @@ fn translate_responses_input_item(
                     Ok(())
                 }
                 Some("custom_tool_call") => {
-                    let tool_call = context.tool_registry.adapt_responses_function_call(item)?;
+                    let tool_call = context
+                        .tool_registry
+                        .adapt_responses_function_call(item, context.tool_arguments_strict)?;
                     merge_assistant_chat_message(
                         pending_assistant,
                         json!({
@@ -1163,6 +1192,7 @@ fn translate_responses_input_item(
                     let message = responses_message_object_to_chat_message_with_dialect(
                         object,
                         context.image_dialect,
+                        context.tool_arguments_strict,
                     )?;
                     if object.get("role").and_then(Value::as_str) == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
@@ -1189,6 +1219,7 @@ fn translate_responses_input_item(
                     let message = responses_message_object_to_chat_message_with_dialect(
                         &cloned,
                         context.image_dialect,
+                        context.tool_arguments_strict,
                     )?;
                     if cloned.get("role").and_then(Value::as_str) == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
@@ -1206,6 +1237,7 @@ fn translate_responses_input_item(
                     let message = responses_message_object_to_chat_message_with_dialect(
                         object,
                         context.image_dialect,
+                        context.tool_arguments_strict,
                     )?;
                     let role = message.get("role").and_then(Value::as_str);
                     if role == Some("assistant") {
@@ -1418,12 +1450,14 @@ fn responses_message_object_to_chat_message(
     responses_message_object_to_chat_message_with_dialect(
         object,
         image_adapter::ImageDialect::all(),
+        false,
     )
 }
 
 fn responses_message_object_to_chat_message_with_dialect(
     object: &Map<String, Value>,
     dialect: image_adapter::ImageDialect,
+    tool_arguments_strict: bool,
 ) -> Result<Value, ProtocolError> {
     let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
 
@@ -1465,7 +1499,11 @@ fn responses_message_object_to_chat_message_with_dialect(
                 let tool_call = tool_call
                     .as_object()
                     .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
-                response_function_call_item_to_chat_tool_call(tool_call, None)
+                response_function_call_item_to_chat_tool_call(
+                    tool_call,
+                    None,
+                    tool_arguments_strict,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         if !converted.is_empty() {
@@ -1535,15 +1573,20 @@ fn response_output_message_item_to_chat_message(
 fn response_output_item_to_chat_tool_call(
     item: &Value,
     tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+    tool_arguments_strict: bool,
 ) -> Result<Option<Value>, ProtocolError> {
     let object = item
         .as_object()
         .ok_or_else(|| ProtocolError::InvalidPayload("unsupported responses output item".into()))?;
 
     match response_output_item_kind(object)? {
-        ResponseOutputItemKind::FunctionCall => Ok(Some(
-            response_function_call_item_to_chat_tool_call(object, tool_registry)?,
-        )),
+        ResponseOutputItemKind::FunctionCall => {
+            Ok(Some(response_function_call_item_to_chat_tool_call(
+                object,
+                tool_registry,
+                tool_arguments_strict,
+            )?))
+        }
         ResponseOutputItemKind::CustomToolCall => Ok(Some(
             response_custom_tool_call_item_to_chat_tool_call(object, tool_registry)?,
         )),
@@ -1559,9 +1602,122 @@ fn response_function_call_output_to_chat_message(
     responses_tool_output_object_to_chat_message(object)
 }
 
+/// Reason a tool-call `arguments` string needed repair (T2.1).  Surfaced via
+/// the `tool_call_arguments_anomaly` event so operators can identify which
+/// upstream produces which fault shape (T4.1 / T2.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolArgumentsRepairReason {
+    /// The string contained a complete JSON value followed by more bytes that
+    /// themselves began another value (`{}` + real arguments, the exact
+    /// `extra data: line 1 column 3 (char 2)` shape).
+    TrailingData,
+    /// No complete JSON value could be parsed at all.
+    Unparseable,
+}
+
+impl ToolArgumentsRepairReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ToolArgumentsRepairReason::TrailingData => "trailing_data",
+            ToolArgumentsRepairReason::Unparseable => "unparseable",
+        }
+    }
+}
+
+/// Normalize a tool-call `arguments` string before it crosses a protocol
+/// boundary in the request direction or is persisted to response history.
+///
+/// Policy:
+/// - empty / whitespace-only                      -> `{}`
+/// - a single complete JSON value                 -> unchanged
+/// - complete value + trailing content            -> the trailing content is
+///   itself a complete JSON object, take the trailing object (the observed
+///   `{}`-placeholder-first / real-arguments-last shape); otherwise keep the
+///   first complete value.  Either way reports `TrailingData`.
+/// - no usable complete value                     -> left untouched, reports
+///   `Unparseable`; callers with `tool_arguments_strict` promote this to a
+///   400 instead of passing the bad string on.
+///
+/// Implemented with `serde_json::Deserializer::into_iter` so the first
+/// complete value and any trailing values are naturally separated.
+pub(crate) fn normalize_tool_arguments(
+    raw: &str,
+) -> (Cow<'_, str>, Option<ToolArgumentsRepairReason>) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return (Cow::Borrowed("{}"), None);
+    }
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
+    let first = match stream.next() {
+        Some(Ok(value)) => value,
+        Some(Err(_)) => {
+            return (
+                Cow::Borrowed(raw),
+                Some(ToolArgumentsRepairReason::Unparseable),
+            )
+        }
+        None => return (Cow::Borrowed("{}"), None),
+    };
+    // Walk every remaining value: `saw_trailing` tells us whether bytes follow
+    // the first complete value, and `last_object` captures the trailing part
+    // when it is itself a complete JSON object (the `{}` placeholder first /
+    // real object arguments last shape).
+    let mut last_object: Option<Value> = None;
+    let mut saw_trailing = false;
+    for item in stream {
+        saw_trailing = true;
+        match item {
+            Ok(value) if value.is_object() => last_object = Some(value),
+            Ok(_) => {}
+            // Garbage after one or more complete values: stop, keep what we
+            // have (the first complete value still wins below).
+            Err(_) => break,
+        }
+    }
+    // No trailing bytes at all: a single complete value, use it unchanged.
+    if !saw_trailing {
+        return (Cow::Borrowed(raw), None);
+    }
+    if let Some(object) = last_object {
+        (
+            Cow::Owned(object.to_string()),
+            Some(ToolArgumentsRepairReason::TrailingData),
+        )
+    } else {
+        (
+            Cow::Owned(first.to_string()),
+            Some(ToolArgumentsRepairReason::TrailingData),
+        )
+    }
+}
+
+/// Apply `normalize_tool_arguments` at a conversion site together with the
+/// `tool_arguments_strict` policy: any repair is logged (`T2.4`), and an
+/// unparseable string is turned into a 400 when strict mode is enabled instead
+/// of being forwarded upstream byte-for-byte.
+pub(crate) fn normalize_tool_arguments_for_request(
+    raw: &str,
+    strict: bool,
+    call_id: &str,
+    model: Option<&str>,
+    diagnostics: Option<&TranslatorDiagnostics>,
+) -> Result<String, ProtocolError> {
+    let (normalized, repair) = normalize_tool_arguments(raw);
+    if let Some(reason) = repair {
+        log_tool_call_arguments_anomaly(reason.as_str(), call_id, raw, model, diagnostics);
+        if strict && reason == ToolArgumentsRepairReason::Unparseable {
+            return Err(ProtocolError::InvalidPayload(format!(
+                "tool call `{call_id}` has arguments that are not valid JSON (tool_arguments_strict)"
+            )));
+        }
+    }
+    Ok(normalized.into_owned())
+}
+
 fn response_function_call_item_to_chat_tool_call(
     object: &Map<String, Value>,
     tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+    tool_arguments_strict: bool,
 ) -> Result<Value, ProtocolError> {
     let call_id = object
         .get("call_id")
@@ -1573,10 +1729,17 @@ fn response_function_call_item_to_chat_tool_call(
         .and_then(Value::as_str)
         .ok_or(ProtocolError::MissingField("name"))?;
     let name = response_chat_tool_name(object, name, tool_registry);
-    let arguments = object
+    let raw_arguments = object
         .get("arguments")
         .and_then(Value::as_str)
         .unwrap_or("{}");
+    let arguments = normalize_tool_arguments_for_request(
+        raw_arguments,
+        tool_arguments_strict,
+        call_id,
+        None,
+        None,
+    )?;
 
     Ok(json!({
         "id": call_id,
@@ -1711,7 +1874,7 @@ fn response_output_message_object_to_chat_message(
                 let tool_call = tool_call
                     .as_object()
                     .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
-                response_function_call_item_to_chat_tool_call(tool_call, None)
+                response_function_call_item_to_chat_tool_call(tool_call, None, false)
             })
             .collect::<Result<Vec<_>, _>>()?;
         if !converted.is_empty() {
@@ -1722,7 +1885,10 @@ fn response_output_message_object_to_chat_message(
     Ok(Value::Object(message))
 }
 
-fn chat_tool_call_to_function_call(tool_call: &Value) -> Result<Value, ProtocolError> {
+fn chat_tool_call_to_function_call(
+    tool_call: &Value,
+    tool_arguments_strict: bool,
+) -> Result<Value, ProtocolError> {
     let object = tool_call
         .as_object()
         .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
@@ -1730,16 +1896,22 @@ fn chat_tool_call_to_function_call(tool_call: &Value) -> Result<Value, ProtocolE
         return Err(ProtocolError::MissingField("function"));
     };
     let name = name.ok_or(ProtocolError::MissingField("name"))?;
-    let arguments = if arguments.is_empty() {
-        "{}".to_string()
-    } else {
-        arguments
-    };
     let call_id = object
         .get("id")
         .or_else(|| object.get("call_id"))
         .and_then(Value::as_str)
         .unwrap_or(name.as_str());
+    let arguments = if arguments.is_empty() {
+        "{}".to_string()
+    } else {
+        normalize_tool_arguments_for_request(
+            &arguments,
+            tool_arguments_strict,
+            &call_id,
+            None,
+            None,
+        )?
+    };
 
     Ok(json!({
         "type": "function_call",
@@ -1751,7 +1923,10 @@ fn chat_tool_call_to_function_call(tool_call: &Value) -> Result<Value, ProtocolE
     }))
 }
 
-fn chat_function_call_to_function_call(function_call: &Value) -> Result<Value, ProtocolError> {
+fn chat_function_call_to_function_call(
+    function_call: &Value,
+    tool_arguments_strict: bool,
+) -> Result<Value, ProtocolError> {
     let object = function_call.as_object().ok_or_else(|| {
         ProtocolError::InvalidPayload(format!("unsupported function call: {function_call}"))
     })?;
@@ -1759,15 +1934,22 @@ fn chat_function_call_to_function_call(function_call: &Value) -> Result<Value, P
         .get("name")
         .and_then(Value::as_str)
         .ok_or(ProtocolError::MissingField("name"))?;
-    let arguments = object
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
     let call_id = object
         .get("id")
         .or_else(|| object.get("call_id"))
         .and_then(Value::as_str)
         .unwrap_or(name);
+    let raw_arguments = object
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+    let arguments = normalize_tool_arguments_for_request(
+        raw_arguments,
+        tool_arguments_strict,
+        call_id,
+        None,
+        None,
+    )?;
 
     Ok(json!({
         "type": "function_call",
@@ -2905,6 +3087,21 @@ impl ChatToResponsesState {
             .collect::<Vec<_>>();
 
         for (index, item_id, call_id, name, arguments) in pending {
+            // Normalize before the value is sent to the client and persisted to
+            // response history so a polluted string (e.g. `{}{...}`) cannot
+            // propagate or self-perpetuate (T2.3).
+            let raw_arguments = arguments;
+            let (arguments, repair) = normalize_tool_arguments(&raw_arguments);
+            if let Some(reason) = repair {
+                log_tool_call_arguments_anomaly(
+                    reason.as_str(),
+                    &call_id,
+                    &raw_arguments,
+                    self.model.as_deref(),
+                    self.diagnostics.as_ref(),
+                );
+            }
+            let arguments = arguments.into_owned();
             let upstream_name = name.as_deref().unwrap_or("");
             let (name, namespace) = self.restored_tool_identity(upstream_name);
             output.push(make_response_function_call_arguments_done_event(
@@ -3273,6 +3470,18 @@ impl ChatToResponsesState {
         }
 
         for tool_call in self.tool_calls.values() {
+            let raw_arguments = tool_call.arguments.clone();
+            let (arguments, repair) = normalize_tool_arguments(&raw_arguments);
+            if let Some(reason) = repair {
+                log_tool_call_arguments_anomaly(
+                    reason.as_str(),
+                    &tool_call.call_id,
+                    &raw_arguments,
+                    self.model.as_deref(),
+                    self.diagnostics.as_ref(),
+                );
+            }
+            let arguments = arguments.into_owned();
             let upstream_name = tool_call.name.as_deref().unwrap_or("");
             let (name, namespace) = self.restored_tool_identity(upstream_name);
             output_items.push((
@@ -3282,7 +3491,7 @@ impl ChatToResponsesState {
                     tool_call.call_id.as_str(),
                     &name,
                     namespace.as_deref(),
-                    &tool_call.arguments,
+                    &arguments,
                     status,
                 ),
             ));
@@ -4056,7 +4265,7 @@ impl ResponsesToChatState {
 
             match response_output_item_kind(object)? {
                 ResponseOutputItemKind::FunctionCall => {
-                    response_function_call_item_to_chat_tool_call(object, None)?;
+                    response_function_call_item_to_chat_tool_call(object, None, false)?;
                 }
                 ResponseOutputItemKind::CustomToolCall => {
                     response_custom_tool_call_item_to_chat_tool_call(object, None)?;

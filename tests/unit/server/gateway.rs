@@ -2450,6 +2450,7 @@ fn chat_fallback_marks_dropped_reasoning_history() {
         }),
         None,
         None,
+        false,
         &mut downgrades,
     )
     .unwrap();

@@ -42,6 +42,7 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
     body: &Value,
     resolved_capabilities: Option<&ResolvedCapabilities>,
     inherited_tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+    tool_arguments_strict: bool,
     downgrade_codes: &mut BTreeSet<String>,
 ) -> Result<Value, ProtocolError> {
     let mut sanitized = body.clone();
@@ -94,7 +95,7 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
             && resolved.supports(Capability::ReasoningOutput)
             && resolved.supports(Capability::ReasoningReplay)
     });
-    let conversion_context = if preserves_reasoning {
+    let mut conversion_context = if preserves_reasoning {
         ConversionContext::new(
             resolved_capabilities.expect("reasoning preservation requires capabilities"),
             tool_registry,
@@ -105,6 +106,7 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
             ..ConversionContext::default()
         }
     };
+    conversion_context.tool_arguments_strict = tool_arguments_strict;
     if !preserves_reasoning && responses_input_contains_reasoning(&sanitized) {
         downgrade_codes.insert("reasoning_history_dropped".to_string());
     }

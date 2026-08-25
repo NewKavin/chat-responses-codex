@@ -4359,8 +4359,10 @@ fn chat_stream_incremental_split_still_concatenates() {
 
 #[test]
 fn chat_stream_complete_then_new_non_strict_keeps_legacy_append() {
-    // With the strict switch off, the legacy unconditional append must be
-    // preserved so operators can roll back the guard.
+    // With the strict switch off, the accumulator keeps the legacy
+    // unconditional append (deltas are still streamed), so operators can roll
+    // back the T1.2 guard.  The T2.3 store-time normalization is independent
+    // of the merge switch and still repairs the emitted value.
     let mut translator = StreamTranslator::new_with_config(
         UpstreamProtocol::ChatCompletions,
         UpstreamProtocol::Responses,
@@ -4403,6 +4405,22 @@ fn chat_stream_complete_then_new_non_strict_keeps_legacy_append() {
     events.extend(translator.translate_event(&second).unwrap());
     events.extend(translator.finish().unwrap());
 
+    // Legacy rollback: deltas are still streamed (no complete_then_new
+    // suppression) and the raw second fragment is delivered to the client.
+    let deltas = events
+        .iter()
+        .filter(|event| event["type"] == "response.function_call_arguments.delta")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deltas.len(),
+        2,
+        "non-strict mode must stream both fragments without suppression"
+    );
+    assert_eq!(deltas[0]["delta"], "{}");
+    assert_eq!(deltas[1]["delta"], "{\"command\":[\"ls\"]}");
+
+    // T2.3 store-time normalization repairs the emitted value regardless of
+    // the merge switch.
     let completed = events
         .iter()
         .find(|event| event["type"] == "response.completed")
@@ -4410,8 +4428,8 @@ fn chat_stream_complete_then_new_non_strict_keeps_legacy_append() {
     let arguments = completed["response"]["output"][0]["arguments"]
         .as_str()
         .expect("string arguments");
-    // Legacy behavior: unconditional append.
-    assert_eq!(arguments, "{}{\"command\":[\"ls\"]}");
+    assert_eq!(arguments, "{\"command\":[\"ls\"]}");
+    serde_json::from_str::<Value>(arguments).expect("arguments must be valid JSON");
 }
 
 #[test]
@@ -4574,4 +4592,131 @@ fn chat_stream_missing_index_with_id_still_merges_by_call_id_when_multiple_open(
     serde_json::from_str::<Value>(call_b["arguments"].as_str().unwrap())
         .expect("call_b arguments must be valid JSON");
     assert_eq!(output.len(), 2, "no extra items: call_b merged by id");
+}
+
+#[test]
+fn chat_stream_single_fragment_polluted_arguments_repaired_at_store_time() {
+    // T2.3: a single delta fragment that already contains the polluted
+    // `{}{...}` shape (one fragment, not split) must be repaired before it
+    // reaches the client and before it is persisted to response history.
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let chunk = json!({
+        "id": "chatcmpl-polluted-single",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_a",
+                "type": "function",
+                "function": {"name": "shell", "arguments": "{}{\"command\":[\"ls\"]}"}
+            }]},
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let mut events = translator.translate_event(&chunk).unwrap();
+    events.extend(translator.finish().unwrap());
+
+    let done = events
+        .iter()
+        .find(|event| event["type"] == "response.function_call_arguments.done")
+        .expect("done event");
+    assert_eq!(
+        done["arguments"], "{\"command\":[\"ls\"]}",
+        "done event must carry the repaired trailing object"
+    );
+    serde_json::from_str::<Value>(done["arguments"].as_str().unwrap())
+        .expect("done arguments must be valid JSON");
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("completed event");
+    let output_arguments = completed["response"]["output"][0]["arguments"]
+        .as_str()
+        .expect("output item arguments");
+    assert_eq!(output_arguments, "{\"command\":[\"ls\"]}");
+    serde_json::from_str::<Value>(output_arguments).expect("output arguments must be valid JSON");
+}
+
+#[test]
+fn responses_request_to_chat_payload_normalizes_polluted_function_call_arguments() {
+    // T2.2 via the Responses->Chat request direction: a polluted function_call
+    // item restored from history must be repaired before it goes upstream.
+    let input = json!({
+        "model": "opaque",
+        "input": [{
+            "type": "function_call",
+            "call_id": "call_a",
+            "name": "shell",
+            "arguments": "{}{\"command\":[\"ls\"]}"
+        }]
+    });
+    let payload =
+        responses_request_to_chat_payload_with_context(&input, &ConversionContext::default())
+            .expect("conversion should succeed");
+
+    let messages = payload["messages"].as_array().expect("messages array");
+    let tool_calls = messages[0]["tool_calls"].as_array().expect("tool_calls");
+    let arguments = tool_calls[0]["function"]["arguments"].as_str().unwrap();
+    assert_eq!(
+        arguments, "{\"command\":[\"ls\"]}",
+        "polluted arguments must be repaired in the request direction"
+    );
+    serde_json::from_str::<Value>(arguments).expect("arguments must be valid JSON");
+}
+
+#[test]
+fn responses_request_to_chat_payload_unparseable_arguments_non_strict_passthrough() {
+    // Default (tool_arguments_strict off): unparseable arguments are logged
+    // and forwarded unchanged, preserving existing compatibility.
+    let input = json!({
+        "model": "opaque",
+        "input": [{
+            "type": "function_call",
+            "call_id": "call_a",
+            "name": "shell",
+            "arguments": "{oops"
+        }]
+    });
+    let payload =
+        responses_request_to_chat_payload_with_context(&input, &ConversionContext::default())
+            .expect("conversion should succeed with non-strict mode");
+    let tool_calls = payload["messages"][0]["tool_calls"].as_array().unwrap();
+    assert_eq!(
+        tool_calls[0]["function"]["arguments"], "{oops",
+        "non-strict mode must pass unparseable arguments through unchanged"
+    );
+}
+
+#[test]
+fn responses_request_to_chat_payload_strict_rejects_unparseable_arguments() {
+    // tool_arguments_strict on: unparseable arguments become a 400 instead of
+    // being forwarded upstream byte-for-byte.
+    let input = json!({
+        "model": "opaque",
+        "input": [{
+            "type": "function_call",
+            "call_id": "call_a",
+            "name": "shell",
+            "arguments": "{oops"
+        }]
+    });
+    let context = ConversionContext {
+        tool_arguments_strict: true,
+        ..ConversionContext::default()
+    };
+    let error = responses_request_to_chat_payload_with_context(&input, &context)
+        .expect_err("strict mode must reject unparseable arguments");
+    assert!(
+        matches!(error, ProtocolError::InvalidPayload(_)),
+        "expected InvalidPayload, got {error:?}"
+    );
 }

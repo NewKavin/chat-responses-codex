@@ -1438,10 +1438,11 @@ pub(super) async fn send_to_upstream(
     let upstream_body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => canonical_body,
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
-            let conversion_context = resolved_capabilities
+            let mut conversion_context = resolved_capabilities
                 .as_ref()
                 .map(|resolved| ConversionContext::new(resolved, ToolAdapterRegistry::empty()))
                 .unwrap_or_default();
+            conversion_context.tool_arguments_strict = runtime_settings.tool_arguments_strict;
             chat_request_to_responses_payload_with_context(&canonical_body, &conversion_context)
                 .map_err(protocol_error_to_gateway)?
         }
@@ -1500,6 +1501,7 @@ pub(super) async fn send_to_upstream(
                 response_history_context
                     .as_ref()
                     .and_then(ResponseHistoryContext::tool_registry),
+                runtime_settings.tool_arguments_strict,
                 &mut downgrade_codes,
             )
             .map_err(protocol_error_to_gateway)?

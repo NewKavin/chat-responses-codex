@@ -72,13 +72,16 @@ fn adapts_responses_calls_for_chat_with_registry_and_preserves_identity() {
     let adapted = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
     let namespace_call = adapted
         .registry
-        .adapt_responses_function_call(&json!({
-            "type":"function_call",
-            "call_id":"call-a",
-            "name":"spawn_agent",
-            "namespace":"multi_agent_v1",
-            "arguments":"{}"
-        }))
+        .adapt_responses_function_call(
+            &json!({
+                "type":"function_call",
+                "call_id":"call-a",
+                "name":"spawn_agent",
+                "namespace":"multi_agent_v1",
+                "arguments":"{}"
+            }),
+            false,
+        )
         .unwrap();
     assert_eq!(namespace_call["id"], "call-a");
     assert_eq!(
@@ -91,12 +94,15 @@ fn adapts_responses_calls_for_chat_with_registry_and_preserves_identity() {
 
     let custom_call = adapted
         .registry
-        .adapt_responses_function_call(&json!({
-            "type":"custom_tool_call",
-            "call_id":"call-b",
-            "name":"apply_patch",
-            "input":"patch-body"
-        }))
+        .adapt_responses_function_call(
+            &json!({
+                "type":"custom_tool_call",
+                "call_id":"call-b",
+                "name":"apply_patch",
+                "input":"patch-body"
+            }),
+            false,
+        )
         .unwrap();
     assert_eq!(custom_call["id"], "call-b");
     assert_eq!(custom_call["function"]["name"], "apply_patch");
@@ -107,12 +113,15 @@ fn adapts_responses_calls_for_chat_with_registry_and_preserves_identity() {
 
     let passthrough = adapted
         .registry
-        .adapt_responses_function_call(&json!({
-            "type":"function_call",
-            "call_id":"call-c",
-            "name":"unregistered",
-            "arguments":"{}"
-        }))
+        .adapt_responses_function_call(
+            &json!({
+                "type":"function_call",
+                "call_id":"call-c",
+                "name":"unregistered",
+                "arguments":"{}"
+            }),
+            false,
+        )
         .unwrap();
     assert_eq!(passthrough["function"]["name"], "unregistered");
 }
