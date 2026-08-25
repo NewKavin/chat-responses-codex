@@ -1503,7 +1503,7 @@ pub(super) async fn send_to_upstream(
                     .and_then(ResponseHistoryContext::tool_registry),
                 runtime_settings.tool_arguments_strict,
                 Some(&final_upstream_model),
-                Some(&request_id),
+                Some(request_id),
                 Some(&upstream.id),
                 &mut downgrade_codes,
             )

@@ -38,6 +38,7 @@ pub(super) fn responses_request_requires_responses_upstream(body: &Value) -> boo
         .is_some_and(responses_tool_choice_requires_responses_upstream)
 }
 
+#[allow(clippy::too_many_arguments)] // dispatch helper: the three attribution fields are threaded through as plain Option<&str>
 pub(super) fn responses_request_to_chat_payload_with_fallback(
     body: &Value,
     resolved_capabilities: Option<&ResolvedCapabilities>,
