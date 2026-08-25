@@ -1,6 +1,7 @@
 use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
+    default_tool_arguments_strict, default_tool_call_merge_strict,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_transient_threshold,
     default_upstream_continuation_pin_escape_enabled,
@@ -11,7 +12,6 @@ use super::types::{
     default_upstream_route_half_open_busy_max_rounds,
     default_upstream_route_half_open_exclusive_window_ms,
     default_upstream_transient_last_resort_probe_enabled,
-    default_tool_arguments_strict, default_tool_call_merge_strict,
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
 use serde::{Deserialize, Serialize};
