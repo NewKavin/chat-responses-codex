@@ -989,7 +989,12 @@ async fn runtime_settings_enable_automatic_probe_jobs_without_restart() {
     let state = AppState::new(
         PersistedState::default(),
         dir.path().join("state.json"),
-        AppConfig::default(),
+        AppConfig {
+            // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+            // budget so update_runtime_settings validation passes.
+            upstream_transient_route_cooldown_base_seconds: 2,
+            ..AppConfig::default()
+        },
     );
     let (sender, mut receiver) = mpsc::channel(2);
     state.set_capability_probe_sender(sender);

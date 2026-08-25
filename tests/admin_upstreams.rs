@@ -59,6 +59,9 @@ fn create_test_state() -> AppState {
         admin_username: "admin".to_string(),
         admin_password: "admin".to_string(),
         jwt_secret: "test_secret".to_string(),
+        // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+        // budget so update_runtime_settings validation passes.
+        upstream_transient_route_cooldown_base_seconds: 2,
         ..Default::default()
     };
 
@@ -103,6 +106,9 @@ fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState 
             admin_username: "admin".to_string(),
             admin_password: "admin".to_string(),
             jwt_secret: "test_secret".to_string(),
+            // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+            // budget so update_runtime_settings validation passes.
+            upstream_transient_route_cooldown_base_seconds: 2,
             ..Default::default()
         },
     )

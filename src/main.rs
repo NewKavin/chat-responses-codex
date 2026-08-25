@@ -25,7 +25,8 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
-    DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
+    DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED, RuntimeSettings,
 };
 use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use chrono::{FixedOffset, Utc};
@@ -75,6 +76,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             transient_route_cooldown_base_seconds,
             transient_route_cooldown_max_seconds,
         )?;
+    let transient_route_cooldown_max_step = env_u32(
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP",
+        DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
+    )
+    .clamp(1, 8);
     let route_health_half_open_ttl_seconds = env_positive_u64(
         "UPSTREAM_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS",
         DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
@@ -121,7 +127,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
     )
     .clamp(60, 86_400);
-    let config = AppConfig {
+    let mut config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
         jwt_secret: env_or("JWT_SECRET", "change_me_in_production"),
@@ -250,6 +256,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
         upstream_transient_route_cooldown_base_seconds: transient_route_cooldown_base_seconds,
         upstream_transient_route_cooldown_max_seconds: transient_route_cooldown_max_seconds,
+        upstream_transient_route_cooldown_max_step: transient_route_cooldown_max_step,
         upstream_route_health_half_open_ttl_seconds: route_health_half_open_ttl_seconds,
         upstream_route_half_open_exclusive_window_ms: route_half_open_exclusive_window_ms,
         upstream_route_half_open_busy_max_rounds: route_half_open_busy_max_rounds,
@@ -320,6 +327,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max(1),
         codex_stream_idle_timeout_ms: env_u64("CODEX_STREAM_IDLE_TIMEOUT_MS", 3_600_000).max(1),
     };
+
+    // T1.1: cooldown-ceiling invariant.  When the worst-case route cooldown
+    // (upstream Retry-After cap or the local backoff curve at the T1.3 max
+    // step — whichever binds) outruns the intra-gateway retry wait budget,
+    // `RouteRetryPolicy` mathematically gives up with `WaitBudget` before a
+    // single inter-round wait: routing_round always 1, no self-healing.
+    // Never panic here — intranet availability comes first — raise the wait
+    // budget to `ceiling * 1.5` and log loudly so the operator knows the
+    // configuration was auto-corrected and why.
+    let startup_settings = RuntimeSettings::from_app_config(&config);
+    let cooldown_ceiling_seconds = startup_settings.effective_cooldown_ceiling_seconds();
+    if cooldown_ceiling_seconds.saturating_mul(1_000) >= config.upstream_route_exhaustion_retry_max_wait_ms {
+        let corrected_max_wait_ms = cooldown_ceiling_seconds.saturating_mul(1_500);
+        tracing::error!(
+            auto_corrected = true,
+            cooldown_ceiling_seconds,
+            retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
+            corrected_retry_max_wait_ms = corrected_max_wait_ms,
+            "违反冷却上界不变量：有效冷却上界 {cooldown_ceiling_seconds}s × 1000 ≥ 轮间等待预算 {}ms；已自动把 upstream_route_exhaustion_retry_max_wait_ms 抬到 {corrected_max_wait_ms}ms（ceiling × 1.5）。请降低 UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS / UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP 或提高 UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS 以消除告警",
+            config.upstream_route_exhaustion_retry_max_wait_ms,
+        );
+        config.upstream_route_exhaustion_retry_max_wait_ms = corrected_max_wait_ms;
+    }
 
     let deployment_calendar =
         DeploymentCalendar::parse(&config.deployment_timezone).map_err(|error| {

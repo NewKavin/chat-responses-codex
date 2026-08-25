@@ -7,13 +7,27 @@ use chat_responses_codex::state::{
 use std::time::Duration;
 use tempfile::tempdir;
 
+
+/// T1.1: a config whose local backoff curve (base=2, max_step=3 => ceiling
+/// 2 << 2 = 8s, bounded by cap=5 via max()) satisfies the cooldown-ceiling
+/// invariant against the default 30s intra-gateway retry wait budget:
+/// 8s * 1000 = 8000ms < 30000ms.  `AppConfig::default()` (base=10, max_step=3
+/// => 40s ceiling) intentionally violates the invariant and is rejected by
+/// `validate_and_normalize`, so round-trip tests must start from this config.
+fn compliant_config() -> AppConfig {
+    AppConfig {
+        upstream_transient_route_cooldown_base_seconds: 2,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn runtime_settings_round_trip_managed_config_without_touching_secrets() {
     let mut config = AppConfig {
         admin_password: "admin-secret".into(),
         jwt_secret: "jwt-secret".into(),
         redis_url: "redis://secret-host".into(),
-        ..Default::default()
+        ..compliant_config()
     };
 
     let mut settings = RuntimeSettings::from_app_config(&config);
@@ -107,7 +121,7 @@ fn runtime_settings_reject_invalid_retry_after_cap() {
 #[test]
 fn runtime_settings_accept_boundary_retry_after_cap() {
     for value in [1_u64, 3_600] {
-        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        let mut settings = RuntimeSettings::from_app_config(&compliant_config());
         settings.upstream_retry_after_cap_seconds = value;
         settings.validate_and_normalize().unwrap();
     }
@@ -126,7 +140,7 @@ fn runtime_settings_reject_invalid_body_excerpt_max_chars() {
 #[test]
 fn runtime_settings_accept_boundary_body_excerpt_max_chars() {
     for value in [50_u64, 2_000] {
-        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        let mut settings = RuntimeSettings::from_app_config(&compliant_config());
         settings.upstream_error_body_excerpt_max_chars = value;
         settings.validate_and_normalize().unwrap();
     }
@@ -145,7 +159,7 @@ fn runtime_settings_reject_invalid_credentials_first_strike() {
 #[test]
 fn runtime_settings_accept_boundary_credentials_first_strike() {
     for value in [1_u64, 3_600] {
-        let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+        let mut settings = RuntimeSettings::from_app_config(&compliant_config());
         settings.upstream_credentials_first_strike_seconds = value;
         settings.validate_and_normalize().unwrap();
     }
@@ -170,7 +184,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 59);
+    assert_eq!(all.len(), 60);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -182,6 +196,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     for field in [
         "upstream_transient_route_cooldown_base_seconds",
         "upstream_transient_route_cooldown_max_seconds",
+        "upstream_transient_route_cooldown_max_step",
         "upstream_route_health_half_open_ttl_seconds",
         "upstream_route_half_open_exclusive_window_ms",
         "upstream_concurrency_recovery_max_wait_ms",
@@ -310,6 +325,10 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
     let mut legacy = AppConfig {
         app_name: "Legacy env".into(),
         upstream_route_exhaustion_retry_max_rounds: 3,
+        // T1.1: keep the startup config compliant so the persisted
+        // `RuntimeSettingsDocument` derived from it passes validation and is
+        // not discarded in `config_with_persisted_runtime_settings`.
+        upstream_transient_route_cooldown_base_seconds: 2,
         ..Default::default()
     };
 
@@ -435,7 +454,7 @@ fn runtime_settings_reject_zero_capability_probe_concurrency() {
 
 #[test]
 fn runtime_settings_round_trip_capability_probe_concurrency() {
-    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    let mut settings = RuntimeSettings::from_app_config(&compliant_config());
     assert_eq!(settings.capability_probe_concurrency, 4);
     settings.capability_probe_concurrency = 6;
     let normalized = settings.validate_and_normalize().unwrap();
@@ -481,7 +500,7 @@ fn runtime_settings_reject_zero_reasoning_timeout() {
 
 #[test]
 fn runtime_settings_round_trip_reasoning_timeout() {
-    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    let mut settings = RuntimeSettings::from_app_config(&compliant_config());
     assert_eq!(settings.capability_probe_reasoning_timeout_seconds, 90);
     settings.capability_probe_reasoning_timeout_seconds = 120;
     let normalized = settings.validate_and_normalize().unwrap();
@@ -530,7 +549,7 @@ fn runtime_settings_reject_transient_threshold_over_64() {
 
 #[test]
 fn runtime_settings_round_trip_transient_breaker_tuning() {
-    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    let mut settings = RuntimeSettings::from_app_config(&compliant_config());
     assert_eq!(settings.upstream_common_mode_transient_threshold, 4);
     assert!(settings.upstream_transient_same_route_retry_enabled);
     settings.upstream_common_mode_transient_threshold = 0;
@@ -546,4 +565,37 @@ fn runtime_settings_round_trip_transient_breaker_tuning() {
         0
     );
     assert!(!RuntimeSettings::from_app_config(&config).upstream_transient_same_route_retry_enabled);
+}
+#[test]
+fn runtime_settings_reject_t1_1_cooldown_ceiling_invariant_violation() {
+    // `AppConfig::default()` has base=10 / max_step=3 => curve ceiling
+    // 10 << 2 = 40s; max(upstream_retry_after_cooldown_cap=5, 40) = 40s
+    // => 40000ms >= 30000ms budget => must be rejected, and the message must
+    // spell out both concrete numbers so the operator sees the collision.
+    let settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    let error = settings.validate_and_normalize().unwrap_err();
+    assert_eq!(error.field(), "upstream_route_exhaustion_retry_max_wait_ms");
+    let message = error.message();
+    assert!(
+        message.contains("40000"),
+        "message should name the ceiling in ms: {message}"
+    );
+    assert!(
+        message.contains("30000"),
+        "message should name the wait budget in ms: {message}"
+    );
+    assert!(
+        message.contains("40"),
+        "message should name the ceiling in seconds: {message}"
+    );
+
+    // The compliant config (base=2) must pass.
+    RuntimeSettings::from_app_config(&compliant_config())
+        .validate_and_normalize()
+        .unwrap();
+
+    // Raising the budget above the ceiling also satisfies the invariant.
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    settings.upstream_route_exhaustion_retry_max_wait_ms = 60_000;
+    settings.validate_and_normalize().unwrap();
 }

@@ -171,6 +171,7 @@ pub use types::{
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
 };
 pub use usage::{
@@ -616,6 +617,7 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_concurrency_probe_delays_ms.clone(),
         config.upstream_transient_route_cooldown_base_seconds,
         config.upstream_transient_route_cooldown_max_seconds,
+        config.upstream_transient_route_cooldown_max_step,
         config.upstream_route_health_half_open_ttl_seconds,
         config.upstream_route_half_open_exclusive_window_ms,
         config.upstream_credentials_first_strike_seconds,
@@ -2930,6 +2932,7 @@ impl AppState {
                 settings.upstream_concurrency_probe_delays_ms.clone(),
                 settings.upstream_transient_route_cooldown_base_seconds,
                 settings.upstream_transient_route_cooldown_max_seconds,
+                settings.upstream_transient_route_cooldown_max_step,
                 settings.upstream_route_health_half_open_ttl_seconds,
                 settings.upstream_route_half_open_exclusive_window_ms,
                 settings.upstream_credentials_first_strike_seconds,

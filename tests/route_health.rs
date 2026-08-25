@@ -122,7 +122,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
     // failure of the request escalates, later rounds reset the cooldown start
     // without growing the cooldown.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("request-suppressed-step", "glm-5.2");
     let key = key("request-suppressed-step");
 
@@ -172,7 +172,7 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
     // layer then applies the repeat_within_request semantics (reset the
     // cooldown start, keep the step flat).
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("sole-candidate-pinned", "glm-5.2");
     let key = key("sole-candidate-pinned");
 
@@ -211,7 +211,7 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
 async fn independent_request_failures_still_escalate_the_step() {
     // A1 counter-check: failures from independent requests keep escalating.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("independent-escalation", "glm-5.2");
     let key = key("independent-escalation");
 
@@ -249,7 +249,7 @@ async fn independent_request_failures_still_escalate_the_step() {
 #[tokio::test(start_paused = true)]
 async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 8, 300, 3000, 60);
     let route = route("half-open-step-cap", "glm-5.2");
     let key = key("half-open-step-cap");
 
@@ -297,6 +297,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
             vec![100, 200],
             3,
             4,
+            3,
             300,
             3000,
             60,
@@ -319,7 +320,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
 #[tokio::test(start_paused = true)]
 async fn transient_route_cooldown_config_does_not_change_other_classes() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
 
     registry.observe_route_failure(
@@ -365,7 +366,7 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
 #[tokio::test(start_paused = true)]
 async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cooldown() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 60, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 60, 3, 300, 3000, 60);
     let route = route("key-runtime", "model-runtime");
     registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
     assert!(
@@ -376,7 +377,7 @@ async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cool
             > Duration::from_secs(2)
     );
 
-    registry.update_runtime_tuning(vec![7, 11], 1, 2, 5, 3000, 60);
+    registry.update_runtime_tuning(vec![7, 11], 1, 2, 3, 5, 3000, 60);
     let clamped = registry.route_health_snapshot(&route).unwrap();
     assert!(clamped.cooldown_remaining <= Duration::from_secs(2));
 
@@ -469,7 +470,7 @@ async fn credentials_first_strike_honors_registry_tuning_and_key_quota_unaffecte
     // T5: the first-strike window is runtime-tunable; KeyQuota (quota-style
     // 429 family) keeps its plain 30s base and is not shortened.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 2);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 2);
     let key = key("fingerprint-a");
     registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
     let first = registry.key_health_snapshot(&key).unwrap();
@@ -1028,7 +1029,7 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
 #[tokio::test(start_paused = true)]
 async fn expired_route_half_open_lease_releases_for_next_caller() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("fingerprint-expired-lease", "glm-5.2");
     let key = key("fingerprint-expired-lease");
 
@@ -1063,7 +1064,7 @@ async fn expired_route_half_open_lease_releases_for_next_caller() {
 #[tokio::test(start_paused = true)]
 async fn expired_key_half_open_lease_releases_for_next_caller() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let key = key("fingerprint-expired-key-lease");
     let route = route("fingerprint-expired-key-lease", "glm-5.2");
 
@@ -1095,7 +1096,7 @@ async fn expired_key_half_open_lease_releases_for_next_caller() {
 #[tokio::test(start_paused = true)]
 async fn half_open_busy_reports_wait_bounded_by_exclusive_window() {
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("fingerprint-busy-recovery", "glm-5.2");
     let key = key("fingerprint-busy-recovery");
 
@@ -1191,7 +1192,7 @@ async fn reserve_route_health_probe_ignores_cooldown_and_is_single_flight() {
     // caller is busy until the first finishes, and a successful probe clears
     // the cooldown entirely.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("early-probe-single-flight", "glm-5.2");
     let key = key("early-probe-single-flight");
 
@@ -1231,7 +1232,7 @@ async fn reserve_route_health_probe_enforces_one_second_interval_per_route() {
     // another early probe for HALF_OPEN_BUSY_RETRY (1s); normal reserves stay
     // cooling during the window and a fresh probe is granted after it.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
     let route = route("early-probe-interval", "glm-5.2");
     let key = key("early-probe-interval");
 
@@ -1270,7 +1271,7 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
     // cannot exceed ROUTE_HALF_OPEN_FAILURE_STEP_CAP and the 1s probe window
     // stays armed for the next caller.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 3000, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 8, 300, 3000, 60);
     let route = route("early-probe-capped-step", "glm-5.2");
     let key = key("early-probe-capped-step");
 
@@ -1384,7 +1385,7 @@ async fn half_open_exclusive_window_zero_never_blocks_concurrent_requests() {
     // prober still holds the half-open lease, but every concurrent request
     // is admitted without a lease immediately.
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 0, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 0, 60);
     let route = route("exclusive-window-zero", "glm-5.2");
     let key = key("exclusive-window-zero");
 
@@ -1415,6 +1416,7 @@ async fn half_open_exclusive_window_max_degrades_to_single_flight() {
         vec![100, 200],
         3,
         4,
+        3,
         300,
         600_000,
         60,
@@ -1453,6 +1455,7 @@ async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases
         vec![100, 200],
         3,
         4,
+        3,
         300,
         600_000,
         60,
@@ -1471,7 +1474,7 @@ async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases
         RouteAvailability::HalfOpenBusy { .. }
     ));
 
-    registry.update_runtime_tuning(vec![100, 200], 3, 4, 300, 0, 60);
+    registry.update_runtime_tuning(vec![100, 200], 3, 4, 3, 300, 0, 60);
     assert!(matches!(
         registry.reserve(&route, &key),
         RouteAvailability::Ready(lease) if !lease.is_half_open()
@@ -1485,7 +1488,7 @@ async fn half_open_exclusive_window_does_not_affect_early_probe_single_flight() 
     // single-flight regardless of the exclusive window (probe-held leases
     // pin the route until the probe finishes).
     let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300, 0, 60);
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 0, 60);
     let route = route("probe-single-flight-window", "glm-5.2");
     let key = key("probe-single-flight-window");
 
@@ -1523,6 +1526,7 @@ async fn early_probe_exclusivity_ends_with_the_cooldown_not_the_lease() {
         vec![100, 200],
         10,
         60,
+        3,
         300,
         3_000,
         60,
@@ -1576,6 +1580,7 @@ async fn early_probe_at_cooldown_tail_keeps_a_full_exclusive_window() {
         vec![100, 200],
         10,
         60,
+        3,
         300,
         3_000,
         60,
@@ -1622,4 +1627,157 @@ async fn early_probe_at_cooldown_tail_keeps_a_full_exclusive_window() {
     };
     registry.finish(probe, RouteOutcome::Success);
     registry.finish(lease, RouteOutcome::Success);
+}
+#[tokio::test(start_paused = true)]
+async fn t13_equivalence_effective_cooldown_bounded_by_t11_ceiling() {
+    // T1.1/T1.3 equivalence proof (plan §0.5 / §4.1): with base=2,
+    // max_step=3 (curve ceiling 2 << 2 = 8s), cooldown_max=15s and the T1.2
+    // cooldown cap=5s (applied by the gateway before this registry ever sees
+    // the upstream Retry-After), the effective cooldown must stay <= 15s for
+    // every failure step and every upstream hint — it can never exceed the
+    // 30s intra-gateway retry wait budget, so a `WaitBudget` give-up is
+    // structurally impossible regardless of what the upstream sends.
+    let cooldown_cap = Duration::from_secs(5);
+    let cooldown_max = Duration::from_secs(15);
+    for raw_retry_after_secs in [0_u64, 1, 5, 28, 60, 300, 900, 1_800, 3_600] {
+        let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+            16,
+            16,
+            vec![100, 200],
+            2,
+            15,
+            3,
+            300,
+            3_000,
+            60,
+        );
+        let route = route(&format!("t13-equiv-{raw_retry_after_secs}"), "glm-5.2");
+        // The gateway clamps the upstream hint to the T1.2 cooldown cap before
+        // observing; model that here.
+        let clamped = Duration::from_secs(raw_retry_after_secs).min(cooldown_cap);
+        for step in 1..=10u32 {
+            registry.observe_route_failure(
+                &route,
+                RouteFailureClass::TransientServer,
+                Some(clamped),
+            );
+            let snapshot = registry.route_health_snapshot(&route).unwrap();
+            assert_eq!(
+                snapshot.consecutive_failures,
+                step.min(3),
+                "step must be capped at max_step=3"
+            );
+            assert!(
+                snapshot.cooldown_remaining <= cooldown_max,
+                "raw={raw_retry_after_secs}s step={step} => cooldown {:?} exceeds the {cooldown_max:?} ceiling",
+                snapshot.cooldown_remaining,
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn t12_upstream_hint_capped_so_local_curve_wins_never_28() {
+    // Regression guard for the 2026-08-25 root cause: an upstream 502 carrying
+    // `Retry-After: 28` must never pin the route cooldown to 28s. The gateway
+    // clamps the hint to upstream_retry_after_cooldown_cap_seconds (5s)
+    // before this registry sees it, and the effective cooldown is
+    // `max(local, clamped)`, so the local curve (here 10s at step 1) wins —
+    // the raw 28s can never surface.
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        10,
+        300,
+        3,
+        300,
+        3_000,
+        60,
+    );
+    let route = route("t12-hint-capped", "glm-5.2");
+
+    // Simulate the gateway clamp: raw 28s -> 5s.
+    let clamped = Duration::from_secs(28).min(Duration::from_secs(5));
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, Some(clamped));
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert!(
+        snapshot.cooldown_remaining < Duration::from_secs(28),
+        "raw 28s hint must never surface as the route cooldown, got {:?}",
+        snapshot.cooldown_remaining,
+    );
+    // Local step-1 cooldown with base=10 is 8..12s, above the 5s cap, so the
+    // local curve dominates.
+    assert!(
+        snapshot.cooldown_remaining >= Duration::from_secs(8),
+        "local curve should dominate the clamped hint, got {:?}",
+        snapshot.cooldown_remaining,
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrency_saturated_retry_after_not_cut_by_t12_cooldown_cap() {
+    // T1.2 exemption: a ConcurrencySaturated upstream's Retry-After is real
+    // slot information. The gateway passes it through unclamped and the
+    // registry must honor the full 28s — never the 5s cooldown cap.
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        2,
+        15,
+        3,
+        300,
+        3_000,
+        60,
+    );
+    let route = route("t12-concurrency-exempt", "glm-5.2");
+
+    registry.observe_route_failure(
+        &route,
+        RouteFailureClass::ConcurrencySaturated,
+        Some(Duration::from_secs(28)),
+    );
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.cooldown_remaining,
+        Duration::from_secs(28),
+        "ConcurrencySaturated Retry-After must remain authoritative (exempt from the cooldown cap)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn t13_non_half_open_failures_cap_step_at_configured_max_step() {
+    // T1.3: eight consecutive independent transient failures must cap the
+    // failure step at the configured max_step (3), not keep doubling toward
+    // the cooldown max. Local-backend side of the invariant; the Redis backend
+    // applies the same min(step, max_step) inside route_health_observe.lua /
+    // route_health_finish.lua over the same schedule.
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        2,
+        300,
+        3,
+        300,
+        3_000,
+        60,
+    );
+    let route = route("t13-step-cap", "glm-5.2");
+
+    for _ in 0..8 {
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    }
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.consecutive_failures, 3,
+        "8 transient failures must cap the step at max_step=3"
+    );
+    // base=2, step=3 => 8s (+/-20%) — far below the 300s max.
+    assert!(
+        snapshot.cooldown_remaining <= Duration::from_secs(10),
+        "cooldown must follow the capped step, got {:?}",
+        snapshot.cooldown_remaining,
+    );
 }

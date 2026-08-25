@@ -190,6 +190,9 @@ impl RuntimeCoordinationBackend {
                     transient_route_cooldown_max: Duration::from_secs(
                         config.upstream_transient_route_cooldown_max_seconds,
                     ),
+                    transient_route_cooldown_max_step: config
+                        .upstream_transient_route_cooldown_max_step
+                        .clamp(1, 8),
                     credentials_first_strike: Duration::from_secs(
                         config.upstream_credentials_first_strike_seconds.max(1),
                     ),
@@ -223,6 +226,7 @@ impl RuntimeCoordinationBackend {
                 settings.upstream_concurrency_recovery_max_wait_ms,
                 settings.upstream_transient_route_cooldown_base_seconds,
                 settings.upstream_transient_route_cooldown_max_seconds,
+                settings.upstream_transient_route_cooldown_max_step,
                 settings.upstream_route_health_half_open_ttl_seconds,
                 settings.upstream_route_half_open_exclusive_window_ms,
                 settings.upstream_credentials_first_strike_seconds,
@@ -252,6 +256,7 @@ struct RedisRuntimeTuning {
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
+    transient_route_cooldown_max_step: u32,
     credentials_first_strike: Duration,
 }
 
@@ -262,6 +267,7 @@ impl RedisRuntimeCoordinator {
         recovery_max_wait_ms: u64,
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
+        transient_route_cooldown_max_step: u32,
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
@@ -281,6 +287,7 @@ impl RedisRuntimeCoordinator {
             normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         tuning.transient_route_cooldown_base = Duration::from_secs(base_seconds);
         tuning.transient_route_cooldown_max = Duration::from_secs(max_seconds);
+        tuning.transient_route_cooldown_max_step = transient_route_cooldown_max_step.clamp(1, 8);
         tuning.credentials_first_strike =
             Duration::from_secs(credentials_first_strike_seconds.max(1));
     }
@@ -1558,6 +1565,7 @@ impl RedisRuntimeCoordinator {
         for cooldown_ms in probe_schedule {
             invocation.arg(cooldown_ms);
         }
+        invocation.arg(self.tuning_snapshot().transient_route_cooldown_max_step);
         let result = timeout_coordination(invocation.invoke_async::<i64>(&mut connection)).await?;
         parse_route_health_finish_result(result)
     }
@@ -1722,6 +1730,7 @@ impl RedisRuntimeCoordinator {
         for cooldown_ms in schedule {
             invocation.arg(*cooldown_ms);
         }
+        invocation.arg(self.tuning_snapshot().transient_route_cooldown_max_step);
         let result = timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
             .await
             .and_then(parse_route_health_observe_result);

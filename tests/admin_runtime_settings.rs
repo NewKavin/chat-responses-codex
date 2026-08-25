@@ -47,6 +47,10 @@ impl SettingsHarness {
             jwt_secret: JWT_SECRET.into(),
             redis_url: REDIS_URL.into(),
             upstream_http_pool_max_idle_per_host: 16,
+            // T1.1: base=2 keeps the cooldown ceiling (8s) strictly below the
+            // 30s wait budget so the settings PUT / round-trip validation
+            // accepts the fixture baseline.
+            upstream_transient_route_cooldown_base_seconds: 2,
             ..AppConfig::default()
         };
         let state_path = tempdir.path().join("state.json");
@@ -205,8 +209,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_error_body_excerpt_max_chars = 57,
     // plus tool_call_merge_strict = 58,
     // plus tool_arguments_strict = 59,
-    // plus upstream_retry_after_cooldown_cap_seconds = 60 (T1.2).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 60);
+    // plus upstream_retry_after_cooldown_cap_seconds = 60 (T1.2),
+    // plus upstream_transient_route_cooldown_max_step = 61 (T1.3).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 61);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

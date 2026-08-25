@@ -916,6 +916,9 @@ async fn codex_catalog_keeps_case_distinct_metadata_and_witnesses_when_folding_i
     let (_tempdir, state, secret) = catalog_state(vec![upper.clone(), lower.clone()], Vec::new());
     let mut settings = state.runtime_settings().as_ref().clone();
     settings.model_case_insensitive_matching = false;
+    // T1.1: keep the config compliant (base=2 -> ceiling 8s < 30s budget) so
+    // update_runtime_settings validation passes.
+    settings.upstream_transient_route_cooldown_base_seconds = 2;
     state.update_runtime_settings(0, settings).await.unwrap();
     state
         .replace_capability_configuration(CapabilityConfiguration {

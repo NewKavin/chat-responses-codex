@@ -11,6 +11,9 @@ local upstream_capacity = tonumber(ARGV[8])
 local exact_retry = ARGV[13] == '1'
 local failure_status = ARGV[14]
 local schedule_count = tonumber(ARGV[15])
+-- schedule values live at ARGV[16..15+schedule_count]; max_step is appended
+-- after them. Guarded: the clear/reconcile actions pass fewer args.
+local max_step = schedule_count and tonumber(ARGV[16 + schedule_count]) or nil
 
 local function prune_index(index_key)
   local members = redis.call('ZRANGE', index_key, 0, -1)
@@ -85,6 +88,12 @@ local previous_count = tonumber(redis.call('HGET', KEYS[1], 'failure_count') or 
 local step = 1
 if previous_class == class and now_ms - previous_at <= streak_reset_ms then
   step = math.max(1, previous_count + 1)
+  -- T1.3: non-half-open failures are capped at the configured max step so
+  -- the local backoff arm can never outrun the retry wait budget. Mirrors
+  -- failure_step in route_health.rs.
+  if max_step and max_step >= 1 then
+    step = math.min(step, max_step)
+  end
 end
 
 local cooldown_ms = 0

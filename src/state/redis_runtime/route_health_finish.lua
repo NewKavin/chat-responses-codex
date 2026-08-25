@@ -49,6 +49,8 @@ for index = 1, probe_schedule_count do
   probe_schedule[index] = tonumber(ARGV[cursor])
   cursor = cursor + 1
 end
+-- T1.3: max_step is appended after the variable-length schedules.
+local max_step = tonumber(ARGV[cursor])
 
 local function owns(key, generation)
   if generation == '' then
@@ -171,8 +173,19 @@ local function observe(
       -- bound (B3): cap the step so the cooldown cannot pin at the
       -- 5-minute maximum while the route keeps failing probes.
       -- ConcurrencySaturated is exempt: it follows its own bounded probe
-      -- schedule and never escalates to the max.
+      -- schedule and never escalates to the max. T1.3: also bounded by the
+      -- configured non-half-open max step (take the smaller of the two).
       step = math.min(step, 5)
+      if max_step and max_step >= 1 then
+        step = math.min(step, max_step)
+      end
+    elseif not half_open_probe then
+      -- T1.3: non-half-open failures are capped at the configured max step
+      -- so the local backoff arm can never outrun the retry wait budget
+      -- (mirrors failure_step in route_health.rs).
+      if max_step and max_step >= 1 then
+        step = math.min(step, max_step)
+      end
     end
   end
   local cooldown_ms = schedule_value(schedule, schedule_count, step)

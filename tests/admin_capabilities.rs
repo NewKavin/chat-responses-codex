@@ -1323,6 +1323,9 @@ async fn admin_reasoning_model_routes_restore_exact_identity_when_case_folding_i
         .unwrap();
     let mut settings = fixture.state.runtime_settings().as_ref().clone();
     settings.model_case_insensitive_matching = false;
+    // T1.1: keep the config compliant (base=2 -> ceiling 8s < 30s budget) so
+    // update_runtime_settings validation passes.
+    settings.upstream_transient_route_cooldown_base_seconds = 2;
     fixture
         .state
         .update_runtime_settings(0, settings)

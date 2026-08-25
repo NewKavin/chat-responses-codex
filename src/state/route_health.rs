@@ -11,6 +11,7 @@ use super::types::{
     DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
 };
 use super::AppState;
 use crate::capabilities::WireProtocol;
@@ -556,6 +557,7 @@ pub struct RouteHealthRegistry {
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
+    transient_route_cooldown_max_step: u32,
     half_open_ttl: Duration,
     half_open_exclusive_window: Duration,
     credentials_first_strike: Duration,
@@ -620,6 +622,7 @@ impl RouteHealthRegistry {
             concurrency_probe_delays_ms,
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+            DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
             DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
@@ -632,6 +635,7 @@ impl RouteHealthRegistry {
         concurrency_probe_delays_ms: Vec<u64>,
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
+        transient_route_cooldown_max_step: u32,
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
@@ -653,6 +657,7 @@ impl RouteHealthRegistry {
                 transient_route_cooldown_base_seconds,
             ),
             transient_route_cooldown_max: Duration::from_secs(transient_route_cooldown_max_seconds),
+            transient_route_cooldown_max_step: transient_route_cooldown_max_step.clamp(1, 8),
             half_open_ttl: Duration::from_secs(half_open_ttl_seconds.max(1)),
             half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
             credentials_first_strike: Duration::from_secs(credentials_first_strike_seconds.max(1)),
@@ -664,6 +669,7 @@ impl RouteHealthRegistry {
         concurrency_probe_delays_ms: Vec<u64>,
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
+        transient_route_cooldown_max_step: u32,
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
@@ -685,6 +691,7 @@ impl RouteHealthRegistry {
             normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         self.transient_route_cooldown_base = base;
         self.transient_route_cooldown_max = max;
+        self.transient_route_cooldown_max_step = transient_route_cooldown_max_step.clamp(1, 8);
         self.half_open_ttl = half_open_ttl;
         self.half_open_exclusive_window = half_open_exclusive_window;
         self.credentials_first_strike =
@@ -1332,7 +1339,13 @@ impl RouteHealthRegistry {
             && state
                 .last_failure_at
                 .is_some_and(|last| now.duration_since(last) <= FAILURE_STREAK_RESET);
-        let step = failure_step(state, class, now, effective_repeat);
+        let step = failure_step(
+            state,
+            class,
+            now,
+            effective_repeat,
+            self.transient_route_cooldown_max_step,
+        );
         state.state_generation = state.state_generation.wrapping_add(1).max(1);
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
@@ -1395,7 +1408,13 @@ impl RouteHealthRegistry {
             .keys
             .entry(key.clone())
             .or_insert_with(|| HealthState::new(now));
-        let step = failure_step(state, class, now, false);
+        let step = failure_step(
+            state,
+            class,
+            now,
+            false,
+            self.transient_route_cooldown_max_step,
+        );
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
         state.last_failure_at = Some(now);
@@ -1839,7 +1858,9 @@ fn failure_step(
     class: RouteFailureClass,
     now: Instant,
     repeat_within_request: bool,
+    max_step: u32,
 ) -> u32 {
+    let max_step = max_step.max(1);
     if class == RouteFailureClass::EdgeProxyError {
         // Edge proxy pages describe the gateway, not the route: they must
         // never escalate the failure streak or lengthen the cooldown.
@@ -1867,9 +1888,24 @@ fn failure_step(
             // exponential cooldown cannot pin at the maximum forever.
             // ConcurrencySaturated is exempt: it follows its own bounded
             // probe schedule and never escalates to the max.
-            escalated.min(ROUTE_HALF_OPEN_FAILURE_STEP_CAP)
-        } else {
+            // T1.3: also bounded by the configured non-half-open max step so
+            // the curve can never outrun the T1.1 cooldown ceiling (the two
+            // caps combine via min — take whichever is smaller).
             escalated
+                .min(ROUTE_HALF_OPEN_FAILURE_STEP_CAP)
+                .min(max_step)
+        } else if state.half_open_generation.is_some() {
+            // Half-open ConcurrencySaturated probe failure: exempt from any
+            // step cap — it follows its own bounded probe schedule and never
+            // escalates to the max (unchanged from pre-T1.3).
+            escalated
+        } else {
+            // T1.3: non-half-open failures previously escalated without any
+            // step cap (`base << (step-1)` grows past the retry wait budget).
+            // Bound by the configured max step (default 3): the local backoff
+            // arm can no longer independently recreate the T1.1 ceiling
+            // violation.
+            escalated.min(max_step)
         }
     }
 }

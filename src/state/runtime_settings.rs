@@ -9,6 +9,7 @@ use super::types::{
     default_upstream_error_body_excerpt_max_chars, default_upstream_local_lease_ttl_seconds,
     default_upstream_max_concurrency, default_upstream_retry_after_cap_seconds,
     default_upstream_retry_after_cooldown_cap_seconds,
+    default_upstream_transient_route_cooldown_max_step,
     default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_route_half_open_busy_max_rounds,
     default_upstream_route_half_open_exclusive_window_ms,
@@ -16,6 +17,7 @@ use super::types::{
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::io;
 use thiserror::Error;
 
@@ -45,6 +47,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_transient_same_route_retry_enabled",
     "upstream_transient_route_cooldown_base_seconds",
     "upstream_transient_route_cooldown_max_seconds",
+    "upstream_transient_route_cooldown_max_step",
     "upstream_route_health_half_open_ttl_seconds",
     "upstream_route_half_open_exclusive_window_ms",
     "upstream_route_half_open_busy_max_rounds",
@@ -119,6 +122,8 @@ pub struct RuntimeSettings {
     pub upstream_same_route_retry_enabled: bool,
     pub upstream_transient_route_cooldown_base_seconds: u64,
     pub upstream_transient_route_cooldown_max_seconds: u64,
+    #[serde(default = "default_upstream_transient_route_cooldown_max_step")]
+    pub upstream_transient_route_cooldown_max_step: u32,
     pub upstream_route_health_half_open_ttl_seconds: u64,
     #[serde(default = "default_upstream_route_half_open_exclusive_window_ms")]
     pub upstream_route_half_open_exclusive_window_ms: u64,
@@ -210,7 +215,7 @@ pub struct RuntimeSettingsUpdate {
 #[error("invalid runtime setting {field}: {message}")]
 pub struct RuntimeSettingsValidationError {
     field: &'static str,
-    message: &'static str,
+    message: Cow<'static, str>,
 }
 
 impl RuntimeSettingsValidationError {
@@ -218,8 +223,8 @@ impl RuntimeSettingsValidationError {
         self.field
     }
 
-    pub fn message(&self) -> &'static str {
-        self.message
+    pub fn message(&self) -> &str {
+        self.message.as_ref()
     }
 }
 
@@ -286,6 +291,8 @@ impl RuntimeSettings {
                 .upstream_transient_route_cooldown_base_seconds,
             upstream_transient_route_cooldown_max_seconds: config
                 .upstream_transient_route_cooldown_max_seconds,
+            upstream_transient_route_cooldown_max_step: config
+                .upstream_transient_route_cooldown_max_step,
             upstream_route_health_half_open_ttl_seconds: config
                 .upstream_route_health_half_open_ttl_seconds,
             upstream_route_half_open_exclusive_window_ms: config
@@ -375,6 +382,8 @@ impl RuntimeSettings {
             self.upstream_transient_route_cooldown_base_seconds;
         config.upstream_transient_route_cooldown_max_seconds =
             self.upstream_transient_route_cooldown_max_seconds;
+        config.upstream_transient_route_cooldown_max_step =
+            self.upstream_transient_route_cooldown_max_step;
         config.upstream_route_health_half_open_ttl_seconds =
             self.upstream_route_health_half_open_ttl_seconds;
         config.upstream_route_half_open_exclusive_window_ms =
@@ -503,6 +512,12 @@ impl RuntimeSettings {
             self.upstream_transient_route_cooldown_max_seconds,
             "upstream_transient_route_cooldown_max_seconds",
         )?;
+        if !(1..=8).contains(&self.upstream_transient_route_cooldown_max_step) {
+            return Err(invalid(
+                "upstream_transient_route_cooldown_max_step",
+                "must be between 1 and 8",
+            ));
+        }
         if self.upstream_transient_route_cooldown_base_seconds
             > self.upstream_transient_route_cooldown_max_seconds
         {
@@ -683,7 +698,47 @@ impl RuntimeSettings {
             ));
         }
 
+        // T1.1: cooldown-ceiling invariant.  The worst-case route cooldown
+        // (upstream Retry-After capped by the T1.2 knob, or the local backoff
+        // curve at the T1.3 max step — whichever is higher, bounded by the
+        // hard cooldown max) must stay below the intra-gateway retry wait
+        // budget; otherwise `RouteRetryPolicy` mathematically returns
+        // `GiveUpReason::WaitBudget` before a single inter-round wait and the
+        // exhaustion self-healing never runs (2026-08-25 root cause).
+        let cooldown_ceiling = self.effective_cooldown_ceiling_seconds();
+        if cooldown_ceiling.saturating_mul(1_000)
+            >= self.upstream_route_exhaustion_retry_max_wait_ms
+        {
+            return Err(invalid_detailed(
+                "upstream_route_exhaustion_retry_max_wait_ms",
+                format!(
+                    "违反冷却上界不变量：有效冷却上界 {cooldown_ceiling} 秒（= max(上游 Retry-After 冷却上限 {}s，本地退避 {} << {} 秒)，不得高于 {}s）乘以 1000 后为 {}ms，必须严格小于轮间等待预算 {}ms；请降低 upstream_transient_route_cooldown_base_seconds / upstream_transient_route_cooldown_max_step，或提高 upstream_route_exhaustion_retry_max_wait_ms",
+                    self.upstream_retry_after_cooldown_cap_seconds,
+                    self.upstream_transient_route_cooldown_base_seconds,
+                    self.upstream_transient_route_cooldown_max_step.saturating_sub(1),
+                    self.upstream_transient_route_cooldown_max_seconds,
+                    cooldown_ceiling.saturating_mul(1_000),
+                    self.upstream_route_exhaustion_retry_max_wait_ms,
+                ),
+            ));
+        }
+
         Ok(self)
+    }
+
+    /// T1.1: worst-case effective route cooldown in seconds, per the invariant:
+    /// `max(upstream_retry_after_cooldown_cap_seconds,
+    ///      transient_cooldown_base << (transient_cooldown_max_step - 1))
+    ///  .min(upstream_transient_route_cooldown_max_seconds)`.
+    pub fn effective_cooldown_ceiling_seconds(&self) -> u64 {
+        let base = self.upstream_transient_route_cooldown_base_seconds.max(1);
+        let max_step = self.upstream_transient_route_cooldown_max_step.max(1);
+        let curve_ceiling = base
+            .checked_shl(max_step.saturating_sub(1))
+            .unwrap_or(u64::MAX);
+        self.upstream_retry_after_cooldown_cap_seconds
+            .max(curve_ceiling)
+            .min(self.upstream_transient_route_cooldown_max_seconds)
     }
 }
 
@@ -702,7 +757,23 @@ pub(super) fn differing_runtime_setting_fields(
 }
 
 fn invalid(field: &'static str, message: &'static str) -> RuntimeSettingsValidationError {
-    RuntimeSettingsValidationError { field, message }
+    RuntimeSettingsValidationError {
+        field,
+        message: Cow::Borrowed(message),
+    }
+}
+
+/// T1.1: validation error with a dynamically formatted (Chinese) message that
+/// embeds the concrete numbers, so the operator sees exactly which two values
+/// collide without reopening the docs.
+fn invalid_detailed(
+    field: &'static str,
+    message: String,
+) -> RuntimeSettingsValidationError {
+    RuntimeSettingsValidationError {
+        field,
+        message: Cow::Owned(message),
+    }
 }
 
 fn normalize_nonempty_string(

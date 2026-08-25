@@ -301,6 +301,11 @@ async fn runtime_settings_cap_change_applies_to_new_failures_only() {
             admin_password: "cap-admin-password".into(),
             jwt_secret: "cap-jwt-secret".into(),
             upstream_retry_after_cap_seconds: 60,
+            // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+            // budget so the runtime-settings PUT in this test passes
+            // validation. (The rate-limited path has no local-backoff floor,
+            // so this does not affect any cooldown assertion here.)
+            upstream_transient_route_cooldown_base_seconds: 2,
             ..AppConfig::default()
         },
         10,

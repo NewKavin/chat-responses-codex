@@ -1584,6 +1584,9 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
         let config = AppConfig {
             capability_probe_request_timeout_seconds: 2,
             automatic_capability_probes_enabled: true,
+            // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+            // budget so update_runtime_settings validation passes.
+            upstream_transient_route_cooldown_base_seconds: 2,
             ..AppConfig::default()
         };
         let state = AppState::new(
@@ -1691,6 +1694,9 @@ async fn probe_service_runtime_concurrency_setting_bounds_global_concurrency() {
         let config = AppConfig {
             capability_probe_request_timeout_seconds: 2,
             automatic_capability_probes_enabled: true,
+            // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+            // budget so update_runtime_settings validation passes.
+            upstream_transient_route_cooldown_base_seconds: 2,
             ..AppConfig::default()
         };
         let state = AppState::new(

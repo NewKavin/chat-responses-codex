@@ -3739,6 +3739,8 @@ async fn redis_route_health_global_eviction_removes_the_owners_upstream_index() 
             "".into(),
             "1".into(),
             "1000".into(),
+            // T1.3: max_step appended after the variable-length probe schedule.
+            "3".into(),
         ],
     )
     .await;
@@ -3827,6 +3829,8 @@ async fn redis_route_health_finish_rejects_capacity_exhaustion_and_corrupt_marke
         "1000".into(),
         "0".into(),
         "0".into(),
+        // T1.3: max_step appended after the variable-length schedules.
+        "3".into(),
     ];
     assert_eq!(
         redis_integer(&redis_test_command(&config, &finish_arguments).await),

@@ -6310,6 +6310,9 @@ async fn runtime_stream_idle_timeout_interrupts_later_hung_stream() {
     config.upstream_stream_idle_timeout_seconds = 60;
     config.upstream_response_header_timeout_seconds = 1;
     config.upstream_connect_timeout_seconds = 1;
+    // T1.1: base=2 keeps the cooldown ceiling (8s) strictly below the 30s wait
+    // budget so update_runtime_settings validation passes.
+    config.upstream_transient_route_cooldown_base_seconds = 2;
     let state = AppState::new(
         PersistedState {
             upstreams: std::sync::Arc::new(vec![UpstreamConfig {

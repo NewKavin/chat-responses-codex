@@ -254,6 +254,17 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'upstream_transient_route_cooldown_max_step',
+    group: 'routing',
+    label: '瞬时错误冷却升级步数上限',
+    apply: 'immediate',
+    control: 'number',
+    unit: '级',
+    min: 1,
+    max: 8,
+    description: '非半开失败允许的退避升级级数上限（默认 3）。无此上限时 base << (step-1) 会无限增长，最终超过轮间等待预算而必现路由耗尽。'
+  },
+  {
     key: 'upstream_route_health_half_open_ttl_seconds',
     group: 'routing',
     label: '半开探测有效期',
@@ -707,6 +718,27 @@ export const validateRuntimeSettings = (
     settings.upstream_stream_idle_timeout_seconds
   ) {
     errors.upstream_stream_keepalive_interval_seconds = '必须短于流式空闲超时'
+  }
+  // T1.1: cooldown-ceiling invariant linkage hint.  The effective ceiling
+  // (max of the upstream Retry-After cooldown cap and the local backoff curve
+  // at max_step) must stay strictly below the retry wait budget, otherwise
+  // GiveUpReason::WaitBudget fires before any inter-round wait.
+  const effectiveStep = Math.max(
+    1,
+    settings.upstream_transient_route_cooldown_max_step || 3
+  )
+  const curveCeiling =
+    (settings.upstream_transient_route_cooldown_base_seconds || 1) *
+    Math.pow(2, effectiveStep - 1)
+  const ceiling = Math.max(
+    settings.upstream_retry_after_cooldown_cap_seconds || 5,
+    curveCeiling
+  )
+  const hardMax = settings.upstream_transient_route_cooldown_max_seconds || 300
+  const boundedCeiling = Math.min(ceiling, hardMax)
+  if (boundedCeiling * 1000 >= (settings.upstream_route_exhaustion_retry_max_wait_ms || 30000)) {
+    errors.upstream_transient_route_cooldown_max_step =
+      `冷却上界 ${boundedCeiling}s×1000 ≥ 轮间等待预算 ${settings.upstream_route_exhaustion_retry_max_wait_ms}ms，会必现路由耗尽；请降低冷却相关参数或提高等待预算`
   }
   if (
     settings.upstream_stream_idle_timeout_seconds >

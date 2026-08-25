@@ -1872,6 +1872,9 @@ async fn runtime_settings_enable_route_exhaustion_retry_for_next_request() {
             // fifteen-second budget guarantees the second round is always admitted.
             upstream_route_exhaustion_retry_enabled: false,
             upstream_route_exhaustion_retry_max_wait_ms: 15_000,
+            // T1.1: base=2 keeps the cooldown ceiling (8s) strictly below the
+            // 15s wait budget so update_runtime_settings validation passes.
+            upstream_transient_route_cooldown_base_seconds: 2,
             ..AppConfig::default()
         },
     );
