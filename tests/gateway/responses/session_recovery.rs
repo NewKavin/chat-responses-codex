@@ -1143,7 +1143,10 @@ async fn build_cross_account_harness() -> CrossAccountHarness {
                     .unwrap_or_default();
                 let body = to_bytes(body, usize::MAX).await.unwrap();
                 let payload: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(auth, "Bearer account-a-secret", "account A must receive its own key");
+                assert_eq!(
+                    auth, "Bearer account-a-secret",
+                    "account A must receive its own key"
+                );
                 capture.lock().unwrap().push(payload.clone());
                 let created = format!(
                     "event: response.created\ndata: {}\n\n",
@@ -1250,7 +1253,10 @@ async fn build_cross_account_harness() -> CrossAccountHarness {
                     .unwrap_or_default();
                 let body = to_bytes(body, usize::MAX).await.unwrap();
                 let payload: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(auth, "Bearer account-b-secret", "account B must receive its own key");
+                assert_eq!(
+                    auth, "Bearer account-b-secret",
+                    "account B must receive its own key"
+                );
                 capture.lock().unwrap().push(payload.clone());
                 (
                     StatusCode::OK,
