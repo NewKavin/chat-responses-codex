@@ -19,6 +19,11 @@ pub(super) struct AttemptFailure {
     /// Upstream display name recorded alongside the status/code so the
     /// terminal summary can point at *which* upstream failed (E2).
     pub upstream_name: Option<String>,
+    /// Host part of the upstream `base_url` (T0.1).  Used to tell
+    /// "N routes all pointed at the same aggregated gateway" from "N
+    /// genuinely distinct upstream hosts failed" in the terminal
+    /// exhaustion log (`distinct_upstream_hosts`).
+    pub upstream_host: Option<String>,
     /// Bounded, sanitized excerpt of the upstream error body (E5).  Present
     /// only when the `upstream_error_body_excerpt_enabled` runtime switch is
     /// on; `None` otherwise and for pre-existing cooldowns.
@@ -321,7 +326,7 @@ impl RequestRouteAttempts {
         class: FailureClass,
         retry_after: Option<Duration>,
     ) {
-        self.record_failure_with_status(route, class, retry_after, None, None, None, None);
+        self.record_failure_with_status(route, class, retry_after, None, None, None, None, None);
     }
 
     #[allow(clippy::too_many_arguments)] // E3/E5 diagnostics threading; bundled context refactor pending
@@ -334,6 +339,7 @@ impl RequestRouteAttempts {
         upstream_error_code: Option<String>,
         upstream_error_body_excerpt: Option<String>,
         upstream_name: Option<String>,
+        upstream_host: Option<String>,
     ) {
         if !self.tracker().record_failure(route, class, retry_after) {
             return;
@@ -361,6 +367,7 @@ impl RequestRouteAttempts {
             upstream_error_code,
             upstream_error_body_excerpt,
             upstream_name,
+            upstream_host,
             class,
             retry_after,
             half_open_busy: false,
@@ -495,6 +502,35 @@ impl RequestRouteAttempts {
 
     pub fn ledger_snapshot(&self) -> AttemptLedger {
         self.ledger().clone()
+    }
+
+    /// Routes still available when the request ends: eligible this round but
+    /// neither recorded as failed nor as cooling (T0.2).  Replaces the
+    /// hard-coded `remaining_candidates = 0` in the terminal exhaustion log.
+    pub fn available_candidate_count(&self) -> usize {
+        let tracker = self.tracker();
+        let ledger = self.ledger();
+        let removed = ledger
+            .failures
+            .iter()
+            .chain(ledger.cooled_candidates.iter())
+            .map(|failure| failure.route_id.as_str())
+            .collect::<HashSet<_>>();
+        tracker
+            .eligible_routes()
+            .into_iter()
+            .filter(|route| {
+                !removed.contains(
+                    anonymous_route_id(
+                        &route.upstream_id,
+                        &route.key_fingerprint,
+                        &route.runtime_model_slug,
+                        route.protocol,
+                    )
+                    .as_str(),
+                )
+            })
+            .count()
     }
 }
 
@@ -761,6 +797,20 @@ impl AttemptLedger {
         counts
     }
 
+    /// Distinct upstream hosts across every failed/cooled route of this
+    /// request (T0.1).  Routes on the same aggregated gateway share one host,
+    /// so a value that stays near 1 while `route_count` is large is the
+    /// signature of a fake-diversity pool (the T1.4 shared-host fault domain).
+    pub fn distinct_upstream_host_count(&self) -> usize {
+        self.failures
+            .iter()
+            .chain(self.cooled_candidates.iter())
+            .filter_map(|failure| failure.upstream_host.as_deref())
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+
     /// Most common sanitized upstream error-body excerpt across ledger
     /// entries (E5), mirroring the code/name "most common" pick.  Present
     /// only when the opt-in runtime switch produced at least one excerpt.
@@ -899,6 +949,7 @@ mod tests {
                 upstream_error_code: None,
                 upstream_error_body_excerpt: None,
                 upstream_name: None,
+                upstream_host: None,
                 class: FailureClass::TransientServer,
                 retry_after: None,
                 half_open_busy: false,
@@ -924,6 +975,7 @@ mod tests {
             upstream_error_code: None,
             upstream_error_body_excerpt: None,
             upstream_name: None,
+            upstream_host: None,
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(28)),
             half_open_busy: false,

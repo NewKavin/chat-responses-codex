@@ -1377,7 +1377,39 @@ impl RouteHealthRegistry {
             (_, Some(explicit)) => explicit.max(local),
             _ => local,
         };
+        // T0.4: expose which side of `explicit.max(local)` actually won so
+        // operators can tell an upstream `Retry-After`-driven cooldown from
+        // the local backoff curve.  `upstream_host` is not available at this
+        // layer (the registry is keyed by upstream_id/fingerprint/slug), so
+        // the upstream id serves as the common-mode tell; callers that also
+        // need the host see the same id on the terminal exhaustion log.
+        let (cooldown_source, upstream_retry_after_ms) = match (class, retry_after) {
+            (RouteFailureClass::ConcurrencySaturated, Some(explicit)) => (
+                "upstream_retry_after",
+                Some(explicit.as_millis() as i64),
+            ),
+            (_, Some(explicit)) => {
+                if explicit > local {
+                    ("upstream_retry_after", Some(explicit.as_millis() as i64))
+                } else {
+                    ("local", Some(explicit.as_millis() as i64))
+                }
+            }
+            _ => ("local", None),
+        };
         state.cooldown_until = Some(now + cooldown);
+        tracing::info!(
+            route_upstream_id = %route.upstream_id,
+            route_model_slug = %route.runtime_model_slug,
+            failure_class = %class.as_str(),
+            step,
+            step_suppressed,
+            local_cooldown_ms = local.as_millis() as u64,
+            upstream_retry_after_ms = upstream_retry_after_ms.unwrap_or(-1),
+            cooldown_source,
+            effective_cooldown_ms = cooldown.as_millis() as u64,
+            "route cooldown recorded"
+        );
         if step_suppressed {
             tracing::warn!(
                 route_upstream_id = %route.upstream_id,

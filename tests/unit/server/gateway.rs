@@ -110,7 +110,7 @@ fn stream_timeouts_use_runtime_idle_and_startup_transport_limits() {
 #[test]
 fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -118,9 +118,10 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(30)),
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record_cooled(AttemptFailure {
+    ledger.record_cooled(AttemptFailure{
         route_id: "route-b".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -128,6 +129,7 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(7)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -170,7 +172,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
         ),
     ] {
         let mut ledger = AttemptLedger::default();
-        ledger.record(AttemptFailure {
+        ledger.record(AttemptFailure{
             route_id: "route".into(),
             upstream_status: Some(400),
             upstream_error_code: None,
@@ -178,7 +180,8 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
             upstream_name: None,
             class,
             retry_after: None,
-            half_open_busy: false,
+            upstream_host: None,
+        half_open_busy: false,
         });
         assert_eq!(ledger.terminal_failure(), expected);
     }
@@ -187,7 +190,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
 #[test]
 fn route_attempts_reports_mixed_non_temporary_exhaustion() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(401),
         upstream_error_code: None,
@@ -195,9 +198,10 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
         upstream_name: None,
         class: FailureClass::Credentials,
         retry_after: None,
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-b".into(),
         upstream_status: Some(400),
         upstream_error_code: None,
@@ -205,6 +209,7 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
         upstream_name: None,
         class: FailureClass::ModelUnsupported,
         retry_after: None,
+        upstream_host: None,
         half_open_busy: false,
     });
     assert_eq!(
@@ -216,7 +221,7 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
 fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
     let mut ledger = AttemptLedger::default();
     for (index, class) in classes.iter().copied().enumerate() {
-        ledger.record(AttemptFailure {
+        ledger.record(AttemptFailure{
             route_id: format!("route-secret-{index}"),
             upstream_status: Some(400),
             upstream_error_code: None,
@@ -226,7 +231,8 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
             retry_after: class
                 .is_temporary()
                 .then(|| Duration::from_secs(11 + index as u64)),
-            half_open_busy: false,
+            upstream_host: None,
+        half_open_busy: false,
         });
     }
     terminal_route_failure_error(
@@ -240,6 +246,8 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
         Duration::from_secs(3600),
         false,
         false,
+        0,
+        0,
         0,
     )
 }
@@ -316,7 +324,7 @@ fn route_attempts_terminal_details_are_numeric_and_secret_free() {
 #[test]
 fn terminal_retry_after_seconds_are_rounded_up() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -324,6 +332,7 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_millis(1_001)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -338,6 +347,8 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         Duration::from_secs(3600),
         false,
         false,
+        0,
+        0,
         0,
     );
     assert_eq!(error.retry_after_seconds(), Some(2));
@@ -357,7 +368,7 @@ fn terminal_retry_after_seconds_are_rounded_up() {
 #[test]
 fn terminal_details_report_give_up_reason_recovery_and_probe() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route".into(),
         upstream_status: Some(502),
         upstream_error_code: None,
@@ -365,6 +376,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(9)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -384,6 +396,8 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
         false,
         false,
         0,
+        0,
+        0,
     );
 
     let details = error.safe_details();
@@ -400,7 +414,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
 #[test]
 fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -408,9 +422,10 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(24)),
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record_cooled(AttemptFailure {
+    ledger.record_cooled(AttemptFailure{
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -418,6 +433,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         upstream_name: None,
         class: FailureClass::ConcurrencySaturated,
         retry_after: Some(Duration::from_secs(2)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -432,6 +448,8 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         Duration::from_secs(3600),
         false,
         false,
+        0,
+        0,
         0,
     );
 
@@ -465,7 +483,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
 fn cooled_routes_carry_real_upstream_status_in_summary() {
     let mut ledger = AttemptLedger::default();
     for index in 0..8 {
-        ledger.record_cooled(AttemptFailure {
+        ledger.record_cooled(AttemptFailure{
             route_id: format!("route-{index}"),
             upstream_status: Some(502),
             upstream_error_code: None,
@@ -473,7 +491,8 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
             upstream_name: None,
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(3)),
-            half_open_busy: false,
+            upstream_host: None,
+        half_open_busy: false,
         });
     }
 
@@ -488,6 +507,8 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         Duration::from_secs(3600),
         false,
         false,
+        0,
+        0,
         0,
     );
 
@@ -508,7 +529,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
 #[test]
 fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -516,9 +537,10 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(24)),
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-b".into(),
         upstream_status: Some(502),
         upstream_error_code: None,
@@ -526,6 +548,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(10)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -540,6 +563,8 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         Duration::from_secs(3600),
         false,
         false,
+        0,
+        0,
         0,
     );
 
@@ -563,7 +588,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
 #[test]
 fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -571,9 +596,10 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         upstream_name: None,
         class: FailureClass::CapacityUnavailable,
         retry_after: Some(Duration::from_secs(2)),
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -581,6 +607,7 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         upstream_name: None,
         class: FailureClass::CapacityUnavailable,
         retry_after: Some(Duration::from_secs(10)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -596,6 +623,8 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         false,
         false,
         0,
+        0,
+        0,
     );
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
@@ -607,7 +636,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
     // Upstream said "retry in 1s" but the local cooldown is ~27s; the client
     // must be told the number that will actually succeed.
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -615,6 +644,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         upstream_name: None,
         class: FailureClass::RateLimited,
         retry_after: Some(Duration::from_secs(1)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -633,6 +663,8 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         Duration::from_secs(3600),
         false,
         false,
+        0,
+        0,
         0,
     );
 
@@ -905,7 +937,7 @@ fn direct_hedge_send_count_does_not_change_round_route_selection() {
 #[test]
 fn terminal_observation_matches_the_public_terminal_failure_class() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "temporary-route".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -913,9 +945,10 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
         upstream_name: None,
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(7)),
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "credential-route".into(),
         upstream_status: Some(403),
         upstream_error_code: None,
@@ -923,6 +956,7 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
         upstream_name: None,
         class: FailureClass::Credentials,
         retry_after: None,
+        upstream_host: None,
         half_open_busy: false,
     });
     let terminal = ledger.terminal_failure();
@@ -3267,7 +3301,7 @@ fn e3_class_summary_picks_most_common_code_and_name() {
     .into_iter()
     .enumerate()
     {
-        ledger.record(AttemptFailure {
+        ledger.record(AttemptFailure{
             route_id: format!("route-{index}"),
             upstream_status: status,
             upstream_error_code: code.map(str::to_string),
@@ -3275,7 +3309,8 @@ fn e3_class_summary_picks_most_common_code_and_name() {
             upstream_name: Some(name.to_string()),
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(30)),
-            half_open_busy: false,
+            upstream_host: None,
+        half_open_busy: false,
         });
     }
 
@@ -3305,7 +3340,7 @@ fn e3_class_summary_picks_most_common_code_and_name() {
 #[test]
 fn e3_terminal_error_message_and_details_carry_code_and_name() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
@@ -3313,9 +3348,10 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         upstream_name: Some("k-api".to_string()),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(30)),
+        upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record_cooled(AttemptFailure {
+    ledger.record_cooled(AttemptFailure{
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
@@ -3323,6 +3359,7 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         upstream_name: Some("k-api".to_string()),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(7)),
+        upstream_host: None,
         half_open_busy: false,
     });
 
@@ -3337,6 +3374,8 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         Duration::from_secs(60),
         false,
         false,
+        0,
+        0,
         0,
     );
     let message = error.message();
@@ -3434,7 +3473,7 @@ fn e5_terminal_summary_appends_body_excerpt_when_present() {
         200,
     )
     .expect("sanitizer must produce an excerpt");
-    ledger.record(AttemptFailure {
+    ledger.record(AttemptFailure{
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
@@ -3442,6 +3481,7 @@ fn e5_terminal_summary_appends_body_excerpt_when_present() {
         upstream_name: Some("k-api".to_string()),
         class: FailureClass::TransientServer,
         retry_after: Some(Duration::from_secs(30)),
+        upstream_host: None,
         half_open_busy: false,
     });
     let error = terminal_route_failure_error(
@@ -3455,6 +3495,8 @@ fn e5_terminal_summary_appends_body_excerpt_when_present() {
         Duration::from_secs(60),
         false,
         false,
+        0,
+        0,
         0,
     );
     let message = error.message();

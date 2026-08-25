@@ -1494,6 +1494,18 @@ async fn route_failure_observability_separates_upstream_500_from_downstream_503(
     assert!(trace.contains("same_route_retry=true"), "{trace}");
     assert!(trace.contains("cooldown_seconds="), "{trace}");
     assert!(trace.contains("remaining_candidates=0"), "{trace}");
+    // T0.1: the terminal exhaustion log carries the give-up reason and the
+    // budget arithmetic next to `cooldown_seconds`.
+    assert!(trace.contains("give_up_reason="), "{trace}");
+    assert!(trace.contains("waited_ms="), "{trace}");
+    assert!(trace.contains("retry_max_wait_ms="), "{trace}");
+    assert!(trace.contains("retry_max_rounds="), "{trace}");
+    assert!(trace.contains("route_count="), "{trace}");
+    assert!(trace.contains("cooled_candidate_count="), "{trace}");
+    assert!(trace.contains("candidate_pass_count="), "{trace}");
+    assert!(trace.contains("continuation_route_count="), "{trace}");
+    assert!(trace.contains("distinct_upstream_hosts="), "{trace}");
+    assert!(trace.contains("upstream_error_codes="), "{trace}");
     for secret in [
         "upstream-secret",
         key_fingerprint.as_str(),

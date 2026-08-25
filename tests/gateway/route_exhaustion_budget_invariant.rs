@@ -429,3 +429,46 @@ async fn concurrency_saturated_retry_after_is_not_cut_by_cooldown_cap() {
         "the client-facing hint is the only place the 30s cap applies"
     );
 }
+
+/// T0 observability guard (2026-08-25 plan §T0.1-T0.3): the terminal error
+/// details must carry, alongside the old pass-channel count, the give-up
+/// reason, the real pass-vs-route split (`candidate_pass_count` /
+/// `continuation_route_count`) and a real `remaining_candidates` value.
+/// (The log-only fields from §T0.1/T0.4 are asserted by
+/// `responses::upstream_feedback::route_failure_observability_separates_upstream_500_from_downstream_503`,
+/// which owns a reliable process-global tracing capture; a per-test
+/// thread-local capture cannot follow the request in a parallel gateway
+/// binary.)
+#[tokio::test]
+async fn exhaustion_log_carries_observability_fields() {
+    let (base_url, _hits) = aggregation_upstream(usize::MAX).await;
+    let (app, _state, downstream_key) = exhaustion_harness(base_url, |config| AppConfig {
+        upstream_route_exhaustion_retry_max_rounds: 2,
+        ..config
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(exhaustion_request(&downstream_key))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let details = &payload["error"]["details"];
+
+    // T0.3: `candidate_pass_count` is the (tier × protocol) channel count
+    // (2: ChatCompletions + Responses passes — the pool only speaks Chat, so
+    // the Responses pass has zero candidate routes); the real
+    // contract-filtered route count is 3 upstreams × 2 keys = 6.
+    assert_eq!(details["candidate_pass_count"], 2);
+    assert_eq!(details["continuation_route_count"], 6);
+    // The deprecated alias stays available, echoing the same pass count.
+    assert_eq!(details["continuation_candidate_count"], 2);
+    assert_ne!(details["give_up_reason"], "wait_budget");
+
+    // T0.2: real remaining_candidates — every one of the 6 candidates failed,
+    // so the honest value is 0 (now derived, not hard-coded).
+    assert_eq!(details["remaining_candidates"], 0);
+}

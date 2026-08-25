@@ -158,7 +158,14 @@ pub(super) fn terminal_route_failure_error(
     retry_after_cap: Duration,
     continuation_pin_escaped: bool,
     continuation_pinned: bool,
-    continuation_candidate_count: usize,
+    // T0.3: `candidate_pass_count` is the number of (tier × protocol)
+    // *pass channels*, not routes; `continuation_route_count` is the real
+    // contract-filtered route count.
+    candidate_pass_count: usize,
+    continuation_route_count: usize,
+    // T0.2: routes still available (not failed, not cooling) when the
+    // request gave up — replaces the old hard-coded 0 in the terminal log.
+    remaining_candidates: usize,
 ) -> GatewayError {
     let terminal = ledger.terminal_failure();
     let summaries = ledger.class_summaries();
@@ -224,9 +231,23 @@ pub(super) fn terminal_route_failure_error(
             "continuation_pinned".to_string(),
             json!(continuation_pinned),
         ),
+        // (deprecated, kept for log-compat) number of (tier × protocol) pass
+        // channels at request start — NOT the number of candidate routes.
         (
             "continuation_candidate_count".to_string(),
-            json!(continuation_candidate_count),
+            json!(candidate_pass_count),
+        ),
+        (
+            "candidate_pass_count".to_string(),
+            json!(candidate_pass_count),
+        ),
+        (
+            "continuation_route_count".to_string(),
+            json!(continuation_route_count),
+        ),
+        (
+            "remaining_candidates".to_string(),
+            json!(remaining_candidates),
         ),
         // The route-removal cooldown that the gateway actually applied
         // (what `cooldown_seconds` means in the exhaustion log line).  For a

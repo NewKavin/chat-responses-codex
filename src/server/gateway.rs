@@ -581,6 +581,7 @@ async fn record_route_attempt(
         error.upstream_error_code().map(str::to_owned),
         error.upstream_error_body_excerpt().map(str::to_owned),
         Some(upstream.name.clone()),
+        upstream_host(&upstream.base_url),
     );
     for observation in route_attempts.take_newly_exhausted() {
         state
@@ -800,6 +801,7 @@ fn record_cooled_route_attempt(
         upstream_error_code,
         upstream_error_body_excerpt: None,
         upstream_name: Some(upstream.name.clone()),
+        upstream_host: upstream_host(&upstream.base_url),
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),
         half_open_busy,
@@ -5863,17 +5865,52 @@ async fn process_gateway_request_inner(
         }
     };
     let mut candidate_passes = compute_candidate_passes(&candidate_protocols);
-    // P3: the contract-filtered candidate count at request start.  The escape
-    // round re-assigns candidate_passes to the relaxed full pool, so the
-    // terminal details must read this immutable snapshot, not candidate_passes.
-    let continuation_candidate_count = candidate_passes.len();
+    // P3: the contract-filtered *pass* count at request start.  A pass is a
+    // (optional-capability-miss tier × protocol) channel, NOT a route: many
+    // routes can share one pass.  The escape round re-assigns
+    // candidate_passes to the relaxed full pool, so the terminal details
+    // must read this immutable snapshot, not candidate_passes.
+    // (T0.3: renamed from `continuation_candidate_count`, which conflated
+    // pass channels with real routes.)
+    let candidate_pass_count = candidate_passes.len();
+    // T0.3: the number of *real* contract-filtered routes at request start
+    // (upstream × key × protocol tuples passing `route_is_candidate`).  This
+    // is what "how many candidates do I have" actually means; the pass count
+    // above can be much smaller than the route count when many keys of one
+    // aggregated gateway share the same pass channel.
+    let continuation_route_count = routing_snapshot
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+        .map(|upstream| {
+            let Some(runtime_model_slug) =
+                upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+            else {
+                return 0usize;
+            };
+            candidate_protocols
+                .iter()
+                .copied()
+                .map(|protocol| {
+                    route_api_keys(upstream, &runtime_model_slug, case_insensitive)
+                        .into_iter()
+                        .filter(|api_key| {
+                            let key_fingerprint = route_key_fingerprint(upstream, api_key);
+                            route_is_candidate(upstream, &key_fingerprint, protocol)
+                        })
+                        .count()
+                })
+                .sum::<usize>()
+        })
+        .sum::<usize>();
     // P4/R3: when a continuation pin narrows the contract-filtered pool to a
     // single candidate, cross-request failures on that sole route must not
     // escalate its cooldown step (the route would pin itself at max and the
     // session stays stuck). These failures are marked sole_candidate so the
-    // health layer applies the repeat_within_request semantics.
+    // health layer applies the repeat_within_request semantics.  The test is
+    // on the real route count, not the pass count (T0.3).
     let sole_contract_candidate =
-        continuation_profile_key.is_some() && continuation_candidate_count == 1;
+        continuation_profile_key.is_some() && continuation_route_count == 1;
     let route_retry_policy =
         RouteRetryPolicy::from_sources(&state.config, runtime_settings.as_ref());
     let mut route_retry_budget = RouteRetryBudget::default();
@@ -8185,11 +8222,15 @@ async fn process_gateway_request_inner(
                             | FailureClass::ProtocolUnsupported
                     )
                 ));
-        let mut error = if should_aggregate {
-            let live_recovery = state
+        let live_recovery = if should_aggregate {
+            state
                 .earliest_temporary_route_recovery(&request_route_attempts.eligible_routes())
                 .await
-                .map_err(|_| runtime_coordination_unavailable_gateway_error())?;
+                .map_err(|_| runtime_coordination_unavailable_gateway_error())?
+        } else {
+            None
+        };
+        let mut error = if should_aggregate {
             terminal_route_failure_error(
                 &attempt_ledger,
                 request_route_attempts.routing_round(),
@@ -8203,7 +8244,9 @@ async fn process_gateway_request_inner(
                 upstream_retry_after_cap,
                 continuation_pin_escaped.load(Ordering::Relaxed),
                 continuation_profile_key.is_some(),
-                continuation_candidate_count,
+                candidate_pass_count,
+                continuation_route_count,
+                request_route_attempts.available_candidate_count(),
             )
         } else {
             last_route_error
@@ -8271,6 +8314,28 @@ async fn process_gateway_request_inner(
             .as_ref()
             .map(|failure| failure.route_id.as_str())
             .unwrap_or("route_unknown");
+        // T0.1: surface the give-up reason and the budget arithmetic next to
+        // `cooldown_seconds` so an operator can see the dimension clash at a
+        // glance (28s cooldown > 30s-waited budget = inevitable WaitBudget).
+        // The `distinct_upstream_hosts` field is the T1.4
+        // fake-diversity tell: if it stays at 1 while `route_count` is
+        // large, the "different routes" are all one aggregated gateway and
+        // 502s are common-mode, not per-route.
+        let live_recovery_seconds = live_recovery.map(|recovery| {
+            duration_seconds_ceil(recovery.half_open_remaining.unwrap_or(recovery.retry_after))
+        });
+        let give_up_reason = request_route_attempts
+            .give_up_reason()
+            .map(GiveUpReason::as_str)
+            .unwrap_or("none");
+        let waited_ms = route_retry_budget.waited().as_millis() as u64;
+        let mut error_code_counts = attempt_ledger.upstream_error_code_counts().into_iter().collect::<Vec<_>>();
+        error_code_counts.sort();
+        let upstream_error_codes = error_code_counts
+            .into_iter()
+            .map(|(code, count)| format!("{code}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",");
         tracing::error!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -8285,14 +8350,25 @@ async fn process_gateway_request_inner(
             route_action = %"routes_exhausted",
             same_route_retry = any_same_route_retry,
             cooldown_seconds,
-            remaining_candidates = 0,
+            give_up_reason,
+            waited_ms,
+            retry_max_wait_ms = runtime_settings.upstream_route_exhaustion_retry_max_wait_ms,
+            retry_max_rounds = runtime_settings.upstream_route_exhaustion_retry_max_rounds,
+            route_count = attempt_ledger.distinct_route_count(),
+            cooled_candidate_count = attempt_ledger.cooled_candidate_count(),
+            remaining_candidates = request_route_attempts.available_candidate_count(),
+            live_recovery_seconds,
+            last_resort_probe_attempted = request_route_attempts.last_resort_probe_granted(),
             routing_round = request_route_attempts.routing_round(),
             account_recovery_rounds = account_recovery.rounds(),
             physical_attempt_count = request_route_attempts.physical_attempt_count(),
             half_open_busy_count = attempt_ledger.half_open_busy_count(),
             error_category = %error.error_category(),
             continuation_pinned = continuation_profile_key.is_some(),
-            continuation_candidate_count,
+            candidate_pass_count,
+            continuation_route_count,
+            distinct_upstream_hosts = attempt_ledger.distinct_upstream_host_count(),
+            upstream_error_codes = %upstream_error_codes,
             continuation_pin_escaped = continuation_pin_escaped.load(Ordering::Relaxed),
             "request failed after exhausting upstream candidates"
         );
