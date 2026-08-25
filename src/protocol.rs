@@ -1606,7 +1606,7 @@ fn response_function_call_output_to_chat_message(
 /// the `tool_call_arguments_anomaly` event so operators can identify which
 /// upstream produces which fault shape (T4.1 / T2.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolArgumentsRepairReason {
+pub enum ToolArgumentsRepairReason {
     /// The string contained a complete JSON value followed by more bytes that
     /// themselves began another value (`{}` + real arguments, the exact
     /// `extra data: line 1 column 3 (char 2)` shape).
@@ -1616,7 +1616,7 @@ pub(crate) enum ToolArgumentsRepairReason {
 }
 
 impl ToolArgumentsRepairReason {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ToolArgumentsRepairReason::TrailingData => "trailing_data",
             ToolArgumentsRepairReason::Unparseable => "unparseable",
@@ -1640,9 +1640,7 @@ impl ToolArgumentsRepairReason {
 ///
 /// Implemented with `serde_json::Deserializer::into_iter` so the first
 /// complete value and any trailing values are naturally separated.
-pub(crate) fn normalize_tool_arguments(
-    raw: &str,
-) -> (Cow<'_, str>, Option<ToolArgumentsRepairReason>) {
+pub fn normalize_tool_arguments(raw: &str) -> (Cow<'_, str>, Option<ToolArgumentsRepairReason>) {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return (Cow::Borrowed("{}"), None);

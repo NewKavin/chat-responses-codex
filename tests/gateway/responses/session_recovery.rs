@@ -1023,3 +1023,529 @@ async fn stale_v2_continuation_mid_stream_failover_completes_without_parallel_to
         "parallel_tool_calls must be stripped on the failover route"
     );
 }
+
+// ============================================================================
+// Integration guard: round 1 through account A streams a fragmented tool call,
+// A is cooled, and round 2 with `previous_response_id` escapes the
+// continuation pin onto account B.  Every `arguments` value in the request
+// body that reaches account B must be parseable JSON (the `extra data` 400
+// regression, end-to-end).  Uses Responses-protocol routes so the
+// continuation-pin escape is eligible (a chat-only fallback has no escape).
+// ============================================================================
+
+const CROSS_ACCOUNT_MODEL: &str = "deepseek-v4-flash";
+
+struct CrossAccountHarness {
+    state: AppState,
+    downstream_key: GeneratedDownstreamKey,
+    captured_bodies: Arc<Mutex<Vec<Value>>>,
+    route_a: UpstreamConfig,
+}
+
+impl CrossAccountHarness {
+    fn route_health_key(&self, upstream: &UpstreamConfig) -> RouteHealthKey {
+        RouteHealthKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: upstream_model_key_fingerprint(upstream, CROSS_ACCOUNT_MODEL),
+            runtime_model_slug: CROSS_ACCOUNT_MODEL.into(),
+            protocol: WireProtocol::Responses,
+        }
+    }
+
+    async fn send_responses(&self, body: Value) -> (StatusCode, Value) {
+        let response = build_router(self.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", self.downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        (status, payload)
+    }
+
+    async fn send_responses_streaming(&self, body: Value) -> (StatusCode, String) {
+        let response = build_router(self.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", self.downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        (status, text)
+    }
+}
+
+fn cross_account_tools() -> Value {
+    json!([{
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": "Run a command",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["command"]
+            }
+        }
+    }])
+}
+async fn build_cross_account_harness() -> CrossAccountHarness {
+    // Account A (Responses protocol) streams the "account B" fragmentation
+    // style: the first `function_call_arguments.delta` carries `{}` and the
+    // continuation carries the real arguments.  Naive accumulation would
+    // concatenate them into `{}{...}`; the T1/T2 guards must repair that
+    // before the value is emitted downstream and stored in history.
+    let captured_bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let a_capture = captured_bodies.clone();
+    let a_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a_address = a_listener.local_addr().unwrap();
+    let a_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let capture = a_capture.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let auth = parts
+                    .headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                let body = to_bytes(body, usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(auth, "Bearer account-a-secret", "account A must receive its own key");
+                capture.lock().unwrap().push(payload.clone());
+                let created = format!(
+                    "event: response.created\ndata: {}\n\n",
+                    json!({
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp-cross-a",
+                            "object": "response",
+                            "created_at": 1,
+                            "status": "in_progress",
+                            "model": CROSS_ACCOUNT_MODEL,
+                            "output": []
+                        }
+                    })
+                );
+                let delta_placeholder = format!(
+                    "event: response.function_call_arguments.delta\ndata: {}\n\n",
+                    json!({
+                        "type": "response.function_call_arguments.delta",
+                        "response_id": "resp-cross-a",
+                        "item_id": "fc_cross",
+                        "output_index": 0,
+                        "delta": "{}"
+                    })
+                );
+                let delta_real = format!(
+                    "event: response.function_call_arguments.delta\ndata: {}\n\n",
+                    json!({
+                        "type": "response.function_call_arguments.delta",
+                        "response_id": "resp-cross-a",
+                        "item_id": "fc_cross",
+                        "output_index": 0,
+                        "delta": "{\"command\":[\"ls\"]}"
+                    })
+                );
+                let done = format!(
+                    "event: response.function_call_arguments.done\ndata: {}\n\n",
+                    json!({
+                        "type": "response.function_call_arguments.done",
+                        "response_id": "resp-cross-a",
+                        "item_id": "fc_cross",
+                        "output_index": 0,
+                        "arguments": "{\"command\":[\"ls\"]}",
+                        "name": "shell"
+                    })
+                );
+                let completed = format!(
+                    "event: response.completed\ndata: {}\n\n",
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp-cross-a",
+                            "object": "response",
+                            "created_at": 1,
+                            "status": "completed",
+                            "model": CROSS_ACCOUNT_MODEL,
+                            "output": [{
+                                "id": "fc_cross",
+                                "type": "function_call",
+                                "status": "completed",
+                                "call_id": "call_cross",
+                                "name": "shell",
+                                "arguments": "{\"command\":[\"ls\"]}"
+                            }]
+                        }
+                    })
+                );
+                let chunks = vec![
+                    Ok::<Bytes, std::io::Error>(Bytes::from(created)),
+                    Ok::<Bytes, std::io::Error>(Bytes::from(delta_placeholder)),
+                    Ok::<Bytes, std::io::Error>(Bytes::from(delta_real)),
+                    Ok::<Bytes, std::io::Error>(Bytes::from(done)),
+                    Ok::<Bytes, std::io::Error>(Bytes::from(completed)),
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n")),
+                ];
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(stream::iter(chunks)),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(a_listener, a_app).await.unwrap();
+    });
+
+    // Account B: captures every request and answers with a plain text
+    // Responses payload (non-streaming).
+    let b_capture = captured_bodies.clone();
+    let b_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let b_address = b_listener.local_addr().unwrap();
+    let b_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let capture = b_capture.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let auth = parts
+                    .headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                let body = to_bytes(body, usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(auth, "Bearer account-b-secret", "account B must receive its own key");
+                capture.lock().unwrap().push(payload.clone());
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Body::from(
+                        json!({
+                            "id": "resp-cross-b",
+                            "object": "response",
+                            "created_at": 1,
+                            "status": "completed",
+                            "model": CROSS_ACCOUNT_MODEL,
+                            "output": [{
+                                "id": "msg-cross-b",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "resumed on b",
+                                    "annotations": []
+                                }]
+                            }],
+                            "usage": {
+                                "input_tokens": 1,
+                                "output_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })
+                        .to_string(),
+                    ),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(b_listener, b_app).await.unwrap();
+    });
+    let route_a = UpstreamConfig {
+        id: "aa-account-a".into(),
+        name: "account a".into(),
+        base_url: format!("http://{a_address}"),
+        api_key: "account-a-secret".into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec![CROSS_ACCOUNT_MODEL.into()],
+        priority: 100,
+        active: true,
+        ..Default::default()
+    };
+    let route_b = UpstreamConfig {
+        id: "bb-account-b".into(),
+        name: "account b".into(),
+        base_url: format!("http://{b_address}"),
+        api_key: "account-b-secret".into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec![CROSS_ACCOUNT_MODEL.into()],
+        priority: 1,
+        active: true,
+        ..Default::default()
+    };
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![route_a.clone(), route_b.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-cross-account".into(),
+                name: "cross account client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![CROSS_ACCOUNT_MODEL.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            // Keep route A cooling for the whole test so the escape to route B
+            // is the only way out and deterministic (no recovery mid-test).
+            upstream_transient_route_cooldown_base_seconds: 300,
+            upstream_transient_route_cooldown_max_seconds: 600,
+            // The A3 last-resort probe would physically probe the cooled,
+            // continuation-pinned route A instead of escaping to B; this test
+            // targets the cross-profile replay escape, so the probe is off.
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    for route in [&route_a, &route_b] {
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(route, CROSS_ACCOUNT_MODEL),
+            upstream_id: route.id.clone(),
+            runtime_model_slug: CROSS_ACCOUNT_MODEL.into(),
+            protocol: WireProtocol::Responses,
+        });
+        profile.state = DialectProfileState::Verified;
+        profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
+        for capability in [
+            Capability::TextInput,
+            Capability::NonStreamingResponse,
+            Capability::TextStream,
+            Capability::FunctionTools,
+        ] {
+            profile
+                .capabilities
+                .insert(capability, EvidenceState::Supported);
+        }
+        stamp_current_dialect_profile(&state, CROSS_ACCOUNT_MODEL, &mut profile).await;
+        state.upsert_dialect_profile(profile).await.unwrap();
+    }
+
+    CrossAccountHarness {
+        state,
+        downstream_key,
+        captured_bodies,
+        route_a,
+    }
+}
+
+#[tokio::test]
+async fn account_switch_replay_sends_parseable_tool_arguments_upstream() {
+    let harness = build_cross_account_harness().await;
+
+    // Round 1: stream through account A (higher priority), whose mock emits
+    // the fragmented tool-call style that previously concatenated `{}` +
+    // real arguments.
+    let (status, text) = harness
+        .send_responses_streaming(json!({
+            "model": CROSS_ACCOUNT_MODEL,
+            "input": "run ls",
+            "tools": cross_account_tools(),
+            "stream": true
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(
+        text.contains("response.function_call_arguments.done"),
+        "{text}"
+    );
+    assert_eq!(
+        harness.captured_bodies.lock().unwrap().len(),
+        1,
+        "round 1 must reach exactly one upstream (account A)"
+    );
+    let response_id = {
+        let mut found = None;
+        for event in text.split("\n\n") {
+            if event.contains("response.completed") {
+                let data_line = event
+                    .lines()
+                    .find(|line| line.starts_with("data: "))
+                    .expect("completed event data");
+                let value: Value =
+                    serde_json::from_str(data_line.trim_start_matches("data: ")).unwrap();
+                found = value
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
+        found.expect("round 1 must produce a response id")
+    };
+
+    // The store path (T2.3) must already have repaired the `{}` + real
+    // arguments accumulation before persisting to response history.
+    let stored = harness
+        .state
+        .response_history("down-cross-account", &response_id)
+        .await
+        .expect("round 1 history must be stored");
+    let stored_args = stored
+        .items
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .and_then(|item| item.get("arguments"))
+        .and_then(Value::as_str)
+        .expect("stored history must carry the function_call arguments");
+    assert_eq!(
+        stored_args, "{\"command\":[\"ls\"]}",
+        "the store path must normalize the polluted accumulation"
+    );
+    assert_eq!(
+        stored
+            .request_state
+            .get("_gateway_source_profile")
+            .and_then(|value| value.get("upstream_id"))
+            .and_then(Value::as_str),
+        Some("aa-account-a"),
+        "round 1 history must be recorded against account A"
+    );
+
+    // Simulate legacy pollution: history written before T2 could already
+    // carry the `{}{...}` concatenation.  Re-store the same history with the
+    // function_call item's arguments replaced by the polluted form so the
+    // cross-profile replay normalization (T3.3) is exercised end-to-end.
+    let mut polluted_items = stored.items.clone();
+    for item in polluted_items.iter_mut() {
+        if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            item["arguments"] = json!("{}{\"command\":[\"ls\"]}");
+        }
+    }
+    harness.state.store_response_history(
+        "down-cross-account",
+        &response_id,
+        polluted_items,
+        stored.request_state.clone(),
+    );
+
+    // Cool account A so the follow-up must escape the continuation pin onto
+    // account B.
+    harness
+        .state
+        .observe_route_failure(
+            &harness.route_health_key(&harness.route_a),
+            RouteFailureClass::TransientServer,
+            None,
+        )
+        .await
+        .expect("route health observation");
+    let snap = harness
+        .state
+        .route_health_snapshot(&harness.route_health_key(&harness.route_a))
+        .await
+        .expect("snapshot")
+        .expect("route A health snapshot");
+    assert!(
+        snap.cooldown_remaining > Duration::from_secs(1),
+        "account A must be in cooldown, got {:?}",
+        snap.cooldown_remaining
+    );
+
+    // Round 2: previous_response_id replay must escape to account B, and
+    // every replayed tool-call arguments value must be parseable JSON.
+    let (status, payload) = harness
+        .send_responses(json!({
+            "model": CROSS_ACCOUNT_MODEL,
+            "previous_response_id": response_id,
+            "input": "continue",
+            "tools": cross_account_tools(),
+            "stream": false
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+
+    let captured = harness.captured_bodies.lock().unwrap().clone();
+    assert_eq!(
+        captured.len(),
+        2,
+        "expected round 1 (account A) + round 2 (account B)"
+    );
+    // The second captured body is the one that reached account B.
+    let b_body = captured[1].clone();
+    let input = b_body
+        .get("input")
+        .and_then(Value::as_array)
+        .expect("account B must receive a responses input array");
+    let mut tool_args_seen = 0;
+    for item in input {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        let raw = item
+            .get("arguments")
+            .and_then(Value::as_str)
+            .expect("function_call item must carry arguments");
+        let parsed: Value = serde_json::from_str(raw).unwrap_or_else(|error| {
+            panic!("account B received unparseable arguments {raw:?}: {error}")
+        });
+        assert!(
+            parsed.is_object(),
+            "account B arguments must be a JSON object: {raw}"
+        );
+        assert!(
+            !raw.starts_with("{}"),
+            "account B arguments must not carry a placeholder prefix: {raw}"
+        );
+        tool_args_seen += 1;
+    }
+    assert_eq!(
+        tool_args_seen, 1,
+        "expected the replayed tool call arguments in account B's request"
+    );
+}

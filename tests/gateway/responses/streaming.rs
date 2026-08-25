@@ -1723,3 +1723,238 @@ async fn downstream_responses_stream_tolerates_chat_keepalive_and_empty_data_fra
     );
     assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
 }
+
+// ============================================================================
+// Integration guard: account-B-style fragmented tool calls produce a valid
+// `function_call_arguments.done` downstream (T1.1 + T1.2 end-to-end).
+// The mock chat upstream emits the first fragment with `id` and `index`, then
+// a continuation fragment that omits BOTH `index` and `id` (the "account B"
+// fragmentation style from the extra-data diagnosis).  Without T1 the
+// accumulator would append and yield `{}{"command":["ls"]}`; with T1 the
+// downstream done event must carry parseable `{"command":["ls"]}`.
+#[tokio::test]
+async fn fragmented_tool_call_without_index_id_yields_valid_done_arguments() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        // "Account B" style: first fragment carries id+index
+                        // and a `{}` placeholder, the continuation fragment
+                        // carries only `arguments` (no index, no id).
+                        let chunks = vec![
+                            Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-frag",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "arbitrary/fragmented",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {
+                                            "role": "assistant",
+                                            "tool_calls": [{
+                                                "index": 0,
+                                                "id": "call_frag",
+                                                "function": {
+                                                    "name": "shell",
+                                                    "arguments": "{}"
+                                                }
+                                            }]
+                                        },
+                                        "finish_reason": null
+                                    }]
+                                })
+                            ))),
+                            Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-frag",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "arbitrary/fragmented",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {
+                                            "tool_calls": [{
+                                                "function": {
+                                                    "arguments": "{\"command\":[\"ls\"]}"
+                                                }
+                                            }]
+                                        },
+                                        "finish_reason": null
+                                    }]
+                                })
+                            ))),
+                            Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-frag",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "arbitrary/fragmented",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "tool_calls"
+                                    }]
+                                })
+                            ))),
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n")),
+                        ];
+
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(chunks)),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let model = "arbitrary/fragmented";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-fragmented".into(),
+                name: "fragmented".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": model,
+                "stream": true,
+                "input": "Run ls",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "shell",
+                            "description": "Run a command",
+                            "parameters": {
+                                "type": "object"
+                            }
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("response.function_call_arguments.done"),
+        "{text}"
+    );
+    assert!(text.contains("response.completed"), "{text}");
+
+    // Extract every `response.function_call_arguments.done` data payload and
+    // assert its `arguments` is a complete, parseable JSON object with no
+    // `{}` placeholder prefix.
+    let mut done_count = 0;
+    for event in text.split("\n\n") {
+        if event.contains("response.function_call_arguments.done") {
+            let data_line = event
+                .lines()
+                .find(|line| line.starts_with("data: "))
+                .expect("done event must carry a data line");
+            let data = data_line.trim_start_matches("data: ");
+            let value: Value = serde_json::from_str(data).expect("done event data must be JSON");
+            let arguments = value
+                .get("arguments")
+                .and_then(Value::as_str)
+                .expect("done event must carry arguments");
+            let parsed: Value =
+                serde_json::from_str(arguments).expect("done arguments must be valid JSON");
+            assert_eq!(
+                parsed,
+                json!({"command": ["ls"]}),
+                "done arguments must equal the repaired object, got {arguments}"
+            );
+            assert!(
+                !arguments.starts_with("{}"),
+                "done arguments must not carry a placeholder prefix"
+            );
+            done_count += 1;
+        }
+    }
+    assert_eq!(
+        done_count, 1,
+        "expected exactly one done event, got {done_count}"
+    );
+}

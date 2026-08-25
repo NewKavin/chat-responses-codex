@@ -8,7 +8,7 @@ use crate::capabilities::{
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::{
     chat_request_to_responses_payload_with_context,
-    chat_response_to_responses_payload_with_tool_registry,
+    chat_response_to_responses_payload_with_tool_registry, normalize_tool_arguments,
     responses_response_to_chat_payload_with_tool_registry,
     tool_adapter::{ToolAdapterRegistry, ToolTarget},
     ChatStreamCanonicalizer, ConversionContext, FirstUsableOutputClassifier,
@@ -3510,6 +3510,41 @@ struct ResponseHistoryContext {
     tool_registry: Option<ToolAdapterRegistry>,
 }
 
+/// The provider profile that produced a stored response history entry
+/// (T3.1).  Recorded at dispatch time from the actually-selected route, and
+/// compared against the route selected on a later `previous_response_id`
+/// replay so cross-provider history reuse can be detected and sanitized.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewaySourceProfile {
+    upstream_id: String,
+    key_fingerprint: String,
+    dialect_profile_key: DialectProfileKey,
+    protocol: WireProtocol,
+}
+
+impl GatewaySourceProfile {
+    fn from_route(
+        upstream: &UpstreamConfig,
+        key_fingerprint: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> Self {
+        let wire_protocol = WireProtocol::from(protocol);
+        Self {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: key_fingerprint.to_string(),
+            dialect_profile_key: DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_fingerprint.to_string(),
+                runtime_model_slug.to_string(),
+                wire_protocol,
+            ),
+            protocol: wire_protocol,
+        }
+    }
+}
+
 impl ResponseHistoryContext {
     fn with_fallback_stage(&self, stage: ChatFallbackStage) -> Self {
         let mut history_request_state = self.history_request_state.clone();
@@ -3552,6 +3587,31 @@ impl ResponseHistoryContext {
             history_request_state,
             tool_registry: self.tool_registry.clone(),
         })
+    }
+
+    /// The source profile recorded when this history context's response was
+    /// (or will be) captured, if one has been set yet (T3.1).
+    fn source_profile(&self) -> Option<GatewaySourceProfile> {
+        self.history_request_state
+            .get("_gateway_source_profile")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Record which provider profile will have produced the response stored
+    /// from this context, so a later `previous_response_id` replay can detect
+    /// that the history crossed provider profiles (T3.1).
+    fn with_source_profile(&self, profile: GatewaySourceProfile) -> Self {
+        let mut history_request_state = self.history_request_state.clone();
+        if let Ok(value) = serde_json::to_value(&profile) {
+            history_request_state.insert("_gateway_source_profile".to_string(), value);
+        }
+        Self {
+            state: self.state.clone(),
+            downstream_key_id: self.downstream_key_id.clone(),
+            history_input_items: self.history_input_items.clone(),
+            history_request_state,
+            tool_registry: self.tool_registry.clone(),
+        }
     }
 
     fn tool_registry(&self) -> Option<&ToolAdapterRegistry> {
@@ -3946,6 +4006,55 @@ fn sanitize_history_for_cross_provider_replay(body: &mut Value) {
     }
     if let Some(input) = body.get_mut("input") {
         sanitize_item(input);
+    }
+}
+
+/// T3.3: on a cross-profile history replay, additionally normalize every
+/// replayed `function_call` item's `arguments` through
+/// [`normalize_tool_arguments`].  History written before T2 can already carry
+/// `{}`-prefixed pollutant strings (the `{}{...}` extra-data shape), so the
+/// replay path repairs them once more before they reach the upstream.
+fn normalize_replayed_history_tool_arguments(
+    body: &mut Value,
+    model: Option<&str>,
+    request_id: &str,
+) {
+    let Some(input) = body.get_mut("input") else {
+        return;
+    };
+    let Some(items) = input.as_array_mut() else {
+        return;
+    };
+    for item in items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        let Some(raw) = object.get("arguments").and_then(Value::as_str) else {
+            continue;
+        };
+        let (normalized, repair) = normalize_tool_arguments(raw);
+        let Some(reason) = repair else {
+            continue;
+        };
+        let call_id = object
+            .get("call_id")
+            .or_else(|| object.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        tracing::warn!(
+            event = "tool_call_arguments_anomaly",
+            reason = reason.as_str(),
+            call_id,
+            model = %model.unwrap_or(""),
+            request_id,
+            fragment = %raw,
+            phase = "cross_profile_history_replay",
+            "tool call arguments anomaly during cross-profile history replay"
+        );
+        object.insert("arguments".into(), Value::String(normalized.into_owned()));
     }
 }
 
@@ -6574,87 +6683,88 @@ async fn process_gateway_request_inner(
                         let global_context_profile = state
                             .global_context_profile_for_upstream_base_url(&upstream.base_url)
                             .await;
-                        let (dispatch_body, dispatch_response_history_context, chat_fallback_stage) =
-                            if endpoint == EndpointKind::Responses
-                                && protocol == UpstreamProtocol::ChatCompletions
-                                && chat_only_responses_fallback
+                        let (
+                            mut dispatch_body,
+                            dispatch_response_history_context,
+                            chat_fallback_stage,
+                        ) = if endpoint == EndpointKind::Responses
+                            && protocol == UpstreamProtocol::ChatCompletions
+                            && chat_only_responses_fallback
+                        {
+                            let stage = initial_chat_fallback_stage(
+                                &state,
+                                &downstream.id,
+                                client_family,
+                                &normalized_model,
+                                &upstream.id,
+                                original_responses_body
+                                    .as_ref()
+                                    .expect("responses requests should retain original body"),
+                            );
+                            tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %&normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                client_family,
+                                fallback_stage = stage.as_str(),
+                                "selected chat-only Responses fallback stage"
+                            );
+                            match prepare_responses_chat_fallback_request(
+                                &state,
+                                &downstream.id,
+                                original_responses_body
+                                    .as_ref()
+                                    .expect("responses requests should retain original body"),
+                                stage,
+                            )
+                            .await
                             {
-                                let stage = initial_chat_fallback_stage(
-                                    &state,
-                                    &downstream.id,
-                                    client_family,
-                                    &normalized_model,
-                                    &upstream.id,
-                                    original_responses_body
-                                        .as_ref()
-                                        .expect("responses requests should retain original body"),
-                                );
-                                tracing::info!(
-                                    request_id = %request_id,
-                                    downstream_key_id = %downstream.id,
-                                    path = %request_path,
-                                    original_model = %model,
-                                    normalized_model = %&normalized_model,
-                                    selected_upstream_id = %upstream.id,
-                                    selected_upstream_protocol = ?protocol,
-                                    client_family,
-                                    fallback_stage = stage.as_str(),
-                                    "selected chat-only Responses fallback stage"
-                                );
-                                match prepare_responses_chat_fallback_request(
-                                    &state,
-                                    &downstream.id,
-                                    original_responses_body
-                                        .as_ref()
-                                        .expect("responses requests should retain original body"),
-                                    stage,
-                                )
-                                .await
-                                {
-                                    Ok((prepared_body, prepared_history_context)) => (
-                                        prepared_body,
-                                        Some(prepared_history_context.with_fallback_stage(stage)),
-                                        Some(stage),
-                                    ),
-                                    Err(error) => {
-                                        if let Some(cancellation) = pre_header_cancellation.as_ref()
-                                        {
-                                            cancellation.disarm();
-                                        }
-                                        let _ = append_gateway_usage_log(
-                                            &state,
-                                            &request_id,
-                                            &downstream.id,
-                                            &downstream.name,
-                                            "",
-                                            None,
-                                            request_path,
-                                            model,
-                                            inference_strength.as_deref(),
-                                            user_agent.as_deref(),
-                                            None,
-                                            error.status_code(),
-                                            Some(error.to_string()),
-                                            Some(error.error_category().to_string()),
-                                            0,
-                                            0,
-                                            0,
-                                            started,
-                                        )
-                                        .await;
-                                        active_request_guard
-                                            .fail_and_finish(error.error_category());
-                                        let release = upstream_request_guard.release().await;
-                                        return Err(if release.is_err() {
-                                            runtime_coordination_unavailable_gateway_error()
-                                        } else {
-                                            error
-                                        });
+                                Ok((prepared_body, prepared_history_context)) => (
+                                    prepared_body,
+                                    Some(prepared_history_context.with_fallback_stage(stage)),
+                                    Some(stage),
+                                ),
+                                Err(error) => {
+                                    if let Some(cancellation) = pre_header_cancellation.as_ref() {
+                                        cancellation.disarm();
                                     }
+                                    let _ = append_gateway_usage_log(
+                                        &state,
+                                        &request_id,
+                                        &downstream.id,
+                                        &downstream.name,
+                                        "",
+                                        None,
+                                        request_path,
+                                        model,
+                                        inference_strength.as_deref(),
+                                        user_agent.as_deref(),
+                                        None,
+                                        error.status_code(),
+                                        Some(error.to_string()),
+                                        Some(error.error_category().to_string()),
+                                        0,
+                                        0,
+                                        0,
+                                        started,
+                                    )
+                                    .await;
+                                    active_request_guard.fail_and_finish(error.error_category());
+                                    let release = upstream_request_guard.release().await;
+                                    return Err(if release.is_err() {
+                                        runtime_coordination_unavailable_gateway_error()
+                                    } else {
+                                        error
+                                    });
                                 }
-                            } else {
-                                (body.clone(), response_history_context.clone(), None)
-                            };
+                            }
+                        } else {
+                            (body.clone(), response_history_context.clone(), None)
+                        };
                         let mut dispatch_response_history_context =
                             dispatch_response_history_context;
                         if let (Some(context), Some(continuation)) = (
@@ -6662,6 +6772,50 @@ async fn process_gateway_request_inner(
                             exact_continuation.as_ref(),
                         ) {
                             *context = context.with_selected_route(continuation.clone(), None)?;
+                        }
+                        // T3: record the actually-dispatched route's provider
+                        // profile on the history context (so the stored
+                        // response history carries its source profile), and
+                        // when the replayed history was captured from a
+                        // different profile, sanitize the replayed items
+                        // before they are sent upstream — the same
+                        // cross-provider sanitization the continuation-pin
+                        // escape channel applies, now enforced on every
+                        // ordinary account rotation (T3.2), plus a T2.1
+                        // normalization pass for legacy polluted arguments
+                        // (T3.3).
+                        let selected_source_profile = GatewaySourceProfile::from_route(
+                            &upstream,
+                            &key_fingerprint,
+                            &runtime_model_slug,
+                            protocol,
+                        );
+                        let mut cross_profile_replay = false;
+                        if let Some(context) = dispatch_response_history_context.as_mut() {
+                            if context
+                                .source_profile()
+                                .is_some_and(|replayed| replayed != selected_source_profile)
+                            {
+                                cross_profile_replay = true;
+                            }
+                            *context = context.with_source_profile(selected_source_profile);
+                        }
+                        if cross_profile_replay {
+                            sanitize_history_for_cross_provider_replay(&mut dispatch_body);
+                            normalize_replayed_history_tool_arguments(
+                                &mut dispatch_body,
+                                Some(model),
+                                &request_id,
+                            );
+                            tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                history_cross_profile_replay = true,
+                                "replayed response history crossed provider profiles; sanitized before dispatch"
+                            );
                         }
 
                         let route_hedge_candidates = if request_stream

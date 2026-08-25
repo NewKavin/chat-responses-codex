@@ -2212,6 +2212,11 @@ pub(super) async fn send_to_upstream(
                 upstream_body_has_output_tokens = diagnostics.has_output_tokens,
                 upstream_body_has_prompt_tokens = diagnostics.has_prompt_tokens,
                 upstream_body_has_completion_tokens = diagnostics.has_completion_tokens,
+                // T4.2: the sanitized upstream message excerpt (e.g. a Python
+                // `extra data` error) is surfaced only when the operator has
+                // enabled `upstream_error_body_excerpt_enabled`; it stays
+                // `None` (and unlogged) otherwise.
+                upstream_body_excerpt = ?classified_feedback.upstream_error_body_excerpt,
                 "upstream rejected request body; payload values withheld"
             );
             let _ = maybe_queue_dialect_error_probe(

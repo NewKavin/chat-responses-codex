@@ -3244,3 +3244,287 @@ async fn downstream_responses_request_with_unknown_function_tool_choice_drops_to
     assert_eq!(request_body["tools"][0]["type"], "function");
     assert_eq!(request_body["tools"][0]["function"]["name"], "get_weather");
 }
+
+// ============================================================================
+// T3: cross-provider history replay sanitization
+// ============================================================================
+
+const PROFILE_SWITCH_MODEL: &str = "arbitrary/profile-switch";
+
+fn source_profile_json(upstream_id: &str, key_fingerprint: &str, model: &str) -> Value {
+    json!({
+        "upstream_id": upstream_id,
+        "key_fingerprint": key_fingerprint,
+        "dialect_profile_key": {
+            "upstream_id": upstream_id,
+            "key_fingerprint": key_fingerprint,
+            "runtime_model_slug": model,
+            "protocol": "responses",
+        },
+        "protocol": "responses",
+    })
+}
+
+/// Mock upstream (protocol=Responses, non-streaming) that captures every
+/// request body it receives so the test can inspect what the gateway actually
+/// dispatched.
+async fn spawn_profile_switch_mock(captured_bodies: Arc<Mutex<Vec<Value>>>) -> (String, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured = captured_bodies.clone();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let captured = captured.clone();
+            async move {
+                let body_value: Value = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX).await.unwrap(),
+                )
+                .unwrap();
+                captured.lock().unwrap().push(body_value);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "resp-profile-b",
+                        "object": "response",
+                        "output": [{
+                            "id": "msg-profile-b",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "ok",
+                                "annotations": []
+                            }]
+                        }]
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+    (format!("http://{address}"), "key-b".to_string())
+}
+
+async fn build_profile_switch_state(
+    base_url: &str,
+    upstream_id: &str,
+    api_key: &str,
+    model: &str,
+) -> (AppState, String, String) {
+    let downstream_key = generate_downstream_key("gw");
+    let upstream = UpstreamConfig {
+        id: upstream_id.into(),
+        name: upstream_id.into(),
+        base_url: base_url.to_string(),
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec![model.into()],
+        active: true,
+        ..Default::default()
+    };
+    let fingerprint = upstream_model_key_fingerprint(&upstream, model);
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-profile-switch".into(),
+                name: "profile switch client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::Responses,
+    });
+    profile.state = DialectProfileState::Verified;
+    profile
+        .capabilities
+        .insert(Capability::TextInput, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::TextStream, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::NonStreamingResponse, EvidenceState::Supported);
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile.clone()).await.unwrap();
+    (state, downstream_key.plaintext, fingerprint)
+}
+
+/// Replayed history whose `source_profile` differs from the currently selected
+/// route must be sanitized before dispatch (T3.2) — the supplier-bound fields
+/// (`encrypted_content`, item `id`) must be gone from the upstream-bound body.
+#[tokio::test]
+async fn history_replay_across_provider_profiles_sanitizes_input() {
+    let captured_bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let (base_url, api_key) = spawn_profile_switch_mock(captured_bodies.clone()).await;
+    let (state, downstream_key, _fingerprint) =
+        build_profile_switch_state(&base_url, "profile-up-b", &api_key, PROFILE_SWITCH_MODEL).await;
+
+    // History captured from a *different* provider profile (account A).
+    state.store_response_history(
+        "down-profile-switch",
+        "history-from-profile-a",
+        vec![
+            json!({
+                "id": "msg-a",
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "from profile a",
+                    "annotations": []
+                }],
+                "encrypted_content": {"ciphertext": "vendor-bound-a"}
+            }),
+            json!({
+                "id": "fc-a",
+                "type": "function_call",
+                "call_id": "call_a",
+                "name": "shell",
+                "arguments": "{\"command\":[\"ls\"]}"
+            }),
+        ],
+        serde_json::Map::from_iter([(
+            "_gateway_source_profile".to_string(),
+            source_profile_json("profile-a", "fp-a", PROFILE_SWITCH_MODEL),
+        )]),
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, format!("Bearer {}", downstream_key))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": PROFILE_SWITCH_MODEL,
+                        "previous_response_id": "history-from-profile-a",
+                        "input": "continue",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = captured_bodies.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1, "expected exactly one upstream request");
+    let input = captured[0].get("input").and_then(Value::as_array).unwrap();
+    let replayed = input
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .expect("replayed function_call item must be present");
+    // Supplier-bound fields are stripped by the cross-provider sanitizer.
+    assert!(
+        input
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none()),
+        "cross-provider replay must strip encrypted_content"
+    );
+    assert!(replayed.get("id").is_none(), "item id must be stripped");
+    assert_eq!(
+        replayed.get("call_id").and_then(Value::as_str),
+        Some("call_a")
+    );
+    assert_eq!(
+        replayed.get("arguments").and_then(Value::as_str),
+        Some("{\"command\":[\"ls\"]}")
+    );
+}
+
+/// Replayed history captured from the *same* profile as the selected route
+/// must NOT be sanitized (T3.2 does not fire when the profiles agree).
+#[tokio::test]
+async fn history_replay_within_same_provider_profile_keeps_input() {
+    let captured_bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let (base_url, api_key) = spawn_profile_switch_mock(captured_bodies.clone()).await;
+    let (state, downstream_key, fingerprint) =
+        build_profile_switch_state(&base_url, "profile-up-b", &api_key, PROFILE_SWITCH_MODEL).await;
+
+    // History captured from the same profile that will be selected now.
+    state.store_response_history(
+        "down-profile-switch",
+        "history-from-profile-b",
+        vec![json!({
+            "id": "msg-b",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "from profile b",
+                "annotations": []
+            }],
+            "encrypted_content": {"ciphertext": "vendor-bound-b"}
+        })],
+        serde_json::Map::from_iter([(
+            "_gateway_source_profile".to_string(),
+            source_profile_json("profile-up-b", &fingerprint, PROFILE_SWITCH_MODEL),
+        )]),
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, format!("Bearer {}", downstream_key))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": PROFILE_SWITCH_MODEL,
+                        "previous_response_id": "history-from-profile-b",
+                        "input": "continue",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = captured_bodies.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1, "expected exactly one upstream request");
+    let input = captured[0].get("input").and_then(Value::as_array).unwrap();
+    assert!(
+        input
+            .iter()
+            .any(|item| item.get("encrypted_content").is_some()),
+        "same-profile replay must preserve supplier-bound fields"
+    );
+}
