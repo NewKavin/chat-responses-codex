@@ -6,6 +6,7 @@ use crate::capabilities::{
 use crate::state::PersistedState;
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::to_bytes;
+use axum::http::StatusCode;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
@@ -3461,4 +3462,45 @@ fn e5_terminal_summary_appends_body_excerpt_when_present() {
         !message.contains("sk-live-abcdefghijklmnopqrst"),
         "key material must not leak: {message}"
     );
+}
+
+#[test]
+fn logprobs_is_safe_dialect_strip_field() {
+    use crate::server::gateway::capability_probe::is_safe_dialect_strip_field;
+
+    // logprobs and top_logprobs should be in the safe strip list
+    assert!(is_safe_dialect_strip_field("logprobs"));
+    assert!(is_safe_dialect_strip_field("top_logprobs"));
+
+    // Other known safe fields
+    assert!(is_safe_dialect_strip_field("parallel_tool_calls"));
+    assert!(is_safe_dialect_strip_field("reasoning_effort"));
+
+    // Unsafe fields should not be stripped
+    assert!(!is_safe_dialect_strip_field("model"));
+    assert!(!is_safe_dialect_strip_field("messages"));
+    assert!(!is_safe_dialect_strip_field("tools"));
+}
+
+#[test]
+fn dialect_retry_identifies_logprobs_for_strip() {
+    use crate::server::gateway::dialect_retry::generic_strip_field_for_response;
+
+    let error_text = r#"{"error":{"message":"Unsupported parameter: logprobs","type":"invalid_parameter_error","param":"logprobs","code":"invalid_parameter"}}"#;
+
+    // Should identify logprobs as the field to strip
+    let field = generic_strip_field_for_response(
+        StatusCode::BAD_REQUEST,
+        error_text,
+        true, // request_shape_rejected
+    );
+
+    assert_eq!(field, Some("logprobs"));
+
+    // Test top_logprobs
+    let error_text2 = r#"{"error":{"message":"Unsupported parameter: top_logprobs","type":"invalid_parameter_error","param":"top_logprobs"}}"#;
+
+    let field2 = generic_strip_field_for_response(StatusCode::BAD_REQUEST, error_text2, true);
+
+    assert_eq!(field2, Some("top_logprobs"));
 }

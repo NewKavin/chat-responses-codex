@@ -50,6 +50,12 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
         .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty);
 
     if let Some(object) = sanitized.as_object_mut() {
+        // Remove logprobs fields that many domestic models (GLM, Deepseek, etc.) don't support.
+        // These will trigger automatic retry via dialect_retry if the upstream rejects them,
+        // but proactively removing them in Responses->Chat conversion avoids the round-trip.
+        object.remove("logprobs");
+        object.remove("top_logprobs");
+
         if let Some(tools) = object.get("tools").and_then(Value::as_array) {
             let adaptation = build_chat_fallback_tool_adaptation(tools)?;
             downgrade_codes.extend(adaptation.downgrades.iter().cloned());

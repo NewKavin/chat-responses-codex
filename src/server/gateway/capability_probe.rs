@@ -616,16 +616,19 @@ pub(super) fn dialect_field_error_hint(error_text: &str) -> Option<&'static str>
         return None;
     }
     [
+        // Order matters: check more specific fields first to avoid substring matches
+        "top_logprobs",
+        "max_output_tokens",
+        "max_completion_tokens",
         "parallel_tool_calls",
         "service_tier",
         "reasoning_effort",
-        "max_output_tokens",
-        "max_completion_tokens",
         "stream_options",
         "reasoning_content",
         "tool_choice",
         "verbosity",
         "prompt_cache_key",
+        "logprobs",
     ]
     .iter()
     .copied()
@@ -646,6 +649,8 @@ pub(super) fn is_safe_dialect_strip_field(field: &str) -> bool {
             | "stream_options"
             | "verbosity"
             | "prompt_cache_key"
+            | "logprobs"
+            | "top_logprobs"
     )
 }
 
