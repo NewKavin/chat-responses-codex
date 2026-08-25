@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::TranslatorDiagnostics;
 
 /// Build a pre-connect SSE stream that sends keepalive frames to the downstream
 /// client while `process_gateway_request` runs in the background. This eliminates
@@ -1490,18 +1491,27 @@ pub(super) fn translated_stream_body(
     response_history_context: Option<ResponseHistoryContext>,
     commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
+    tool_call_merge_strict: bool,
 ) -> Result<Body, GatewayError> {
     let tool_registry = response_history_context
         .as_ref()
         .and_then(ResponseHistoryContext::tool_registry)
         .cloned();
-    let translator =
-        StreamTranslator::new_with_tool_registry(source_protocol, target_protocol, tool_registry)
-            .ok_or_else(|| {
-            GatewayError::BadRequest(
-                "stream translation is not available for the requested protocol pair".into(),
-            )
-        })?;
+    let translator = StreamTranslator::new_with_config(
+        source_protocol,
+        target_protocol,
+        tool_registry,
+        tool_call_merge_strict,
+        Some(TranslatorDiagnostics {
+            request_id: log_context.request_id.clone(),
+            upstream_id: log_context.upstream_key_id.clone(),
+        }),
+    )
+    .ok_or_else(|| {
+        GatewayError::BadRequest(
+            "stream translation is not available for the requested protocol pair".into(),
+        )
+    })?;
     let canonicalizer = (source_protocol == UpstreamProtocol::ChatCompletions).then(|| {
         ChatStreamCanonicalizer::new(
             format!("chatcmpl-{}", log_context.request_id),

@@ -2598,6 +2598,7 @@ pub(super) async fn send_to_upstream(
                     response_history_context,
                     commit_tracker,
                     first_semantic_deadline,
+                    runtime_settings.tool_call_merge_strict,
                 )?
             }
         } else {

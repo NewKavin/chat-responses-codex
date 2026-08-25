@@ -4180,3 +4180,236 @@ fn chat_stream_fixture_content_filter_marks_response_incomplete() {
         .iter()
         .all(|event| event["type"] != "response.completed"));
 }
+
+#[test]
+fn chat_stream_complete_then_new_fragment_replaces_placeholder() {
+    // Root-cause guard (T1.2): an upstream that first emits a `{}` placeholder
+    // (with id) and then the real arguments on the same call must NOT yield
+    // `{}{"command":["ls"]}`.  The complete-then-new guard replaces the stale
+    // placeholder instead of appending.
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let first = json!({
+        "id": "chatcmpl-placeholder",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_a",
+                "type": "function",
+                "function": {"name": "shell", "arguments": "{}"}
+            }]},
+            "finish_reason": null
+        }]
+    });
+    let second = json!({
+        "id": "chatcmpl-placeholder",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "{\"command\":[\"ls\"]}"}
+            }]},
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let arguments_done = events
+        .iter()
+        .find(|event| event["type"] == "response.function_call_arguments.done")
+        .expect("function arguments done event");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+
+    let done_arguments = arguments_done["arguments"]
+        .as_str()
+        .expect("string arguments");
+    assert_eq!(done_arguments, "{\"command\":[\"ls\"]}");
+    assert!(!done_arguments.starts_with("{}"));
+    serde_json::from_str::<Value>(done_arguments).expect("done arguments must be valid JSON");
+
+    let output_arguments = completed["response"]["output"][0]["arguments"]
+        .as_str()
+        .expect("output item arguments");
+    assert_eq!(output_arguments, "{\"command\":[\"ls\"]}");
+    serde_json::from_str::<Value>(output_arguments).expect("output arguments must be valid JSON");
+}
+
+#[test]
+fn chat_stream_cumulative_full_fragment_does_not_concatenate() {
+    // Cumulative-shaping upstream: every fragment carries the full value.
+    // The guard must not produce `{"a":1}{"a":1}`.
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let first = json!({
+        "id": "chatcmpl-cumulative",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_cum",
+                "type": "function",
+                "function": {"name": "tool", "arguments": "{\"a\":1}"}
+            }]},
+            "finish_reason": null
+        }]
+    });
+    let second = json!({
+        "id": "chatcmpl-cumulative",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "{\"a\":1}"}
+            }]},
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+    let arguments = completed["response"]["output"][0]["arguments"]
+        .as_str()
+        .expect("string arguments");
+    assert_eq!(arguments, "{\"a\":1}");
+    serde_json::from_str::<Value>(arguments).expect("arguments must be valid JSON");
+}
+
+#[test]
+fn chat_stream_incremental_split_still_concatenates() {
+    // Regression guard: ordinary incremental splits (`{"comm` + `and":["ls"]}`)
+    // must still concatenate — the guard only fires for complete-then-new.
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let first = json!({
+        "id": "chatcmpl-incremental",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_inc",
+                "type": "function",
+                "function": {"name": "shell", "arguments": "{\"comm"}
+            }]},
+            "finish_reason": null
+        }]
+    });
+    let second = json!({
+        "id": "chatcmpl-incremental",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "and\":[\"ls\"]}"}
+            }]},
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+    let arguments = completed["response"]["output"][0]["arguments"]
+        .as_str()
+        .expect("string arguments");
+    assert_eq!(arguments, "{\"command\":[\"ls\"]}");
+    serde_json::from_str::<Value>(arguments).expect("arguments must be valid JSON");
+}
+
+#[test]
+fn chat_stream_complete_then_new_non_strict_keeps_legacy_append() {
+    // With the strict switch off, the legacy unconditional append must be
+    // preserved so operators can roll back the guard.
+    let mut translator = StreamTranslator::new_with_config(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+        None,
+        false,
+        None,
+    )
+    .expect("translator should exist");
+
+    let first = json!({
+        "id": "chatcmpl-nonstrict",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_ns",
+                "type": "function",
+                "function": {"name": "shell", "arguments": "{}"}
+            }]},
+            "finish_reason": null
+        }]
+    });
+    let second = json!({
+        "id": "chatcmpl-nonstrict",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "{\"command\":[\"ls\"]}"}
+            }]},
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+    let arguments = completed["response"]["output"][0]["arguments"]
+        .as_str()
+        .expect("string arguments");
+    // Legacy behavior: unconditional append.
+    assert_eq!(arguments, "{}{\"command\":[\"ls\"]}");
+}

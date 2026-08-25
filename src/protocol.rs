@@ -2284,6 +2284,15 @@ enum StreamTranslatorState {
     ResponsesToChat(ResponsesToChatState),
 }
 
+/// Optional request-scoped identity for tool-call diagnostics emitted by the
+/// Chat->Responses accumulator (T4.1).  Kept out of the hot struct fields so
+/// plain translators (and all existing tests) construct with `None`.
+#[derive(Clone, Debug)]
+pub struct TranslatorDiagnostics {
+    pub request_id: String,
+    pub upstream_id: String,
+}
+
 impl StreamTranslator {
     pub fn new(source: UpstreamProtocol, target: UpstreamProtocol) -> Option<Self> {
         Self::new_with_tool_registry(source, target, None)
@@ -2294,10 +2303,24 @@ impl StreamTranslator {
         target: UpstreamProtocol,
         tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
     ) -> Option<Self> {
+        Self::new_with_config(source, target, tool_registry, true, None)
+    }
+
+    /// Production entry point: threads the strict tool-call merge switch and
+    /// request-scoped diagnostics into the Chat->Responses accumulator.
+    pub fn new_with_config(
+        source: UpstreamProtocol,
+        target: UpstreamProtocol,
+        tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
+        tool_call_merge_strict: bool,
+        diagnostics: Option<TranslatorDiagnostics>,
+    ) -> Option<Self> {
         match (source, target) {
             (UpstreamProtocol::ChatCompletions, UpstreamProtocol::Responses) => Some(Self {
                 state: StreamTranslatorState::ChatToResponses(ChatToResponsesState::new(
                     tool_registry,
+                    tool_call_merge_strict,
+                    diagnostics,
                 )),
             }),
             (UpstreamProtocol::Responses, UpstreamProtocol::ChatCompletions) => Some(Self {
@@ -2344,6 +2367,8 @@ struct ChatToResponsesState {
     reasoning: Option<ReasoningStreamState>,
     tool_calls: BTreeMap<usize, ChatToolCallState>,
     tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
+    tool_call_merge_strict: bool,
+    diagnostics: Option<TranslatorDiagnostics>,
 }
 
 #[derive(Debug)]
@@ -2355,6 +2380,11 @@ struct ChatToolCallState {
     arguments: String,
     added_emitted: bool,
     done_emitted: bool,
+    /// Set when a complete-then-new replacement happened: the client already
+    /// accumulated the stale placeholder via deltas, so further deltas would
+    /// recreate the concatenation client-side.  The done event / final item
+    /// carry the authoritative value instead.
+    client_delta_desynced: bool,
 }
 
 #[derive(Debug)]
@@ -2367,8 +2397,106 @@ struct ReasoningStreamState {
     done_status: Option<&'static str>,
 }
 
+/// Policy applied by the accumulator when it already holds a complete JSON
+/// value and the incoming fragment starts a fresh JSON value (T1.2).
+///
+/// Observed fault shape: the upstream emits a `{}` placeholder as the first
+/// fragment of a tool call (with an `id`), then the real arguments as a later
+/// fragment on the same call key.  Unconditional concatenation yields
+/// `{}{"command":["ls"]}`, the exact `extra data: line 1 column 3 (char 2)`
+/// 400 shape.  The complete first value is therefore a stale placeholder and
+/// the new fragment carries the real arguments: replace rather than append.
+///
+/// `replace_with_new` only triggers when the existing buffer is already a
+/// complete `serde_json` value AND the fragment starts with a value-opening
+/// byte, so ordinary incremental splits (`{"comm` + `and":["ls"]}`) still
+/// append normally.
+const TOOL_ARGUMENTS_COMPLETE_THEN_NEW_POLICY: &str = "replace_with_new";
+
+/// Outcome of `ChatToResponsesState::merge_tool_call_arguments`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallArgumentsMerge {
+    /// Ordinary incremental continuation; the fragment was appended to the
+    /// existing buffer.
+    Appended,
+    /// The buffer already held a complete JSON value and the fragment starts
+    /// a new value; the buffer was replaced with the fragment.
+    ReplacedCompleteThenNew,
+}
+
+/// Merge a tool-call argument fragment into an accumulator entry with the
+/// T1.2 completeness guard (see `TOOL_ARGUMENTS_COMPLETE_THEN_NEW_POLICY`).
+/// Shared by the `tool_calls[]` delta path and the `function_call` delta path
+/// so the two copies cannot drift.  `strict` gates the guard (runtime switch
+/// `tool_call_merge_strict`); `diagnostics` / `model` feed the anomaly event.
+fn merge_tool_call_arguments(
+    entry: &mut ChatToolCallState,
+    fragment: &str,
+    strict: bool,
+    model: Option<&str>,
+    diagnostics: Option<&TranslatorDiagnostics>,
+) -> ToolCallArgumentsMerge {
+    if strict
+        && !entry.arguments.is_empty()
+        && serde_json::from_str::<Value>(&entry.arguments).is_ok()
+        && fragment
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| matches!(byte, b'{' | b'[' | b'"'))
+    {
+        log_tool_call_arguments_anomaly(
+            "complete_then_new",
+            &entry.call_id,
+            fragment,
+            model,
+            diagnostics,
+        );
+        tracing::warn!(
+            previous_arguments = %entry.arguments,
+            policy = TOOL_ARGUMENTS_COMPLETE_THEN_NEW_POLICY,
+            "tool call argument accumulation replaced a complete value with a new fragment instead of appending"
+        );
+        entry.arguments.clear();
+        entry.arguments.push_str(fragment);
+        ToolCallArgumentsMerge::ReplacedCompleteThenNew
+    } else {
+        entry.arguments.push_str(fragment);
+        ToolCallArgumentsMerge::Appended
+    }
+}
+
+/// Unified anomaly event for tool-call argument accumulation problems
+/// (T4.1).  `reason` is one of `ambiguous_continuation` / `complete_then_new`
+/// / `trailing_data` / `unparseable`.
+fn log_tool_call_arguments_anomaly(
+    reason: &str,
+    call_id: &str,
+    fragment: &str,
+    model: Option<&str>,
+    diagnostics: Option<&TranslatorDiagnostics>,
+) {
+    tracing::warn!(
+        event = "tool_call_arguments_anomaly",
+        reason,
+        call_id,
+        model = %model.unwrap_or(""),
+        request_id = %diagnostics
+            .map(|diagnostics| diagnostics.request_id.as_str())
+            .unwrap_or(""),
+        upstream_id = %diagnostics
+            .map(|diagnostics| diagnostics.upstream_id.as_str())
+            .unwrap_or(""),
+        fragment = %fragment,
+        "tool call arguments anomaly"
+    );
+}
+
 impl ChatToResponsesState {
-    fn new(tool_registry: Option<tool_adapter::ToolAdapterRegistry>) -> Self {
+    fn new(
+        tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
+        tool_call_merge_strict: bool,
+        diagnostics: Option<TranslatorDiagnostics>,
+    ) -> Self {
         Self {
             response_id: None,
             upstream_response_id: None,
@@ -2388,6 +2516,8 @@ impl ChatToResponsesState {
             reasoning: None,
             tool_calls: BTreeMap::new(),
             tool_registry,
+            tool_call_merge_strict,
+            diagnostics,
         }
     }
 
@@ -2859,6 +2989,7 @@ impl ChatToResponsesState {
                     arguments: String::new(),
                     added_emitted: false,
                     done_emitted: false,
+                    client_delta_desynced: false,
                 });
             if entry.item_id.is_empty() {
                 entry.item_id = call_id.clone();
@@ -2880,8 +3011,22 @@ impl ChatToResponsesState {
             }
 
             if !arguments.is_empty() {
-                entry.arguments.push_str(&arguments);
-                delta_event = Some((entry.item_id.clone(), arguments.clone()));
+                let merge = merge_tool_call_arguments(
+                    entry,
+                    &arguments,
+                    self.tool_call_merge_strict,
+                    self.model.as_deref(),
+                    self.diagnostics.as_ref(),
+                );
+                // A complete-then-new replacement is not streamed as a delta:
+                // the client already accumulated the stale placeholder, and
+                // appending the replacement would recreate the concatenation
+                // client-side.  The done event / final item are authoritative.
+                if merge == ToolCallArgumentsMerge::Appended && !entry.client_delta_desynced {
+                    delta_event = Some((entry.item_id.clone(), arguments.clone()));
+                } else if merge != ToolCallArgumentsMerge::Appended {
+                    entry.client_delta_desynced = true;
+                }
             }
         }
 
@@ -2992,6 +3137,7 @@ impl ChatToResponsesState {
                     arguments: String::new(),
                     added_emitted: false,
                     done_emitted: false,
+                    client_delta_desynced: false,
                 });
             if entry.name.is_none() {
                 entry.name = Some(name.to_string());
@@ -3013,8 +3159,18 @@ impl ChatToResponsesState {
             }
 
             if !arguments.is_empty() {
-                entry.arguments.push_str(arguments);
-                delta_event = Some((entry.item_id.clone(), arguments.to_string()));
+                let merge = merge_tool_call_arguments(
+                    entry,
+                    arguments,
+                    self.tool_call_merge_strict,
+                    self.model.as_deref(),
+                    self.diagnostics.as_ref(),
+                );
+                if merge == ToolCallArgumentsMerge::Appended && !entry.client_delta_desynced {
+                    delta_event = Some((entry.item_id.clone(), arguments.to_string()));
+                } else if merge != ToolCallArgumentsMerge::Appended {
+                    entry.client_delta_desynced = true;
+                }
             }
         }
 
