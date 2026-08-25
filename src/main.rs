@@ -22,6 +22,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
+    DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
@@ -103,6 +104,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS,
     )
     .clamp(50, 2_000);
+    let tool_call_merge_strict = env_bool(
+        "TOOL_CALL_MERGE_STRICT",
+        DEFAULT_TOOL_CALL_MERGE_STRICT,
+    );
+    let tool_arguments_strict = env_bool(
+        "TOOL_ARGUMENTS_STRICT",
+        DEFAULT_TOOL_ARGUMENTS_STRICT,
+    );
     let upstream_credentials_first_strike_seconds = env_u64(
         "UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS",
         DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
@@ -248,6 +257,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_retry_after_cap_seconds,
         upstream_error_body_excerpt_enabled,
         upstream_error_body_excerpt_max_chars,
+        tool_call_merge_strict,
+        tool_arguments_strict,
         upstream_credentials_first_strike_seconds,
         upstream_local_lease_ttl_seconds,
         upstream_continuation_pin_escape_enabled: env_bool(

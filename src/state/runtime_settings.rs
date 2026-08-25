@@ -11,6 +11,7 @@ use super::types::{
     default_upstream_route_half_open_busy_max_rounds,
     default_upstream_route_half_open_exclusive_window_ms,
     default_upstream_transient_last_resort_probe_enabled,
+    default_tool_arguments_strict, default_tool_call_merge_strict,
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,8 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_route_half_open_busy_max_rounds",
     "upstream_retry_after_cap_seconds",
     "upstream_error_body_excerpt_enabled",
+    "tool_call_merge_strict",
+    "tool_arguments_strict",
     "upstream_error_body_excerpt_max_chars",
     "upstream_credentials_first_strike_seconds",
     "upstream_local_lease_ttl_seconds",
@@ -125,6 +128,10 @@ pub struct RuntimeSettings {
     pub upstream_error_body_excerpt_enabled: bool,
     #[serde(default = "default_upstream_error_body_excerpt_max_chars")]
     pub upstream_error_body_excerpt_max_chars: u64,
+    #[serde(default = "default_tool_call_merge_strict")]
+    pub tool_call_merge_strict: bool,
+    #[serde(default = "default_tool_arguments_strict")]
+    pub tool_arguments_strict: bool,
     #[serde(default = "default_upstream_credentials_first_strike_seconds")]
     pub upstream_credentials_first_strike_seconds: u64,
     #[serde(default = "default_upstream_local_lease_ttl_seconds")]
@@ -284,6 +291,8 @@ impl RuntimeSettings {
             upstream_retry_after_cap_seconds: config.upstream_retry_after_cap_seconds,
             upstream_error_body_excerpt_enabled: config.upstream_error_body_excerpt_enabled,
             upstream_error_body_excerpt_max_chars: config.upstream_error_body_excerpt_max_chars,
+            tool_call_merge_strict: config.tool_call_merge_strict,
+            tool_arguments_strict: config.tool_arguments_strict,
             upstream_credentials_first_strike_seconds: config
                 .upstream_credentials_first_strike_seconds,
             upstream_local_lease_ttl_seconds: config.upstream_local_lease_ttl_seconds,
@@ -369,6 +378,8 @@ impl RuntimeSettings {
         config.upstream_retry_after_cap_seconds = self.upstream_retry_after_cap_seconds;
         config.upstream_error_body_excerpt_enabled = self.upstream_error_body_excerpt_enabled;
         config.upstream_error_body_excerpt_max_chars = self.upstream_error_body_excerpt_max_chars;
+        config.tool_call_merge_strict = self.tool_call_merge_strict;
+        config.tool_arguments_strict = self.tool_arguments_strict;
         config.upstream_credentials_first_strike_seconds =
             self.upstream_credentials_first_strike_seconds;
         config.upstream_local_lease_ttl_seconds = self.upstream_local_lease_ttl_seconds;

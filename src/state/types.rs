@@ -128,6 +128,17 @@ pub const DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED: bool = false;
 /// client messages when `upstream_error_body_excerpt_enabled` is on (E5).
 /// Range 50..=2000.
 pub const DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS: u64 = 200;
+/// Whether the Chat-to-Responses tool-call accumulator uses strict merge
+/// semantics for fragments that carry neither an `index` nor an `id`
+/// (T1.1) and refuses to append a new complete JSON value onto an already
+/// complete buffer (T1.2).  Default on: the old positional fallback and the
+/// unconditional append are the root cause of the `extra data` upstream 400.
+pub const DEFAULT_TOOL_CALL_MERGE_STRICT: bool = true;
+/// Whether request-direction argument normalization rejects unparseable tool
+/// arguments with a 400 (T2.1).  Default off: normalize and pass through with
+/// a warning; turn on after observing that normalization is stable.
+pub const DEFAULT_TOOL_ARGUMENTS_STRICT: bool = false;
+
 /// First Credentials-family (401/403) strike cooldown (seconds, T5).  The old
 /// behavior cooled a key for 15min on the very first 401, so a single
 /// misconfigured credential made that key unusable for a quarter hour even
@@ -277,6 +288,14 @@ pub struct AppConfig {
     /// (E5).  Range 50..=2000.
     #[serde(default = "default_upstream_error_body_excerpt_max_chars")]
     pub upstream_error_body_excerpt_max_chars: u64,
+    /// Strict tool-call argument merge semantics in the Chat-to-Responses
+    /// accumulator (T1.1/T1.2).  See `DEFAULT_TOOL_CALL_MERGE_STRICT`.
+    #[serde(default = "default_tool_call_merge_strict")]
+    pub tool_call_merge_strict: bool,
+    /// Reject unparseable tool arguments in request-direction conversion with
+    /// a 400 when enabled (T2.1).  See `DEFAULT_TOOL_ARGUMENTS_STRICT`.
+    #[serde(default = "default_tool_arguments_strict")]
+    pub tool_arguments_strict: bool,
     /// First Credentials-family (401/403) strike cooldown (seconds, T5).
     /// Range 1..=3600; higher values make the first strike behave more like
     /// the old 15min quarantine.
@@ -387,6 +406,8 @@ impl Default for AppConfig {
             upstream_retry_after_cap_seconds: DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
             upstream_error_body_excerpt_enabled: DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED,
             upstream_error_body_excerpt_max_chars: DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS,
+            tool_call_merge_strict: DEFAULT_TOOL_CALL_MERGE_STRICT,
+            tool_arguments_strict: DEFAULT_TOOL_ARGUMENTS_STRICT,
             upstream_credentials_first_strike_seconds:
                 DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_local_lease_ttl_seconds: DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
@@ -1066,6 +1087,14 @@ pub fn default_upstream_error_body_excerpt_enabled() -> bool {
 
 pub fn default_upstream_error_body_excerpt_max_chars() -> u64 {
     DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS
+}
+
+pub fn default_tool_call_merge_strict() -> bool {
+    DEFAULT_TOOL_CALL_MERGE_STRICT
+}
+
+pub fn default_tool_arguments_strict() -> bool {
+    DEFAULT_TOOL_ARGUMENTS_STRICT
 }
 
 pub fn default_upstream_credentials_first_strike_seconds() -> u64 {
