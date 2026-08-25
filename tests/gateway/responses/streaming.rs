@@ -1958,3 +1958,249 @@ async fn fragmented_tool_call_without_index_id_yields_valid_done_arguments() {
         "expected exactly one done event, got {done_count}"
     );
 }
+
+/// Shared harness for the P1 tool-call identity guard tests: spins up a
+/// chat-completions upstream that streams the given `delta.tool_calls`
+/// fragments (each is a full tool_call object), then performs a streaming
+/// `/v1/responses` request and returns the downstream SSE text.  A final
+/// `finish_reason: "tool_calls"` chunk and `[DONE]` terminate the stream.
+async fn run_fragmented_tool_call_stream(fragments: Vec<Value>) -> String {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| async move {
+            let (_, body) = request.into_parts();
+            let body = to_bytes(body, usize::MAX).await.unwrap();
+            let _payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let mut chunks = Vec::new();
+            for fragment in fragments {
+                let chunk = format!(
+                    "data: {}\n\n",
+                    json!({
+                        "id": "chatcmpl-frag",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "arbitrary/fragmented",
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "tool_calls": [fragment] },
+                            "finish_reason": null
+                        }]
+                    })
+                );
+                chunks.push(Ok::<Bytes, std::io::Error>(Bytes::from(chunk)));
+            }
+            chunks.push(Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                "data: {}\n\n",
+                json!({
+                    "id": "chatcmpl-frag",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "arbitrary/fragmented",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            ))));
+            chunks.push(Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"data: [DONE]\n\n",
+            )));
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(stream::iter(chunks)),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let model = "arbitrary/fragmented";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-fragmented".into(),
+                name: "fragmented".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": model,
+                "stream": true,
+                "input": "Run ls",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "shell",
+                            "description": "Run a command",
+                            "parameters": { "type": "object" }
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// Parse every `response.function_call_arguments.done` event from the SSE
+/// text into (name, arguments) pairs, in stream order.
+fn parse_done_events(text: &str) -> Vec<(String, String)> {
+    let mut done = Vec::new();
+    for event in text.split("\n\n") {
+        if event.contains("response.function_call_arguments.done") {
+            let data_line = event
+                .lines()
+                .find(|line| line.starts_with("data: "))
+                .expect("done event must carry a data line");
+            let value: Value =
+                serde_json::from_str(data_line.trim_start_matches("data: ")).expect("JSON");
+            done.push((
+                value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                value
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            ));
+        }
+    }
+    done
+}
+
+/// P1.1 guard: when the open (index/id-less) continuation fragment carries an
+/// explicitly different non-empty name, it is a genuinely NEW tool call and
+/// must be split into its own entry — not merged onto the open one (which
+/// would yield name from call A + arguments from call B).
+#[tokio::test]
+async fn tool_call_name_mismatch_without_index_splits_into_two_calls() {
+    let text = run_fragmented_tool_call_stream(vec![
+        json!({
+            "index": 0,
+            "id": "call_a",
+            "function": {
+                "name": "shell",
+                "arguments": "{\"command\":[\"ls\"]}"
+            }
+        }),
+        json!({
+            "function": {
+                "name": "apply_patch",
+                "arguments": "{\"patch\":\"x\"}"
+            }
+        }),
+    ])
+    .await;
+    assert!(
+        text.contains("response.function_call_arguments.done"),
+        "{text}"
+    );
+    let done = parse_done_events(&text);
+    assert_eq!(done.len(), 2, "expected two done events, got {done:?}");
+    let shell = done
+        .iter()
+        .find(|(name, _)| name == "shell")
+        .expect("shell call must be present");
+    assert_eq!(shell.1, "{\"command\":[\"ls\"]}");
+    let patch = done
+        .iter()
+        .find(|(name, _)| name == "apply_patch")
+        .expect("apply_patch call must be present");
+    assert_eq!(patch.1, "{\"patch\":\"x\"}");
+}
+
+/// P1.1 guard: an empty `"name": ""` on the continuation fragment is treated
+/// as missing (some upstreams send empty names), so it still continues the
+/// open call instead of splitting.
+#[tokio::test]
+async fn tool_call_empty_name_without_index_continues_open_call() {
+    let text = run_fragmented_tool_call_stream(vec![
+        json!({
+            "index": 0,
+            "id": "call_a",
+            "function": {
+                "name": "shell",
+                "arguments": "{}"
+            }
+        }),
+        json!({
+            "function": {
+                "name": "",
+                "arguments": "{\"command\":[\"ls\"]}"
+            }
+        }),
+    ])
+    .await;
+    assert!(
+        text.contains("response.function_call_arguments.done"),
+        "{text}"
+    );
+    let done = parse_done_events(&text);
+    assert_eq!(
+        done.len(),
+        1,
+        "expected exactly one done event, got {done:?}"
+    );
+    assert_eq!(done[0].0, "shell");
+    assert_eq!(done[0].1, "{\"command\":[\"ls\"]}");
+}

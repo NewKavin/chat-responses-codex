@@ -3180,12 +3180,52 @@ impl ChatToResponsesState {
                             .filter(|(_, state)| !state.done_emitted)
                             .count();
                         match open {
-                            1 => self
-                                .tool_calls
-                                .iter()
-                                .find(|(_, state)| !state.done_emitted)
-                                .map(|(index, _)| *index)
-                                .expect("counted exactly one open call"),
+                            1 => {
+                                let open_index = self
+                                    .tool_calls
+                                    .iter()
+                                    .find(|(_, state)| !state.done_emitted)
+                                    .map(|(index, _)| *index)
+                                    .expect("counted exactly one open call");
+                                // P1.1: a fragment `name` is "missing" when the
+                                // field is absent or empty (some upstreams send
+                                // `"name": ""` on continuation chunks).  Only an
+                                // *explicitly present* non-empty name that differs
+                                // from the open entry's non-empty name marks a
+                                // genuinely new tool call instead of a
+                                // continuation.  This upstream omits `index`/`id`
+                                // on real new calls too, so without this gate the
+                                // new call would be merged onto the open one (name
+                                // from call A, arguments from call B).
+                                let entry_name = self
+                                    .tool_calls
+                                    .get(&open_index)
+                                    .and_then(|state| state.name.as_deref());
+                                let fragment_name_missing =
+                                    name.as_deref().is_none_or(|value| value.is_empty());
+                                let entry_name_missing =
+                                    entry_name.is_none_or(|value| value.is_empty());
+                                let name_conflicts = !fragment_name_missing
+                                    && !entry_name_missing
+                                    && name.as_deref() != entry_name;
+                                if name_conflicts {
+                                    let open_call_id = self
+                                        .tool_calls
+                                        .get(&open_index)
+                                        .map(|state| state.call_id.clone())
+                                        .unwrap_or_default();
+                                    log_tool_call_arguments_anomaly(
+                                        "name_mismatch",
+                                        &open_call_id,
+                                        &arguments,
+                                        self.model.as_deref(),
+                                        self.diagnostics.as_ref(),
+                                    );
+                                    self.tool_calls.keys().next_back().map_or(0, |max| max + 1)
+                                } else {
+                                    open_index
+                                }
+                            }
                             _ => {
                                 log_tool_call_arguments_anomaly(
                                     "ambiguous_continuation",
@@ -3234,6 +3274,22 @@ impl ChatToResponsesState {
             }
             if entry.name.is_none() {
                 entry.name = name.clone();
+            } else if let (Some(existing), Some(incoming)) =
+                (entry.name.as_deref(), name.as_deref())
+            {
+                // P1.2: the upstream supplied an `index` and reused it for a
+                // different tool call.  Log-only observation; never rewrite a
+                // name that may already have been streamed downstream via
+                // `response.output_item.added`.
+                if !existing.is_empty() && !incoming.is_empty() && existing != incoming {
+                    log_tool_call_arguments_anomaly(
+                        "index_name_mismatch",
+                        &entry.call_id,
+                        &arguments,
+                        self.model.as_deref(),
+                        self.diagnostics.as_ref(),
+                    );
+                }
             }
 
             if !entry.added_emitted {
