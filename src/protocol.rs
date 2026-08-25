@@ -2952,8 +2952,17 @@ impl ChatToResponsesState {
         // Missing `index`: merge by call id when the call was seen before (a
         // provider may move the same call to a different array position in a
         // later chunk). A brand-new call with an id gets the next free key so
-        // it never collides with an existing entry; only id-less calls fall
-        // back to the position in this delta.
+        // it never collides with an existing entry.
+        //
+        // T1.1: with `tool_call_merge_strict` (default on) a fragment that has
+        // neither `index` nor `id` must NOT fall back to its position within
+        // this delta: that position is not a stable tool-call identity and
+        // caused later calls to be concatenated onto earlier ones (the
+        // `{}`+real-arguments `extra data` 400). The only unambiguous reading
+        // is "continuation of the single tool call that is still open"; with
+        // zero or multiple open calls the fragment is treated as a new call
+        // instead of guessing a position. Legacy fallback remains behind the
+        // switch for rollback.
         let index = object
             .get("index")
             .and_then(Value::as_u64)
@@ -2964,9 +2973,40 @@ impl ChatToResponsesState {
                     .iter()
                     .find_map(|(index, state)| (state.call_id == call_id).then_some(*index))
                     .unwrap_or_else(|| self.tool_calls.keys().next_back().map_or(0, |max| max + 1)),
-                None => fallback_index,
+                None => {
+                    if !self.tool_call_merge_strict {
+                        // Legacy behavior: assume the fragment continues the
+                        // call at the same position within this delta.
+                        fallback_index
+                    } else {
+                        let open = self
+                            .tool_calls
+                            .iter()
+                            .filter(|(_, state)| !state.done_emitted)
+                            .count();
+                        match open {
+                            1 => self
+                                .tool_calls
+                                .iter()
+                                .find(|(_, state)| !state.done_emitted)
+                                .map(|(index, _)| *index)
+                                .expect("counted exactly one open call"),
+                            _ => {
+                                log_tool_call_arguments_anomaly(
+                                    "ambiguous_continuation",
+                                    "<none>",
+                                    &arguments,
+                                    self.model.as_deref(),
+                                    self.diagnostics.as_ref(),
+                                );
+                                self.tool_calls.keys().next_back().map_or(0, |max| max + 1)
+                            }
+                        }
+                    }
+                }
             });
-        let call_id = call_id_hint.unwrap_or_else(|| format!("call-{}", index));
+        let call_id =
+            call_id_hint.unwrap_or_else(|| format!("gw-call-{}", Uuid::new_v4().simple()));
 
         let response_id = self.response_id_value();
         let mut added_event = None;

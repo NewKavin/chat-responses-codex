@@ -4413,3 +4413,165 @@ fn chat_stream_complete_then_new_non_strict_keeps_legacy_append() {
     // Legacy behavior: unconditional append.
     assert_eq!(arguments, "{}{\"command\":[\"ls\"]}");
 }
+
+#[test]
+fn chat_stream_ambiguous_continuation_creates_new_entry_not_merged_into_index_zero() {
+    // Root-cause guard (T1.1): with two still-open tool calls, a fragment that
+    // carries neither `index` nor `id` is ambiguous. Strict mode must NOT merge
+    // it into the entry at array position 0 (the old fallback_index behavior);
+    // it is treated as a new call instead, and the pre-existing calls keep
+    // their own independent arguments.
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    // Two open calls at index 0 and 1, each holding a complete placeholder.
+    let first = json!({
+        "id": "chatcmpl-ambiguous",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [
+                {"index": 0, "id": "call_a", "type": "function", "function": {"name": "alpha", "arguments": "{}"}},
+                {"index": 1, "id": "call_b", "type": "function", "function": {"name": "beta", "arguments": "{}"}}
+            ]},
+            "finish_reason": null
+        }]
+    });
+    // Ambiguous continuation: neither index nor id.
+    let second = json!({
+        "id": "chatcmpl-ambiguous",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{"type": "function", "function": {"arguments": "{\"x\":1}"}}]},
+            "finish_reason": null
+        }]
+    });
+    let done = json!({
+        "id": "chatcmpl-ambiguous",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.translate_event(&done).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+    let output = completed["response"]["output"].as_array().unwrap();
+
+    let call_a = output
+        .iter()
+        .find(|item| item["call_id"] == "call_a")
+        .expect("call_a item should exist");
+    assert_eq!(
+        call_a["arguments"], "{}",
+        "call_a must NOT absorb the ambiguous fragment (no index-0 pollution)"
+    );
+    assert_eq!(call_a["name"], "alpha", "call_a must keep its own name");
+
+    let call_b = output
+        .iter()
+        .find(|item| item["call_id"] == "call_b")
+        .expect("call_b item should exist");
+    assert_eq!(call_b["arguments"], "{}", "call_b must stay independent");
+
+    let fragment_item = output
+        .iter()
+        .find(|item| item["arguments"] == "{\"x\":1}")
+        .expect("the ambiguous fragment must surface on its own item");
+    assert_ne!(fragment_item["call_id"], "call_a");
+    assert_ne!(fragment_item["call_id"], "call_b");
+    let fragment_call_id = fragment_item["call_id"].as_str().unwrap();
+    assert!(
+        fragment_call_id.starts_with("gw-call-"),
+        "synthetic call_id must use the stable gw-call- form, got {fragment_call_id}"
+    );
+}
+
+#[test]
+fn chat_stream_missing_index_with_id_still_merges_by_call_id_when_multiple_open() {
+    // Regression for T1.1: when a continuation lacks `index` but carries an
+    // `id` that matches an existing open call, it must still merge by call_id
+    // even while other calls are open. Both entries must remain independent
+    // and each argument blob must be valid standalone JSON.
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let first = json!({
+        "id": "chatcmpl-callid",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [
+                {"index": 0, "id": "call_a", "type": "function", "function": {"name": "alpha", "arguments": "{\"a\":1"}},
+                {"index": 1, "id": "call_b", "type": "function", "function": {"name": "beta", "arguments": "{\"b\":1"}}
+            ]},
+            "finish_reason": null
+        }]
+    });
+    // Continuation of call_b: no index, but id present. Must merge into call_b.
+    let second = json!({
+        "id": "chatcmpl-callid",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [
+                {"id": "call_b", "type": "function", "function": {"arguments": ",\"c\":2}"}}
+            ]},
+            "finish_reason": null
+        }]
+    });
+    let done = json!({
+        "id": "chatcmpl-callid",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.translate_event(&done).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+    let output = completed["response"]["output"].as_array().unwrap();
+
+    let call_a = output
+        .iter()
+        .find(|item| item["call_id"] == "call_a")
+        .expect("call_a item should exist");
+    let call_b = output
+        .iter()
+        .find(|item| item["call_id"] == "call_b")
+        .expect("call_b item should exist");
+
+    assert_eq!(call_a["arguments"], "{\"a\":1");
+    assert_eq!(
+        call_b["arguments"], "{\"b\":1,\"c\":2}",
+        "call_b continuation must merge by call_id into call_b"
+    );
+    serde_json::from_str::<Value>(call_a["arguments"].as_str().unwrap())
+        .expect_err("incomplete arguments must remain split (not fully merged yet)");
+    serde_json::from_str::<Value>(call_b["arguments"].as_str().unwrap())
+        .expect("call_b arguments must be valid JSON");
+    assert_eq!(output.len(), 2, "no extra items: call_b merged by id");
+}
