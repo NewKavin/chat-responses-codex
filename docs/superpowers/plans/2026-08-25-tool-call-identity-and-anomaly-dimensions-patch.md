@@ -252,7 +252,7 @@ rtk cargo test
 | P2.4 统一 anomaly 事件形状 | `f18a489` | ✅ |
 | P2.5 dispatch 路径填充 | `f18a489` + `4b8969e` | ✅ |
 | P3 rustfmt | `dfe725fa` | ✅ |
-| P2.6 Chat→Responses arm 归属补齐（复审新增） | `PENDING` | ✅ |
+| P2.6 Chat→Responses arm 归属补齐（复审新增） | `4aa942da` | ✅ |
 
 ### 测试
 
@@ -263,7 +263,7 @@ rtk cargo test
 | name 空串 ⇒ 视为缺失 | `tests/gateway/responses/streaming.rs:2176` `tool_call_empty_name_without_index_continues_open_call` | `7f356b64` | ✅ |
 | 存量污染重放 + anomaly 维度非空 | `tests/gateway/responses/fallback.rs:2347` `polluted_replayed_history_repairs_and_anomaly_carries_dispatch_attribution` | `f18a489` | ✅ |
 | delta/done 一致性 | `tests/gateway/responses/streaming.rs:2215` `normal_fragmented_tool_call_deltas_concatenate_bytewise_to_done_arguments` | `f18a489` | ✅ |
-| Chat→Responses 方向 anomaly 维度非空 | `tests/gateway/chat/core.rs:1857` `chat_to_responses_dispatch_anomaly_carries_dispatch_attribution` | `PENDING` | ✅ |
+| Chat→Responses 方向 anomaly 维度非空 | `tests/gateway/chat/core.rs:1857` `chat_to_responses_dispatch_anomaly_carries_dispatch_attribution` | `4aa942da` | ✅ |
 
 验证链（实际执行于隔离 worktree @ `4b8969e`，不含并行进程的路由耗尽 WIP）：
 
