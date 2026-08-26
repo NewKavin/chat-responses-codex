@@ -318,6 +318,32 @@
           </el-select>
           <span class="form-hint">无探测档案时按预设静态兜底各字段处理（deepseek：reasoning_effort 直传；glm：thinking 对象值；严格模式：全剥离）</span>
         </el-form-item>
+        <el-form-item label="按模型方言预设">
+          <div style="width: 100%">
+            <div
+              v-for="(preset, pattern, index) in form.model_dialect_presets || {}"
+              :key="index"
+              style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center"
+            >
+              <el-input
+                :model-value="pattern"
+                @update:model-value="renameModelPreset(pattern, $event)"
+                placeholder="模型前缀，如 glm-* / deepseek-*"
+                style="width: 260px"
+              />
+              <el-select :model-value="preset" @update:model-value="updateModelPreset(pattern, $event)" clearable placeholder="预设" style="width: 200px">
+                <el-option label="OpenAI 兼容" value="openai" />
+                <el-option label="DeepSeek" value="deepseek" />
+                <el-option label="GLM" value="glm" />
+                <el-option label="MiniMax" value="minimax" />
+                <el-option label="严格模式" value="generic-strict" />
+              </el-select>
+              <el-button type="danger" :icon="Trash2" circle @click="removeModelPreset(pattern)" />
+            </div>
+            <el-button type="primary" plain size="small" :icon="Plus" @click="addModelPreset">添加模型预设</el-button>
+            <span class="form-hint" style="display: block; margin-top: 4px">按模型 slug 覆盖方言预设（支持 glm-* 前缀通配）；比「方言预设」优先，但探测档案始终优先</span>
+          </div>
+        </el-form-item>
 
         <!-- 模型配置 -->
         <el-divider class="drawer-section">模型配置</el-divider>
@@ -546,8 +572,48 @@ const form = ref<Partial<UpstreamConfig>>({
   protect_premium_quota: false,
   strip_nonstandard_chat_fields: 'auto',
   dialect_preset: null,
+  model_dialect_presets: {} as Record<string, string>,
   failure_count: 0
 })
+
+const modelPresetKeys = ref<string[]>([])
+
+const syncModelPresetKeys = () => {
+  modelPresetKeys.value = Object.keys(form.value.model_dialect_presets || {})
+}
+
+const addModelPreset = () => {
+  if (!form.value.model_dialect_presets) {
+    form.value.model_dialect_presets = {}
+  }
+  const key = `model-${Date.now()}`
+  form.value.model_dialect_presets[key] = 'openai'
+  syncModelPresetKeys()
+}
+
+const removeModelPreset = (pattern: string) => {
+  const presets = form.value.model_dialect_presets || {}
+  delete presets[pattern]
+  syncModelPresetKeys()
+}
+
+const renameModelPreset = (oldPattern: string, value: string) => {
+  const presets = form.value.model_dialect_presets || {}
+  const newPattern = String(value || '').trim()
+  if (!newPattern || newPattern === oldPattern) {
+    syncModelPresetKeys()
+    return
+  }
+  const preset = presets[oldPattern]
+  delete presets[oldPattern]
+  presets[newPattern] = preset
+  syncModelPresetKeys()
+}
+
+const updateModelPreset = (pattern: string, value: string) => {
+  const presets = form.value.model_dialect_presets || {}
+  presets[pattern] = String(value || '')
+}
 
 const availableModelOptions = computed(() => {
   const supported = form.value.supported_models || []
@@ -827,8 +893,10 @@ const handleCreate = async () => {
     protect_premium_quota: false,
     strip_nonstandard_chat_fields: 'auto',
     dialect_preset: null,
+    model_dialect_presets: {},
     failure_count: 0
   }
+  syncModelPresetKeys()
   dialogVisible.value = true
 }
 
@@ -860,8 +928,10 @@ const handleCopy = (row: UpstreamConfig) => {
     protect_premium_quota: row.protect_premium_quota,
     strip_nonstandard_chat_fields: normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields),
     dialect_preset: row.dialect_preset || null,
+    model_dialect_presets: row.model_dialect_presets ? { ...row.model_dialect_presets } : {},
     failure_count: 0
   }
+  syncModelPresetKeys()
   dialogVisible.value = true
 }
 
@@ -891,6 +961,7 @@ const handleEdit = (row: UpstreamConfig) => {
     max_concurrency: row.max_concurrency,
     strip_nonstandard_chat_fields: normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields),
     dialect_preset: row.dialect_preset || null,
+    model_dialect_presets: row.model_dialect_presets ? { ...row.model_dialect_presets } : {},
     default_model_context: row.default_model_context
       ? {
           ...row.default_model_context
@@ -903,7 +974,24 @@ const handleEdit = (row: UpstreamConfig) => {
         },
     model_contexts: row.model_contexts ? [...row.model_contexts] : []
   }
+  syncModelPresetKeys()
   dialogVisible.value = true
+}
+
+const normalizeModelDialectPresets = (presets: Record<string, string> | undefined): Record<string, string> => {
+  const out: Record<string, string> = {}
+  const raw = presets || {}
+  const keys = Object.keys(raw)
+  for (let i = 0; i < keys.length; i++) {
+    const pattern = keys[i]
+    const editedKey = modelPresetKeys.value[i]
+    const p = String(editedKey !== undefined ? editedKey : pattern).trim()
+    const v = String(raw[pattern] || '').trim()
+    if (p && v) {
+      out[p] = v
+    }
+  }
+  return out
 }
 
 const handleSubmit = async () => {
@@ -960,6 +1048,7 @@ const handleSubmit = async () => {
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
     submitData.strip_nonstandard_chat_fields = normalizeNonstandardPolicy(submitData.strip_nonstandard_chat_fields)
     submitData.dialect_preset = form.value.dialect_preset || null
+    submitData.model_dialect_presets = normalizeModelDialectPresets(form.value.model_dialect_presets)
 
     const submittedKeys = (form.value.api_key || '')
       .split('\n')
@@ -1010,7 +1099,8 @@ const handleSubmit = async () => {
           max_concurrency: Number(form.value.max_concurrency),
           active: submitData.active,
           strip_nonstandard_chat_fields: normalizeNonstandardPolicy(submitData.strip_nonstandard_chat_fields),
-          dialect_preset: form.value.dialect_preset || null
+          dialect_preset: form.value.dialect_preset || null,
+          model_dialect_presets: normalizeModelDialectPresets(form.value.model_dialect_presets)
         }
 
         const response = await adminApi.createUpstreamsBatch(batchPayload)

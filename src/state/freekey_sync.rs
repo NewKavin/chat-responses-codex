@@ -3,7 +3,7 @@ use super::types::*;
 use crate::state::{AppState, NonstandardFieldPolicy, RuntimeCoordinationError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -730,6 +730,14 @@ impl AppState {
                         upstream.dialect_preset = Some(dialect_preset.to_string());
                     } else if updates.get("dialect_preset").is_some() {
                         upstream.dialect_preset = None;
+                    }
+                    if let Some(model_dialect_presets) = updates
+                        .get("model_dialect_presets")
+                        .and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok())
+                    {
+                        upstream.model_dialect_presets = model_dialect_presets;
+                    } else if updates.get("model_dialect_presets").is_some() {
+                        upstream.model_dialect_presets.clear();
                     }
 
                     upstream.normalize_for_storage();

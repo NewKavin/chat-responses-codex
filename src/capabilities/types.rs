@@ -706,6 +706,13 @@ pub fn compile_dialect_preset(preset: &str) -> Option<ResolvedCapabilities> {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
                 effort_map.insert(effort.to_string(), Value::String(effort.to_string()));
             }
+            // T3.5: known-unsupported sampling fields for deepseek-family
+            // upstreams (from the 2026-08-25 400 diagnosis): logprobs and
+            // top_logprobs are rejected with 400. Omitting them at the
+            // cold-start preset makes the first request correct instead of
+            // learning from a 400 round-trip.
+            omit_sampling_fields.insert("logprobs".to_string());
+            omit_sampling_fields.insert("top_logprobs".to_string());
         }
         "glm" => {
             for capability in [Capability::ReasoningOutput, Capability::ReasoningReplay] {
@@ -724,7 +731,12 @@ pub fn compile_dialect_preset(preset: &str) -> Option<ResolvedCapabilities> {
             for effort in ["medium", "high", "xhigh", "max"] {
                 effort_map.insert(effort.to_string(), serde_json::json!({ "type": "enabled" }));
             }
+            // T3.5: GLM rejects stream_options and (per the 2026-08-25 400
+            // diagnosis) the logprobs family with 400; strip all three in the
+            // cold-start preset so the first request is already correct.
             omit_sampling_fields.insert("stream_options".to_string());
+            omit_sampling_fields.insert("logprobs".to_string());
+            omit_sampling_fields.insert("top_logprobs".to_string());
         }
         "generic-strict" => {
             omit_optional_extensions = true;

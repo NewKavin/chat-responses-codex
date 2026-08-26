@@ -12,17 +12,42 @@ pub fn correction_for_response(
         return None;
     }
     let value: Value = serde_json::from_slice(error_body).ok()?;
-    let param = value.pointer("/error/param").and_then(Value::as_str)?;
+    let message = value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let code = value
         .pointer("/error/code")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if !matches!(
+    // T3.2: extend the code whitelist with the errors domestic upstreams
+    // (GLM/Deepseek/new-api) actually return, and accept pure numeric codes
+    // (`1210` family) but only under the joint criterion that the message
+    // itself names a rejected field — a bare numeric code never qualifies.
+    let code_whitelisted = matches!(
         code,
-        "unsupported_parameter" | "invalid_parameter" | "unknown_field"
-    ) {
+        "unsupported_parameter"
+            | "invalid_parameter"
+            | "unknown_field"
+            | "invalid_request_error"
+            | "invalid_parameter_error"
+            | "unsupported_value"
+            | "invalid_value"
+    );
+    let numeric_code = !code.is_empty() && code.bytes().all(|b| b.is_ascii_digit());
+    let message_field_hint = super::capability_probe::dialect_field_error_hint(message);
+    if !(code_whitelisted || numeric_code && message_field_hint.is_some()) {
         return None;
     }
+    // Resolve the rejected field: /error/param first, falling back to the
+    // field name mentioned in the message (T3.2) so a missing `param` no
+    // longer blocks the correction path.
+    let param = value
+        .pointer("/error/param")
+        .and_then(Value::as_str)
+        .filter(|param| !param.trim().is_empty())
+        .map(str::trim)
+        .or(message_field_hint)?;
     rules
         .iter()
         .find(|rule| rule.is_safe() && rule.matches_rejected_field(param))

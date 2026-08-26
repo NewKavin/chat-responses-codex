@@ -1535,3 +1535,82 @@ fn unobserved_extension_evidence_does_not_erase_conclusive_evidence() {
         Some(&CapabilitySource::Baseline)
     );
 }
+
+#[test]
+fn per_model_preset_resolution_orders_probe_then_per_model_then_fallback() {
+    // T3.4 解析优先级端到端（在 resolver 的 dialect_preset 入参处）：
+    // 已验证探测档案 > per-model preset > per-upstream preset > baseline。
+    // 这里通过 UpstreamConfig::dialect_preset_for_model 拿到"已按模型解析好的
+    // preset"，再喂给 resolver，断言三层优先级都成立。
+    use chat_responses_codex::state::UpstreamConfig;
+
+    let upstream = UpstreamConfig {
+        name: "agg".into(),
+        base_url: "https://example.invalid".into(),
+        api_key: "key-a".into(),
+        dialect_preset: Some("glm".into()),
+        model_dialect_presets: BTreeMap::from([
+            ("deepseek-*".to_string(), "deepseek".to_string()),
+            ("glm-5.2".to_string(), "minimax".to_string()),
+        ]),
+        supported_models: vec!["glm-5.2".into(), "deepseek-v4".into()],
+        ..UpstreamConfig::default()
+    };
+
+    // per-model exact wins over per-upstream fallback.
+    let preset_for_glm = upstream.dialect_preset_for_model("glm-5.2");
+    assert_eq!(preset_for_glm, Some("minimax"));
+    // wildcard wins over per-upstream fallback.
+    assert_eq!(
+        upstream.dialect_preset_for_model("deepseek-v4"),
+        Some("deepseek")
+    );
+    // no match → per-upstream fallback.
+    assert_eq!(upstream.dialect_preset_for_model("gpt-4"), Some("glm"));
+
+    // 探测档案必须压过 preset：带 Verified profile 的 ParallelToolCalls 以
+    // Probe 来源生效，即使 dialect_preset 是 glm（该预设本身 ParallelToolCalls=Policy）。
+    let route = route(WireProtocol::ChatCompletions);
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::from_route(&route));
+    profile
+        .capabilities
+        .insert(Capability::ParallelToolCalls, EvidenceState::Supported);
+    let resolved = CapabilityResolver
+        .resolve(ResolutionInput {
+            route: &route,
+            requested: &RequestedFeatures::text_stream(),
+            semantic: &SemanticPolicy::default(),
+            route_overrides: &[],
+            policy_extensions: &[],
+            profile: Some(&profile),
+            dialect_preset: upstream.dialect_preset_for_model("glm-5.2"),
+            strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
+        })
+        .unwrap();
+    assert_eq!(
+        resolved.source(Capability::ParallelToolCalls),
+        CapabilitySource::Probe
+    );
+
+    // 无档案时 per-model preset 生效（minimax：ParallelToolCalls 以 Policy 生效）。
+    let resolved_no_profile = CapabilityResolver
+        .resolve(ResolutionInput {
+            route: &route,
+            requested: &RequestedFeatures::text_stream(),
+            semantic: &SemanticPolicy::default(),
+            route_overrides: &[],
+            policy_extensions: &[],
+            profile: None,
+            dialect_preset: upstream.dialect_preset_for_model("glm-5.2"),
+            strip_nonstandard_chat_fields: NonstandardFieldPolicy::Forward,
+        })
+        .unwrap();
+    assert_eq!(
+        resolved_no_profile.state(Capability::ParallelToolCalls),
+        EvidenceState::Supported
+    );
+    assert_eq!(
+        resolved_no_profile.source(Capability::ParallelToolCalls),
+        CapabilitySource::Policy
+    );
+}

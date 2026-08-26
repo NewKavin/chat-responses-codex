@@ -519,6 +519,24 @@ fn message_is_request_rejected(message: &str) -> bool {
         "validation error",
         "invalid parameter",
         "parameter invalid",
+        // T3.1: align with `message_is_rate_limited` above — domestic
+        // upstreams (GLM/Deepseek/new-api) reject optional request fields
+        // with Chinese messages. Only phrases clearly pointing at a
+        // parameter/field are listed; generic 错误/失败/异常  are deliberately
+        // excluded so real transient faults still cool the route. Chinese is
+        // unaffected by to_ascii_lowercase(), so these match verbatim.
+        "参数非法",
+        "参数错误",
+        "参数有误",
+        "不支持该参数",
+        "不支持",
+        "无效的参数",
+        "无效参数",
+        "缺少必需参数",
+        "缺少参数",
+        "非法参数",
+        "未知字段",
+        "未知参数",
     ]
     .iter()
     .any(|pattern| message.contains(pattern))

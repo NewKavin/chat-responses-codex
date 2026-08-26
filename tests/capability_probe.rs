@@ -5718,7 +5718,7 @@ async fn run_probe_job_skips_cooling_routes_and_supersedes_stale_jobs() {
             protocol: job.key.protocol,
         };
         state
-            .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+            .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
             .await
             .unwrap();
         let execution = run_probe_job(&state, &job).await;

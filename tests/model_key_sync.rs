@@ -318,7 +318,7 @@ async fn targeted_queue_deduplicates_and_clears_confirmed_model_quarantine() {
         protocol: WireProtocol::ChatCompletions,
     };
     state
-        .observe_route_failure(&route, RouteFailureClass::ModelUnsupported, None)
+        .observe_route_failure(&route, RouteFailureClass::ModelUnsupported, None, false)
         .await
         .expect("route health observation");
     let worker = ModelKeySyncService::spawn(state.clone()).expect("sync service enabled");

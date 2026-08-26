@@ -609,6 +609,24 @@ pub(super) fn dialect_field_error_hint(error_text: &str) -> Option<&'static str>
         "invalid field",
         "invalid parameter",
         "unexpected field",
+        // T3.1: domestic (GLM/Deepseek/new-api) upstreams reject optional
+        // fields with Chinese messages. Only phrases that clearly point at a
+        // parameter/field are listed here; generic words like 错误/失败/异常
+        // are deliberately excluded so real transient faults still cool the
+        // route. error_lower is to_ascii_lowercase(); Chinese is unaffected,
+        // so these are matched verbatim.
+        "参数非法",
+        "参数错误",
+        "参数有误",
+        "不支持该参数",
+        "不支持",
+        "无效的参数",
+        "无效参数",
+        "缺少必需参数",
+        "缺少参数",
+        "非法参数",
+        "未知字段",
+        "未知参数",
     ]
     .iter()
     .any(|pattern| error_lower.contains(pattern));
@@ -616,7 +634,9 @@ pub(super) fn dialect_field_error_hint(error_text: &str) -> Option<&'static str>
         return None;
     }
     [
-        // Order matters: check more specific fields first to avoid substring matches
+        // Order matters: check more specific fields first to avoid substring
+        // matches (top_logprobs before logprobs, frequency/presence_penalty
+        // before any shorter penalty-shaped pattern).
         "top_logprobs",
         "max_output_tokens",
         "max_completion_tokens",
@@ -627,7 +647,15 @@ pub(super) fn dialect_field_error_hint(error_text: &str) -> Option<&'static str>
         "reasoning_content",
         "tool_choice",
         "verbosity",
+        "response_format",
+        "frequency_penalty",
+        "presence_penalty",
         "prompt_cache_key",
+        "thinking",
+        "metadata",
+        "store",
+        "top_p",
+        "seed",
         "logprobs",
     ]
     .iter()
@@ -638,6 +666,10 @@ pub(super) fn dialect_field_error_hint(error_text: &str) -> Option<&'static str>
 /// Fields that are safe to strip for a same-route downgrade retry: they are
 /// optional sampling/extensions, never semantic state. `tool_choice` and
 /// `reasoning_content` are excluded because removing them changes behavior.
+/// `thinking` is also excluded (T3.3): it carries the reasoning on/off
+/// semantics; a request that rejects it must go through the per-model preset
+/// (T3.4) path instead of a blind strip, so the reasoning capability state
+/// stays coherent.
 pub(super) fn is_safe_dialect_strip_field(field: &str) -> bool {
     matches!(
         field,
@@ -648,6 +680,20 @@ pub(super) fn is_safe_dialect_strip_field(field: &str) -> bool {
             | "max_completion_tokens"
             | "stream_options"
             | "verbosity"
+            // T3.3: response_format only changes the response envelope
+            // (json_object/json_schema/text); removing it falls back to plain
+            // text safely and the caller can restructure the request.
+            | "response_format"
+            // T3.3: seed/store/metadata are sampling/bookkeeping extensions;
+            // dropping them changes nothing semantically.
+            | "seed"
+            | "store"
+            | "metadata"
+            // T3.3: top_p/frequency_penalty/presence_penalty are sampling
+            // knobs; a downgrade retry without them yields a valid request.
+            | "top_p"
+            | "frequency_penalty"
+            | "presence_penalty"
             | "prompt_cache_key"
             | "logprobs"
             | "top_logprobs"

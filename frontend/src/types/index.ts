@@ -114,6 +114,7 @@ export interface UpstreamConfig {
   last_synced_at?: number
   strip_nonstandard_chat_fields: NonstandardFieldPolicy
   dialect_preset?: string | null
+  model_dialect_presets?: Record<string, string>
   runtime_state?: UpstreamRuntimeState
   route_health?: RouteHealthSnapshot
   _replace_api_keys?: boolean

@@ -1030,6 +1030,7 @@ async fn test_upstreams_list_route_health_is_aggregate_and_secret_free() {
             },
             RouteFailureClass::CapacityUnavailable,
             Some(Duration::from_secs(90)),
+            false,
         )
         .await
         .expect("route health observation");
@@ -1118,6 +1119,7 @@ async fn reset_upstream_route_health_clears_exact_routes_but_preserves_key_failu
             &target_route,
             RouteFailureClass::CapacityUnavailable,
             Some(Duration::from_secs(90)),
+            false,
         )
         .await
         .unwrap();
@@ -1126,6 +1128,7 @@ async fn reset_upstream_route_health_clears_exact_routes_but_preserves_key_failu
             &control_route,
             RouteFailureClass::CapacityUnavailable,
             Some(Duration::from_secs(90)),
+            false,
         )
         .await
         .unwrap();
@@ -1225,6 +1228,7 @@ async fn legacy_local_admission_invariant_is_bounded_and_secret_free() {
             },
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(86_000_000)),
+            false,
         )
         .await
         .expect("legacy local-admission route health observation");

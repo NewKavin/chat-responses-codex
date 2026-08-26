@@ -110,7 +110,7 @@ fn stream_timeouts_use_runtime_idle_and_startup_transport_limits() {
 #[test]
 fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -121,7 +121,7 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record_cooled(AttemptFailure{
+    ledger.record_cooled(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -172,7 +172,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
         ),
     ] {
         let mut ledger = AttemptLedger::default();
-        ledger.record(AttemptFailure{
+        ledger.record(AttemptFailure {
             route_id: "route".into(),
             upstream_status: Some(400),
             upstream_error_code: None,
@@ -181,7 +181,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
             class,
             retry_after: None,
             upstream_host: None,
-        half_open_busy: false,
+            half_open_busy: false,
         });
         assert_eq!(ledger.terminal_failure(), expected);
     }
@@ -190,7 +190,7 @@ fn route_attempts_groups_homogeneous_terminal_classes() {
 #[test]
 fn route_attempts_reports_mixed_non_temporary_exhaustion() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(401),
         upstream_error_code: None,
@@ -201,7 +201,7 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(400),
         upstream_error_code: None,
@@ -221,7 +221,7 @@ fn route_attempts_reports_mixed_non_temporary_exhaustion() {
 fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
     let mut ledger = AttemptLedger::default();
     for (index, class) in classes.iter().copied().enumerate() {
-        ledger.record(AttemptFailure{
+        ledger.record(AttemptFailure {
             route_id: format!("route-secret-{index}"),
             upstream_status: Some(400),
             upstream_error_code: None,
@@ -232,7 +232,7 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
                 .is_temporary()
                 .then(|| Duration::from_secs(11 + index as u64)),
             upstream_host: None,
-        half_open_busy: false,
+            half_open_busy: false,
         });
     }
     terminal_route_failure_error(
@@ -324,7 +324,7 @@ fn route_attempts_terminal_details_are_numeric_and_secret_free() {
 #[test]
 fn terminal_retry_after_seconds_are_rounded_up() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -368,7 +368,7 @@ fn terminal_retry_after_seconds_are_rounded_up() {
 #[test]
 fn terminal_details_report_give_up_reason_recovery_and_probe() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route".into(),
         upstream_status: Some(502),
         upstream_error_code: None,
@@ -414,7 +414,7 @@ fn terminal_details_report_give_up_reason_recovery_and_probe() {
 #[test]
 fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -425,7 +425,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record_cooled(AttemptFailure{
+    ledger.record_cooled(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -483,7 +483,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
 fn cooled_routes_carry_real_upstream_status_in_summary() {
     let mut ledger = AttemptLedger::default();
     for index in 0..8 {
-        ledger.record_cooled(AttemptFailure{
+        ledger.record_cooled(AttemptFailure {
             route_id: format!("route-{index}"),
             upstream_status: Some(502),
             upstream_error_code: None,
@@ -492,7 +492,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(3)),
             upstream_host: None,
-        half_open_busy: false,
+            half_open_busy: false,
         });
     }
 
@@ -529,7 +529,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
 #[test]
 fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -540,7 +540,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(502),
         upstream_error_code: None,
@@ -588,7 +588,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
 #[test]
 fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -599,7 +599,7 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -636,7 +636,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
     // Upstream said "retry in 1s" but the local cooldown is ~27s; the client
     // must be told the number that will actually succeed.
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route".into(),
         upstream_status: Some(429),
         upstream_error_code: None,
@@ -696,7 +696,7 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
-            shared_host_failure_domain: false,
+            shared_host_failure_domain: false
         }
     );
 }
@@ -938,7 +938,7 @@ fn direct_hedge_send_count_does_not_change_round_route_selection() {
 #[test]
 fn terminal_observation_matches_the_public_terminal_failure_class() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "temporary-route".into(),
         upstream_status: Some(503),
         upstream_error_code: None,
@@ -949,7 +949,7 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "credential-route".into(),
         upstream_status: Some(403),
         upstream_error_code: None,
@@ -3304,7 +3304,7 @@ fn e3_class_summary_picks_most_common_code_and_name() {
     .into_iter()
     .enumerate()
     {
-        ledger.record(AttemptFailure{
+        ledger.record(AttemptFailure {
             route_id: format!("route-{index}"),
             upstream_status: status,
             upstream_error_code: code.map(str::to_string),
@@ -3313,7 +3313,7 @@ fn e3_class_summary_picks_most_common_code_and_name() {
             class: FailureClass::TransientServer,
             retry_after: Some(Duration::from_secs(30)),
             upstream_host: None,
-        half_open_busy: false,
+            half_open_busy: false,
         });
     }
 
@@ -3343,7 +3343,7 @@ fn e3_class_summary_picks_most_common_code_and_name() {
 #[test]
 fn e3_terminal_error_message_and_details_carry_code_and_name() {
     let mut ledger = AttemptLedger::default();
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
@@ -3354,7 +3354,7 @@ fn e3_terminal_error_message_and_details_carry_code_and_name() {
         upstream_host: None,
         half_open_busy: false,
     });
-    ledger.record_cooled(AttemptFailure{
+    ledger.record_cooled(AttemptFailure {
         route_id: "route-b".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
@@ -3476,7 +3476,7 @@ fn e5_terminal_summary_appends_body_excerpt_when_present() {
         200,
     )
     .expect("sanitizer must produce an excerpt");
-    ledger.record(AttemptFailure{
+    ledger.record(AttemptFailure {
         route_id: "route-a".into(),
         upstream_status: Some(503),
         upstream_error_code: Some("channel_not_found".to_string()),
@@ -3552,4 +3552,162 @@ fn dialect_retry_identifies_logprobs_for_strip() {
     let field2 = generic_strip_field_for_response(StatusCode::BAD_REQUEST, error_text2, true);
 
     assert_eq!(field2, Some("top_logprobs"));
+}
+
+#[test]
+fn chinese_field_error_hint_extracts_field_for_domestic_upstreams() {
+    use crate::server::gateway::capability_probe::dialect_field_error_hint;
+
+    // 中文参数错误（GLM/Deepseek/new-api 常见）应能提取字段名。
+    assert_eq!(
+        dialect_field_error_hint("参数非法：logprobs"),
+        Some("logprobs")
+    );
+    assert_eq!(
+        dialect_field_error_hint("不支持该参数 top_logprobs"),
+        Some("top_logprobs")
+    );
+    assert_eq!(
+        dialect_field_error_hint("无效的参数 presence_penalty"),
+        Some("presence_penalty")
+    );
+    assert_eq!(
+        dialect_field_error_hint("缺少必需参数：response_format"),
+        Some("response_format")
+    );
+    assert_eq!(dialect_field_error_hint("未知参数 seed"), Some("seed"));
+}
+
+#[test]
+fn chinese_field_error_hint_rejects_generic_transient_words() {
+    use crate::server::gateway::capability_probe::dialect_field_error_hint;
+
+    // 泛词（错误/失败/异常）不应被当成字段错误——否则真瞬态会被误判为
+    // RequestRejected 而不冷却路由、反复打故障上游。
+    assert_eq!(dialect_field_error_hint("上游内部错误"), None);
+    assert_eq!(dialect_field_error_hint("网关异常"), None);
+    assert_eq!(dialect_field_error_hint("请求处理失败"), None);
+    assert_eq!(dialect_field_error_hint("上游服务不可用"), None);
+}
+
+#[test]
+fn chinese_field_error_hint_pressure_penalty_not_substring_matched() {
+    use crate::server::gateway::capability_probe::dialect_field_error_hint;
+
+    // presence_penalty / frequency_penalty 不被更短的 penalty 类子串误匹配：
+    // 命中长字段名，而不是回退到某个短模式。
+    assert_eq!(
+        dialect_field_error_hint("参数非法 presence_penalty"),
+        Some("presence_penalty")
+    );
+    assert_eq!(
+        dialect_field_error_hint("参数非法 frequency_penalty"),
+        Some("frequency_penalty")
+    );
+    // 顺序回归：top_p 不应被子串误配成其它字段。
+    assert_eq!(dialect_field_error_hint("参数非法 top_p"), Some("top_p"));
+}
+
+#[test]
+fn thinking_is_never_safe_to_strip_but_response_format_is() {
+    use crate::server::gateway::capability_probe::is_safe_dialect_strip_field;
+
+    // thinking 承载推理开关语义（T3.3），只能走 preset 修正，不能剥离。
+    assert!(!is_safe_dialect_strip_field("thinking"));
+    assert!(!is_safe_dialect_strip_field("reasoning_content"));
+    assert!(!is_safe_dialect_strip_field("tool_choice"));
+    // T3.3 新增字段：可安全剥离重试。
+    assert!(is_safe_dialect_strip_field("response_format"));
+    assert!(is_safe_dialect_strip_field("seed"));
+    assert!(is_safe_dialect_strip_field("store"));
+    assert!(is_safe_dialect_strip_field("metadata"));
+    assert!(is_safe_dialect_strip_field("top_p"));
+    assert!(is_safe_dialect_strip_field("frequency_penalty"));
+    assert!(is_safe_dialect_strip_field("presence_penalty"));
+}
+
+#[test]
+fn correction_for_response_falls_back_to_message_field_without_param() {
+    use crate::capabilities::DialectCorrectionRule;
+    use crate::server::gateway::dialect_retry::correction_for_response;
+    use axum::http::StatusCode;
+
+    // /error/param 缺失时，从 error.message 提取字段名（T3.2）。
+    // 用 service_tier：它同时在提示字段表与 RemoveOptionalField 的 is_safe 白名单里。
+    let body = r#"{"error":{"message":"不支持该参数 service_tier","code":"1210"}}"#.as_bytes();
+    let rules = [DialectCorrectionRule::RemoveOptionalField {
+        field: "service_tier".into(),
+    }];
+    let rule = correction_for_response(StatusCode::BAD_REQUEST, body, false, &rules);
+    assert_eq!(
+        rule,
+        Some(DialectCorrectionRule::RemoveOptionalField {
+            field: "service_tier".into()
+        })
+    );
+}
+
+#[test]
+fn correction_for_response_numeric_code_requires_field_in_message() {
+    use crate::capabilities::DialectCorrectionRule;
+    use crate::server::gateway::dialect_retry::correction_for_response;
+    use axum::http::StatusCode;
+
+    // 数字码 + message 无字段名 ⇒ 不放行（T3.2 联合判据）。
+    let body = r#"{"error":{"message":"上游内部错误","code":"1210"}}"#.as_bytes();
+    let rules = [DialectCorrectionRule::RemoveOptionalField {
+        field: "service_tier".into(),
+    }];
+    assert_eq!(
+        correction_for_response(StatusCode::BAD_REQUEST, body, false, &rules),
+        None
+    );
+
+    // 数字码 + message 含字段名 ⇒ 放行。
+    let body = r#"{"error":{"message":"参数非法: service_tier","code":"1210"}}"#.as_bytes();
+    assert_eq!(
+        correction_for_response(StatusCode::BAD_REQUEST, body, false, &rules),
+        Some(DialectCorrectionRule::RemoveOptionalField {
+            field: "service_tier".into()
+        })
+    );
+
+    // 白名单外的字符串码不放行。
+    let body = r#"{"error":{"message":"参数非法: service_tier","code":"bogus_code"}}"#.as_bytes();
+    assert_eq!(
+        correction_for_response(StatusCode::BAD_REQUEST, body, false, &rules),
+        None
+    );
+}
+
+#[test]
+fn correction_for_response_keeps_three_guards() {
+    use crate::capabilities::DialectCorrectionRule;
+    use crate::server::gateway::dialect_retry::correction_for_response;
+    use axum::http::StatusCode;
+
+    let body = r#"{"error":{"message":"参数非法: service_tier","code":"1210"}}"#.as_bytes();
+    let rules = [DialectCorrectionRule::RemoveOptionalField {
+        field: "service_tier".into(),
+    }];
+
+    // 仅 400。
+    assert_eq!(
+        correction_for_response(StatusCode::INTERNAL_SERVER_ERROR, body, false, &rules),
+        None
+    );
+    // 仅 response_started == false。
+    assert_eq!(
+        correction_for_response(StatusCode::BAD_REQUEST, body, true, &rules),
+        None
+    );
+    // body ≤ 64KB 护栏。
+    let big = format!(
+        r#"{{"error":{{"message":"参数非法: {}","code":"1210"}}}}"#,
+        "x".repeat(65_536)
+    );
+    assert_eq!(
+        correction_for_response(StatusCode::BAD_REQUEST, big.as_bytes(), false, &rules),
+        None
+    );
 }

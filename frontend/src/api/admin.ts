@@ -53,6 +53,7 @@ export interface BatchCreateUpstreamPayload {
   active?: boolean
   strip_nonstandard_chat_fields?: NonstandardFieldPolicy
   dialect_preset?: string | null
+  model_dialect_presets?: Record<string, string>
 }
 
 export interface BatchCreateUpstreamResult {

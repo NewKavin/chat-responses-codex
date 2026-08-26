@@ -214,6 +214,44 @@ impl UpstreamConfig {
         self.is_premium_model_request_with(model, true)
     }
 
+    /// T3.4: resolve the dialect preset for a specific runtime model slug.
+    /// Priority per plan: a matching `model_dialect_presets` entry (exact
+    /// canonical match first, then `prefix*` wildcard) wins over the
+    /// per-upstream `dialect_preset` fallback. A verified probe profile beats
+    /// both at the resolver (it is consulted only when no profile exists).
+    /// Matching syntax reuses the model-mappings convention (canonical
+    /// trimmed+lowercase comparison) plus an optional trailing `*` prefix
+    /// wildcard, e.g. `{"glm-*": "glm", "deepseek-*": "deepseek"}`.
+    pub fn dialect_preset_for_model(&self, runtime_model_slug: &str) -> Option<&str> {
+        if !self.model_dialect_presets.is_empty() {
+            let canonical = super::canonical_model_id(runtime_model_slug);
+            // 1) Exact canonical match wins first.
+            if let Some(preset) = self
+                .model_dialect_presets
+                .iter()
+                .find(|(pattern, _)| super::canonical_model_id(pattern.trim()) == canonical)
+            {
+                return Some(preset.1);
+            }
+            // 2) Longest matching `prefix*` wildcard wins next; ties broken by
+            //    BTreeMap key order (stable).
+            if let Some((_, preset)) = self
+                .model_dialect_presets
+                .iter()
+                .filter(|(pattern, _)| pattern.trim_end().ends_with('*'))
+                .filter_map(|(pattern, preset)| {
+                    let prefix = super::canonical_model_id(pattern.trim_end_matches('*'));
+                    (!prefix.is_empty() && canonical.starts_with(&prefix))
+                        .then_some((prefix.len(), preset))
+                })
+                .max_by_key(|(prefix_len, _)| *prefix_len)
+            {
+                return Some(preset);
+            }
+        }
+        self.dialect_preset.as_deref()
+    }
+
     pub fn is_premium_model_request_with(&self, model: &str, case_insensitive: bool) -> bool {
         if self.premium_models.is_empty() {
             return false;
@@ -314,6 +352,13 @@ impl UpstreamConfig {
         self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
         self.default_model_context =
             normalized_default_model_context(self.default_model_context.take());
+        // T3.4: trim keys and values; drop empty entries so a stale `""`
+        // mapping never shadows anything.
+        self.model_dialect_presets = std::mem::take(&mut self.model_dialect_presets)
+            .into_iter()
+            .map(|(pattern, preset)| (pattern.trim().to_string(), preset.trim().to_string()))
+            .filter(|(pattern, preset)| !pattern.is_empty() && !preset.is_empty())
+            .collect();
     }
 
     pub fn validate_configuration(&self) -> Result<(), String> {
@@ -946,5 +991,62 @@ mod tests {
                 .map(|entry| entry.model.as_str()),
             Some("DeepSeek-Chat")
         );
+    }
+}
+
+#[cfg(test)]
+mod dialect_preset_tests {
+    use super::*;
+
+    fn preset_upstream() -> UpstreamConfig {
+        UpstreamConfig {
+            name: "presets".into(),
+            base_url: "https://example.invalid".into(),
+            api_key: "key-a".into(),
+            dialect_preset: Some("openai".into()),
+            model_dialect_presets: BTreeMap::from([
+                ("glm-*".to_string(), "glm".to_string()),
+                ("deepseek-*".to_string(), "deepseek".to_string()),
+                ("deepseek-v4-flash-0731".to_string(), "minimax".to_string()),
+            ]),
+            ..UpstreamConfig::default()
+        }
+    }
+
+    #[test]
+    fn per_model_preset_exact_match_wins_over_wildcard_and_fallback() {
+        let upstream = preset_upstream();
+        // Exact canonical match beats the glm-* wildcard.
+        assert_eq!(
+            upstream.dialect_preset_for_model("deepseek-v4-flash-0731"),
+            Some("minimax")
+        );
+        // Case/whitespace-insensitive canonical folding.
+        assert_eq!(
+            upstream.dialect_preset_for_model("DEEPSEEK-V4-FLASH-0731"),
+            Some("minimax")
+        );
+    }
+
+    #[test]
+    fn per_model_preset_wildcard_covers_family_and_fallback_for_miss() {
+        let upstream = preset_upstream();
+        assert_eq!(upstream.dialect_preset_for_model("glm-5.1"), Some("glm"));
+        assert_eq!(
+            upstream.dialect_preset_for_model("deepseek-v4"),
+            Some("deepseek")
+        );
+        // No matching pattern fall back to the per-upstream preset.
+        assert_eq!(upstream.dialect_preset_for_model("gpt-4"), Some("openai"));
+    }
+
+    #[test]
+    fn per_model_preset_empty_map_falls_back_to_per_upstream() {
+        let upstream = UpstreamConfig {
+            dialect_preset: Some("glm".into()),
+            ..UpstreamConfig::default()
+        };
+        assert_eq!(upstream.dialect_preset_for_model("glm-5.1"), Some("glm"));
+        assert_eq!(upstream.dialect_preset_for_model("anything"), Some("glm"));
     }
 }

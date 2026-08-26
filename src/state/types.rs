@@ -669,6 +669,13 @@ pub struct UpstreamConfig {
     /// probe profile always wins over the preset.
     #[serde(default)]
     pub dialect_preset: Option<String>,
+    /// T3.4: per-model dialect preset overrides, model slug (or `prefix*`
+    /// wildcard) -> preset name. A matching entry wins over the per-upstream
+    /// `dialect_preset`; a verified probe profile still wins over both. This
+    /// fixes the single-aggregate-gateway mismatch where one upstream hosts
+    /// several models (e.g. `{"glm-*": "glm", "deepseek-*": "deepseek"}`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_dialect_presets: BTreeMap<String, String>,
 }
 
 impl UpstreamConfig {
@@ -717,6 +724,7 @@ impl Default for UpstreamConfig {
             last_synced_at: 0,
             strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,
             dialect_preset: None,
+            model_dialect_presets: BTreeMap::new(),
         }
     }
 }

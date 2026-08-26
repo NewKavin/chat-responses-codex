@@ -736,7 +736,7 @@ pub(super) fn evaluate_route_capabilities_with_runtime_hints(
         route_overrides: &route_overrides,
         policy_extensions: &policy_extensions,
         profile: effective_profile,
-        dialect_preset: upstream.dialect_preset.as_deref(),
+        dialect_preset: upstream.dialect_preset_for_model(runtime_model_slug),
         strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
     }) {
         Ok(resolved) => resolved,

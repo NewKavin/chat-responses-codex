@@ -702,3 +702,52 @@ fn sanitize_body_excerpt_passes_through_plain_text_unchanged() {
     let raw = "upstream channel temporarily unavailable, please retry later";
     assert_eq!(sanitize_upstream_body_excerpt(raw, 200).unwrap(), raw);
 }
+
+#[test]
+fn chinese_parameter_error_on_500_is_request_rejected_not_transient() {
+    // T3.1 回归守卫：中文「参数非法」一类明确指向参数/字段的报错，
+    // 在 5xx 上必须判成 RequestRejected（⇒ 不冷却路由），而不是 TransientServer。
+    for body in [
+        r#"{"error":{"message":"参数非法：logprobs"}}"#,
+        r#"{"error":{"message":"请求参数有误：top_p"}}"#,
+        r#"{"error":{"message":"不支持该参数 presence_penalty"}}"#,
+        r#"{"error":{"message":"缺少必需参数：response_format"}}"#,
+    ] {
+        assert_class(500, body, FailureClass::RequestRejected);
+        assert_class(502, body, FailureClass::RequestRejected);
+    }
+}
+
+#[test]
+fn chinese_generic_errors_on_500_remain_transient_server() {
+    // T3.1 回界：泛词「错误/失败/异常」不能进词表，否则真瞬态会被误判成
+    // RequestRejected 而不冷却、反复打故障上游。
+    for body in [
+        r#"{"error":{"message":"上游内部错误"}}"#,
+        r#"{"error":{"message":"网关异常"}}"#,
+        r#"{"error":{"message":"请求处理失败"}}"#,
+        r#"{"error":{"message":"上游服务不可用"}}"#,
+    ] {
+        assert_class(500, body, FailureClass::TransientServer);
+    }
+}
+
+#[test]
+fn chinese_parameter_error_on_400_stays_request_rejected() {
+    assert_class(
+        400,
+        r#"{"error":{"message":"参数非法：logprobs","code":"1210"}}"#,
+        FailureClass::RequestRejected,
+    );
+}
+
+#[test]
+fn nginx_html_502_remains_edge_proxy_error() {
+    // T3.1 回归守卫：502 + 纯 nginx HTML 仍判 EdgeProxyError，不能因词表
+    // 扩充而变成别的类（EdgeProxyError 有自己的短冷却曲线）。
+    assert_class(
+        502,
+        "<html><body><h1>502 Bad Gateway</h1>nginx/1.18.0</body></html>",
+        FailureClass::EdgeProxyError,
+    );
+}
