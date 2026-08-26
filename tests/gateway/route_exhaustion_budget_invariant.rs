@@ -503,3 +503,212 @@ async fn exhaustion_log_carries_observability_fields() {
     // so the honest value is 0 (now derived, not hard-coded).
     assert_eq!(details["remaining_candidates"], 0);
 }
+
+// ---------------------------------------------------------------------------
+// P1.3 (2026-08-26 T11): the original production incident, pinned on the
+// *shipped default* configuration — no switch overridden.
+//
+// The rest of this file (like the rest of the suite) isolates one mechanism
+// by turning self-healing switches off.  That is exactly the gap P1.3 fills:
+// the intranet deployment runs every default ON, so the incident must be
+// reproduced on the pure `AppConfig::default()` path and the observable
+// guarantees below must hold there.
+//
+// The incident: 6 physical candidates (3 routes × 2 keys) all behind one
+// aggregation gateway (one host), every one answering `502 + Retry-After: 28`.
+// Before T1.2 the 28s hint pinned the route cooldown and the 30s intra-gateway
+// wait budget collapsed at round 1 (`routing_round=1`, `give_up_reason=
+// wait_budget`).  On the shipped defaults the T1.1 invariant (`ceiling*1000 <
+// retry_max_wait_ms`) guarantees a single cooldown always fits in the budget,
+// so `wait_budget` must be unreachable; the request must actually wait between
+// rounds and exhaust with an honest `remaining_candidates`.
+// ---------------------------------------------------------------------------
+
+const P13_MODEL: &str = "p13-incident-model";
+
+/// The failure-domain tell: `distinct_upstream_hosts` is a log-only field
+/// (never in `error.details`), so P1.3 reads it from the process-global
+/// tracing capture (`install_gateway_tracing_once`, T11 §6.3) filtering the
+/// one line belonging to this request via the unique `original_model`.
+fn p13_distinct_upstream_hosts(capture: &super::common::TracingCapture) -> u64 {
+    let trace = capture.contents();
+    let line = trace
+        .lines()
+        .find(|line| {
+            line.contains("original_model=p13-incident-model")
+                && line.contains("distinct_upstream_hosts=")
+        })
+        .unwrap_or_else(|| {
+            panic!("no terminal exhaustion log line for the p13 request in:\n{trace}")
+        });
+    let needle = "distinct_upstream_hosts=";
+    let start = line
+        .find(needle)
+        .unwrap_or_else(|| panic!("no distinct_upstream_hosts field in log line:\n{line}"));
+    let value = line[start + needle.len()..]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
+    value.parse().unwrap_or_else(|_| {
+        panic!("distinct_upstream_hosts value not numeric: {value:?} in:\n{line}")
+    })
+}
+
+#[tokio::test]
+async fn shipped_default_config_waits_between_rounds_and_reports_honest_state() {
+    // The gateway binary installs its single global tracing subscriber once
+    // (shared with upstream_feedback's observability test); install it before
+    // the request so this request's terminal log line is captured.
+    let capture = super::common::install_gateway_tracing_once();
+
+    let (base_url, _hits) = aggregation_upstream(usize::MAX).await;
+    let downstream_key = generate_downstream_key("p13");
+    let tempdir = tempdir().unwrap();
+    let upstreams = (0..3u32)
+        .map(|i| UpstreamConfig {
+            id: format!("p13-agg-{i}"),
+            name: format!("p13-aggregator-{i}"),
+            base_url: base_url.clone(),
+            api_key: format!("p13-secret-{i}-a"),
+            api_keys: vec![format!("p13-secret-{i}-b")],
+            api_key_models: vec![
+                chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: format!("p13-secret-{i}-a"),
+                    supported_models: vec![P13_MODEL.into()],
+                },
+                chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: format!("p13-secret-{i}-b"),
+                    supported_models: vec![P13_MODEL.into()],
+                },
+            ],
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![P13_MODEL.into()],
+            active: true,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(upstreams),
+            downstreams: Arc::new(vec![DownstreamConfig {
+                id: "down-p13".into(),
+                name: "p13-client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![P13_MODEL.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        tempdir.path().join("state.json"),
+        // P1.3's whole point: the shipped defaults, NOTHING overridden.
+        AppConfig::default(),
+    );
+    let app = build_router(state.clone());
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(60),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": P13_MODEL,
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("request must terminate on the shipped defaults")
+    .unwrap();
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let details = &payload["error"]["details"];
+    let rounds = details["routing_rounds"].as_u64().unwrap_or(0);
+    let give_up = details["give_up_reason"].clone();
+    let remaining = &details["remaining_candidates"];
+    let distinct_hosts = p13_distinct_upstream_hosts(capture);
+
+    // Shipped-defaults terminal shape (deviation from the handoff's "503"
+    // wording, see P1.3 notes in the T11 plan backfill): with T2.2's
+    // same-host transient breaker ON by default, the 4th of the 6 same-host
+    // 502s trips the common-mode latch and the request ends as a 502
+    // `upstream_transient_pool_failure` *before* the all-routes-503
+    // exhaustion arm can run.  That is strictly the designed behavior for the
+    // single-aggregation-gateway shape: the pool is not burned through
+    // (cooldown capped at 5s, 2 candidates left available) and the client
+    // gets a pool-scale message plus a Retry-After.  The P1.3 guarantees that
+    // DO matter for the incident are all asserted below.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "payload={payload}");
+    assert_eq!(
+        payload["error"]["code"], "upstream_transient_pool_failure",
+        "T2.2 on the shipped defaults must pre-empt the 503 exhaustion arm with the pool-failure verdict, got {payload}"
+    );
+    assert!(
+        rounds >= 2,
+        "T1.1: on the shipped defaults the gateway must wait between rounds (at least one inter-round wait), got routing_rounds={rounds} payload={payload}"
+    );
+    assert_ne!(
+        give_up.as_str(),
+        Some("wait_budget"),
+        "T1.1 corollary: a single cooldown always fits the 30s budget on the shipped defaults, so wait_budget must be unreachable (null/unset is fine — the common-mode arm does not set it), got {payload}"
+    );
+    assert_eq!(
+        details["cooldown_seconds"],
+        5,
+        "T1.2 on the shipped defaults: the upstream 28s hint must be capped to the 5s cooldown cap in the ledger, not echoed as 28 (this relies on the shipped default `upstream_retry_after_cooldown_cap_seconds` = 5 — P1.3 deliberately pins the un-overridden defaults), got {payload}"
+    );
+    assert!(
+        remaining.is_number()
+            && remaining
+                .as_u64()
+                .is_some_and(|value| (1..=6).contains(&value)),
+        "remaining_candidates must be an honest nonzero value on the defaults — the common-mode verdict must NOT burn the whole pool, got {remaining} (payload={payload})"
+    );
+    assert_eq!(
+        distinct_hosts, 1,
+        "the 6 candidates all resolve to the single aggregation gateway: distinct_upstream_hosts must be 1 (the fake-diversity tell), got {distinct_hosts}"
+    );
+    // What the request actually spent, for the record: far more than the old
+    // collapse (which had zero inter-round wait), and the terminal details
+    // carry the honest attempt/round/hit accounting.
+    assert!(
+        details["physical_attempt_count"].as_u64().unwrap() >= 6,
+        "physical_attempt_count must count every hit, got {details}"
+    );
+    assert!(
+        details["waited_ms"].as_u64().unwrap() > 0,
+        "the request must actually have waited, got {details}"
+    );
+}

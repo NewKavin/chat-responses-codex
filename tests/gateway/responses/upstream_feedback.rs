@@ -1414,15 +1414,11 @@ async fn route_failure_observability_separates_upstream_500_from_downstream_503(
     );
 
     let app = build_router(state.clone());
-    let capture = TracingCapture::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_target(false)
-        .with_writer(capture.clone())
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("gateway test process must install tracing only once");
+    // The gateway binary's single process-global tracing slot (T11 §6.3):
+    // exactly one test may install it, and every log-asserting test in this
+    // binary must read the same shared capture.  Filter by a marker unique to
+    // this test (`original_model=upstream-error-surface`) when parsing.
+    let capture = super::super::common::install_gateway_tracing_once();
 
     let response = app
         .clone()
@@ -1619,6 +1615,13 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
         // truncation switch is turned off explicitly.
         AppConfig {
             upstream_route_exhaustion_alignment_truncated_enabled: false,
+            // Stated explicitly rather than inherited.  The assertion below is
+            // only discriminating while the local curve differs from BOTH the
+            // raw upstream hint (30) and the cooldown cap (5): at the shipped
+            // default base of 5s the effective cooldown is also ~5s, which
+            // collides with `upstream_retry_after_cooldown_cap_seconds` and the
+            // test could no longer tell "local curve" from "capped hint".
+            upstream_transient_route_cooldown_base_seconds: 10,
             ..AppConfig::default()
         },
     );
@@ -1650,9 +1653,9 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
 
     // Post-T1.2 the client hint reflects the route's *effective* recovery
     // (local backoff curve, upstream hint bounded by the 5s cooldown cap),
-    // not a raw echo of the upstream `Retry-After: 30`.  Default transient
-    // base = 10s, step-1 deterministic jitter -> ~9s effective cooldown,
-    // ceil -> 9.  The upstream hint only governs route health up to
+    // not a raw echo of the upstream `Retry-After: 30`.  Transient base = 10s
+    // as configured above, step-1 deterministic jitter -> ~9s effective
+    // cooldown, ceil -> 9.  The upstream hint only governs route health up to
     // `upstream_retry_after_cooldown_cap_seconds`;
     // `upstream_retry_after_cap_seconds` still bounds the client header.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

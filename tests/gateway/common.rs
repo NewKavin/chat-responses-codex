@@ -84,6 +84,33 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TracingCapture {
     }
 }
 
+/// Install the single process-global tracing subscriber for the `tests/gateway.rs`
+/// binary, exactly once (tracing's `set_global_default` can only be called once
+/// per process; a second call panics).  Every gateway test that needs to assert
+/// on log fields must read the returned capture instead of installing its own —
+/// see 2026-08-26 T11 plan §6.3 (a per-test thread-local `with_default` capture
+/// silently misses callsites whose `Interest::never()` got cached while no
+/// subscriber was installed, while a second `set_global_default` panics).
+///
+/// The returned buffer is process-wide, so consumers should filter by a marker
+/// unique to their test (a unique `runtime_model_slug`/`original_model` is the
+/// convention) rather than asserting on the whole buffer.
+pub(crate) fn install_gateway_tracing_once() -> &'static TracingCapture {
+    static GATEWAY_TRACE: OnceLock<TracingCapture> = OnceLock::new();
+    GATEWAY_TRACE.get_or_init(|| {
+        let capture = TracingCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("gateway test process must install tracing only once");
+        capture
+    })
+}
+
 pub(crate) fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
     let plaintext = format!("{prefix}-{}", uuid::Uuid::new_v4().simple());
     let salt = format!("test-{}", uuid::Uuid::new_v4().simple());
