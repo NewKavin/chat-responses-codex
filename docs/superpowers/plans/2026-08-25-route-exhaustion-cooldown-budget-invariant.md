@@ -761,5 +761,5 @@ rtk grep -ao 'upstream_error_codes=[^ ]*' logs/*.log | sort | uniq -c | sort -rn
 | T3.3 | 字段表与剥离白名单补齐 | b4768249 | ✅ |
 | T3.4 | per-model dialect preset | b4768249 | ✅ |
 | T3.5 | GLM/Deepseek 保守档案预设 | b4768249 | ✅ |
-| T4.1 | 内网默认参数表 | `<T4 commit>` | ✅ |
-| T4.2 | 排查 runbook | `<T4 commit>` | ✅ |
+| T4.1 | 内网默认参数表 | fbbef48e | ✅ |
+| T4.2 | 排查 runbook | fbbef48e | ✅ |
