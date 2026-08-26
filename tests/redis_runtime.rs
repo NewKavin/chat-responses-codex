@@ -1903,6 +1903,13 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
     downstream.billing_mode = "token".into();
+    // Cost-billing fields: without them `cost_billing_mode()` is false and the
+    // usage-log write never reaches the Redis token-recording path, so these
+    // tests would silently exercise nothing (the cost-billing refactor in
+    // 44ab6bee tightened this predicate and the ignored suite never ran).
+    downstream.input_token_price_per_million_cents = Some(1_000_000);
+    downstream.output_token_price_per_million_cents = Some(1_000_000);
+    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
     let log = redis_test_usage_log("retryable-token-log", &downstream.id, 10);
 
@@ -1945,6 +1952,13 @@ async fn redis_token_recording_retries_commit_after_response_loss() {
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
     downstream.billing_mode = "token".into();
+    // Cost-billing fields: without them `cost_billing_mode()` is false and the
+    // usage-log write never reaches the Redis token-recording path, so these
+    // tests would silently exercise nothing (the cost-billing refactor in
+    // 44ab6bee tightened this predicate and the ignored suite never ran).
+    downstream.input_token_price_per_million_cents = Some(1_000_000);
+    downstream.output_token_price_per_million_cents = Some(1_000_000);
+    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
     let log = redis_test_usage_log("token-record-response-loss", &downstream.id, 10);
 
@@ -2011,6 +2025,13 @@ async fn redis_downstream_token_replay_preserves_original_score_and_value() {
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(1_000);
     downstream.billing_mode = "token".into();
+    // Cost-billing fields: without them `cost_billing_mode()` is false and the
+    // usage-log write never reaches the Redis token-recording path, so these
+    // tests would silently exercise nothing (the cost-billing refactor in
+    // 44ab6bee tightened this predicate and the ignored suite never ran).
+    downstream.input_token_price_per_million_cents = Some(1_000_000);
+    downstream.output_token_price_per_million_cents = Some(1_000_000);
+    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
 
     let log_id = "replayed-token-event";
@@ -2581,6 +2602,11 @@ async fn redis_route_health_exclusive_window_allows_admission_after_window() {
     // route state through the same-observation path.
     let mut config = redis_test_config();
     config.upstream_route_half_open_exclusive_window_ms = 150;
+    // T1.2: the upstream Retry-After hint is only a *floor* under the local
+    // backoff curve (`cooldown = max(local, explicit)`), so the 50ms hint
+    // below no longer yields a 50ms cooldown.  State the curve explicitly
+    // (base 1s, jittered 80-120% -> at most 1.2s) and sleep past it.
+    config.upstream_transient_route_cooldown_base_seconds = 1;
     let (first, second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("exclusive-window", "fingerprint-a");
     let route = redis_test_health_route("exclusive-window", "fingerprint-a", "model-a");
@@ -2594,7 +2620,7 @@ async fn redis_route_health_exclusive_window_allows_admission_after_window() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
         RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
         other => panic!("expected half-open permit, got {other:?}"),
@@ -2629,6 +2655,11 @@ async fn redis_settle_healthy_releases_exclusive_window_for_other_state() {
     // still running; the route state is cleared entirely.
     let mut config = redis_test_config();
     config.upstream_route_half_open_exclusive_window_ms = 150;
+    // T1.2: the upstream Retry-After hint is only a floor under the local
+    // backoff curve, so the 50ms hint below no longer yields a 50ms cooldown.
+    // State the curve explicitly (base 1s, jittered 80-120% -> at most 1.2s)
+    // and sleep past it.
+    config.upstream_transient_route_cooldown_base_seconds = 1;
     let (first, second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("settle-healthy-upstream", "fingerprint-a");
     let route = redis_test_health_route("settle-healthy-upstream", "fingerprint-a", "model-a");
@@ -2642,7 +2673,7 @@ async fn redis_settle_healthy_releases_exclusive_window_for_other_state() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     let mut permit = match first.reserve_route_health(&route, &key).await.unwrap() {
         RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
         other => panic!("expected half-open permit, got {other:?}"),
@@ -2670,7 +2701,11 @@ async fn redis_settled_permit_failure_observes_route_without_lease() {
     // T2 Redis backend: after a healthy settle, a stream failure is recorded
     // as a fresh no-lease observation (step 1) rather than a half-open probe
     // failure (which would escalate the streak and needs the lease).
-    let config = redis_test_config();
+    let mut config = redis_test_config();
+    // T1.2: the local backoff curve dominates the (absent) upstream hint, so
+    // the seed cooldown is the local step-1 duration.  State the curve
+    // explicitly (base 1s, jittered 80-120% -> at most 1.2s) and sleep past it.
+    config.upstream_transient_route_cooldown_base_seconds = 1;
     let (first, _second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("settled-observe-upstream", "fingerprint-a");
     let route = redis_test_health_route("settled-observe-upstream", "fingerprint-a", "model-a");
@@ -2679,7 +2714,7 @@ async fn redis_settled_permit_failure_observes_route_without_lease() {
         .observe_route_failure(&route, RouteFailureClass::Transport, None, false)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     let mut permit = match first.reserve_route_health(&route, &key).await.unwrap() {
         RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
         other => panic!("expected half-open permit, got {other:?}"),
@@ -2892,7 +2927,11 @@ async fn redis_route_health_probe_failure_stays_capped_and_keeps_interval() {
     // A3 Redis backend: a failing early probe follows the half-open failure
     // path: the step stays capped and the 1s probe window stays armed for the
     // next caller.
-    let config = redis_test_config();
+    let mut config = redis_test_config();
+    // T1.3/P0: the shipped default max step is 2, which would cap the seeded
+    // step at 2 and make this test indistinguishable from the cap behavior it
+    // pins.  State the curve explicitly so the independent seed reaches 5.
+    config.upstream_transient_route_cooldown_max_step = 5;
     let (state, _second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("early-probe-capped-upstream", "fingerprint-a");
     let route = redis_test_health_route("early-probe-capped-upstream", "fingerprint-a", "model-a");
@@ -4367,8 +4406,8 @@ async fn redis_coordinated_probe_plan_reserves_and_releases_upstream_capacity() 
     ));
     assert_eq!(
         hits.load(Ordering::SeqCst),
-        2,
-        "both cases must reach the upstream under coordination"
+        3,
+        "both cases must reach the upstream under coordination; the reasoning          case streams first and, against this non-SSE JSON fake upstream,          falls back to one non-stream request (see capability_probe.rs          ReasoningControl), so MinimalText (1) + reasoning stream + fallback (2)          = 3 hits"
     );
 
     // Every probe case reserves a Redis lease for its request and releases it
@@ -4587,4 +4626,103 @@ async fn redis_half_open_busy_reports_remaining_dedicated_lease() {
     );
 
     permit.finish(RouteOutcome::Success).await.unwrap();
+}
+
+// ============================================================================
+// P2 (2026-08-26 T11): no-Redis drift guard — the three T1.x cooldown
+// parameters must be threaded into the Redis backend's Lua scripts/argument
+// lists.  The live-Redis suite is `#[ignore]`d and needs TEST_REDIS_URL; this
+// plain test runs everywhere and statically locks the threading so a change
+// to the local backend can never silently leave the Redis backend behind.
+//
+// Threading recap (redis_runtime.rs):
+//   - T1.2 upstream_retry_after_cooldown_cap_seconds: the gateway clamps the
+//     upstream Retry-After BEFORE it reaches the coordinator; the clamped
+//     value arrives as `optional_duration_ms(retry_after)` (ARGV explicit
+//     retry), and the Lua side does `cooldown_ms = max(cooldown_ms,
+//     explicit_retry_ms)` — so a 28s hint can only ever *raise* the schedule,
+//     never blow the wait budget.
+//   - T1.3 upstream_transient_route_cooldown_max_step: read in
+//     `update_runtime_tuning` into `RedisRuntimeTuning`, appended to the
+//     finish/observe Lua invocations after the variable-length schedules, and
+//     used as `min(step, max_step)` in Lua.
+//   - T1.4 upstream_shared_host_failure_domain_enabled: the per-request
+//     `shared_host_failure_domain` flag folds into the `repeat_within_request`
+//     bit (`repeat_within_request || shared_host_failure_domain`), which the
+//     Lua step escalator honors as "do not escalate".
+// ============================================================================
+#[test]
+fn redis_lua_scripts_thread_the_t1_cooldown_parameters() {
+    let finish = include_str!("../src/state/redis_runtime/route_health_finish.lua");
+    let observe = include_str!("../src/state/redis_runtime/route_health_observe.lua");
+    let coordinator_source =
+        std::fs::read_to_string("src/state/redis_runtime.rs").expect("redis_runtime.rs");
+
+    // --- T1.3: max step must be threaded on BOTH Lua paths and read into the
+    // tuning in Rust. -----------------------------------------------------
+    assert!(
+        coordinator_source.contains("settings.upstream_transient_route_cooldown_max_step"),
+        "update_runtime_tuning must read upstream_transient_route_cooldown_max_step \
+         from RuntimeSettings (T1.3)"
+    );
+    assert!(
+        coordinator_source.contains("self.tuning_snapshot().transient_route_cooldown_max_step"),
+        "the coordinator must append transient_route_cooldown_max_step to the Lua \
+         invocations (T1.3)"
+    );
+    assert!(
+        finish.contains("local max_step = tonumber(ARGV[cursor])"),
+        "route_health_finish.lua must read max_step after the variable-length schedules (T1.3)"
+    );
+    assert!(
+        observe.contains(
+            "local max_step = schedule_count and tonumber(ARGV[16 + schedule_count]) or nil"
+        ),
+        "route_health_observe.lua must read max_step after the schedules (T1.3)"
+    );
+    for (name, script) in [("finish", finish), ("observe", observe)] {
+        assert!(
+            script.contains("math.min(step, max_step)"),
+            "route_health_{name}.lua must cap the non-half-open step with max_step (T1.3)"
+        );
+    }
+
+    // --- T1.4: the shared-host failure domain flag must reach the step
+    // escalator via the repeat bit. ---------------------------------------
+    assert!(
+        coordinator_source.contains("shared_host_failure_domain"),
+        "observe_route_failure / finish_route_health_once must accept the shared-host \
+         failure-domain flag (T1.4)"
+    );
+    assert!(
+        coordinator_source.contains("repeat_within_request || shared_host_failure_domain"),
+        "the shared-host flag must fold into the repeat bit so Lua does not escalate (T1.4)"
+    );
+    assert!(
+        finish.contains("local repeat_within_request = ARGV[17] == '1'"),
+        "route_health_finish.lua must read the repeat (incl. shared-host) bit (T1.4)"
+    );
+
+    // --- T1.2: the (already-clamped) upstream Retry-After must reach the Lua
+    // cooldown as an explicit-retry floor, never a replacement. ------------
+    assert!(
+        coordinator_source.contains("optional_duration_ms(retry_after)"),
+        "the coordinator must forward the (gateway-clamped) retry_after into the Lua \
+         invocation (T1.2)"
+    );
+    assert!(
+        finish.contains("local explicit_retry_ms = tonumber(ARGV[7])"),
+        "route_health_finish.lua must read the explicit retry hint (T1.2)"
+    );
+    assert!(
+        observe.contains("local explicit_retry_ms = tonumber(ARGV[4])"),
+        "route_health_observe.lua must read the explicit retry hint (T1.2)"
+    );
+    for (name, script) in [("finish", finish), ("observe", observe)] {
+        assert!(
+            script.contains("cooldown_ms = math.max(cooldown_ms, explicit_retry_ms)"),
+            "route_health_{name}.lua must apply the explicit retry hint as a floor, \
+             preserving the local backoff curve as the primary cooldown (T1.2)"
+        );
+    }
 }
