@@ -89,7 +89,15 @@ pub const DEFAULT_UPSTREAM_HEDGE_DELAY_MS: u64 = 12_000;
 pub const DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS: u64 = 12_000;
 pub const DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS: u32 = 1;
 pub const DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED: bool = true;
-pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: u64 = 10;
+/// Base of the local exponential route-cooldown curve (`base << (step - 1)`).
+/// Coupled to `DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP` and
+/// `DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS` by the T1.1
+/// cooldown-ceiling invariant, which the `const _` assertion below enforces at
+/// compile time: with base=5 / max_step=2 the curve is 5s -> 10s and the
+/// effective ceiling is 10s, comfortably under the 30s wait budget.  It used to
+/// be 10 (curve 10/20/40, ceiling 40s), which made the shipped defaults fail
+/// their own validator.
+pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: u64 = 5;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
@@ -99,7 +107,7 @@ pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 /// (`upstream_route_exhaustion_retry_max_wait_ms`), re-creating the T1.1
 /// ceiling violation through the local backoff arm instead of the upstream
 /// Retry-After arm.
-pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP: u32 = 3;
+pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP: u32 = 2;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 /// Whether a continuation-pinned request may escape the pinned route once
 /// the constrained candidate set is exhausted (P2): relaxes the hard
@@ -135,6 +143,34 @@ pub const DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS: u64 = 30;
 /// `DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS` (30s) which only governs the
 /// Retry-After header / message returned to the *downstream* client.
 pub const DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS: u64 = 5;
+
+/// T1.1: the shipped defaults must satisfy the cooldown-ceiling invariant *by
+/// construction*.  A default configuration that its own validator rejects makes
+/// every default boot log an error and auto-correct itself, blocks Admin saves
+/// of untouched settings, and (before the load path learned to repair instead of
+/// discard) silently reverted every persisted runtime setting on upgrade.  This
+/// mirrors `RuntimeSettings::effective_cooldown_ceiling_seconds`; keep the two
+/// in step.
+const _: () = {
+    let curve = DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS
+        << (DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP - 1);
+    let ceiling = if DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS > curve {
+        DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS
+    } else {
+        curve
+    };
+    let ceiling = if ceiling > DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS {
+        DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS
+    } else {
+        ceiling
+    };
+    assert!(
+        ceiling * 1_000 < DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
+        "shipped defaults violate the T1.1 cooldown-ceiling invariant: lower \
+         DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS / _MAX_STEP or raise \
+         DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS"
+    );
+};
 /// Whether upstream error responses may surface a bounded, sanitized body
 /// excerpt in client messages (E5).  Opt-in: off by default because provider
 /// bodies can echo prompts / tool arguments / credentials even after

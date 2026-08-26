@@ -764,6 +764,28 @@ impl RuntimeSettings {
             .max(curve_ceiling)
             .min(self.upstream_transient_route_cooldown_max_seconds)
     }
+
+    /// T1.1 repair: raise the intra-gateway retry wait budget to
+    /// `effective_cooldown_ceiling_seconds() * 1.5` so the cooldown-ceiling
+    /// invariant holds, and report the corrected budget.  Returns `None` when
+    /// the invariant already holds and nothing was changed.
+    ///
+    /// Single source of truth for the correction policy, shared by the startup
+    /// path (env/CLI configuration, which must never panic — intranet
+    /// availability comes first) and the persisted-settings load path (which
+    /// must repair rather than discard, or an upgrade that tightens the
+    /// invariant silently reverts every setting the operator ever saved).
+    pub fn repair_cooldown_ceiling_invariant(&mut self) -> Option<u64> {
+        let ceiling_ms = self
+            .effective_cooldown_ceiling_seconds()
+            .saturating_mul(1_000);
+        if ceiling_ms < self.upstream_route_exhaustion_retry_max_wait_ms {
+            return None;
+        }
+        let corrected = ceiling_ms.saturating_mul(3) / 2;
+        self.upstream_route_exhaustion_retry_max_wait_ms = corrected;
+        Some(corrected)
+    }
 }
 
 pub(super) fn differing_runtime_setting_fields(

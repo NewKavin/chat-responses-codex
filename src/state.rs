@@ -642,18 +642,48 @@ fn config_with_persisted_runtime_settings(
         .runtime_settings
         .as_ref()
         .filter(|document| document.schema_version == RUNTIME_SETTINGS_SCHEMA_VERSION)
-        .and_then(
-            |document| match document.settings.clone().validate_and_normalize() {
-                Ok(settings) => Some(settings),
-                Err(error) => {
-                    tracing::error!(error = %error, "ignoring invalid persisted runtime settings");
-                    None
-                }
-            },
-        )
+        .and_then(|document| validated_persisted_runtime_settings(document.settings.clone()))
         .unwrap_or(startup_settings);
     settings.apply_to_app_config(&mut config);
     (config, settings)
+}
+
+/// Validate a persisted runtime-settings document, repairing a T1.1
+/// cooldown-ceiling violation instead of discarding the whole document.
+///
+/// The all-or-nothing predecessor was a silent data-loss path on upgrade: a
+/// release that tightens the cooldown-ceiling invariant makes every previously
+/// saved document invalid, and dropping it reverts *every* runtime setting the
+/// operator ever changed through Admin — with one error line as the only
+/// evidence.  Only the cooldown-ceiling arm is repairable; any other validation
+/// failure still discards, since we have no principled correction for it.
+fn validated_persisted_runtime_settings(settings: RuntimeSettings) -> Option<RuntimeSettings> {
+    let rejection = match settings.clone().validate_and_normalize() {
+        Ok(settings) => return Some(settings),
+        Err(error) => error,
+    };
+
+    let mut repaired = settings;
+    let Some(corrected_max_wait_ms) = repaired.repair_cooldown_ceiling_invariant() else {
+        tracing::error!(error = %rejection, "ignoring invalid persisted runtime settings");
+        return None;
+    };
+
+    match repaired.validate_and_normalize() {
+        Ok(settings) => {
+            tracing::error!(
+                auto_corrected = true,
+                corrected_retry_max_wait_ms = corrected_max_wait_ms,
+                rejection = %rejection,
+                "持久化运行时设置违反冷却上界不变量：已自动把 upstream_route_exhaustion_retry_max_wait_ms 抬到 {corrected_max_wait_ms}ms（ceiling × 1.5）并保留其余已保存设置；请在 Admin 中下调冷却参数以消除告警"
+            );
+            Some(settings)
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "ignoring invalid persisted runtime settings");
+            None
+        }
+    }
 }
 
 fn new_internal_route_capture_token() -> Arc<str> {

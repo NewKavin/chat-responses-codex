@@ -351,12 +351,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Never panic here — intranet availability comes first — raise the wait
     // budget to `ceiling * 1.5` and log loudly so the operator knows the
     // configuration was auto-corrected and why.
-    let startup_settings = RuntimeSettings::from_app_config(&config);
+    let mut startup_settings = RuntimeSettings::from_app_config(&config);
     let cooldown_ceiling_seconds = startup_settings.effective_cooldown_ceiling_seconds();
-    if cooldown_ceiling_seconds.saturating_mul(1_000)
-        >= config.upstream_route_exhaustion_retry_max_wait_ms
-    {
-        let corrected_max_wait_ms = cooldown_ceiling_seconds.saturating_mul(1_500);
+    if let Some(corrected_max_wait_ms) = startup_settings.repair_cooldown_ceiling_invariant() {
         tracing::error!(
             auto_corrected = true,
             cooldown_ceiling_seconds,
