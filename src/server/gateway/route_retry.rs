@@ -249,20 +249,18 @@ impl RouteRetryPolicy {
         let TerminalFailure::Temporary { retry_after } = terminal else {
             return (None, None);
         };
-        if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
-            eprintln!(
-                "[TRACE] decide_with_reason round={} waited_ms={} max_wait_ms={} max_rounds={} busy_only={} retry_after_ms={:?} recovery_ms={:?} recovery_class={:?} alignment_used={}",
-                budget.current_round,
-                budget.waited.as_millis(),
-                self.max_wait.as_millis(),
-                self.max_rounds,
-                busy_only,
-                retry_after.as_millis(),
-                health_recovery.map(|r| r.retry_after.as_millis()),
-                health_recovery.map(|r| r.class),
-                budget.alignment_used,
-            );
-        }
+        tracing::debug!(
+            "decide_with_reason round={} waited_ms={} max_wait_ms={} max_rounds={} busy_only={} retry_after_ms={:?} recovery_ms={:?} recovery_class={:?} alignment_used={}",
+            budget.current_round,
+            budget.waited.as_millis(),
+            self.max_wait.as_millis(),
+            self.max_rounds,
+            busy_only,
+            retry_after.as_millis(),
+            health_recovery.map(|r| r.retry_after.as_millis()),
+            health_recovery.map(|r| r.class),
+            budget.alignment_used,
+        );
         if client_retryable_rate_limit {
             // A pure upstream rate-limit / key-quota exhaustion (429 family)
             // is a client-side retry signal: codex honors Retry-After and
@@ -366,14 +364,12 @@ impl RouteRetryPolicy {
                 // WaitBudget (an aligned recovery longer than the budget is
                 // still a wait-budget give-up, not a round-cap one).
                 if self.alignment_truncated_enabled && remaining >= HALF_OPEN_BUSY_RETRY {
-                    if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
-                        eprintln!(
-                            "[TRACE] ALIGN-TRUNCATE remaining_ms={} sleep_for_ms={} recovery={:?}",
-                            remaining.as_millis(),
-                            sleep_for.as_millis(),
-                            dbg_recovery
-                        );
-                    }
+                    tracing::debug!(
+                        "ALIGN-TRUNCATE remaining_ms={} sleep_for_ms={} recovery={:?}",
+                        remaining.as_millis(),
+                        sleep_for.as_millis(),
+                        dbg_recovery
+                    );
                     return (
                         Some(RouteRetryWait {
                             next_round,
@@ -424,14 +420,12 @@ impl RouteRetryPolicy {
             // probe path take one real timed probe, not abandon the request
             // instantly.  `remaining < 1s` is effectively no budget left.
             if self.alignment_truncated_enabled && remaining >= HALF_OPEN_BUSY_RETRY {
-                if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
-                    eprintln!(
-                        "[TRACE] ORD-TRUNCATE remaining_ms={} sleep_for_ms={} recovery={:?}",
-                        remaining.as_millis(),
-                        sleep_for.as_millis(),
-                        dbg_recovery
-                    );
-                }
+                tracing::debug!(
+                    "ORD-TRUNCATE remaining_ms={} sleep_for_ms={} recovery={:?}",
+                    remaining.as_millis(),
+                    sleep_for.as_millis(),
+                    dbg_recovery
+                );
                 return (
                     Some(RouteRetryWait {
                         next_round,
@@ -446,14 +440,12 @@ impl RouteRetryPolicy {
                     None,
                 );
             }
-            if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
-                eprintln!(
-                    "[TRACE] ORD-WAITBUDGET-GIVEUP remaining_ms={} sleep_for_ms={} recovery={:?}",
-                    remaining.as_millis(),
-                    sleep_for.as_millis(),
-                    dbg_recovery
-                );
-            }
+            tracing::debug!(
+                "ORD-WAITBUDGET-GIVEUP remaining_ms={} sleep_for_ms={} recovery={:?}",
+                remaining.as_millis(),
+                sleep_for.as_millis(),
+                dbg_recovery
+            );
             return (None, Some(GiveUpReason::WaitBudget));
         }
 
