@@ -216,31 +216,55 @@ Relevant settings (see `Runtime Settings Operations`):
 
 Recommended values for a single aggregated gateway deployment:
 
+The rows below are **self-consistent by construction**: the T1.1 cooldown-ceiling
+invariant is what prevents a route cooldown from ever eating the whole retry
+budget (`upstream_route_exhaustion_retry_max_wait_ms`).
+
+> **Cooldown ceiling invariant (T1.1).** Let `base = upstream_transient_route_cooldown_base_seconds`,
+> `step_max = upstream_transient_route_cooldown_max_step`, and
+> `wait_max_ms = upstream_route_exhaustion_retry_max_wait_ms`. The worst-case
+> effective cooldown is
+> `ceiling = max(upstream_retry_after_cooldown_cap_seconds, base << (step_max - 1))`
+> capped at `upstream_transient_route_cooldown_max_seconds`, and the invariant
+> requires `ceiling * 1000 < wait_max_ms`. If you change any of these fields,
+> Admin > Settings rejects an invalid combination, and the gateway logs a loud
+> startup warning (auto-raising `wait_max_ms` to `ceiling * 1500`) if a config
+> still violates it.
+
+| Setting | Public default | Intranet aggregated-gateway value | Why |
+|---------|---------------|-----------------------------------|-----|
+| `upstream_transient_route_cooldown_base_seconds` | 10 | **2** | A shared-hop blip lasts 2–3s; a short base lets the route come back fast. |
+| `upstream_transient_route_cooldown_max_seconds` | 300 | **15** | Aligns the ceiling with `EDGE_PROXY_ROUTE_MAX`; bounded escalation instead of minutes. |
+| `upstream_transient_route_cooldown_max_step` | 3 | **3** | `2 << 2 = 8s`, ×1.2 escalation ≈ 9.6s worst case — far inside the 30s budget. |
+| `upstream_retry_after_cooldown_cap_seconds` | 5 | **5** | Upstream-provided `Retry-After` must never dominate local cooldown; 28s headers collapse to 5s. |
+| `upstream_route_exhaustion_retry_max_wait_ms` | 30_000 | **30_000** | `ceiling = max(5, 8) = 8s`, `8_000 < 30_000` ⇒ invariant satisfied. |
+| `upstream_route_exhaustion_retry_max_rounds` | 3 | **4** | A single-host pool benefits from more in-request probing rounds before giving up. |
+| `upstream_shared_host_failure_domain_enabled` | true | **true** | Same-host candidates share one failure domain: they do not upgrade each other's cooldown step. |
+| `upstream_common_mode_same_host_transient_enabled` | true | **true** | Same-host common-mode transient failures get the delayed-replay round instead of an immediate hard failure. |
+| `upstream_error_body_excerpt_enabled` | false | **true** | You operate both sides of the intranet upstream; error excerpts are required for diagnosis. |
+
+Keep these as-is for the aggregated-gateway shape:
+
 - `upstream_common_mode_transient_threshold = 0` (or `>= 4` when you have ≥4
   genuinely distinct upstream hosts and want pool-outage detection). With one
-  aggregated gateway, transient 502s are always "same host" and can never trip;
-  `0` keeps the code path simple and relies on the normal per-route failover +
-  temporary recovery rounds (bounded by the route-exhaustion retry rounds
-  setting in Admin > Settings).
+  aggregated gateway, transient 502s always share the single hop; `0` keeps the
+  code path simple and relies on per-route failover + the temporary recovery
+  rounds bounded by `upstream_route_exhaustion_retry_max_rounds`.
 - Keep `upstream_common_mode_breaker_threshold` at its default; `RequestRejected`
-  (400 semantics) repetition is still a genuine request-shape signal.
-- Keep `upstream_transient_same_route_retry_enabled = true`; it absorbs single
-  network glitches without burning routes or feeding the breaker streak.
-- Set `upstream_transient_route_cooldown_base_seconds = 2–3` and
-  `upstream_transient_route_cooldown_max_seconds = 60`. Combined with the
-  in-request step suppression (a request's own routing rounds never escalate a
-  route beyond +1 step), most single-hop blips recover within seconds.
-- Keep both new self-healing switches on (defaults):
-  `upstream_route_exhaustion_budget_alignment_enabled = true` and
-  `upstream_transient_last_resort_probe_enabled = true`.
-- Keep the new half-open governance defaults:
+  (400 semantics) repetition is still a genuine request-shape signal, and the
+  request-shape breaker deliberately keeps its **different-host** semantics.
+- Keep the half-open governance defaults:
   `upstream_route_half_open_exclusive_window_ms = 3000` (a recovering route is
   monopolized by one probe request for at most 3s, then others may race in),
   `upstream_route_half_open_busy_max_rounds = 10`,
-  `upstream_retry_after_cap_seconds = 30` (do not let a quota-style 429
-  quarantine a route for an hour), and
-  `upstream_credentials_first_strike_seconds = 60` (a single 401/403 should
-  not hide the key for 15 minutes; consecutive strikes still escalate).
+  `upstream_retry_after_cap_seconds = 30` (the header returned **to the client**
+  — not the cooldown — stays capped at 30 so a quota-style 429 does not tell the
+  client to wait an hour), and `upstream_credentials_first_strike_seconds = 60`.
+- `upstream_route_exhaustion_budget_alignment_enabled = true` and
+  `upstream_transient_last_resort_probe_enabled = true` (both defaults) keep the
+  pool self-healing: an aligned wait rides out a live recovery, and a fully
+  cooling pool arms the earliest route as an early half-open probe.
+
 - **Concurrency capacity (the other half of `upstream_routes_exhausted`):**
   each upstream admits at most `max_concurrency` concurrent streams per
   (upstream, key) — default **4**. Claude Code / Codex spawn parallel
@@ -252,6 +276,38 @@ Recommended values for a single aggregated gateway deployment:
   `default_upstream_max_concurrency` for upstreams without an explicit
   value. `requests_per_minute` and the 5h quota only gate **hedge** attempts,
   not primary windows, so they are rarely the limiter here.
+
+### `upstream_routes_exhausted` 三步定位法 (runbook)
+
+When a request fails with `503 upstream_routes_exhausted`, read the terminal
+`tracing::error!` line and walk these three steps in order:
+
+1. **看 `give_up_reason`** (which budget ran out first)
+   - `wait_budget` ⇒ the cooldown ceiling invariant is violated: compare
+     `cooldown_seconds` against `retry_max_wait_ms` side by side (they appear
+     adjacent in the log by design). Fix the config, not the code.
+   - `round_cap` ⇒ raise `upstream_route_exhaustion_retry_max_rounds`.
+   - `no_recovery` ⇒ the health registry has no recovery information at all;
+     check the Redis / local backend and whether failures are being recorded.
+   - `half_open_busy_cap` ⇒ probe congestion: raise
+     `upstream_route_half_open_exclusive_window_ms` or check upstream
+     first-packet latency.
+2. **看 `cooldown_source`** (why routes are cooling)
+   - `upstream_retry_after` ⇒ an upstream `Retry-After` header is driving the
+     cooldown; tune `upstream_retry_after_cooldown_cap_seconds` (default 5s —
+     the header tells the *client* when to retry, not how long the gateway
+     must quarantine a route).
+   - `local` ⇒ look at `step` and escalate with
+     `upstream_transient_route_cooldown_base_seconds` /
+     `upstream_transient_route_cooldown_max_step`.
+3. **看 `distinct_upstream_hosts`** (is the diversity real?)
+   - `= 1` ⇒ every "different route" is physically the same aggregated
+     gateway; confirm `upstream_shared_host_failure_domain_enabled` and
+     `upstream_common_mode_same_host_transient_enabled` are both **true** (they
+     are by default) so same-host candidates do not escalate each other.
+   - If `= 1` stays true for a long time, route diversity is illusory: scale the
+     real upstream (new-api / the egress proxy) instead of adding gateway
+     routes — the gateway can only fail over to paths that actually exist.
 
 Troubleshooting:
 
