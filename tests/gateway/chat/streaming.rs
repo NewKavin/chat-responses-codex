@@ -3914,7 +3914,16 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
             model_aliases: vec![],
         },
         state_path,
-        AppConfig::default(),
+        // T2.3 regression guard: with `upstream_route_exhaustion_alignment_
+        // truncated_enabled` on (default), the request spends the remaining
+        // budget and the terminal client hint becomes the *remaining* ~2.4s
+        // cooldown ("3") instead of the ~9s effective recovery.  This test
+        // pins the T1.2 client-hint semantics (effective recovery), so the
+        // truncation switch is turned off explicitly.
+        AppConfig {
+            upstream_route_exhaustion_alignment_truncated_enabled: false,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
@@ -3947,7 +3956,7 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
     // not a raw echo of the upstream `Retry-After: 30`.  Default transient
     // base = 10s, step-1 deterministic jitter -> ~9s effective cooldown,
     // ceil -> 9.  The upstream hint only governs route health up to
-    // `upstream_retry_after_cooldown_cap_seconds`; 
+    // `upstream_retry_after_cooldown_cap_seconds`;
     // `upstream_retry_after_cap_seconds` still bounds the client header.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(

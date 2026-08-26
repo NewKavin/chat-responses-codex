@@ -1,6 +1,6 @@
 use super::route_health::{
-    concurrency_probe_schedule_ms, enumerable_route_health_routes, key_cooldown_schedule_ms,
-    key_failure_has_cooldown, legacy_local_admission_cooldown_threshold,
+    concurrency_probe_schedule_ms, enumerable_route_health_routes, is_shared_host_domain_class,
+    key_cooldown_schedule_ms, key_failure_has_cooldown, legacy_local_admission_cooldown_threshold,
     normalize_concurrency_probe_delays, route_cooldown_schedule_ms, route_failure_has_cooldown,
     route_health_aggregate_is_current, route_health_key_is_current, route_health_route_is_current,
     summarize_route_health_routes, RedisHealthLease,
@@ -1490,9 +1490,27 @@ impl RedisRuntimeCoordinator {
         lease: &RedisHealthLease,
         outcome: RouteOutcome,
     ) -> Result<(), RuntimeCoordinationError> {
-        let (outcome_name, class, retry_after, upstream_status, repeat_within_request) =
-            route_outcome_parts(outcome);
-        let route_schedule = class
+        let (
+            outcome_name,
+            class,
+            retry_after,
+            upstream_status,
+            repeat_within_request,
+            shared_host_failure_domain,
+        ) = route_outcome_parts(outcome);
+        // T1.4: a shared-host transient failure (several candidates of the
+        // request on the same upstream host) is one outage observed many
+        // times; schedule it on the EDGE_PROXY curve (3s..15s) and fold the
+        // flag into the repeat bit so the Lua side does not escalate the
+        // step.  This mirrors the local backend where observe_route_failure_at
+        // computes the cooldown with the edge class and returns step 1.
+        let cooldown_class =
+            if shared_host_failure_domain && class.is_some_and(is_shared_host_domain_class) {
+                Some(crate::state::RouteFailureClass::EdgeProxyError)
+            } else {
+                class
+            };
+        let route_schedule = cooldown_class
             .filter(|class| route_failure_has_cooldown(*class))
             .map(|class| {
                 route_cooldown_schedule_ms(
@@ -1552,7 +1570,11 @@ impl RedisRuntimeCoordinator {
                     .map(|status| status.to_string())
                     .unwrap_or_default(),
             )
-            .arg(if repeat_within_request { "1" } else { "0" })
+            .arg(if repeat_within_request || shared_host_failure_domain {
+                "1"
+            } else {
+                "0"
+            })
             .arg(route_schedule.len() as u64);
         for cooldown_ms in route_schedule {
             invocation.arg(cooldown_ms);
@@ -1575,13 +1597,21 @@ impl RedisRuntimeCoordinator {
         route: &RouteHealthKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
+        shared_host_failure_domain: bool,
     ) -> Result<(), RuntimeCoordinationError> {
         if !route_failure_has_cooldown(class) {
             return self.clear_route_health(route).await;
         }
+        // T1.4 mirror: shared-host transient failures use the EDGE_PROXY
+        // schedule (3s..15s) and the repeat bit keeps the Lua step flat.
+        let cooldown_class = if shared_host_failure_domain && is_shared_host_domain_class(class) {
+            crate::state::RouteFailureClass::EdgeProxyError
+        } else {
+            class
+        };
         let schedule = route_cooldown_schedule_ms(
             route,
-            class,
+            cooldown_class,
             &self.tuning_snapshot().concurrency_probe_delays,
             self.tuning_snapshot().transient_route_cooldown_base,
             self.tuning_snapshot().transient_route_cooldown_max,
@@ -1593,7 +1623,8 @@ impl RedisRuntimeCoordinator {
             "route",
             class,
             retry_after,
-            class == RouteFailureClass::ConcurrencySaturated && retry_after.is_some(),
+            (class == RouteFailureClass::ConcurrencySaturated && retry_after.is_some())
+                || (shared_host_failure_domain && is_shared_host_domain_class(class)),
             None,
             &route.upstream_id,
             &route.key_fingerprint,
@@ -2552,20 +2583,23 @@ fn route_outcome_parts(
     Option<Duration>,
     Option<u16>,
     bool,
+    bool,
 ) {
     match outcome {
-        RouteOutcome::Success => ("success", None, None, None, false),
+        RouteOutcome::Success => ("success", None, None, None, false, false),
         RouteOutcome::RouteFailure {
             class,
             upstream_status,
             repeat_within_request,
             sole_candidate,
+            shared_host_failure_domain,
         } => (
             "route_failure",
             Some(class),
             None,
             upstream_status,
             repeat_within_request || sole_candidate,
+            shared_host_failure_domain,
         ),
         RouteOutcome::RouteFailureWithRetry {
             class,
@@ -2573,25 +2607,33 @@ fn route_outcome_parts(
             upstream_status,
             repeat_within_request,
             sole_candidate,
+            shared_host_failure_domain,
         } => (
             "route_failure_with_retry",
             Some(class),
             Some(retry_after),
             upstream_status,
             repeat_within_request || sole_candidate,
+            shared_host_failure_domain,
         ),
-        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None, false),
+        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None, false, false),
         RouteOutcome::KeyFailureWithRetry { class, retry_after } => (
             "key_failure_with_retry",
             Some(class),
             Some(retry_after),
             None,
             false,
+            false,
         ),
-        RouteOutcome::UncertainRouteFailure(class) => {
-            ("uncertain_route_failure", Some(class), None, None, false)
-        }
-        RouteOutcome::Cancelled => ("cancelled", None, None, None, false),
+        RouteOutcome::UncertainRouteFailure(class) => (
+            "uncertain_route_failure",
+            Some(class),
+            None,
+            None,
+            false,
+            false,
+        ),
+        RouteOutcome::Cancelled => ("cancelled", None, None, None, false, false),
     }
 }
 

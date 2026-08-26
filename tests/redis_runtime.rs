@@ -2542,6 +2542,7 @@ async fn redis_route_health_cooldown_and_half_open_owner_are_shared() {
             &route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(50)),
+            false,
         )
         .await
         .unwrap();
@@ -2589,6 +2590,7 @@ async fn redis_route_health_exclusive_window_allows_admission_after_window() {
             &route,
             RouteFailureClass::TransientServer,
             Some(Duration::from_millis(50)),
+            false,
         )
         .await
         .unwrap();
@@ -2636,6 +2638,7 @@ async fn redis_settle_healthy_releases_exclusive_window_for_other_state() {
             &route,
             RouteFailureClass::TransientServer,
             Some(Duration::from_millis(50)),
+            false,
         )
         .await
         .unwrap();
@@ -2673,7 +2676,7 @@ async fn redis_settled_permit_failure_observes_route_without_lease() {
     let route = redis_test_health_route("settled-observe-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::Transport, None)
+        .observe_route_failure(&route, RouteFailureClass::Transport, None, false)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -2692,6 +2695,7 @@ async fn redis_settled_permit_failure_observes_route_without_lease() {
             upstream_status: Some(502),
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         })
         .await
         .unwrap();
@@ -2725,7 +2729,7 @@ async fn redis_route_health_probe_ignores_cooldown_and_is_single_flight() {
     let route = redis_test_health_route("early-probe-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     // Default tuning observes a long cooldown; a normal reserve must refuse.
@@ -2787,7 +2791,7 @@ async fn redis_early_probe_exclusivity_ends_with_the_cooldown_not_the_lease() {
     );
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     let cooldown_remaining = first
@@ -2840,7 +2844,7 @@ async fn redis_route_health_probe_enforces_one_second_interval_per_route() {
         redis_test_health_route("early-probe-interval-upstream", "fingerprint-a", "model-a");
 
     state
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
 
@@ -2897,7 +2901,7 @@ async fn redis_route_health_probe_failure_stays_capped_and_keeps_interval() {
     // push it to 6.
     for _ in 0..5 {
         state
-            .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+            .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
             .await
             .unwrap();
     }
@@ -2922,6 +2926,7 @@ async fn redis_route_health_probe_failure_stays_capped_and_keeps_interval() {
             upstream_status: Some(502),
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         })
         .await
         .unwrap();
@@ -2969,7 +2974,7 @@ async fn redis_route_health_probe_refuses_when_key_cooling_or_route_healthy() {
     assert!(refusal.is_zero());
 
     state
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     state
@@ -3000,6 +3005,7 @@ async fn route_reservation_self_heals_only_legacy_local_admission_cooldown() {
             &legacy_route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(86_000_000)),
+            false,
         )
         .await
         .unwrap();
@@ -3028,7 +3034,12 @@ async fn route_reservation_self_heals_only_legacy_local_admission_cooldown() {
     for (model, class, status, cooldown_ms) in controls {
         let route = redis_test_health_route(upstream_id, fingerprint, model);
         state
-            .observe_route_failure(&route, class, Some(Duration::from_millis(cooldown_ms)))
+            .observe_route_failure(
+                &route,
+                class,
+                Some(Duration::from_millis(cooldown_ms)),
+                false,
+            )
             .await
             .unwrap();
         if let Some(status) = status {
@@ -3106,6 +3117,7 @@ async fn legacy_local_admission_route_health_is_repaired_selectively() {
             &legacy_route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(86_000_000)),
+            false,
         )
         .await
         .unwrap();
@@ -3134,7 +3146,12 @@ async fn legacy_local_admission_route_health_is_repaired_selectively() {
     for (model, class, status, cooldown_ms) in controls {
         let route = redis_test_health_route(upstream_id, &fingerprint, model);
         state
-            .observe_route_failure(&route, class, Some(Duration::from_millis(cooldown_ms)))
+            .observe_route_failure(
+                &route,
+                class,
+                Some(Duration::from_millis(cooldown_ms)),
+                false,
+            )
             .await
             .unwrap();
         let state_key = redis_route_health_route_state_key(&config, &route);
@@ -3294,6 +3311,7 @@ async fn app_state_load_repairs_legacy_local_admission_route_health() {
             &legacy_route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(86_000_000)),
+            false,
         )
         .await
         .unwrap();
@@ -3302,6 +3320,7 @@ async fn app_state_load_repairs_legacy_local_admission_route_health() {
             &provider_route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(86_000_000)),
+            false,
         )
         .await
         .unwrap();
@@ -3353,6 +3372,7 @@ async fn redis_earliest_route_recovery_uses_shared_health() {
             &route,
             RouteFailureClass::TransientServer,
             Some(Duration::from_secs(5)),
+            false,
         )
         .await
         .unwrap();
@@ -3378,7 +3398,7 @@ async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
     let route = redis_test_health_route("configured-cooldown-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     let recovery = second
@@ -3400,6 +3420,7 @@ async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         })
         .await
         .unwrap();
@@ -3422,7 +3443,7 @@ async fn redis_route_health_ttl_outlives_long_configured_cooldown() {
     let route = redis_test_health_route("long-cooldown-upstream", "fingerprint-a", "model-a");
 
     state
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
 
@@ -3460,7 +3481,7 @@ async fn redis_admin_route_health_snapshots_use_shared_health() {
     );
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
 
@@ -3483,7 +3504,7 @@ async fn redis_route_health_reconcile_removes_unconfigured_state() {
     let route = redis_test_health_route("removed-health-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     assert!(second
@@ -3510,6 +3531,7 @@ async fn redis_route_health_reconcile_defers_active_lease_then_removes_on_finish
             &route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(20)),
+            false,
         )
         .await
         .unwrap();
@@ -3532,6 +3554,7 @@ async fn redis_route_health_reconcile_defers_active_lease_then_removes_on_finish
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         })
         .await
         .unwrap();
@@ -3551,7 +3574,7 @@ async fn redis_repeated_transient_failure_within_same_request_keeps_step_flat() 
     let route = redis_test_health_route("request-suppressed-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     let first_step = first
@@ -3573,6 +3596,7 @@ async fn redis_repeated_transient_failure_within_same_request_keeps_step_flat() 
                 upstream_status: None,
                 repeat_within_request: true,
                 sole_candidate: false,
+                shared_host_failure_domain: false,
             })
             .await
             .unwrap();
@@ -3603,7 +3627,7 @@ async fn redis_independent_request_failures_still_escalate_the_step() {
     );
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
 
@@ -3618,6 +3642,7 @@ async fn redis_independent_request_failures_still_escalate_the_step() {
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         })
         .await
         .unwrap();
@@ -3645,6 +3670,7 @@ async fn redis_route_health_reconcile_removes_expired_half_open_lease() {
             &route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(20)),
+            false,
         )
         .await
         .unwrap();
@@ -3869,6 +3895,7 @@ async fn redis_half_open_reserve_refreshes_route_index_ttls() {
             &route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(20)),
+            false,
         )
         .await
         .unwrap();
@@ -3909,6 +3936,7 @@ async fn redis_route_health_stale_finish_cannot_clear_a_newer_failure() {
             &route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(20)),
+            false,
         )
         .await
         .unwrap();
@@ -3923,6 +3951,7 @@ async fn redis_route_health_stale_finish_cannot_clear_a_newer_failure() {
             &route,
             RouteFailureClass::RateLimited,
             Some(Duration::from_secs(30)),
+            false,
         )
         .await
         .unwrap();
@@ -4056,7 +4085,7 @@ async fn redis_cancelled_half_open_reapplies_concurrency_probe_delay() {
     let route = redis_test_health_route("cancelled-health-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None)
+        .observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None, false)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(110)).await;
@@ -4088,6 +4117,7 @@ async fn redis_expired_half_open_owner_can_be_reclaimed() {
             &route,
             RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(20)),
+            false,
         )
         .await
         .unwrap();
@@ -4125,7 +4155,7 @@ async fn redis_route_health_generation_does_not_reset_after_clear() {
     let route = redis_test_health_route("generation-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     let state_key = redis_route_health_state_key(&config).await;
@@ -4139,7 +4169,7 @@ async fn redis_route_health_generation_does_not_reset_after_clear() {
 
     first.clear_route_health(&route).await.unwrap();
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     let second_generation = redis_bulk_u64(
@@ -4172,6 +4202,7 @@ async fn redis_route_health_finish_retry_is_idempotent() {
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         })
         .await
         .unwrap();
@@ -4231,7 +4262,7 @@ async fn redis_targeted_model_sync_retains_pending_cleanup_until_coordination_re
     let fingerprint = upstream_key_fingerprint(upstream_id, api_key);
     let route = redis_test_health_route(upstream_id, &fingerprint, "model-a");
     state
-        .observe_route_failure(&route, RouteFailureClass::ModelUnsupported, None)
+        .observe_route_failure(&route, RouteFailureClass::ModelUnsupported, None, false)
         .await
         .unwrap();
     let worker = ModelKeySyncService::spawn(state.clone()).expect("model sync enabled");
@@ -4523,7 +4554,7 @@ async fn redis_half_open_busy_reports_remaining_dedicated_lease() {
     let route = redis_test_health_route("half-open-ttl-upstream", "fingerprint-a", "model-a");
 
     first
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(1_100)).await;

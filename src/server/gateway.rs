@@ -487,6 +487,7 @@ fn log_route_retry_wait(
         route_retry_rounds = wait.next_round,
         route_retry_wait_ms = wait.sleep_for.as_millis() as u64,
         route_retry_alignment = wait.alignment,
+        route_retry_alignment_truncated = wait.alignment_truncated,
         route_retry_required_delay_ms = wait.required_delay.as_millis() as u64,
         route_retry_remaining_wait_budget_ms = wait.remaining_after.as_millis() as u64,
         route_retry_waited_ms = budget.waited().as_millis() as u64,
@@ -683,6 +684,7 @@ fn route_health_outcome(
         sole_candidate,
         retry_after_cap,
         retry_after_cap,
+        false,
     )
 }
 
@@ -691,12 +693,19 @@ fn route_health_outcome(
 /// (client-facing) is used for the `ConcurrencyFull` branch only: a
 /// concurrency-saturated upstream's Retry-After is real slot information and
 /// must not be cut, otherwise recovery probes storm the upstream.
+///
+/// T1.4: `shared_host_failure_domain` is set when several candidate routes of
+/// this request resolve to the same upstream host (a single aggregated
+/// gateway).  Only transient-family classes enter the shared failure domain;
+/// ConcurrencySaturated keeps its real slot-based Retry-After and
+/// Credentials/KeyQuota always take the per-key path, never this flag.
 fn route_health_outcome_with_cooldown_cap(
     error: &GatewayError,
     repeat_within_request: bool,
     sole_candidate: bool,
     retry_after_cap: Duration,
     retry_after_cooldown_cap: Duration,
+    shared_host_failure_domain: bool,
 ) -> RouteOutcome {
     if matches!(error, GatewayError::ConcurrencyFull { .. }) {
         let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cap);
@@ -708,12 +717,14 @@ fn route_health_outcome_with_cooldown_cap(
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                shared_host_failure_domain: false,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
                 class: FailureClass::ConcurrencySaturated,
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                shared_host_failure_domain: false,
             });
     }
     let retry_after = clamp_upstream_retry_after(error.retry_after(), retry_after_cooldown_cap);
@@ -723,20 +734,25 @@ fn route_health_outcome_with_cooldown_cap(
             .map(|retry_after| RouteOutcome::KeyFailureWithRetry { class, retry_after })
             .unwrap_or(RouteOutcome::KeyFailure(class)),
         Some(FailureClass::RequestRejected) => RouteOutcome::Success,
-        Some(class) => retry_after
-            .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
-                class,
-                retry_after,
-                upstream_status,
-                repeat_within_request,
-                sole_candidate,
-            })
-            .unwrap_or(RouteOutcome::RouteFailure {
-                class,
-                upstream_status,
-                repeat_within_request,
-                sole_candidate,
-            }),
+        Some(class) => {
+            let shared_host = shared_host_failure_domain && is_common_mode_transient_class(class);
+            retry_after
+                .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
+                    class,
+                    retry_after,
+                    upstream_status,
+                    repeat_within_request,
+                    sole_candidate,
+                    shared_host_failure_domain: shared_host,
+                })
+                .unwrap_or(RouteOutcome::RouteFailure {
+                    class,
+                    upstream_status,
+                    repeat_within_request,
+                    sole_candidate,
+                    shared_host_failure_domain: shared_host,
+                })
+        }
         None => RouteOutcome::Cancelled,
     }
 }
@@ -843,10 +859,39 @@ fn upstream_host(base_url: &str) -> Option<String> {
     })
 }
 
+/// T1.4: whether this request's candidate pool has >= 2 candidate routes
+/// resolving to the same upstream host.  A single aggregated gateway
+/// (new-api) makes the "different routes" the same physical hop, so 502s are
+/// a shared outage: the health layer then cools them on the edge-proxy curve
+/// and never escalates the step.  The class check (transient family only) is
+/// applied by the caller when the flag reaches `RouteOutcome`.  Disable by
+/// turning `upstream_shared_host_failure_domain_enabled` off.
+fn shared_host_failure_domain(
+    host: Option<&str>,
+    host_candidate_counts: &std::collections::HashMap<String, usize>,
+    enabled: bool,
+) -> bool {
+    enabled
+        && host
+            .and_then(|host| host_candidate_counts.get(host))
+            .copied()
+            .unwrap_or(0)
+            >= 2
+}
+
 /// B2 common-mode streak, scoped to one downstream request.  The streak only
 /// grows when a *different route on a different upstream host* fails with the
-/// exact same (class, status); the same route or the same host failing again
-/// is a route-local fault that restarts the streak at 1.
+/// exact same (class, status); the same route failing again is a route-local
+/// fault that restarts the streak at 1.
+///
+/// T2.2: for the *transient* family (with
+/// `upstream_common_mode_same_host_transient_enabled` on), a repeated
+/// (class, status) failure on the *same upstream host* but a different route
+/// also grows the streak — under a single aggregated gateway (new-api) the
+/// "different routes" are the same physical hop, so identical transient
+/// signatures there are one shared outage, not independent evidence.
+/// `RequestRejected` keeps its strict different-host semantics (deliberate
+/// 2026-08-12 design, never relaxed).
 #[derive(Clone)]
 struct CommonModeStreak {
     class: FailureClass,
@@ -882,9 +927,22 @@ impl CommonModeStreak {
         self.class == class && self.upstream_status == upstream_status
     }
 
-    fn route_local_fault(&self, route: &RouteHealthKey, host: &Option<String>) -> bool {
+    /// Whether this failure is a route-local fault (restarts the streak)
+    /// rather than pool-wide evidence.  Under T2.2 a same-host transient
+    /// failure counts as pool-wide (`same_host_counts`), so only the exact
+    /// same route restarts; for `RequestRejected` (and when the switch is
+    /// off) the old strict different-host semantics are preserved.
+    fn route_local_fault(
+        &self,
+        route: &RouteHealthKey,
+        host: &Option<String>,
+        same_host_counts: bool,
+    ) -> bool {
         self.last_route == *route
-            || (host.is_some() && self.last_host.is_some() && self.last_host == *host)
+            || (!same_host_counts
+                && host.is_some()
+                && self.last_host.is_some()
+                && self.last_host == *host)
     }
 }
 
@@ -5903,6 +5961,34 @@ async fn process_gateway_request_inner(
                 .sum::<usize>()
         })
         .sum::<usize>();
+    // T1.4: count, per upstream host, how many candidate routes (upstream ×
+    // key × protocol tuples passing `route_is_candidate`) resolve to it.  A
+    // host with >= 2 candidates is a shared failure domain (single aggregated
+    // gateway): transient-family failures on its routes cool on the
+    // edge-proxy curve and never escalate the step.  `Credentials`/key-quota
+    // classes deliberately ignore this map (per-key cooldown stays per-key).
+    let mut shared_host_candidate_counts = std::collections::HashMap::<String, usize>::new();
+    for upstream in routing_snapshot
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+    {
+        let Some(runtime_model_slug) =
+            upstream.resolved_model_name_with(&normalized_model, case_insensitive)
+        else {
+            continue;
+        };
+        for protocol in candidate_protocols.iter().copied() {
+            for api_key in route_api_keys(upstream, &runtime_model_slug, case_insensitive) {
+                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                if route_is_candidate(upstream, &key_fingerprint, protocol) {
+                    if let Some(host) = upstream_host(&upstream.base_url) {
+                        *shared_host_candidate_counts.entry(host).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
     // P4/R3: when a continuation pin narrows the contract-filtered pool to a
     // single candidate, cross-request failures on that sole route must not
     // escalate its cooldown step (the route would pin itself at max and the
@@ -7441,6 +7527,15 @@ async fn process_gateway_request_inner(
                                         sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
                                         route_attempt_context.retry_after_cooldown_cap,
+                                        shared_host_failure_domain(
+                                            upstream_host(
+                                                &route_attempt_context.route.upstream.base_url,
+                                            )
+                                            .as_deref(),
+                                            &shared_host_candidate_counts,
+                                            runtime_settings
+                                                .upstream_shared_host_failure_domain_enabled,
+                                        ),
                                     ),
                                 )
                                 .await?;
@@ -7555,6 +7650,7 @@ async fn process_gateway_request_inner(
                                                             &route_health_key,
                                                         ),
                                                     sole_candidate: sole_contract_candidate,
+                                                    shared_host_failure_domain: false,
                                                 }
                                             })
                                             .unwrap_or(RouteOutcome::RouteFailure {
@@ -7563,6 +7659,7 @@ async fn process_gateway_request_inner(
                                                 repeat_within_request: request_route_attempts
                                                     .has_transient_failure_for(&route_health_key),
                                                 sole_candidate: sole_contract_candidate,
+                                                shared_host_failure_domain: false,
                                             })
                                     },
                                 )
@@ -7640,6 +7737,7 @@ async fn process_gateway_request_inner(
                                             repeat_within_request: request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
                                             sole_candidate: sole_contract_candidate,
+                                            shared_host_failure_domain: false,
                                         }
                                     },
                                 )
@@ -7727,6 +7825,15 @@ async fn process_gateway_request_inner(
                                             sole_contract_candidate,
                                             route_attempt_context.retry_after_cap,
                                             route_attempt_context.retry_after_cooldown_cap,
+                                            shared_host_failure_domain(
+                                                upstream_host(
+                                                    &route_attempt_context.route.upstream.base_url,
+                                                )
+                                                .as_deref(),
+                                                &shared_host_candidate_counts,
+                                                runtime_settings
+                                                    .upstream_shared_host_failure_domain_enabled,
+                                            ),
                                         ),
                                     )
                                     .await?;
@@ -7771,6 +7878,15 @@ async fn process_gateway_request_inner(
                                         sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
                                         route_attempt_context.retry_after_cooldown_cap,
+                                        shared_host_failure_domain(
+                                            upstream_host(
+                                                &route_attempt_context.route.upstream.base_url,
+                                            )
+                                            .as_deref(),
+                                            &shared_host_candidate_counts,
+                                            runtime_settings
+                                                .upstream_shared_host_failure_domain_enabled,
+                                        ),
                                     ),
                                 )
                                 .await?;
@@ -7816,6 +7932,12 @@ async fn process_gateway_request_inner(
                                             repeat_within_request: request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
                                             sole_candidate: sole_contract_candidate,
+                                            shared_host_failure_domain: shared_host_failure_domain(
+                                                upstream_host(&upstream.base_url).as_deref(),
+                                                &shared_host_candidate_counts,
+                                                runtime_settings
+                                                    .upstream_shared_host_failure_domain_enabled,
+                                            ),
                                         }
                                     },
                                 )
@@ -7857,6 +7979,15 @@ async fn process_gateway_request_inner(
                                         sole_contract_candidate,
                                         route_attempt_context.retry_after_cap,
                                         route_attempt_context.retry_after_cooldown_cap,
+                                        shared_host_failure_domain(
+                                            upstream_host(
+                                                &route_attempt_context.route.upstream.base_url,
+                                            )
+                                            .as_deref(),
+                                            &shared_host_candidate_counts,
+                                            runtime_settings
+                                                .upstream_shared_host_failure_domain_enabled,
+                                        ),
                                     ),
                                 )
                                 .await?;
@@ -7888,7 +8019,14 @@ async fn process_gateway_request_inner(
                                 Some(ref mut streak)
                                     if streak.same_signature(class, upstream_status) =>
                                 {
-                                    if streak.route_local_fault(&route_health_key, &host) {
+                                    let same_host_counts = is_transient
+                                        && runtime_settings
+                                            .upstream_common_mode_same_host_transient_enabled;
+                                    if streak.route_local_fault(
+                                        &route_health_key,
+                                        &host,
+                                        same_host_counts,
+                                    ) {
                                         // Identical failure on the *same route*
                                         // or the *same upstream host* as the
                                         // previous one: route-local fault, not a
@@ -7907,15 +8045,19 @@ async fn process_gateway_request_inner(
                                         streak.count += 1;
                                         streak.last_route = route_health_key.clone();
                                         streak.last_host = host.clone();
-                                        if let Some(host) = host {
-                                            if !streak.hosts.iter().any(|seen| seen == &host) {
-                                                streak.hosts.push(host);
+                                        if let Some(seen_host) = host.as_ref() {
+                                            if !streak.hosts.iter().any(|seen| seen == seen_host) {
+                                                streak.hosts.push(seen_host.clone());
                                             }
                                         }
                                         if retry_after.is_some() {
                                             streak.retry_after = retry_after;
                                         }
                                         common_mode_failed_routes.push(route_health_key.clone());
+                                        if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
+                                            eprintln!("[TRACE] common-mode: class={:?} count={} threshold={} same_host_counts={} host={:?} route_local={} tripping={}",
+                                                class, streak.count, threshold, same_host_counts, host.as_deref(), streak.route_local_fault(&route_health_key, &host, same_host_counts), streak.count + 1 >= threshold);
+                                        }
                                         if streak.count >= threshold {
                                             common_mode_tripped = true;
                                             let failed_route_count =
@@ -8072,12 +8214,41 @@ async fn process_gateway_request_inner(
         // interval, in which case the ordinary decide/terminal flow below
         // applies.  At most one probe is armed per request, and a stale arm
         // that never reached its route is dropped here before re-evaluating.
+        // The probe is part of the route-exhaustion retry machinery, so the
+        // master `upstream_route_exhaustion_retry_enabled` switch turns it
+        // off too: an operator who disables exhaustion retries must not see
+        // their request still probed/replayed.
         request_route_attempts.clear_last_resort_probe();
-        if runtime_settings.upstream_transient_last_resort_probe_enabled
+        if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
+            eprintln!(
+                "[TRACE] round end: attempts={} all_transient={} avail={} cooled={} all_cooled={}",
+                round_ledger.attempt_count(),
+                round_ledger.is_all_transient_family_failures(),
+                request_route_attempts.available_candidate_count(),
+                round_ledger.cooled_candidate_count(),
+                round_ledger.is_all_cooled_transient_family(),
+            );
+        }
+        if runtime_settings.upstream_route_exhaustion_retry_enabled
+            && runtime_settings.upstream_transient_last_resort_probe_enabled
             && !stream_only_final_attempt
             && round_terminal.is_some()
-            && round_ledger.attempt_count() == 0
-            && round_ledger.is_all_cooled_transient_family()
+            && (
+                // Original arm: zero physical attempts, every candidate
+                // skipped only because of transient-family cooldowns.
+                (round_ledger.attempt_count() == 0
+                    && round_ledger.is_all_cooled_transient_family())
+                // T2.1 arm: the request *did* attempt the whole pool and
+                // every physical attempt was a transient-family failure
+                // (shared-host aggregated-gateway outage), and by the end of
+                // the round no candidate remains available.  The first
+                // request to hit a freshly-failing pool gets one real probe
+                // instead of waiting for the next request to see the empty
+                // pool.  At most one probe per request, as before.
+                || (round_ledger.attempt_count() > 0
+                    && round_ledger.is_all_transient_family_failures()
+                    && request_route_attempts.available_candidate_count() == 0)
+            )
             && !request_route_attempts.last_resort_probe_armed()
         {
             if let Some(probe_route) = request_route_attempts.earliest_cooled_route() {
@@ -8329,7 +8500,10 @@ async fn process_gateway_request_inner(
             .map(GiveUpReason::as_str)
             .unwrap_or("none");
         let waited_ms = route_retry_budget.waited().as_millis() as u64;
-        let mut error_code_counts = attempt_ledger.upstream_error_code_counts().into_iter().collect::<Vec<_>>();
+        let mut error_code_counts = attempt_ledger
+            .upstream_error_code_counts()
+            .into_iter()
+            .collect::<Vec<_>>();
         error_code_counts.sort();
         let upstream_error_codes = error_code_counts
             .into_iter()

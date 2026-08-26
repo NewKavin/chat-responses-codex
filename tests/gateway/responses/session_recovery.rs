@@ -431,6 +431,7 @@ async fn cooling_route_turns_capability_gate_into_503_with_retry_after() {
             &harness.route_health_key(),
             RouteFailureClass::TransientServer,
             None,
+            false,
         )
         .await
         .expect("route health observation");
@@ -1488,6 +1489,7 @@ async fn account_switch_replay_sends_parseable_tool_arguments_upstream() {
             &harness.route_health_key(&harness.route_a),
             RouteFailureClass::TransientServer,
             None,
+            false,
         )
         .await
         .expect("route health observation");

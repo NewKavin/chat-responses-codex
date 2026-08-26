@@ -246,7 +246,7 @@ async fn seed_route_failure(harness: &HalfOpenVerdictHarness, class: &str) {
     };
     harness
         .state
-        .observe_route_failure(&harness.route, class, None)
+        .observe_route_failure(&harness.route, class, None, false)
         .await
         .unwrap();
     // Wait out the 1s seeded cooldown so the route is re-checkable.

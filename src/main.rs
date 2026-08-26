@@ -4,10 +4,11 @@ use chat_responses_codex::logging::{
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
-    ModelKeySyncService, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
+    ModelKeySyncService, RuntimeSettings, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
@@ -17,16 +18,18 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
     DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
-    DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED, RuntimeSettings,
+    DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
 };
 use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use chrono::{FixedOffset, Utc};
@@ -292,6 +295,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED",
             DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
         ),
+        upstream_route_exhaustion_alignment_truncated_enabled: env_bool(
+            "UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED",
+            DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
+        ),
         upstream_transient_last_resort_probe_enabled: env_bool(
             "UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED",
             DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
@@ -307,6 +314,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_transient_same_route_retry_enabled: env_bool(
             "UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED",
             DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
+        ),
+        upstream_shared_host_failure_domain_enabled: env_bool(
+            "UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED",
+            DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
+        ),
+        upstream_common_mode_same_host_transient_enabled: env_bool(
+            "UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED",
+            DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
         ),
         upstream_concurrency_recovery_max_wait_ms: env_u64(
             "UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS",
@@ -338,7 +353,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // configuration was auto-corrected and why.
     let startup_settings = RuntimeSettings::from_app_config(&config);
     let cooldown_ceiling_seconds = startup_settings.effective_cooldown_ceiling_seconds();
-    if cooldown_ceiling_seconds.saturating_mul(1_000) >= config.upstream_route_exhaustion_retry_max_wait_ms {
+    if cooldown_ceiling_seconds.saturating_mul(1_000)
+        >= config.upstream_route_exhaustion_retry_max_wait_ms
+    {
         let corrected_max_wait_ms = cooldown_ceiling_seconds.saturating_mul(1_500);
         tracing::error!(
             auto_corrected = true,

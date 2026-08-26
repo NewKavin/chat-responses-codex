@@ -615,6 +615,20 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
             // default_route_exhaustion_budget_waits_out_a_transient_cooldown.
             AppConfig {
                 upstream_route_exhaustion_retry_max_wait_ms: 5_000,
+                // T2.1 regression guard: with the new first-request probe arm,
+                // the fully-attempted capacity pool gets one extra probe round,
+                // re-observing a fresh 7s cooldown and turning the terminal
+                // client hint from the ~13s live recovery into ~8s.  This test
+                // pins the "terminal uses live recovery" semantics, so the
+                // probe is turned off explicitly.
+                upstream_transient_last_resort_probe_enabled: false,
+                // T2.3 regression guard: the truncation would spend the whole
+                // 5s budget then give up with the *remaining* ~7.4s cooldown
+                // (hint 8) instead of failing fast with the fresh ~12.4s
+                // recovery (hint 13).  This test pins the "fails fast with a
+                // deterministic live-recovery hint", so the truncation switch
+                // is turned off explicitly too.
+                upstream_route_exhaustion_alignment_truncated_enabled: false,
                 ..AppConfig::default()
             },
         );

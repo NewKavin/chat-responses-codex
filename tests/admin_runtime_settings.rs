@@ -210,8 +210,11 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus tool_call_merge_strict = 58,
     // plus tool_arguments_strict = 59,
     // plus upstream_retry_after_cooldown_cap_seconds = 60 (T1.2),
-    // plus upstream_transient_route_cooldown_max_step = 61 (T1.3).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 61);
+    // plus upstream_transient_route_cooldown_max_step = 61 (T1.3),
+    // plus upstream_shared_host_failure_domain_enabled = 62 (T1.4),
+    // plus upstream_common_mode_same_host_transient_enabled = 63 (T2.2),
+    // plus upstream_route_exhaustion_alignment_truncated_enabled = 64 (T2.3).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 64);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

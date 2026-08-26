@@ -69,7 +69,7 @@ async fn route_health_snapshot_uses_key_cooldown_before_route_half_open() {
         runtime_model_slug: "glm-5.2".into(),
         protocol: WireProtocol::Responses,
     };
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(20)).await;
     let _route_half_open = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -93,7 +93,7 @@ async fn route_cooldown_has_one_half_open_lease_and_resets_after_success() {
     let route = route("fingerprint-a", "glm-5.2");
     let key = key("fingerprint-a");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     assert!(matches!(
         registry.reserve(&route, &key),
         RouteAvailability::Cooling { .. }
@@ -121,12 +121,21 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
     // same route must not amplify the failure step (R1): only the first
     // failure of the request escalates, later rounds reset the cooldown start
     // without growing the cooldown.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("request-suppressed-step", "glm-5.2");
     let key = key("request-suppressed-step");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let first_step = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(first_step.consecutive_failures, 1);
     let first_cooldown = first_step.cooldown_remaining;
@@ -148,6 +157,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
                 upstream_status: Some(500),
                 repeat_within_request: true,
                 sole_candidate: false,
+                shared_host_failure_domain: false,
             },
         );
         let snapshot = registry.route_health_snapshot(&route).unwrap();
@@ -171,12 +181,21 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
     // The gateway marks such failures with sole_candidate = true; the health
     // layer then applies the repeat_within_request semantics (reset the
     // cooldown start, keep the step flat).
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("sole-candidate-pinned", "glm-5.2");
     let key = key("sole-candidate-pinned");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let first_step = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(first_step.consecutive_failures, 1);
     let first_cooldown = first_step.cooldown_remaining;
@@ -194,6 +213,7 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
             upstream_status: Some(500),
             repeat_within_request: false,
             sole_candidate: true,
+            shared_host_failure_domain: false,
         },
     );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
@@ -210,12 +230,21 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
 #[tokio::test(start_paused = true)]
 async fn independent_request_failures_still_escalate_the_step() {
     // A1 counter-check: failures from independent requests keep escalating.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("independent-escalation", "glm-5.2");
     let key = key("independent-escalation");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let first_cooldown = registry
         .route_health_snapshot(&route)
         .unwrap()
@@ -233,6 +262,7 @@ async fn independent_request_failures_still_escalate_the_step() {
             upstream_status: Some(500),
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         },
     );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
@@ -248,12 +278,21 @@ async fn independent_request_failures_still_escalate_the_step() {
 
 #[tokio::test(start_paused = true)]
 async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() {
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 8, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        8,
+        300,
+        3000,
+        60,
+    );
     let route = route("half-open-step-cap", "glm-5.2");
     let key = key("half-open-step-cap");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let mut streak = 1;
     for _ in 0..12 {
         let cooldown = registry
@@ -272,6 +311,7 @@ async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() 
                 upstream_status: Some(500),
                 repeat_within_request: false,
                 sole_candidate: false,
+                shared_host_failure_domain: false,
             },
         );
         streak = registry
@@ -304,13 +344,13 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
         );
         let route = route(class.as_str(), "glm-5.2");
 
-        registry.observe_route_failure(&route, class, None);
+        registry.observe_route_failure(&route, class, None, false);
         let first = registry.route_health_snapshot(&route).unwrap();
         assert_eq!(first.consecutive_failures, 1);
         assert!(first.cooldown_remaining >= Duration::from_millis(2_400));
         assert!(first.cooldown_remaining <= Duration::from_millis(3_600));
 
-        registry.observe_route_failure(&route, class, None);
+        registry.observe_route_failure(&route, class, None, false);
         let second = registry.route_health_snapshot(&route).unwrap();
         assert_eq!(second.consecutive_failures, 2);
         assert_eq!(second.cooldown_remaining, Duration::from_secs(4));
@@ -319,14 +359,24 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
 
 #[tokio::test(start_paused = true)]
 async fn transient_route_cooldown_config_does_not_change_other_classes() {
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
 
     registry.observe_route_failure(
         &concurrency_route,
         RouteFailureClass::ConcurrencySaturated,
         None,
+        false,
     );
     assert_eq!(
         registry
@@ -339,6 +389,7 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
         &concurrency_route,
         RouteFailureClass::ConcurrencySaturated,
         None,
+        false,
     );
     assert_eq!(
         registry
@@ -353,6 +404,7 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
         &capacity_route,
         RouteFailureClass::CapacityUnavailable,
         None,
+        false,
     );
     assert!(
         registry
@@ -365,10 +417,19 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
 
 #[tokio::test(start_paused = true)]
 async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cooldown() {
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 60, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        60,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("key-runtime", "model-runtime");
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     assert!(
         registry
             .route_health_snapshot(&route)
@@ -382,7 +443,7 @@ async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cool
     assert!(clamped.cooldown_remaining <= Duration::from_secs(2));
 
     tokio::time::advance(Duration::from_secs(2)).await;
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let updated = registry.route_health_snapshot(&route).unwrap();
     assert!(updated.cooldown_remaining <= Duration::from_secs(2));
 }
@@ -393,7 +454,7 @@ async fn successful_route_state_does_not_create_a_new_half_open_lease() {
     let route = route("fingerprint-a", "glm-5.2");
     let key = key("fingerprint-a");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(12)).await;
     let recovery = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -523,7 +584,7 @@ async fn same_base_url_upstreams_keep_route_health_fully_isolated() {
     let key_b = key_for(&route_b);
     let mut registry = RouteHealthRegistry::new(16, 16);
 
-    registry.observe_route_failure(&route_a, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route_a, RouteFailureClass::TransientServer, None, false);
 
     assert!(matches!(
         registry.reserve(&route_a, &key_a),
@@ -545,7 +606,7 @@ async fn route_failure_isolated_from_another_model_on_the_same_key() {
     let failed = route("fingerprint-a", "glm-5.2");
     let healthy = route("fingerprint-a", "glm-4.7");
 
-    registry.observe_route_failure(&failed, RouteFailureClass::CapacityUnavailable, None);
+    registry.observe_route_failure(&failed, RouteFailureClass::CapacityUnavailable, None, false);
     assert!(matches!(
         registry.reserve(&failed, &key),
         RouteAvailability::Cooling {
@@ -569,7 +630,7 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
 
-    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None);
+    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None, false);
     let first = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(first.cooldown_remaining, Duration::from_millis(100));
 
@@ -587,6 +648,7 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
                 upstream_status: None,
                 repeat_within_request: false,
                 sole_candidate: false,
+                shared_host_failure_domain: false,
             },
         );
         let expected_delay = Duration::from_millis(expected_delay);
@@ -608,7 +670,7 @@ async fn concurrency_half_open_uncertainty_reapplies_current_delay() {
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
 
-    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None);
+    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None, false);
     tokio::time::advance(Duration::from_millis(100)).await;
     let lease = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -639,6 +701,7 @@ async fn concurrency_retry_after_is_authoritative() {
         &route,
         RouteFailureClass::ConcurrencySaturated,
         Some(Duration::from_millis(1_500)),
+        false,
     );
     assert_eq!(
         registry
@@ -670,7 +733,7 @@ async fn stale_healthy_success_does_not_clear_newer_concurrency_saturation() {
         RouteAvailability::Ready(lease) => lease,
         other => panic!("expected healthy lease, got {other:?}"),
     };
-    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None);
+    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None, false);
     registry.finish(stale, RouteOutcome::Success);
 
     assert!(matches!(
@@ -693,6 +756,7 @@ async fn explicit_retry_after_is_a_lower_bound_and_failure_streak_resets() {
         &route,
         RouteFailureClass::RateLimited,
         Some(Duration::from_secs(73)),
+        false,
     );
     let first = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(first.consecutive_failures, 1);
@@ -704,7 +768,7 @@ async fn explicit_retry_after_is_a_lower_bound_and_failure_streak_resets() {
         other => panic!("expected route recovery, got {other:?}"),
     };
     registry.finish(lease, RouteOutcome::Success);
-    registry.observe_route_failure(&route, RouteFailureClass::RateLimited, None);
+    registry.observe_route_failure(&route, RouteFailureClass::RateLimited, None, false);
     assert_eq!(
         registry
             .route_health_snapshot(&route)
@@ -800,8 +864,8 @@ async fn stale_failure_streak_restarts_and_local_jitter_is_deterministic() {
     let mut first = RouteHealthRegistry::new(16, 16);
     let mut second = RouteHealthRegistry::new(16, 16);
 
-    first.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
-    second.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    first.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    second.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     assert_eq!(
         first
             .route_health_snapshot(&route)
@@ -814,7 +878,7 @@ async fn stale_failure_streak_restarts_and_local_jitter_is_deterministic() {
     );
 
     tokio::time::advance(Duration::from_secs(11 * 60)).await;
-    first.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    first.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     assert_eq!(
         first
             .route_health_snapshot(&route)
@@ -829,7 +893,12 @@ async fn health_registry_keeps_active_half_open_leases_when_bounded() {
     let mut registry = RouteHealthRegistry::new(2, 2);
     let key_a = key("fingerprint-a");
     let route_a = route("fingerprint-a", "glm-5.2");
-    registry.observe_route_failure(&route_a, RouteFailureClass::CapacityUnavailable, None);
+    registry.observe_route_failure(
+        &route_a,
+        RouteFailureClass::CapacityUnavailable,
+        None,
+        false,
+    );
     tokio::time::advance(Duration::from_secs(20)).await;
     let lease = match registry.reserve(&route_a, &key_a) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -839,7 +908,7 @@ async fn health_registry_keeps_active_half_open_leases_when_bounded() {
     for index in 0..8 {
         let fingerprint = format!("fingerprint-{index}");
         let route = route(&fingerprint, "glm-5.2");
-        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     }
 
     assert!(registry.route_count() <= 2);
@@ -853,7 +922,7 @@ async fn route_and_key_half_open_leases_are_acquired_atomically() {
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
     registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
 
     tokio::time::advance(Duration::from_secs(20 * 60)).await;
     let lease = match registry.reserve(&route, &key) {
@@ -880,6 +949,7 @@ async fn temporary_recovery_uses_larger_route_and_key_delay() {
         &route,
         RouteFailureClass::TransientServer,
         Some(Duration::from_secs(40)),
+        false,
     );
     registry.observe_key_failure(
         &key,
@@ -913,11 +983,13 @@ async fn temporary_recovery_chooses_earliest_exact_route() {
         &slower,
         RouteFailureClass::TransientServer,
         Some(Duration::from_secs(80)),
+        false,
     );
     registry.observe_route_failure(
         &faster,
         RouteFailureClass::TransientServer,
         Some(Duration::from_secs(45)),
+        false,
     );
     let slower_recovery = registry
         .earliest_temporary_recovery(std::slice::from_ref(&slower))
@@ -939,7 +1011,7 @@ async fn temporary_recovery_excludes_a_credential_blocked_exact_route() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let route = route("fingerprint-credentials", "glm-5.2");
     let key = key("fingerprint-credentials");
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
 
     assert!(registry
@@ -952,7 +1024,7 @@ async fn temporary_recovery_query_is_read_only_and_reports_half_open_busy() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let route = route("fingerprint-half-open", "glm-5.2");
     let key = key("fingerprint-half-open");
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let cooldown = registry
         .route_health_snapshot(&route)
         .expect("route state")
@@ -986,9 +1058,9 @@ async fn per_upstream_capacity_evicts_only_from_the_full_upstream() {
         runtime_model_slug: "glm-5.2".into(),
         protocol: WireProtocol::Responses,
     };
-    registry.observe_route_failure(&route_a, RouteFailureClass::TransientServer, None);
-    registry.observe_route_failure(&route_b, RouteFailureClass::TransientServer, None);
-    registry.observe_route_failure(&route_c, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route_a, RouteFailureClass::TransientServer, None, false);
+    registry.observe_route_failure(&route_b, RouteFailureClass::TransientServer, None, false);
+    registry.observe_route_failure(&route_c, RouteFailureClass::TransientServer, None, false);
 
     assert_eq!(registry.route_count(), 2);
     assert!(!registry.contains_route(&route_a));
@@ -1007,7 +1079,7 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
     state
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
     tokio::time::advance(Duration::from_secs(12)).await;
@@ -1028,12 +1100,21 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
 
 #[tokio::test(start_paused = true)]
 async fn expired_route_half_open_lease_releases_for_next_caller() {
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("fingerprint-expired-lease", "glm-5.2");
     let key = key("fingerprint-expired-lease");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(12)).await;
     let lease = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1063,8 +1144,17 @@ async fn expired_route_half_open_lease_releases_for_next_caller() {
 
 #[tokio::test(start_paused = true)]
 async fn expired_key_half_open_lease_releases_for_next_caller() {
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let key = key("fingerprint-expired-key-lease");
     let route = route("fingerprint-expired-key-lease", "glm-5.2");
 
@@ -1095,12 +1185,21 @@ async fn expired_key_half_open_lease_releases_for_next_caller() {
 
 #[tokio::test(start_paused = true)]
 async fn half_open_busy_reports_wait_bounded_by_exclusive_window() {
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("fingerprint-busy-recovery", "glm-5.2");
     let key = key("fingerprint-busy-recovery");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(12)).await;
     let lease = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1159,7 +1258,7 @@ async fn edge_proxy_error_cools_briefly_and_never_escalates_streak() {
 
     // Edge proxy errors are cooldown classes (short base), unlike pure
     // request rejections which never cool.
-    registry.observe_route_failure(&route, RouteFailureClass::EdgeProxyError, None);
+    registry.observe_route_failure(&route, RouteFailureClass::EdgeProxyError, None, false);
     assert!(matches!(
         registry.reserve(&route, &key),
         RouteAvailability::Cooling { .. }
@@ -1175,7 +1274,7 @@ async fn edge_proxy_error_cools_briefly_and_never_escalates_streak() {
     // Repeated identical edge proxy failures must not escalate the streak or
     // lengthen the cooldown beyond the short base.
     tokio::time::advance(Duration::from_secs(10)).await;
-    registry.observe_route_failure(&route, RouteFailureClass::EdgeProxyError, None);
+    registry.observe_route_failure(&route, RouteFailureClass::EdgeProxyError, None, false);
     let second = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(second.consecutive_failures, 1);
     assert!(
@@ -1191,12 +1290,21 @@ async fn reserve_route_health_probe_ignores_cooldown_and_is_single_flight() {
     // remaining cooldown and grants a single-flight half-open lease; a second
     // caller is busy until the first finishes, and a successful probe clears
     // the cooldown entirely.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("early-probe-single-flight", "glm-5.2");
     let key = key("early-probe-single-flight");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     assert!(matches!(
         registry.reserve(&route, &key),
         RouteAvailability::Cooling { .. }
@@ -1231,12 +1339,21 @@ async fn reserve_route_health_probe_enforces_one_second_interval_per_route() {
     // A3: after an early probe (even a cancelled one) the same route refuses
     // another early probe for HALF_OPEN_BUSY_RETRY (1s); normal reserves stay
     // cooling during the window and a fresh probe is granted after it.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        60,
+    );
     let route = route("early-probe-interval", "glm-5.2");
     let key = key("early-probe-interval");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
 
     let first = match registry.reserve_route_health_probe(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1270,15 +1387,24 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
     // A3: a failing early probe follows the half-open failure path: the step
     // cannot exceed ROUTE_HALF_OPEN_FAILURE_STEP_CAP and the 1s probe window
     // stays armed for the next caller.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 8, 300, 3000, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        8,
+        300,
+        3000,
+        60,
+    );
     let route = route("early-probe-capped-step", "glm-5.2");
     let key = key("early-probe-capped-step");
 
     // Seed a step of 5 through independent failures; a probe failure must not
     // push it to 6.
     for _ in 0..5 {
-        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     }
     let seeded = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(seeded.consecutive_failures, 5);
@@ -1294,6 +1420,7 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
             upstream_status: Some(502),
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         },
     );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
@@ -1323,7 +1450,7 @@ async fn reserve_route_health_probe_refuses_when_key_cooling_or_route_healthy() 
         RouteAvailability::Cooling { .. }
     ));
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
     assert!(matches!(
         registry.reserve_route_health_probe(&route, &key),
@@ -1341,7 +1468,7 @@ async fn half_open_exclusive_window_admits_requests_after_window_elapses() {
     let route = route("exclusive-window", "glm-5.2");
     let key = key("exclusive-window");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     // Step-1 transient cooldown is jittered up to 12s (10s base).
     tokio::time::advance(Duration::from_secs(13)).await;
     let first = match registry.reserve(&route, &key) {
@@ -1389,7 +1516,7 @@ async fn half_open_exclusive_window_zero_never_blocks_concurrent_requests() {
     let route = route("exclusive-window-zero", "glm-5.2");
     let key = key("exclusive-window-zero");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(13)).await;
     let first = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1424,7 +1551,7 @@ async fn half_open_exclusive_window_max_degrades_to_single_flight() {
     let route = route("exclusive-window-max", "glm-5.2");
     let key = key("exclusive-window-max");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(13)).await;
     let first = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1463,7 +1590,7 @@ async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases
     let route = route("exclusive-window-tuning", "glm-5.2");
     let key = key("exclusive-window-tuning");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     tokio::time::advance(Duration::from_secs(13)).await;
     let first = match registry.reserve(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1492,7 +1619,7 @@ async fn half_open_exclusive_window_does_not_affect_early_probe_single_flight() 
     let route = route("probe-single-flight-window", "glm-5.2");
     let key = key("probe-single-flight-window");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     // The route is still deep in cooldown; the early probe ignores it.
     let first = match registry.reserve_route_health_probe(&route, &key) {
         RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
@@ -1534,7 +1661,7 @@ async fn early_probe_exclusivity_ends_with_the_cooldown_not_the_lease() {
     let route = route("early-probe-exclusivity", "glm-5.2");
     let key = key("early-probe-exclusivity");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let cooldown_remaining = registry
         .route_health_snapshot(&route)
         .unwrap()
@@ -1588,7 +1715,7 @@ async fn early_probe_at_cooldown_tail_keeps_a_full_exclusive_window() {
     let route = route("early-probe-tail-window", "glm-5.2");
     let key = key("early-probe-tail-window");
 
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     let cooldown_remaining = registry
         .route_health_snapshot(&route)
         .unwrap()
@@ -1660,6 +1787,7 @@ async fn t13_equivalence_effective_cooldown_bounded_by_t11_ceiling() {
                 &route,
                 RouteFailureClass::TransientServer,
                 Some(clamped),
+                false,
             );
             let snapshot = registry.route_health_snapshot(&route).unwrap();
             assert_eq!(
@@ -1699,7 +1827,12 @@ async fn t12_upstream_hint_capped_so_local_curve_wins_never_28() {
 
     // Simulate the gateway clamp: raw 28s -> 5s.
     let clamped = Duration::from_secs(28).min(Duration::from_secs(5));
-    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, Some(clamped));
+    registry.observe_route_failure(
+        &route,
+        RouteFailureClass::TransientServer,
+        Some(clamped),
+        false,
+    );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
     assert!(
         snapshot.cooldown_remaining < Duration::from_secs(28),
@@ -1737,6 +1870,7 @@ async fn concurrency_saturated_retry_after_not_cut_by_t12_cooldown_cap() {
         &route,
         RouteFailureClass::ConcurrencySaturated,
         Some(Duration::from_secs(28)),
+        false,
     );
     let snapshot = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(
@@ -1767,7 +1901,7 @@ async fn t13_non_half_open_failures_cap_step_at_configured_max_step() {
     let route = route("t13-step-cap", "glm-5.2");
 
     for _ in 0..8 {
-        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
     }
     let snapshot = registry.route_health_snapshot(&route).unwrap();
     assert_eq!(

@@ -97,6 +97,12 @@ pub(super) struct RouteRetryWait {
     /// True for the single budget-aligned last wait granted after the round
     /// cap when a live transient recovery fits the remaining time budget.
     pub alignment: bool,
+    /// T2.3: the required retry delay exceeded the remaining in-request time
+    /// budget, so this wait was truncated to the remaining budget.  The next
+    /// round then re-checks the pool via the last-resort probe path instead of
+    /// giving up immediately; wasting seconds of budget has no diagnostic
+    /// value when a known recovery is this close.
+    pub alignment_truncated: bool,
     /// True for a dedicated half-open-busy wait (T3): it advances
     /// `RouteRetryBudget::busy_rounds` instead of the ordinary round counter.
     pub busy: bool,
@@ -114,6 +120,10 @@ pub(super) struct RouteRetryPolicy {
     /// `max_rounds`; this budget bounds how many 1s busy polls a request may
     /// take before giving up with `GiveUpReason::HalfOpenBusyCap`.
     busy_max_rounds: u32,
+    /// T2.3: whether a required delay that exceeds the remaining budget is
+    /// truncated to the remaining budget (then re-probed next round) rather
+    /// than an immediate `WaitBudget` give-up.
+    alignment_truncated_enabled: bool,
 }
 
 impl RouteRetryPolicy {
@@ -156,9 +166,11 @@ impl RouteRetryPolicy {
             concurrency_max_rounds,
             budget_alignment_enabled,
             10,
+            true,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // test-only tuning constructor
     fn new_with_full_tuning(
         enabled: bool,
         max_wait: Duration,
@@ -167,6 +179,7 @@ impl RouteRetryPolicy {
         concurrency_max_rounds: u32,
         budget_alignment_enabled: bool,
         busy_max_rounds: u32,
+        alignment_truncated_enabled: bool,
     ) -> Self {
         Self {
             enabled,
@@ -176,6 +189,7 @@ impl RouteRetryPolicy {
             concurrency_max_rounds: concurrency_max_rounds.max(1),
             budget_alignment_enabled,
             busy_max_rounds: busy_max_rounds.max(1),
+            alignment_truncated_enabled,
         }
     }
 
@@ -188,6 +202,7 @@ impl RouteRetryPolicy {
             runtime_settings.upstream_concurrency_recovery_max_rounds,
             runtime_settings.upstream_route_exhaustion_budget_alignment_enabled,
             runtime_settings.upstream_route_half_open_busy_max_rounds,
+            runtime_settings.upstream_route_exhaustion_alignment_truncated_enabled,
         )
     }
 
@@ -234,6 +249,20 @@ impl RouteRetryPolicy {
         let TerminalFailure::Temporary { retry_after } = terminal else {
             return (None, None);
         };
+        if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
+            eprintln!(
+                "[TRACE] decide_with_reason round={} waited_ms={} max_wait_ms={} max_rounds={} busy_only={} retry_after_ms={:?} recovery_ms={:?} recovery_class={:?} alignment_used={}",
+                budget.current_round,
+                budget.waited.as_millis(),
+                self.max_wait.as_millis(),
+                self.max_rounds,
+                busy_only,
+                retry_after.as_millis(),
+                health_recovery.map(|r| r.retry_after.as_millis()),
+                health_recovery.map(|r| r.class),
+                budget.alignment_used,
+            );
+        }
         if client_retryable_rate_limit {
             // A pure upstream rate-limit / key-quota exhaustion (429 family)
             // is a client-side retry signal: codex honors Retry-After and
@@ -270,6 +299,7 @@ impl RouteRetryPolicy {
                     sleep_for,
                     remaining_after: remaining - sleep_for,
                     alignment: false,
+                    alignment_truncated: false,
                     busy: true,
                 }),
                 None,
@@ -278,6 +308,9 @@ impl RouteRetryPolicy {
         let concurrency_recovery = health_recovery.is_some_and(|recovery| {
             recovery.class == crate::state::RouteFailureClass::ConcurrencySaturated
         });
+        #[allow(clippy::if_same_then_else)]
+        let dbg_recovery =
+            health_recovery.map(|r| (format!("{:?}", r.class), r.retry_after.as_millis()));
         let (max_wait, max_rounds) = if concurrency_recovery {
             (self.concurrency_max_wait, self.concurrency_max_rounds)
         } else {
@@ -318,14 +351,43 @@ impl RouteRetryPolicy {
                             sleep_for,
                             remaining_after: remaining - sleep_for,
                             alignment: true,
+                            alignment_truncated: false,
                             busy: false,
                         }),
                         None,
                     );
                 }
-                // An aligned recovery even longer than the remaining budget
-                // is a wait-budget give-up, not a round-cap one: the cap was
-                // already provisionally answered by the alignment check.
+                // T2.3: the aligned recovery would need more than the
+                // remaining budget.  If at least a second of budget is left,
+                // wait the remaining budget anyway and let the next round's
+                // last-resort probe path re-check the earliest-recovering
+                // route (alignment_truncated marks the truncation in logs).
+                // Only when the budget is effectively gone do we give up as
+                // WaitBudget (an aligned recovery longer than the budget is
+                // still a wait-budget give-up, not a round-cap one).
+                if self.alignment_truncated_enabled && remaining >= HALF_OPEN_BUSY_RETRY {
+                    if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
+                        eprintln!(
+                            "[TRACE] ALIGN-TRUNCATE remaining_ms={} sleep_for_ms={} recovery={:?}",
+                            remaining.as_millis(),
+                            sleep_for.as_millis(),
+                            dbg_recovery
+                        );
+                    }
+                    return (
+                        Some(RouteRetryWait {
+                            next_round,
+                            required_delay: remaining,
+                            jitter: Duration::ZERO,
+                            sleep_for: remaining,
+                            remaining_after: Duration::ZERO,
+                            alignment: true,
+                            alignment_truncated: true,
+                            busy: false,
+                        }),
+                        None,
+                    );
+                }
                 return (None, Some(GiveUpReason::WaitBudget));
             }
             // No budget-aligned wait available at the round cap.  Classify
@@ -356,6 +418,42 @@ impl RouteRetryPolicy {
         };
         let remaining = max_wait.saturating_sub(budget.waited);
         if sleep_for > remaining {
+            // T2.3: same truncation as the alignment branch — a required
+            // delay only slightly longer than the remaining budget should
+            // spend the remaining budget and let the next round's last-resort
+            // probe path take one real timed probe, not abandon the request
+            // instantly.  `remaining < 1s` is effectively no budget left.
+            if self.alignment_truncated_enabled && remaining >= HALF_OPEN_BUSY_RETRY {
+                if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
+                    eprintln!(
+                        "[TRACE] ORD-TRUNCATE remaining_ms={} sleep_for_ms={} recovery={:?}",
+                        remaining.as_millis(),
+                        sleep_for.as_millis(),
+                        dbg_recovery
+                    );
+                }
+                return (
+                    Some(RouteRetryWait {
+                        next_round,
+                        required_delay: remaining,
+                        jitter: Duration::ZERO,
+                        sleep_for: remaining,
+                        remaining_after: Duration::ZERO,
+                        alignment: false,
+                        alignment_truncated: true,
+                        busy: false,
+                    }),
+                    None,
+                );
+            }
+            if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
+                eprintln!(
+                    "[TRACE] ORD-WAITBUDGET-GIVEUP remaining_ms={} sleep_for_ms={} recovery={:?}",
+                    remaining.as_millis(),
+                    sleep_for.as_millis(),
+                    dbg_recovery
+                );
+            }
             return (None, Some(GiveUpReason::WaitBudget));
         }
 
@@ -367,6 +465,7 @@ impl RouteRetryPolicy {
                 sleep_for,
                 remaining_after: remaining - sleep_for,
                 alignment: false,
+                alignment_truncated: false,
                 busy: false,
             }),
             None,
@@ -479,17 +578,29 @@ mod tests {
                 "permanent"
             )
             .is_none());
-        assert!(RouteRetryPolicy::new(true, Duration::from_secs(10), 3)
-            .decide(
-                &budget,
-                TerminalFailure::Temporary {
-                    retry_after: Duration::from_secs(11),
-                },
-                None,
-                false,
-                "over-budget",
-            )
-            .is_none());
+        // T2.3: an over-budget wait is truncated to the remaining budget by
+        // default, so the outright refusal only happens when truncation is
+        // turned off (or no budget is left at all).
+        assert!(RouteRetryPolicy::new_with_full_tuning(
+            true,
+            Duration::from_secs(10),
+            3,
+            Duration::from_secs(10),
+            3,
+            true,
+            10,
+            false,
+        )
+        .decide(
+            &budget,
+            TerminalFailure::Temporary {
+                retry_after: Duration::from_secs(11),
+            },
+            None,
+            false,
+            "over-budget",
+        )
+        .is_none());
         assert!(RouteRetryPolicy::new(true, Duration::ZERO, 3)
             .decide(&budget, temporary, None, false, "zero-budget")
             .is_none());
@@ -646,7 +757,20 @@ mod tests {
 
     #[test]
     fn round_cap_alignment_skipped_when_recovery_exceeds_budget() {
-        let policy = RouteRetryPolicy::new(true, Duration::from_secs(30), 3);
+        // T2.3: with the truncation switch off, an aligned recovery that
+        // needs more than the remaining budget is still refused outright
+        // (the pre-T2.3 behavior).  The on-by-default truncation path is
+        // covered by `over_budget_alignment_wait_truncates_to_remaining`.
+        let policy = RouteRetryPolicy::new_with_full_tuning(
+            true,
+            Duration::from_secs(30),
+            3,
+            Duration::from_secs(30),
+            3,
+            true,
+            10,
+            false,
+        );
         let terminal = TerminalFailure::Temporary {
             retry_after: Duration::from_secs(1),
         };
@@ -671,8 +795,76 @@ mod tests {
             policy
                 .decide(&budget, terminal, Some(big), false, "over-budget")
                 .is_none(),
-            "an alignment wait that exceeds the remaining time budget must be refused"
+            "an alignment wait that exceeds the remaining time budget must be refused when truncation is off"
         );
+    }
+
+    #[test]
+    fn over_budget_alignment_wait_truncates_to_remaining() {
+        // T2.3: a required delay slightly longer than the remaining budget
+        // must not abandon the request instantly.  The wait is truncated to
+        // the remaining budget (alignment_truncated = true) so the next round
+        // can still take one timed last-resort probe.
+        let policy = RouteRetryPolicy::new(true, Duration::from_secs(30), 3);
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(28),
+        };
+        let mut budget = RouteRetryBudget {
+            current_round: 1,
+            waited: Duration::from_secs(3),
+            alignment_used: false,
+            busy_rounds: 0,
+        };
+        let (wait, reason) =
+            policy.decide_with_reason(&budget, terminal, None, false, false, "truncate");
+        let wait = wait.expect("a 28s delay with 27s left must truncate, not give up");
+        assert_eq!(reason, None);
+        assert!(wait.alignment_truncated);
+        assert_eq!(wait.sleep_for, Duration::from_secs(27));
+        assert_eq!(wait.remaining_after, Duration::ZERO);
+        budget.record_wait(wait);
+
+        // With less than 1s of budget left there is nothing to truncate to:
+        // the give-up is WaitBudget again.
+        let exhausted = RouteRetryBudget {
+            waited: Duration::from_millis(29_900),
+            ..budget
+        };
+        assert_eq!(
+            policy
+                .decide_with_reason(&exhausted, terminal, None, false, false, "exhausted")
+                .1,
+            Some(GiveUpReason::WaitBudget),
+        );
+    }
+
+    #[test]
+    fn truncation_switch_off_restores_instant_wait_budget_give_up() {
+        // T2.3 regression guard for the switch: with truncation disabled the
+        // request gives up with WaitBudget exactly as before.
+        let policy = RouteRetryPolicy::new_with_full_tuning(
+            true,
+            Duration::from_secs(30),
+            3,
+            Duration::from_secs(30),
+            3,
+            true,
+            10,
+            false,
+        );
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(28),
+        };
+        let budget = RouteRetryBudget {
+            current_round: 1,
+            waited: Duration::from_secs(3),
+            alignment_used: false,
+            busy_rounds: 0,
+        };
+        let (wait, reason) =
+            policy.decide_with_reason(&budget, terminal, None, false, false, "no-truncation");
+        assert!(wait.is_none());
+        assert_eq!(reason, Some(GiveUpReason::WaitBudget));
     }
 
     #[test]
@@ -825,9 +1017,11 @@ mod tests {
         // 4. The next evidence-backed wait exceeds the remaining budget
         //    -> wait_budget (both inside the aligned branch and in the
         //    ordinary branch).
+        // T2.3: remaining budget must be < HALF_OPEN_BUSY_RETRY (1s) for a
+        // genuine WaitBudget give-up; a bigger remainder truncates instead.
         let small_budget = RouteRetryBudget {
             current_round: 1,
-            waited: Duration::from_secs(29),
+            waited: Duration::from_millis(29_900),
             alignment_used: false,
             busy_rounds: 0,
         };
@@ -839,7 +1033,7 @@ mod tests {
         );
         let aligned_over_budget = RouteRetryBudget {
             current_round: 3,
-            waited: Duration::from_secs(29),
+            waited: Duration::from_millis(29_900),
             alignment_used: false,
             busy_rounds: 0,
         };
@@ -930,6 +1124,7 @@ mod tests {
             1,
             true,
             3,
+            true,
         );
         let terminal = TerminalFailure::Temporary {
             retry_after: Duration::from_secs(1),
@@ -981,6 +1176,7 @@ mod tests {
             3,
             true,
             10,
+            true,
         );
         let terminal = TerminalFailure::Temporary {
             retry_after: Duration::from_secs(1),

@@ -239,6 +239,7 @@ async fn seed_busy_route_failure(state: &AppState) {
             &route,
             chat_responses_codex::state::RouteFailureClass::TransientServer,
             None,
+            false,
         )
         .await
         .unwrap();

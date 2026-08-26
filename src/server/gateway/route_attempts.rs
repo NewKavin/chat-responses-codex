@@ -479,12 +479,20 @@ impl RequestRouteAttempts {
     }
 
     /// The route with the shortest remaining cooldown among the candidates
-    /// this round skipped because they are cooling (A3 probe target).
+    /// this round skipped because they are cooling (A3 probe target).  T2.1:
+    /// also considers routes that recorded a *physical* transient-family
+    /// failure this round (the "attempted everything, nothing left" arm),
+    /// so the first request to hit a freshly-failing pool can still arm one
+    /// real probe instead of waiting for the next request to see the empty
+    /// pool.  The retry_after carried by a physical failure is the (already
+    /// T1.2-capped) upstream Retry-After, the best recovery estimate the
+    /// ledger has.
     pub fn earliest_cooled_route(&self) -> Option<RouteHealthKey> {
         let ledger = self.ledger();
         let selected = ledger
-            .cooled_candidates
+            .failures
             .iter()
+            .chain(ledger.cooled_candidates.iter())
             .min_by_key(|failure| failure.retry_after.unwrap_or(Duration::MAX))?;
         self.tracker().eligible_routes().into_iter().find(|route| {
             anonymous_route_id(
@@ -600,6 +608,24 @@ impl AttemptLedger {
     pub fn is_all_cooled_transient_family(&self) -> bool {
         !self.cooled_candidates.is_empty()
             && self.cooled_candidates.iter().all(|failure| {
+                matches!(
+                    failure.class,
+                    FailureClass::TransientServer
+                        | FailureClass::EdgeProxyError
+                        | FailureClass::CapacityUnavailable
+                )
+            })
+    }
+
+    /// Whether every *physical* attempt this round failed with a
+    /// transient-family class (TransientServer / EdgeProxyError /
+    /// CapacityUnavailable — the same family A1 suppression tracks).  T2.1:
+    /// when this holds alongside a zero `available_candidate_count`, the
+    /// request attempted the whole pool and everything softened on a shared
+    /// outage, so the last-resort probe arm may still fire once.
+    pub fn is_all_transient_family_failures(&self) -> bool {
+        !self.failures.is_empty()
+            && self.failures.iter().all(|failure| {
                 matches!(
                     failure.class,
                     FailureClass::TransientServer
@@ -809,7 +835,6 @@ impl AttemptLedger {
             .collect::<HashSet<_>>()
             .len()
     }
-
 
     /// Most common sanitized upstream error-body excerpt across ledger
     /// entries (E5), mirroring the code/name "most common" pick.  Present

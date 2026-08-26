@@ -777,6 +777,7 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
             &route,
             chat_responses_codex::state::RouteFailureClass::ConcurrencySaturated,
             None,
+            false,
         )
         .await
         .expect("route health observation");
@@ -1004,6 +1005,7 @@ async fn account_recovery_budget_cancels_exact_route_cooldown_after_probe_grant(
             &route,
             chat_responses_codex::state::RouteFailureClass::ConcurrencySaturated,
             Some(Duration::from_secs(5)),
+            false,
         )
         .await
         .unwrap();
@@ -1944,7 +1946,15 @@ async fn default_route_exhaustion_budget_waits_out_a_transient_cooldown() {
         state_path,
         // Default wait budget (30s) on purpose: the ~10s transient cooldown
         // must be absorbed inside the gateway so the client never sees a 503.
-        AppConfig::default(),
+        // T2.1 regression guard: with the new first-request probe arm, the
+        // request would probe immediately after the first failing round and
+        // succeed in ~300ms instead of waiting out the cooldown.  This test
+        // pins the budget-absorption path (sleep through the cooldown), so
+        // the probe is turned off explicitly.
+        AppConfig {
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
@@ -2065,6 +2075,11 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
         state_path,
         AppConfig {
             upstream_route_exhaustion_retry_max_wait_ms: 15_000,
+            // T2.1 regression guard: the first-request probe would fire after
+            // round two and flip `last_resort_probe_attempted` to true.  This
+            // test pins the budget/round-cap arithmetic, so the probe is
+            // turned off explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2139,6 +2154,12 @@ async fn budget_aligned_last_wait_recovers_inside_remaining_budget() {
             upstream_transient_route_cooldown_max_seconds: 4,
             upstream_route_exhaustion_retry_max_wait_ms: 30_000,
             upstream_route_exhaustion_retry_max_rounds: 3,
+            // T2.1 regression guard: the probe after round one shifts the
+            // failure count so the upstream recovers inside round three,
+            // skipping the final aligned wait (elapsed drops below the 5s
+            // floor).  This test pins the aligned-wait path, so the probe is
+            // turned off explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2207,6 +2228,17 @@ async fn budget_aligned_last_wait_refused_when_recovery_exceeds_budget() {
         AppConfig {
             upstream_route_exhaustion_retry_max_wait_ms: 5_000,
             upstream_route_exhaustion_retry_max_rounds: 1,
+            // T2.3 regression guard: with truncation on, the request would
+            // spend the remaining ~5s budget and then probe (blowing the 1s
+            // test timeout) instead of refusing immediately.  This test pins
+            // the "over-budget recovery is refused at once" semantics, so the
+            // truncation switch is turned off explicitly.
+            upstream_route_exhaustion_alignment_truncated_enabled: false,
+            // T2.1 regression guard: the first-request probe arm would fire
+            // after round one and flip `last_resort_probe_attempted` to true.
+            // This test pins the "refused immediately, never probed"
+            // semantics, so the probe is turned off explicitly too.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2270,6 +2302,11 @@ async fn budget_aligned_last_wait_happens_only_once() {
             upstream_transient_route_cooldown_max_seconds: 4,
             upstream_route_exhaustion_retry_max_wait_ms: 30_000,
             upstream_route_exhaustion_retry_max_rounds: 1,
+            // T2.1 regression guard: the probe round after round one adds two
+            // more hits and consumes the alignment differently (6 hits vs 4).
+            // This test pins "the aligned wait is granted at most once", so
+            // the probe is turned off explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2334,6 +2371,11 @@ async fn budget_aligned_last_wait_switch_off_keeps_round_cap_behavior() {
             upstream_route_exhaustion_retry_max_wait_ms: 30_000,
             upstream_route_exhaustion_retry_max_rounds: 3,
             upstream_route_exhaustion_budget_alignment_enabled: false,
+            // T2.1 regression guard: the probe after the third round would
+            // reach the recovered upstream (hit 7 -> 200) and turn the
+            // round-cap 503 into a success.  This test pins the round-cap
+            // semantics, so the probe is turned off explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2543,6 +2585,11 @@ async fn a1_same_route_failures_across_rounds_keep_step_flat() {
             upstream_route_exhaustion_retry_max_wait_ms: 30_000,
             upstream_route_exhaustion_retry_max_rounds: 3,
             upstream_route_exhaustion_budget_alignment_enabled: false,
+            // T2.1 regression guard: the probe after the third round would
+            // add two more upstream hits (8 vs 6).  This test pins the A1
+            // step-flat-across-rounds arithmetic, so the probe is turned off
+            // explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2643,6 +2690,7 @@ async fn route_retry_last_resort_probe_recovers_earliest_route_when_all_cooling(
                 route,
                 chat_responses_codex::state::RouteFailureClass::TransientServer,
                 Some(Duration::from_secs(cooldown_seconds)),
+                false,
             )
             .await
             .unwrap();
@@ -2741,6 +2789,13 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
             upstream_transient_route_cooldown_max_seconds: 2,
             upstream_route_exhaustion_retry_max_wait_ms: 1_000,
             upstream_transient_same_route_retry_enabled: false,
+            // T2.3 regression guard: with truncation on, the first request
+            // spends ~1s of truncated wait before its probe, so the "second
+            // request within the 1s probe interval" actually arrives after the
+            // interval has elapsed and probes again (1 hit instead of 0).
+            // This test pins the probe-interval throttle, so the truncation
+            // switch is turned off explicitly.
+            upstream_route_exhaustion_alignment_truncated_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2751,6 +2806,7 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
             &route,
             chat_responses_codex::state::RouteFailureClass::TransientServer,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -2870,6 +2926,7 @@ async fn route_retry_last_resort_probe_disabled_keeps_zero_physical_attempts() {
             &route,
             chat_responses_codex::state::RouteFailureClass::TransientServer,
             None,
+            false,
         )
         .await
         .unwrap();

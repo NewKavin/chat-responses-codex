@@ -7,7 +7,6 @@ use chat_responses_codex::state::{
 use std::time::Duration;
 use tempfile::tempdir;
 
-
 /// T1.1: a config whose local backoff curve (base=2, max_step=3 => ceiling
 /// 2 << 2 = 8s, bounded by cap=5 via max()) satisfies the cooldown-ceiling
 /// invariant against the default 30s intra-gateway retry wait budget:
@@ -64,7 +63,7 @@ async fn runtime_settings_update_applies_recovery_tuning_without_restart() {
         protocol: WireProtocol::Responses,
     };
     state
-        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
         .await
         .unwrap();
 
@@ -184,7 +183,11 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 60);
+    // 60 base fields + upstream_shared_host_failure_domain_enabled (T1.4)
+    // + upstream_common_mode_same_host_transient_enabled (T2.2)
+    // + upstream_route_exhaustion_alignment_truncated_enabled (T2.3)
+    // = 63.
+    assert_eq!(all.len(), 63);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -204,7 +207,10 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_common_mode_transient_threshold",
         "upstream_transient_same_route_retry_enabled",
         "upstream_route_exhaustion_budget_alignment_enabled",
+        "upstream_route_exhaustion_alignment_truncated_enabled",
         "upstream_transient_last_resort_probe_enabled",
+        "upstream_shared_host_failure_domain_enabled",
+        "upstream_common_mode_same_host_transient_enabled",
         "upstream_local_lease_ttl_seconds",
         "upstream_continuation_pin_escape_enabled",
         "model_case_insensitive_matching",

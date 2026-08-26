@@ -188,6 +188,14 @@ pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED: bool = tru
 /// a cooling route is otherwise skipped until its cooldown clock runs out,
 /// so perceived recovery latency equals the cooldown, not the real outage).
 pub const DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED: bool = true;
+/// T2.3: when a required retry delay exceeds the remaining in-request time
+/// budget by a little (the "wait a few seconds or not at all" cliff), wait
+/// the *remaining* budget instead of giving up with `WaitBudget`, then let
+/// the next round's last-resort probe path re-check the earliest-recovering
+/// route.  This turns budget exhaustion from an immediate give-up into one
+/// final timed probe.  Set false to restore the pre-T2.3 behavior (give up
+/// as soon as `sleep_for > remaining`, even with seconds of budget left).
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED: bool = true;
 /// Consecutive identical (class, upstream status) failures across different
 /// routes within one request that trip the common-mode breaker. 0 disables
 /// the breaker.
@@ -197,6 +205,23 @@ pub const DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD: u32 = 2;
 /// common-mode breaker. 0 disables the transient breaker class.
 pub const DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD: u32 = 4;
 pub const DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED: bool = true;
+/// T1.4: treat every candidate route that resolves to the same upstream host
+/// as one shared failure domain.  With a single aggregated gateway (new-api)
+/// the "different routes" are physically the same hop, so 502s are a shared
+/// outage, not independent evidence: route cooldown flattens to the edge-proxy
+/// curve (3s..15s) and the failure step never escalates.  Set false to restore
+/// per-route cooldown semantics (useful when one host really hosts
+/// independent pools, or to keep the pre-T1.4 behavior).
+pub const DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED: bool = true;
+/// T2.2: let identical transient-family (class, status) failures on the SAME
+/// upstream host count toward the request's common-mode transient streak, so
+/// the aggregated-gateway outage case trips the delayed-replay breaker instead
+/// of being misread as a per-route local fault.  RequestRejected keeps its
+/// strict different-host semantics (that is a deliberate 2026-08-12 design
+/// choice and must not be relaxed).  Set false to restore the pre-T2.2
+/// behavior where only genuinely distinct hosts grow the transient streak.
+pub const DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED: bool = true;
+
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
@@ -343,10 +368,16 @@ pub struct AppConfig {
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
     pub upstream_route_exhaustion_budget_alignment_enabled: bool,
+    #[serde(default = "default_upstream_route_exhaustion_alignment_truncated_enabled")]
+    pub upstream_route_exhaustion_alignment_truncated_enabled: bool,
     pub upstream_transient_last_resort_probe_enabled: bool,
     pub upstream_common_mode_breaker_threshold: u32,
     pub upstream_common_mode_transient_threshold: u32,
     pub upstream_transient_same_route_retry_enabled: bool,
+    #[serde(default = "default_upstream_shared_host_failure_domain_enabled")]
+    pub upstream_shared_host_failure_domain_enabled: bool,
+    #[serde(default = "default_upstream_common_mode_same_host_transient_enabled")]
+    pub upstream_common_mode_same_host_transient_enabled: bool,
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
@@ -458,6 +489,8 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
             upstream_route_exhaustion_budget_alignment_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
+            upstream_route_exhaustion_alignment_truncated_enabled:
+                DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
             upstream_transient_last_resort_probe_enabled:
                 DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
             upstream_common_mode_breaker_threshold: DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
@@ -465,6 +498,10 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD,
             upstream_transient_same_route_retry_enabled:
                 DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
+            upstream_shared_host_failure_domain_enabled:
+                DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
+            upstream_common_mode_same_host_transient_enabled:
+                DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
             upstream_concurrency_recovery_max_wait_ms:
                 DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
             upstream_concurrency_recovery_max_rounds:
@@ -1098,8 +1135,20 @@ pub fn default_upstream_transient_same_route_retry_enabled() -> bool {
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED
 }
 
+pub fn default_upstream_shared_host_failure_domain_enabled() -> bool {
+    DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED
+}
+
+pub fn default_upstream_common_mode_same_host_transient_enabled() -> bool {
+    DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED
+}
+
 pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED
+}
+
+pub fn default_upstream_route_exhaustion_alignment_truncated_enabled() -> bool {
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED
 }
 
 pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {

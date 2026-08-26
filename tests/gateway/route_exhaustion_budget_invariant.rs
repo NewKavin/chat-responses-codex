@@ -164,6 +164,17 @@ async fn exhaustion_harness(
             // sends (the flag lives inside the per-key candidate loop); the
             // user's log line shows 6 candidates tried once each.
             upstream_transient_same_route_retry_enabled: false,
+            // This harness isolates the ROUTE-EXHAUSTION path (the user's log
+            // line) from the self-healing layers that otherwise pre-empt it:
+            //  - T2.2 same-host common-mode breaker defaults on: at threshold 4
+            //    it trips and returns 502 `upstream_transient_pool_error`
+            //    instead of exhausting 6 candidates to a 503.  The user's log
+            //    is `route_action=exhausted`, so the breaker must be off here.
+            //  - T1.4 shared-host failure-domain flattening defaults on: it
+            //    would cap the effective cooldown at the 3..15s edge-proxy
+            //    curve, masking the raw 28s hint the pre-fix test must see.
+            upstream_common_mode_same_host_transient_enabled: false,
+            upstream_shared_host_failure_domain_enabled: false,
             upstream_route_exhaustion_retry_enabled: true,
             // Deterministic: no hedging, no last-resort probe, no capability
             // probing that would consume upstream hits.
@@ -207,6 +218,12 @@ async fn wait_budget_reproduction_when_upstream_hint_exceeds_budget() {
     let (app, _state, downstream_key) = exhaustion_harness(base_url, |config| AppConfig {
         upstream_retry_after_cooldown_cap_seconds: 30,
         upstream_route_exhaustion_retry_max_wait_ms: 20_000,
+        // T2.3 is OFF here: its default-on truncation would turn the
+        // over-budget 28s wait into a truncated 20s wait plus one last probe
+        // (routing_round=2), which is the POST-fix behavior.  To reproduce
+        // the original pre-fix collapse we must restore the old
+        // sleep_for > remaining => WaitBudget semantics.
+        upstream_route_exhaustion_alignment_truncated_enabled: false,
         ..config
     })
     .await;
@@ -223,8 +240,14 @@ async fn wait_budget_reproduction_when_upstream_hint_exceeds_budget() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
     let details = &payload["error"]["details"];
-    assert_eq!(details["routing_rounds"], 1, "no inter-round wait must happen");
-    assert_eq!(details["physical_attempt_count"], 6, "6 candidates tried once");
+    assert_eq!(
+        details["routing_rounds"], 1,
+        "no inter-round wait must happen (T2.3 is off in this reproduction)"
+    );
+    assert_eq!(
+        details["physical_attempt_count"], 6,
+        "6 candidates tried once"
+    );
     assert_eq!(
         details["give_up_reason"], "wait_budget",
         "28s cooldown vs 20s budget must give up as wait_budget"
@@ -233,7 +256,11 @@ async fn wait_budget_reproduction_when_upstream_hint_exceeds_budget() {
         details["cooldown_seconds"], 28,
         "the ledger cooldown must echo the raw 28s upstream hint when the cap is 30"
     );
-    assert_eq!(hits.load(Ordering::SeqCst), 6, "exactly one round of attempts");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        6,
+        "exactly one round of attempts"
+    );
 }
 
 /// Post-fix: with the default 5s cooldown cap, the upstream 28s hint no
@@ -253,7 +280,11 @@ async fn recovers_when_upstream_hint_fits_the_wait_budget() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(status, StatusCode::OK, "round-2 recovery must succeed: {payload}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "round-2 recovery must succeed: {payload}"
+    );
     assert_eq!(payload["choices"][0]["message"]["content"], "ok");
     // 6 failures in round 1 + 1 success in round 2.  The extra successful hit
     // proves the gateway actually waited and retried (routing_round >= 2).

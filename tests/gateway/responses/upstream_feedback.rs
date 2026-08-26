@@ -1611,7 +1611,16 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
             model_aliases: vec![],
         },
         state_path,
-        AppConfig::default(),
+        // T2.3 regression guard: with `upstream_route_exhaustion_alignment_
+        // truncated_enabled` on (default), the request spends the remaining
+        // budget and the terminal client hint becomes the *remaining* ~2.4s
+        // cooldown ("3") instead of the ~9s effective recovery.  This test
+        // pins the T1.2 client-hint semantics (effective recovery), so the
+        // truncation switch is turned off explicitly.
+        AppConfig {
+            upstream_route_exhaustion_alignment_truncated_enabled: false,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
@@ -1644,7 +1653,7 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
     // not a raw echo of the upstream `Retry-After: 30`.  Default transient
     // base = 10s, step-1 deterministic jitter -> ~9s effective cooldown,
     // ceil -> 9.  The upstream hint only governs route health up to
-    // `upstream_retry_after_cooldown_cap_seconds`; 
+    // `upstream_retry_after_cooldown_cap_seconds`;
     // `upstream_retry_after_cap_seconds` still bounds the client header.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
@@ -2327,7 +2336,16 @@ async fn common_mode_breaker_threshold_zero_disables_the_breaker_and_tries_all_r
             upstream_same_route_retry_enabled: false,
             upstream_route_exhaustion_retry_max_wait_ms: 0,
             // K=0 disables the common-mode breaker entirely (B2 knobs).
+            // There are two independent breaker knobs — the request-shape
+            // breaker and the transient breaker — so both must be zeroed to
+            // truly disable the breaker and let the request try all 8 keys.
             upstream_common_mode_breaker_threshold: 0,
+            upstream_common_mode_transient_threshold: 0,
+            // T2.1 regression guard: the probe adds a 9th physical attempt
+            // (the last-resort probe of the earliest-recovering key).  This
+            // test pins "exactly all 8 keys are attempted", so the probe is
+            // turned off explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
             ..AppConfig::default()
         },
     );
@@ -2928,7 +2946,21 @@ async fn common_mode_same_host_502_does_not_trip_and_tries_all_routes() {
             model_aliases: vec![],
         },
         directory.path().join("state.json"),
-        transient_breaker_config(AppConfig::default()),
+        transient_breaker_config(AppConfig {
+            // T2.2 regression guard: with `upstream_common_mode_same_host_
+            // transient_enabled` on (the new default) identical same-host
+            // transient 502s DO accumulate into the streak and trip the
+            // breaker — that is the intended single-aggregated-gateway
+            // behavior.  This pre-T2.2 test pins the old host-diversity
+            // semantics (same-host never trips), so the switch is turned off
+            // explicitly.
+            upstream_common_mode_same_host_transient_enabled: false,
+            // T2.1 regression guard: the probe adds a 3rd physical attempt.
+            // This test pins "both keys are attempted exactly once", so the
+            // probe is turned off explicitly.
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        }),
     );
     let app = build_router(state.clone());
 
@@ -3153,6 +3185,11 @@ async fn common_mode_transient_same_route_retry_still_502_records_one_failure() 
         config.upstream_transient_same_route_retry_enabled = true;
         config.upstream_route_exhaustion_retry_max_wait_ms = 0;
         config.upstream_common_mode_transient_threshold = 0;
+        // T2.1 regression guard: with the new first-request probe arm, a
+        // fully-attempted transient pool gets one extra probe round (2 more
+        // hits).  This test pins the pre-T2.1 "one same-route retry then
+        // terminal" count, so the probe is turned off explicitly.
+        config.upstream_transient_last_resort_probe_enabled = false;
         config
     })
     .await;

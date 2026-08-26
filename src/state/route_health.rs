@@ -245,16 +245,27 @@ impl RouteHealthPermit {
                         upstream_status: _,
                         repeat_within_request: _,
                         sole_candidate: _,
-                    } => state.observe_route_failure(&route, class, None).await,
+                        shared_host_failure_domain,
+                    } => {
+                        state
+                            .observe_route_failure(&route, class, None, shared_host_failure_domain)
+                            .await
+                    }
                     RouteOutcome::RouteFailureWithRetry {
                         class,
                         retry_after,
                         upstream_status: _,
                         repeat_within_request: _,
                         sole_candidate: _,
+                        shared_host_failure_domain,
                     } => {
                         state
-                            .observe_route_failure(&route, class, Some(retry_after))
+                            .observe_route_failure(
+                                &route,
+                                class,
+                                Some(retry_after),
+                                shared_host_failure_domain,
+                            )
                             .await
                     }
                     RouteOutcome::KeyFailure(class) => {
@@ -266,7 +277,9 @@ impl RouteHealthPermit {
                             .await
                     }
                     RouteOutcome::UncertainRouteFailure(class) => {
-                        state.observe_route_failure(&route, class, None).await
+                        state
+                            .observe_route_failure(&route, class, None, false)
+                            .await
                     }
                 }
             }
@@ -403,6 +416,12 @@ pub enum RouteOutcome {
         /// start resets and the step stays flat, so the only reachable route
         /// cannot pin its own cooldown at max (P4/R3).
         sole_candidate: bool,
+        /// T1.4: several candidate routes of this request resolve to the same
+        /// upstream host (a single aggregated gateway), so a transient-family
+        /// failure here is one shared outage observed many times, not
+        /// independent evidence.  The health registry then uses the
+        /// edge-proxy cooldown curve (3s..15s) and never escalates the step.
+        shared_host_failure_domain: bool,
     },
     RouteFailureWithRetry {
         class: RouteFailureClass,
@@ -410,6 +429,7 @@ pub enum RouteOutcome {
         upstream_status: Option<u16>,
         repeat_within_request: bool,
         sole_candidate: bool,
+        shared_host_failure_domain: bool,
     },
     KeyFailure(RouteFailureClass),
     KeyFailureWithRetry {
@@ -1156,6 +1176,7 @@ impl RouteHealthRegistry {
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                shared_host_failure_domain,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 self.observe_route_failure_at(
@@ -1166,6 +1187,7 @@ impl RouteHealthRegistry {
                     now,
                     repeat_within_request,
                     sole_candidate,
+                    shared_host_failure_domain,
                 );
             }
             RouteOutcome::RouteFailureWithRetry {
@@ -1174,6 +1196,7 @@ impl RouteHealthRegistry {
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                shared_host_failure_domain,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 self.observe_route_failure_at(
@@ -1184,6 +1207,7 @@ impl RouteHealthRegistry {
                     now,
                     repeat_within_request,
                     sole_candidate,
+                    shared_host_failure_domain,
                 );
             }
             RouteOutcome::KeyFailure(class) => {
@@ -1205,6 +1229,7 @@ impl RouteHealthRegistry {
                         now,
                         false,
                         false,
+                        false,
                     );
                 }
             }
@@ -1222,6 +1247,7 @@ impl RouteHealthRegistry {
         route: &RouteHealthKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
+        shared_host_failure_domain: bool,
     ) {
         self.observe_route_failure_at(
             route,
@@ -1231,6 +1257,7 @@ impl RouteHealthRegistry {
             Instant::now(),
             false,
             false,
+            shared_host_failure_domain,
         );
     }
 
@@ -1317,6 +1344,7 @@ impl RouteHealthRegistry {
         now: Instant,
         repeat_within_request: bool,
         sole_candidate: bool,
+        shared_host_failure_domain: bool,
     ) {
         if !route_failure_has_cooldown(class) {
             self.clear_route(route, now);
@@ -1333,6 +1361,14 @@ impl RouteHealthRegistry {
             .entry(route.clone())
             .or_insert_with(|| HealthState::new(now));
         let effective_repeat = repeat_within_request || sole_candidate;
+        // T1.4: when several candidate routes of the request resolve to the
+        // same upstream host (single aggregated gateway), a transient-family
+        // failure is one shared outage observed many times, not independent
+        // evidence.  The host/step are deliberately kept at the edge-proxy
+        // semantics: cooldown uses the EDGE_PROXY curve (3s..15s, designed
+        // for shared-hop blips) and the step never escalates.  `Credentials`
+        // / key-quota classes never reach here (they take the per-key path).
+        let shared_host = shared_host_failure_domain && is_shared_host_domain_class(class);
         let step_suppressed = effective_repeat
             && class != RouteFailureClass::EdgeProxyError
             && state.last_failure_class == Some(class)
@@ -1345,6 +1381,7 @@ impl RouteHealthRegistry {
             now,
             effective_repeat,
             self.transient_route_cooldown_max_step,
+            shared_host,
         );
         state.state_generation = state.state_generation.wrapping_add(1).max(1);
         state.consecutive_failures = step;
@@ -1356,7 +1393,11 @@ impl RouteHealthRegistry {
         state.half_open_exclusive_until = None;
         state.last_access = now;
         let local = route_cooldown_with_concurrency_delays(
-            class,
+            if shared_host {
+                RouteFailureClass::EdgeProxyError
+            } else {
+                class
+            },
             step,
             route,
             &concurrency_probe_delays,
@@ -1384,10 +1425,9 @@ impl RouteHealthRegistry {
         // the upstream id serves as the common-mode tell; callers that also
         // need the host see the same id on the terminal exhaustion log.
         let (cooldown_source, upstream_retry_after_ms) = match (class, retry_after) {
-            (RouteFailureClass::ConcurrencySaturated, Some(explicit)) => (
-                "upstream_retry_after",
-                Some(explicit.as_millis() as i64),
-            ),
+            (RouteFailureClass::ConcurrencySaturated, Some(explicit)) => {
+                ("upstream_retry_after", Some(explicit.as_millis() as i64))
+            }
             (_, Some(explicit)) => {
                 if explicit > local {
                     ("upstream_retry_after", Some(explicit.as_millis() as i64))
@@ -1404,6 +1444,7 @@ impl RouteHealthRegistry {
             failure_class = %class.as_str(),
             step,
             step_suppressed,
+            shared_host_failure_domain = shared_host,
             local_cooldown_ms = local.as_millis() as u64,
             upstream_retry_after_ms = upstream_retry_after_ms.unwrap_or(-1),
             cooldown_source,
@@ -1446,6 +1487,9 @@ impl RouteHealthRegistry {
             now,
             false,
             self.transient_route_cooldown_max_step,
+            // Key failures are deliberately per-key: they never enter the
+            // shared-host failure domain (T1.4).
+            false,
         );
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
@@ -1859,6 +1903,16 @@ fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecov
     }
 }
 
+/// T1.4: classes that get the shared-host failure-domain treatment (flatten
+/// to the EDGE_PROXY cooldown curve, never escalate the step) when several
+/// candidate routes of one request resolve to the same upstream host.
+pub(super) fn is_shared_host_domain_class(class: RouteFailureClass) -> bool {
+    matches!(
+        class,
+        RouteFailureClass::TransientServer | RouteFailureClass::EdgeProxyError
+    )
+}
+
 pub(super) fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
     matches!(
         class,
@@ -1891,11 +1945,18 @@ fn failure_step(
     now: Instant,
     repeat_within_request: bool,
     max_step: u32,
+    shared_host_failure_domain: bool,
 ) -> u32 {
     let max_step = max_step.max(1);
-    if class == RouteFailureClass::EdgeProxyError {
+    if class == RouteFailureClass::EdgeProxyError
+        || (shared_host_failure_domain && is_shared_host_domain_class(class))
+    {
         // Edge proxy pages describe the gateway, not the route: they must
         // never escalate the failure streak or lengthen the cooldown.
+        // T1.4: the same reasoning applies to a shared-host transient failure
+        // when several candidate routes resolve to the same upstream host —
+        // the 2nd/3rd identical failures are repeated observations of one
+        // aggregated-gateway outage, not independent evidence.
         return 1;
     }
     if state

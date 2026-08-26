@@ -696,6 +696,7 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
+            shared_host_failure_domain: false,
         }
     );
 }
@@ -1771,6 +1772,7 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
                 },
                 FailureClass::ConcurrencySaturated,
                 Some(Duration::from_secs(60)),
+                false,
             )
             .await
             .unwrap();
@@ -1786,6 +1788,7 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
             },
             FailureClass::ConcurrencySaturated,
             Some(Duration::from_millis(50)),
+            false,
         )
         .await
         .unwrap();

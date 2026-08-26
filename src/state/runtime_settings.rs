@@ -3,17 +3,20 @@ use super::types::{
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_tool_arguments_strict, default_tool_call_merge_strict,
     default_upstream_common_mode_breaker_threshold,
+    default_upstream_common_mode_same_host_transient_enabled,
     default_upstream_common_mode_transient_threshold,
     default_upstream_continuation_pin_escape_enabled,
     default_upstream_credentials_first_strike_seconds, default_upstream_error_body_excerpt_enabled,
     default_upstream_error_body_excerpt_max_chars, default_upstream_local_lease_ttl_seconds,
     default_upstream_max_concurrency, default_upstream_retry_after_cap_seconds,
     default_upstream_retry_after_cooldown_cap_seconds,
-    default_upstream_transient_route_cooldown_max_step,
+    default_upstream_route_exhaustion_alignment_truncated_enabled,
     default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_route_half_open_busy_max_rounds,
     default_upstream_route_half_open_exclusive_window_ms,
+    default_upstream_shared_host_failure_domain_enabled,
     default_upstream_transient_last_resort_probe_enabled,
+    default_upstream_transient_route_cooldown_max_step,
     default_upstream_transient_same_route_retry_enabled, AppConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -45,6 +48,8 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_hedge_max_extra_attempts",
     "upstream_same_route_retry_enabled",
     "upstream_transient_same_route_retry_enabled",
+    "upstream_shared_host_failure_domain_enabled",
+    "upstream_common_mode_same_host_transient_enabled",
     "upstream_transient_route_cooldown_base_seconds",
     "upstream_transient_route_cooldown_max_seconds",
     "upstream_transient_route_cooldown_max_step",
@@ -64,6 +69,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
     "upstream_route_exhaustion_budget_alignment_enabled",
+    "upstream_route_exhaustion_alignment_truncated_enabled",
     "upstream_transient_last_resort_probe_enabled",
     "upstream_common_mode_transient_threshold",
     "default_upstream_max_concurrency",
@@ -152,6 +158,8 @@ pub struct RuntimeSettings {
     pub upstream_route_exhaustion_retry_max_rounds: u32,
     #[serde(default = "default_upstream_route_exhaustion_budget_alignment_enabled")]
     pub upstream_route_exhaustion_budget_alignment_enabled: bool,
+    #[serde(default = "default_upstream_route_exhaustion_alignment_truncated_enabled")]
+    pub upstream_route_exhaustion_alignment_truncated_enabled: bool,
     #[serde(default = "default_upstream_transient_last_resort_probe_enabled")]
     pub upstream_transient_last_resort_probe_enabled: bool,
     #[serde(default = "default_upstream_common_mode_breaker_threshold")]
@@ -160,6 +168,10 @@ pub struct RuntimeSettings {
     pub upstream_common_mode_transient_threshold: u32,
     #[serde(default = "default_upstream_transient_same_route_retry_enabled")]
     pub upstream_transient_same_route_retry_enabled: bool,
+    #[serde(default = "default_upstream_shared_host_failure_domain_enabled")]
+    pub upstream_shared_host_failure_domain_enabled: bool,
+    #[serde(default = "default_upstream_common_mode_same_host_transient_enabled")]
+    pub upstream_common_mode_same_host_transient_enabled: bool,
     #[serde(default = "default_upstream_max_concurrency")]
     pub default_upstream_max_concurrency: u32,
     pub downstream_lease_ttl_seconds: u64,
@@ -318,6 +330,8 @@ impl RuntimeSettings {
                 .upstream_route_exhaustion_retry_max_rounds,
             upstream_route_exhaustion_budget_alignment_enabled: config
                 .upstream_route_exhaustion_budget_alignment_enabled,
+            upstream_route_exhaustion_alignment_truncated_enabled: config
+                .upstream_route_exhaustion_alignment_truncated_enabled,
             upstream_transient_last_resort_probe_enabled: config
                 .upstream_transient_last_resort_probe_enabled,
             upstream_common_mode_breaker_threshold: config.upstream_common_mode_breaker_threshold,
@@ -325,6 +339,10 @@ impl RuntimeSettings {
                 .upstream_common_mode_transient_threshold,
             upstream_transient_same_route_retry_enabled: config
                 .upstream_transient_same_route_retry_enabled,
+            upstream_shared_host_failure_domain_enabled: config
+                .upstream_shared_host_failure_domain_enabled,
+            upstream_common_mode_same_host_transient_enabled: config
+                .upstream_common_mode_same_host_transient_enabled,
             default_upstream_max_concurrency: default_upstream_max_concurrency(),
             downstream_lease_ttl_seconds: config.downstream_lease_ttl_seconds,
             upstream_concurrency_recovery_max_wait_ms: config
@@ -410,6 +428,8 @@ impl RuntimeSettings {
             self.upstream_route_exhaustion_retry_max_rounds;
         config.upstream_route_exhaustion_budget_alignment_enabled =
             self.upstream_route_exhaustion_budget_alignment_enabled;
+        config.upstream_route_exhaustion_alignment_truncated_enabled =
+            self.upstream_route_exhaustion_alignment_truncated_enabled;
         config.upstream_transient_last_resort_probe_enabled =
             self.upstream_transient_last_resort_probe_enabled;
         config.upstream_common_mode_breaker_threshold = self.upstream_common_mode_breaker_threshold;
@@ -417,6 +437,10 @@ impl RuntimeSettings {
             self.upstream_common_mode_transient_threshold;
         config.upstream_transient_same_route_retry_enabled =
             self.upstream_transient_same_route_retry_enabled;
+        config.upstream_shared_host_failure_domain_enabled =
+            self.upstream_shared_host_failure_domain_enabled;
+        config.upstream_common_mode_same_host_transient_enabled =
+            self.upstream_common_mode_same_host_transient_enabled;
         config.downstream_lease_ttl_seconds = self.downstream_lease_ttl_seconds;
         config.upstream_concurrency_recovery_max_wait_ms =
             self.upstream_concurrency_recovery_max_wait_ms;
@@ -766,10 +790,7 @@ fn invalid(field: &'static str, message: &'static str) -> RuntimeSettingsValidat
 /// T1.1: validation error with a dynamically formatted (Chinese) message that
 /// embeds the concrete numbers, so the operator sees exactly which two values
 /// collide without reopening the docs.
-fn invalid_detailed(
-    field: &'static str,
-    message: String,
-) -> RuntimeSettingsValidationError {
+fn invalid_detailed(field: &'static str, message: String) -> RuntimeSettingsValidationError {
     RuntimeSettingsValidationError {
         field,
         message: Cow::Owned(message),

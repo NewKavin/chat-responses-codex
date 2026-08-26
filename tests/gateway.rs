@@ -22,10 +22,10 @@ mod images;
 mod model_mappings;
 #[path = "gateway/responses.rs"]
 mod responses;
-#[path = "gateway/route_exhaustion_budget_invariant.rs"]
-mod route_exhaustion_budget_invariant;
 #[path = "gateway/responses/reasoning.rs"]
 mod responses_reasoning;
+#[path = "gateway/route_exhaustion_budget_invariant.rs"]
+mod route_exhaustion_budget_invariant;
 #[path = "gateway/slow_stream.rs"]
 mod slow_stream;
 #[path = "gateway/stream_only.rs"]

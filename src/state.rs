@@ -154,6 +154,7 @@ pub use types::{
     UpstreamModelMapping, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
     DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING, DEFAULT_TOOL_ARGUMENTS_STRICT,
     DEFAULT_TOOL_CALL_MERGE_STRICT, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
@@ -163,11 +164,13 @@ pub use types::{
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
     DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
@@ -1612,16 +1615,19 @@ impl AppState {
         route: &RouteHealthKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
+        shared_host_failure_domain: bool,
     ) -> Result<(), RuntimeCoordinationError> {
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             return coordinator
-                .observe_route_failure(route, class, retry_after)
+                .observe_route_failure(route, class, retry_after, shared_host_failure_domain)
                 .await;
         }
-        self.route_health
-            .lock()
-            .await
-            .observe_route_failure(route, class, retry_after);
+        self.route_health.lock().await.observe_route_failure(
+            route,
+            class,
+            retry_after,
+            shared_host_failure_domain,
+        );
         Ok(())
     }
 

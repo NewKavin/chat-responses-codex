@@ -377,6 +377,7 @@ async fn persisted_catalog_stays_stable_while_a_route_is_in_cooldown() {
             &route,
             chat_responses_codex::state::RouteFailureClass::CapacityUnavailable,
             None,
+            false,
         )
         .await
         .expect("route health observation");

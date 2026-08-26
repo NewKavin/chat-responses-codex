@@ -1001,6 +1001,18 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
             // default_route_exhaustion_budget_waits_out_a_transient_cooldown.
             AppConfig {
                 upstream_route_exhaustion_retry_max_wait_ms: 5_000,
+                // T2.1 regression guard: with the new first-request probe arm,
+                // the fully-attempted capacity pool gets one extra probe round
+                // (a third physical attempt).  This test pins "exactly one
+                // physical round of key-a/key-b", so the probe is turned off
+                // explicitly.
+                upstream_transient_last_resort_probe_enabled: false,
+                // T2.3 regression guard: the truncation would wait out the
+                // 5s budget and give up from a fresh zero-attempt round,
+                // leaving the terminal `attempt_count` at 0 instead of 2.
+                // This test pins "one physical round of key-a/key-b", so the
+                // truncation switch is turned off explicitly too.
+                upstream_route_exhaustion_alignment_truncated_enabled: false,
                 ..AppConfig::default()
             },
         );
