@@ -6,6 +6,7 @@ use chat_responses_codex::state::{
     RouteFailureClass, RouteHealthKey, RouteHealthRegistry, RouteOutcome, RouteSetAggregateKey,
     UpstreamConfig,
 };
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 fn key(fingerprint: &str) -> KeyHealthKey {
@@ -1913,5 +1914,423 @@ async fn t13_non_half_open_failures_cap_step_at_configured_max_step() {
         snapshot.cooldown_remaining <= Duration::from_secs(10),
         "cooldown must follow the capped step, got {:?}",
         snapshot.cooldown_remaining,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T1.4 shared-host failure domain (P1.1)
+//
+// Until this block existed, `shared_host_failure_domain: true` appeared
+// nowhere in the test suite — every one of the ~18 call sites passed `false`,
+// so the entire ON path of the *default-on* switch
+// (`upstream_shared_host_failure_domain_enabled`) was untested.  These tests
+// pin the two guarantees the switch makes at
+// `src/state/route_health.rs:1372` and `:1952`:
+//   1. cooldown follows the EDGE_PROXY curve (3s base / 15s max), not the
+//      local transient curve, and
+//   2. the failure step never escalates, because the 2nd/3rd identical
+//      failures are repeated observations of ONE aggregated-gateway outage.
+// ---------------------------------------------------------------------------
+
+/// Registry tuned like the shipped defaults after P0.1: transient base 5s,
+/// max_step 2. The local transient curve is therefore 5s -> 10s (+/-20%
+/// deterministic jitter), which is comfortably distinguishable from the
+/// EDGE_PROXY curve's 3s first step.
+fn shipped_default_registry() -> RouteHealthRegistry {
+    RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 5, 300, 2, 300, 3_000, 60)
+}
+
+#[tokio::test(start_paused = true)]
+async fn shared_host_transient_failures_use_the_edge_proxy_curve_and_never_escalate() {
+    let mut registry = shipped_default_registry();
+    let route = route("t14-shared-host", "glm-5.2");
+    let key = key("t14-shared-host");
+
+    // Three *independent* requests (repeat_within_request = false) each see a
+    // transient 502, and each time >= 2 candidates resolved to the same
+    // upstream host.  Under one aggregation gateway that is one outage seen
+    // three times.
+    for round in 1..=3 {
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, true);
+        let snapshot = registry.route_health_snapshot(&route).unwrap();
+        assert_eq!(
+            snapshot.consecutive_failures, 1,
+            "T1.4: shared-host transient failures must never escalate the step (round {round})"
+        );
+        // EDGE_PROXY_ROUTE_BASE = 3s at step 1, jitter 80%..120% => [2.4s, 3.6s].
+        // The local transient curve would have been 5s..10s here, so the
+        // upper bound below is what actually proves the EDGE_PROXY curve won.
+        assert!(
+            snapshot.cooldown_remaining >= Duration::from_millis(2_400)
+                && snapshot.cooldown_remaining <= Duration::from_millis(3_600),
+            "T1.4: shared-host cooldown must follow the EDGE_PROXY 3s curve, \
+             not the 5s local transient curve (round {round}), got {:?}",
+            snapshot.cooldown_remaining
+        );
+        assert!(matches!(
+            registry.reserve(&route, &key),
+            RouteAvailability::Cooling { .. }
+        ));
+        // Past FAILURE_STREAK_RESET so this is genuinely a fresh request, not
+        // a within-request repeat (which has its own suppression path).
+        tokio::time::advance(Duration::from_secs(120)).await;
+    }
+
+    // And the flattening must never exceed the EDGE_PROXY ceiling either.
+    assert!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .cooldown_remaining
+            <= Duration::from_secs(15),
+        "T1.4: shared-host cooldown must stay inside the EDGE_PROXY 15s ceiling"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn distinct_host_transient_failures_still_escalate_the_step() {
+    // Control for the test above: with the same registry, the same class and
+    // the same cadence, `shared_host_failure_domain = false` (routes on
+    // genuinely different upstream hosts) must keep the normal local curve
+    // and keep escalating.  If this test and the one above ever agree, the
+    // T1.4 flag has stopped doing anything.
+    let mut registry = shipped_default_registry();
+    let route = route("t14-distinct-host", "glm-5.2");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    let first = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(first.consecutive_failures, 1);
+    // base=5s at step 1, jitter 80%..120% => [4s, 6s].
+    assert!(
+        first.cooldown_remaining >= Duration::from_secs(4)
+            && first.cooldown_remaining <= Duration::from_secs(6),
+        "distinct-host transient must use the local 5s curve, got {:?}",
+        first.cooldown_remaining
+    );
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    let second = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        second.consecutive_failures, 2,
+        "distinct-host transient failures are independent evidence and must escalate"
+    );
+    // step=2 => 10s base, jitter => [8s, 12s].
+    assert!(
+        second.cooldown_remaining >= Duration::from_secs(8)
+            && second.cooldown_remaining <= Duration::from_secs(12),
+        "escalated step must double the local curve, got {:?}",
+        second.cooldown_remaining
+    );
+
+    tokio::time::advance(Duration::from_secs(20)).await;
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    assert_eq!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .consecutive_failures,
+        2,
+        "max_step=2 caps the escalation (T1.3)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shared_host_flattening_only_applies_to_the_transient_family() {
+    // `is_shared_host_domain_class` restricts T1.4 to TransientServer /
+    // EdgeProxyError.  A capacity failure on the same host is real route-local
+    // information (that key/model pair is out of capacity) and must keep
+    // escalating even with the flag on.
+    let mut registry = shipped_default_registry();
+    let route = route("t14-capacity-on-shared-host", "glm-5.2");
+
+    registry.observe_route_failure(&route, RouteFailureClass::CapacityUnavailable, None, true);
+    assert_eq!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .consecutive_failures,
+        1
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    registry.observe_route_failure(&route, RouteFailureClass::CapacityUnavailable, None, true);
+    assert_eq!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .consecutive_failures,
+        2,
+        "T1.4 must not flatten non-transient classes even on a shared host"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shared_host_flattening_survives_the_route_outcome_path() {
+    // The gateway reaches the registry through `RouteOutcome::RouteFailure`,
+    // not through `observe_route_failure` directly.  Pin that the flag is
+    // threaded through the lease path too, otherwise the wiring could rot
+    // while the direct-call tests above stay green.
+    let mut registry = shipped_default_registry();
+    let route = route("t14-outcome-path", "glm-5.2");
+    let key = key("t14-outcome-path");
+
+    for round in 1..=2 {
+        let lease = match registry.reserve(&route, &key) {
+            RouteAvailability::Ready(lease) => lease,
+            other => panic!("round {round}: expected a ready lease, got {other:?}"),
+        };
+        registry.finish(
+            lease,
+            RouteOutcome::RouteFailure {
+                class: RouteFailureClass::TransientServer,
+                upstream_status: Some(502),
+                repeat_within_request: false,
+                sole_candidate: false,
+                shared_host_failure_domain: true,
+            },
+        );
+        let snapshot = registry.route_health_snapshot(&route).unwrap();
+        assert_eq!(
+            snapshot.consecutive_failures, 1,
+            "round {round}: RouteOutcome path must honour T1.4"
+        );
+        assert!(
+            snapshot.cooldown_remaining <= Duration::from_millis(3_600),
+            "round {round}: RouteOutcome path must use the EDGE_PROXY curve, got {:?}",
+            snapshot.cooldown_remaining
+        );
+        tokio::time::advance(Duration::from_secs(120)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T0.4 `cooldown_source` observability (P2 zero-assertion gap)
+//
+// `cooldown_source` is emitted only as a field on the "route cooldown
+// recorded" tracing event (`src/state/route_health.rs:1427`) — there is no
+// snapshot accessor — and it had zero assertions anywhere.  It is the single
+// field that tells an operator whether a route was removed because the
+// *upstream* asked for it (`Retry-After`) or because of our own backoff
+// curve, which on a common-mode aggregation gateway is the difference between
+// "the pool is genuinely rate-limited" and "we are cooling ourselves down".
+//
+// `tests/gateway.rs` already owns the process-wide `set_global_default`, so
+// log assertions cannot live in that binary.  This one installs no subscriber
+// of its own, so the tests below claim it.
+//
+// Why a *global* subscriber and not a thread-local `tracing::subscriber::
+// with_default` scope per test: tracing caches callsite interest globally, and
+// the ~50 other tests in this binary call `observe_route_failure` with no
+// subscriber installed at all.  The first one to reach the callsite makes
+// tracing cache `Interest::never()` for it, which disables the event for the
+// whole process — a thread-local subscriber installed afterwards then captures
+// nothing.  `set_global_default` rebuilds that interest cache, so it is the
+// only reliable option.  Because the buffer is then shared by every test in
+// the binary, each test below uses a unique `runtime_model_slug` and filters
+// the buffer by it, which keeps the assertions independent of test ordering
+// and of the parallel test runner.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct LogCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+struct LogCaptureWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for LogCaptureWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogCapture {
+    type Writer = LogCaptureWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        LogCaptureWriter {
+            bytes: self.bytes.clone(),
+        }
+    }
+}
+
+fn cooldown_log_buffer() -> &'static LogCapture {
+    static CAPTURE: OnceLock<LogCapture> = OnceLock::new();
+    CAPTURE.get_or_init(|| {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("route_health test binary installs tracing exactly once");
+        capture
+    })
+}
+
+/// Run `action`, then return the single "route cooldown recorded" line whose
+/// `route_model_slug` matches `model_slug`.
+fn cooldown_log_for(model_slug: &str, action: impl FnOnce()) -> String {
+    let capture = cooldown_log_buffer();
+    action();
+    let contents = String::from_utf8_lossy(&capture.bytes.lock().unwrap()).into_owned();
+    let needle = format!("route_model_slug={model_slug} ");
+    let mut matching = contents
+        .lines()
+        .filter(|line| line.contains("route cooldown recorded") && line.contains(&needle));
+    let line = matching
+        .next()
+        .unwrap_or_else(|| {
+            panic!("no 'route cooldown recorded' event for {model_slug} in:\n{contents}")
+        })
+        .to_string();
+    assert!(
+        matching.next().is_none(),
+        "expected exactly one cooldown event for {model_slug}, got:\n{contents}"
+    );
+    line
+}
+
+fn log_field<'a>(line: &'a str, field: &str) -> &'a str {
+    let marker = format!("{field}=");
+    let start = line
+        .find(&marker)
+        .unwrap_or_else(|| panic!("field `{field}` missing from log line:\n{line}"))
+        + marker.len();
+    let rest = &line[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"').expect("unterminated quoted field");
+        &stripped[..end]
+    } else {
+        let end = rest.find(' ').unwrap_or(rest.len());
+        &rest[..end]
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cooldown_source_reports_upstream_retry_after_when_the_hint_exceeds_the_local_curve() {
+    let mut registry = shipped_default_registry();
+    let route = route("t04-source-upstream", "t04-source-upstream-model");
+
+    // Shared-host transient => local curve is EDGE_PROXY 3s (+/-20%, so at
+    // most 3.6s).  A 5s hint — the value
+    // `upstream_retry_after_cooldown_cap_seconds` clamps to by default —
+    // therefore wins `explicit.max(local)` regardless of jitter.
+    let line = cooldown_log_for("t04-source-upstream-model", || {
+        registry.observe_route_failure(
+            &route,
+            RouteFailureClass::TransientServer,
+            Some(Duration::from_secs(5)),
+            true,
+        );
+    });
+
+    assert_eq!(log_field(&line, "cooldown_source"), "upstream_retry_after");
+    assert_eq!(log_field(&line, "upstream_retry_after_ms"), "5000");
+    assert_eq!(log_field(&line, "effective_cooldown_ms"), "5000");
+    assert_eq!(log_field(&line, "shared_host_failure_domain"), "true");
+    assert_eq!(log_field(&line, "failure_class"), "transient_server");
+    assert_eq!(log_field(&line, "step"), "1");
+    let local_ms: u64 = log_field(&line, "local_cooldown_ms").parse().unwrap();
+    assert!(
+        local_ms <= 3_600,
+        "shared-host local curve must be the EDGE_PROXY 3s step, got {local_ms}ms"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cooldown_source_reports_local_when_the_capped_hint_loses_to_the_local_curve() {
+    let mut registry = shipped_default_registry();
+    let route = route("t04-source-local", "t04-source-local-model");
+
+    // Distinct-host transient => local curve is the 5s transient base
+    // (>= 4s after jitter).  A 1s hint loses, and T1.2 requires that losing
+    // hint to NOT shrink the route removal below our own curve.
+    let line = cooldown_log_for("t04-source-local-model", || {
+        registry.observe_route_failure(
+            &route,
+            RouteFailureClass::TransientServer,
+            Some(Duration::from_secs(1)),
+            false,
+        );
+    });
+
+    assert_eq!(log_field(&line, "cooldown_source"), "local");
+    assert_eq!(
+        log_field(&line, "upstream_retry_after_ms"),
+        "1000",
+        "a losing hint must still be reported so operators can see what the upstream asked for"
+    );
+    assert_eq!(log_field(&line, "shared_host_failure_domain"), "false");
+    let effective_ms: u64 = log_field(&line, "effective_cooldown_ms").parse().unwrap();
+    assert_eq!(
+        effective_ms,
+        log_field(&line, "local_cooldown_ms")
+            .parse::<u64>()
+            .unwrap(),
+        "T1.2: a shorter upstream Retry-After must never shorten the local cooldown"
+    );
+    assert!(
+        effective_ms >= 4_000,
+        "local transient curve must be the 5s base, got {effective_ms}ms"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cooldown_source_reports_local_with_a_sentinel_when_no_hint_arrives() {
+    let mut registry = shipped_default_registry();
+    let route = route("t04-source-none", "t04-source-none-model");
+
+    let line = cooldown_log_for("t04-source-none-model", || {
+        registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    });
+
+    assert_eq!(log_field(&line, "cooldown_source"), "local");
+    assert_eq!(
+        log_field(&line, "upstream_retry_after_ms"),
+        "-1",
+        "no header must be reported as the -1 sentinel, not as 0 (which reads as 'asked for now')"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrency_saturated_retry_after_is_exempt_from_the_local_floor() {
+    // T1.2's deliberate exemption: for ConcurrencySaturated the upstream's
+    // Retry-After is real slot information, so it is used verbatim instead of
+    // `explicit.max(local)`.  Raising it to the local floor would turn a
+    // 50ms slot wait into a multi-second removal and cause probe storms.
+    let mut registry = shipped_default_registry();
+    let route = route("t04-concurrency-exempt", "t04-concurrency-exempt-model");
+
+    let line = cooldown_log_for("t04-concurrency-exempt-model", || {
+        registry.observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(50)),
+            false,
+        );
+    });
+
+    assert_eq!(log_field(&line, "cooldown_source"), "upstream_retry_after");
+    assert_eq!(
+        log_field(&line, "effective_cooldown_ms"),
+        "50",
+        "ConcurrencySaturated must use the upstream hint verbatim, not max() it with the local curve"
+    );
+    let local_ms: u64 = log_field(&line, "local_cooldown_ms").parse().unwrap();
+    assert!(
+        local_ms > 50,
+        "test is only meaningful if the local probe delay exceeds the hint, got {local_ms}ms"
     );
 }
