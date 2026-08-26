@@ -273,3 +273,182 @@ upstream routes are temporarily unavailable: transient upstream server errors
 - **Confidence:** 现状已逐行核实（`upstream_client_message` 只用 status、
   `extract_upstream_error_code` 只认数字、客户端错误体无 request_id 均为硬事实）。
 - **Scope-risk:** low-medium（触碰面广但都是描述性字段；风险集中在隐私红线与既有断言更新）。
+
+## 8. 现场排查记录：Codex reconnect + K-API `invalid_parameter_error`
+
+> 记录时间：2026-08-23。仅记录排查结果，本节没有对应代码改动、没有提交、没有部署。
+
+### 8.1 已确认的目标请求
+
+用户看到的错误：
+
+```text
+Stream disconnected before completion:
+[upstream_request_rejected] upstream rejected the request
+(status 400, upstream=公益：K-API, code=invalid_parameter_error)
+```
+
+目标 `request_id=6edbffb0-cb05-41fb-866f-c2905da81153` 的完整链路位于：
+
+```text
+/home/kavin/docker/chat-responses-codex/logs/chat-responses-codex.2026-08-22:23421-23435
+```
+
+实际时间与链路：
+
+- `2026-08-22 18:08:44.880 +08:00`：收到 `POST /v1/responses`，客户端为
+  `codex-tui/0.148.0`，模型为 `deepseek-v4-flash-0731`，`stream=true`。
+- `18:08:44.884`：`responses_routes_ineligible_fallback_to_chat`，可用 Responses 路由为
+  0，可用 Chat 路由为 8。
+- `18:08:44.890`：选择 `公益：K-API`，上游协议为 `ChatCompletions`。
+- `18:08:44.893`：进入 Codex 的 `high_fidelity` fallback；保留工具 9 个，剥离工具 1 个，
+  `tool_choice` 仍存在。
+- `18:08:44.895`：完成 `responses_to_chat` 转换。
+- `18:08:44.897`：上下文预算记录为 `estimated_input_tokens=88914`、
+  `context_limit=200000`、未截断、`requested_output_tokens=0`。
+- `18:08:44.898`：实际发送到
+  `https://new.xkool.cfd/v1/chat/completions`。
+- `18:08:59.307`：上游 HTTP 400；随后网关记录 `upstream_request_rejected`，最终下游也是
+  HTTP 400，`failure_class=request_rejected`、`route_action=routes_exhausted`、
+  `physical_attempt_count=1`。
+
+上游请求体的安全结构摘要：
+
+```text
+json_bytes=414612
+top_level_field_count=8
+messages=291
+tools=13
+stream=true
+reasoning_effort=true
+max_output_tokens=false
+max_tokens=false
+max_completion_tokens=false
+usage=false
+```
+
+日志只记录了 `payload values withheld` 的结构诊断，没有记录上游响应正文中的
+`code` / `param` / `message`。因此，用户界面显示的 `invalid_parameter_error` 不能从该条
+目标日志逐字复核，当前只能确认上游拒绝了这个具体请求结构。
+
+### 8.2 代码路径核对
+
+当前 Responses → Chat 转换入口与字段白名单：
+
+- `src/server/gateway/upstream.rs:1459` 调用
+  `responses_request_to_chat_payload_with_fallback`；
+- `src/server/gateway/responses_fallback.rs:41` 负责 fallback 前的工具适配；
+- `src/protocol.rs:525` 的
+  `responses_request_to_chat_payload_with_context` 重建 Chat 请求；
+- 当前转换会复制 `model`、`stream`、`temperature`、`top_p`、`stop`、部分 metadata、
+  `reasoning.effort -> reasoning_effort`、可兼容的 `tools`、`tool_choice`、
+  `parallel_tool_calls`、`max_output_tokens -> max_tokens`、部分 `stream_options`，以及
+  转换后的 `messages`；
+- 当前转换白名单没有把 Responses 请求中的 `logprobs` 复制到 Chat 请求；
+- `src/server/gateway/compat.rs:69` 后续还会按上游能力与非标准字段策略清洗字段，未知路由
+  默认会移除 `parallel_tool_calls` 与通常的 `stream_options`，并规范化
+  `reasoning_effort`。
+
+### 8.3 证据边界与当前判断
+
+必须区分以下两件事：
+
+1. 独立直连测试已经确认：K-API 对 `logprobs=true` 返回 HTTP 400，错误码为
+   `invalid_parameter_error`，正文含“参数 `logprobs` 不支持”。
+2. 但目标 `request_id=6edbffb0...` 的网关日志没有保存完整上游错误正文，且当前
+   Responses → Chat 转换白名单不复制 `logprobs`，所以**不能把目标请求的具体原因确定为
+   `logprobs`**。
+
+当前可以排除或确认的内容：
+
+- 已确认请求确实经过 `Responses -> ChatCompletions` 转换后发送到 K-API；不是网关在转换
+  阶段自身报错。
+- 已确认这不是 K-API + 该模型 + Chat fallback 的必然失败；同一上游后续请求曾返回 HTTP 200。
+- 目标请求发生在 `2026-08-22 18:42` 新镜像部署之前；因此不能用该旧请求证明当前镜像仍然必现。
+- 2026-08-23 当前日志中未发现新的 `invalid_parameter_error`；今天的拒绝主要是其他上游的
+  404、429、405、401、403。
+- 目标失败与长会话、工具数量、`tool_choice`、`reasoning_effort`、Responses → Chat fallback
+  的组合有关，但现有证据不足以确认具体违规字段。
+
+### 8.4 后续独立治理方案（未实施）
+
+本问题不应通过“盲目删除某一个字段”处理，建议单独立项，按以下顺序执行：
+
+#### F1：安全记录上游参数错误摘要
+
+在保留隐私红线的前提下，从上游错误响应中只提取：
+
+```text
+upstream_status
+upstream_error_code
+upstream_error_type
+upstream_error_param
+payload_fingerprint
+sanitized_top_level_fields
+```
+
+允许记录错误码、参数名、类型、HTTP 状态、请求体 fingerprint 和字段名；禁止记录完整
+上游正文、prompt、工具参数、Token、API Key、Client Secret。这样下一次可以确认是
+`param=logprobs`、`param=tool_choice` 还是其他字段，而不依赖猜测。
+
+#### F2：对 400 参数拒绝做一次性字段级兼容重试
+
+仅当满足以下条件时触发：
+
+```text
+upstream HTTP 400
+upstream code=invalid_parameter_error
+当前请求是协议 fallback 或兼容转换请求
+```
+
+每个请求最多一次兼容重试，候选降级顺序建议为：
+
+1. 移除 `logprobs` / `top_logprobs`；
+2. 移除 `parallel_tool_calls`；
+3. 移除非必要 `stream_options`；
+4. 按能力档案移除或规范化 `reasoning_effort`；
+5. 只有在工具选择与工具能力不匹配时，才降级 `tool_choice`。
+
+每一步必须是可审计的字段级变更，不能一次性删除所有工具、reasoning 和历史内容。
+重试后仍失败则直接返回不可重试的结构化错误，不能进入无限重试。
+
+#### F3：将参数拒绝写入能力档案
+
+如果某个 `upstream_id + route_id + protocol + model` 多次拒绝同一个参数，应记录该路由不支持
+该字段，后续发送前直接剥离。能力不能跨上游、跨模型污染。
+
+#### F4：明确 SSE 客户端的不可重试语义
+
+对于明确的 400 参数错误，SSE 错误 details 增加：
+
+```json
+{
+  "retryable": false,
+  "compatibility_retry_attempted": true,
+  "compatibility_removed_fields": ["logprobs"]
+}
+```
+
+同时保持现有 `FailureClass`、HTTP 状态和错误分类语义不变。目标是让 Codex 区分“网络断开
+可以重试”和“原请求参数被上游拒绝，重复发送没有意义”。
+
+### 8.5 后续测试矩阵
+
+后续 F1-F4 实施时必须增加：
+
+| 场景 | 期望 |
+|------|------|
+| 上游 400 + `invalid_parameter_error` + `param=logprobs` | 只移除 logprobs，最多重试一次 |
+| 上游 400 + 未知参数 | 保留分类语义，记录净化后的 param，不泄漏正文 |
+| 降级后 200 | 客户端正常完成，details 记录兼容重试字段 |
+| 降级后仍 400 | 不无限重试，返回明确不可重试错误 |
+| 长 Codex 会话 + 291 条消息 + 13 个工具 | 不泄漏消息与工具参数；字段级降级可审计 |
+| 上游拒绝正文含 prompt / secret | 日志和客户端 message 均不包含正文 |
+| SSE 参数错误 | message 里包含 request_id 与安全错误码，details 标记 `retryable=false` |
+| 其他 429 / 5xx | 不被 F2 吸收，现有分类与重试语义保持不变 |
+
+### 8.6 记录状态
+
+- 本节为排查记录与后续方案，不属于 E1-E6 已完成代码范围。
+- 本节没有修改 Rust、Vue、数据库 schema、Redis Lua 或部署配置。
+- 当前工作区仅新增本节文档记录；后续 F1-F4 应作为独立任务规划、测试、提交和部署。
