@@ -704,3 +704,100 @@ async fn learned_stream_options_rejection_is_omitted_on_next_request_without_ret
     assert_eq!(fixture.upstream_hits(), 3);
     assert!(fixture.requests()[2].get("stream_options").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// P1.4 (2026-08-26 T11): domestic upstream Chinese 400 — GLM numeric `1210`
+// + a field name in the message — must get a same-route strip retry and the
+// route must NOT be cooled by the rejected request.
+//
+// Production shape: new-api/GLM reject optional sampling fields with Chinese
+// messages and numeric codes (no OpenAI-style `unsupported_parameter`).
+// T3.1 added the Chinese trigger words to the request-rejection vocabulary,
+// T3.2 widened `correction_for_response` to accept numeric codes under the
+// joint criterion (numeric code + a field name in the message), and the A3
+// generic strip removes exactly the rejected field and retries once on the
+// SAME route.  The second half is the point of this test: a request-shape
+// rejection that gets fixed by a strip is NOT a route-health signal, so the
+// route must stay usable (no cooldown) after the retry succeeds — otherwise
+// the whole retry was wasted.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn chinese_400_glm_numeric_code_gets_same_route_strip_retry_and_route_stays_healthy() {
+    let fixture = DialectRetryFixture::scripted(vec![
+        // GLM-style rejection: numeric 1210-family code, Chinese message
+        // naming the rejected field, NO /error/param.
+        reply_400(json!({
+            "error": {
+                "message": "参数非法：top_p",
+                "type": "invalid_request_error",
+                "code": 1210
+            }
+        })),
+        reply_ok("stripped"),
+    ])
+    .await;
+
+    // Send a chat request that carries `top_p` so the strip actually removes
+    // it (stripping a field that is not present would retry an identical body).
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", fixture.downstream_key)).unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "opaque/model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_tokens": 64,
+                        "top_p": 0.95
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the same-route strip retry must succeed"
+    );
+    assert_eq!(fixture.upstream_hits(), 2, "1 rejected + 1 stripped retry");
+    assert_eq!(response.headers()["x-chat2responses-dialect-retry"], "1");
+    assert!(fixture.requests()[0].get("top_p").is_some());
+    assert!(
+        fixture.requests()[1].get("top_p").is_none(),
+        "the retry must be the request with top_p stripped, got {:?}",
+        fixture.requests()[1]
+    );
+
+    // The route that produced a fixed-by-strip rejection must remain healthy:
+    // a request-shape rejection is not a route outage, and cooling it would
+    // make the strip retry pointless for any *next* request.
+    let routing = fixture.state.snapshot().await;
+    let upstream = routing
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-1")
+        .expect("fixture upstream should exist");
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: "up-1".into(),
+        key_fingerprint: upstream_model_key_fingerprint(upstream, "opaque/model"),
+        runtime_model_slug: "opaque/model".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    let snapshot = fixture.state.route_health_snapshot(&route).await.unwrap();
+    assert!(
+        snapshot.is_none(),
+        "route must stay cooldown-free after a stripped retry succeeds, got {snapshot:?}"
+    );
+}
