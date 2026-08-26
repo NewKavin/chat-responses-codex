@@ -286,6 +286,15 @@ pub fn repair_cooldown_ceiling_invariant(&mut self) -> Option<u64>
 
 两个方案都必须保持：终态 HTTP 状态码与 `error.code` 不变（避免破坏既有客户端契约），只加 details。
 
+**已选方案 A（2026-08-26，commit `4a09e6bc`）**：去掉 `should_aggregate` 的 `!common_mode_tripped`，
+终态在 `common_mode_tripped` 时保持上游 passthrough 错误（status/code/message 原样，客户端契约零改动），
+随后把 `terminal_route_failure_error` 聚合出的 T0 details 与 common-mode verdict 字段
+（`common_mode` / `failed_route_count` / `distinct_hosts` / `streak` / `threshold` / `retried`）
+通过 `merge_details` 合并进同一 `details`。verdict 在闩锁触发瞬间快照（`CommonModeVerdict`），
+因为触发后的 500ms replay 轮会重置 streak。选 A 不选 B 的理由：闩锁只该决定"是否继续重试"，
+不该影响"错误报告的丰富度"；B 需要在两处各构造一份 details，且保留短路会让 T0 聚合逻辑
+继续被闩锁旁路，语义不如 A 干净。
+
 ### P5 出厂默认值变更的测试爆炸半径（**本轮已修完，但必须读懂，否则会再犯**）
 
 P0.1 把 `upstream_transient_route_cooldown_base_seconds` 由 10 改 5、
@@ -384,30 +393,40 @@ rtk cargo test ; echo "all rc=$?"
 
 | 任务 | 说明 | commit | 状态 |
 |------|------|--------|------|
-| P0.1 | 出厂默认值满足 T1.1 + 编译期断言 | 待填 | ✅ 已实施并验证 |
-| P0.2 | 持久化设置自愈而非整份丢弃 | 待填 | ✅ 已实施并验证 |
-| P0.3 | 默认值合规 / 自愈 回归测试 | 待填 | ✅ 已实施并验证（`tests/runtime_settings.rs` 37 passed） |
-| P1.1 | 同 host 失败域覆盖 + `cooldown_source` 断言 | 待填 | ✅ 已实施并验证（**落在 `tests/route_health.rs`**，见下方偏差说明） |
-| P1.2 | last-resort 探测（attempts 用尽后）覆盖 | 待填 | ✅ 已实施并验证（**落在 `tests/gateway/chat/rate_limits.rs`**，见下方偏差说明） |
-| P1.3 | 出厂默认值端到端回归 | | ⬜ 未开始 |
-| P1.4 | `dialect_retry.rs` 中文 400 + 路由未冷却 | | ⬜ 未开始 |
-| P2 | Redis 参数串接测试 + 套件执行记录 | | ⬜ 未开始 |
-| P3 | 清理 `GATEWAY_RETRY_TRACE` 脚手架 | 待填 | ✅ 已实施并验证（全仓 0 处） |
-| P4 | common-mode 闩锁丢弃 T0 details | | ⬜ 未开始（缺陷已钉在测试里） |
-| P5 | 默认值变更导致的 6 个既有测试回归 | 待填 | ✅ 已修完并验证 |
+| P0.1 | 出厂默认值满足 T1.1 + 编译期断言 | `fff2a8dd` | ✅ 已实施并验证 |
+| P0.2 | 持久化设置自愈而非整份丢弃 | `fff2a8dd` | ✅ 已实施并验证 |
+| P0.3 | 默认值合规 / 自愈 回归测试 | `98b71888` | ✅ 已实施并验证（`tests/runtime_settings.rs` 37 passed） |
+| P1.1 | 同 host 失败域覆盖 + `cooldown_source` 断言 | `57ab683a` | ✅ 已实施并验证（**落在 `tests/route_health.rs`**，见下方偏差说明） |
+| P1.2 | last-resort 探测（attempts 用尽后）覆盖 | `4a09e6bc` | ✅ 已实施并验证（**落在 `tests/gateway/chat/rate_limits.rs`**，与 P4 同 commit） |
+| P1.3 | 出厂默认值端到端回归 | `e643cb44` | ✅ 已实施并验证（纯 `AppConfig::default()`，一个开关都不覆盖） |
+| P1.4 | `dialect_retry.rs` 中文 400 + 路由未冷却 | `bbc7e34a` | ✅ 已实施并验证（剥离重试成功 + 健康注册表无冷却快照） |
+| P2 | Redis 参数串接测试 + 套件执行记录 | `17fdccb3` | ✅ 已实施并验证（**live 套件实跑 85 passed / 0 failed**，见 6.1） |
+| P3 | 清理 `GATEWAY_RETRY_TRACE` 脚手架 | `fb920bf2`（route_retry.rs）+ `4a09e6bc`（gateway.rs 同文件两处） | ✅ 已实施并验证（全仓 0 处） |
+| P4 | common-mode 闩锁丢弃 T0 details | `4a09e6bc` | ✅ 已实施并验证（**方案 A**，见 §3-P4 落点说明） |
+| P5 | 默认值变更导致的 6 个既有测试回归 | `98b71888`（streaming.rs）+ `4a09e6bc`（rate_limits.rs）+ `e643cb44`（upstream_feedback.rs） | ✅ 已修完并验证 |
 
-### 6.1 已完成部分的验证结果（截至 2026-08-26）
+### 6.1 验证结果（截至 2026-08-26，全部任务完成后）
 
 ```
 rtk proxy cargo fmt --check                                        rc=0
 rtk proxy cargo clippy --all-targets --all-features -- -D warnings rc=0（0 条 warning/error）
 rtk proxy cargo test --lib                                         rc=0   244 passed
-rtk proxy cargo test                                               rc=0   1792 passed / 0 failed / 88 ignored / 62 suites
+rtk proxy cargo test                                               rc=0   1795 passed / 0 failed / 0 ignored（聚合）
+TEST_REDIS_URL=redis://127.0.0.1:6379 rtk proxy cargo test --test redis_runtime -- --ignored
+                                                                    rc=0   85 passed / 0 failed（live Redis 7.4）
 ```
 
-基线为 **1777 passed / 0 failed / 88 ignored / 62 suites**，净增 **+15**：
-`tests/route_health.rs` +8（52→60）、`tests/gateway/chat/rate_limits.rs` +4、
-`tests/runtime_settings.rs` +3。
+全量从 P1.1/P1.2 完成时的 **1792 passed** 增至 **1795**（+3 = P1.3 / P1.4 / P2 各一条新增）。
+`--lib` 保持 244。Redis live 套件用本机 Docker 起的 `redis:7-alpine`（`t11-test-redis`，
+`127.0.0.1:6379`，测试后已删除容器）实跑，85/85 全过。
+
+**Redis 套件暴露的 8 个陈旧期望（已修，仅测试侧，无生产改动）**：该套件自 T0–T4 轮后从未执行过，
+8 个用例断言的是改版前的行为。逐条根因与修法见 `17fdccb3` 的 commit message；类别为
+① 3 个冷却时序用例（T1.2 `max(local, explicit)` 让本地曲线主导，改为显式 base=1 + 睡过曲线）、
+② 1 个 step 封顶用例（P0 把默认 max_step 降到 2，改为显式 max_step=5）、
+③ 3 个 token 记录用例（`44ab6bee` 计费重构后 `cost_billing_mode()` 需要价格 + 日限额字段，
+否则 token 路径被静默跳过，补三个字段）、④ 1 个探针计划用例（ReasoningControl 现在先流式、
+对非 SSE 假上游回退非流式，命中数 2→3）。
 
 ### 6.2 与原方案的偏差（**必读，否则会重复造文件**）
 
