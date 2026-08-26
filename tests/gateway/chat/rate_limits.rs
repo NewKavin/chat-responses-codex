@@ -1944,8 +1944,9 @@ async fn default_route_exhaustion_budget_waits_out_a_transient_cooldown() {
             model_aliases: vec![],
         },
         state_path,
-        // Default wait budget (30s) on purpose: the ~10s transient cooldown
-        // must be absorbed inside the gateway so the client never sees a 503.
+        // Default wait budget (30s) on purpose: the step-one transient cooldown
+        // (shipped default base 5s, jittered to 4-6s) must be absorbed inside
+        // the gateway so the client never sees a 503.
         // T2.1 regression guard: with the new first-request probe arm, the
         // request would probe immediately after the first failing round and
         // succeed in ~300ms instead of waiting out the cooldown.  This test
@@ -1978,10 +1979,15 @@ async fn default_route_exhaustion_budget_waits_out_a_transient_cooldown() {
     // Hit one fails, hit two fails the in-place same-route retry, hit three is
     // the second routing round succeeding after the cooldown wait.
     assert_eq!(hits.load(Ordering::SeqCst), 3);
+    // The lower bound tracks the shipped default curve deliberately: base 5s
+    // jittered to 80% is 4s, so anything under ~3s means the cooldown was not
+    // waited out at all.  Do not widen this downward without checking
+    // DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS in
+    // src/state/types.rs -- that is what this bound is asserting.
     assert!(
-        elapsed >= std::time::Duration::from_secs(7)
+        elapsed >= std::time::Duration::from_secs(3)
             && elapsed <= std::time::Duration::from_secs(25),
-        "request must wait out the ~10s cooldown inside the gateway, took {elapsed:?}"
+        "request must wait out the step-one cooldown inside the gateway, took {elapsed:?}"
     );
 }
 
@@ -2075,6 +2081,19 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
         state_path,
         AppConfig {
             upstream_route_exhaustion_retry_max_wait_ms: 15_000,
+            // The cooldown curve is stated explicitly, and it deliberately
+            // violates the T1.1 ceiling invariant (ceiling 40s > budget 15s).
+            // That is the whole point of this test: `wait_budget` is only
+            // reachable on an operator-misconfigured curve.  At the shipped
+            // defaults (base 5s / max_step 2 => ceiling 10s) the invariant
+            // guarantees every cooldown fits the budget, so the terminal
+            // give-up is `alignment_exhausted` instead -- see
+            // `route_retry_round_cap_gives_up_with_alignment_exhausted`.
+            // This test used to pass by inheriting the old shipped defaults,
+            // which silently violated the same invariant; P0 fixed the
+            // defaults, so the curve has to be named here.
+            upstream_transient_route_cooldown_base_seconds: 10,
+            upstream_transient_route_cooldown_max_step: 3,
             // T2.1 regression guard: the first-request probe would fire after
             // round two and flip `last_resort_probe_attempted` to true.  This
             // test pins the budget/round-cap arithmetic, so the probe is
@@ -2228,6 +2247,11 @@ async fn budget_aligned_last_wait_refused_when_recovery_exceeds_budget() {
         AppConfig {
             upstream_route_exhaustion_retry_max_wait_ms: 5_000,
             upstream_route_exhaustion_retry_max_rounds: 1,
+            // Stated explicitly so the 8-12s first cooldown above is real.  At
+            // the shipped default base of 5s the jittered cooldown lands in
+            // 4-6s, which sometimes *fits* the 5s budget -- the request then
+            // waits instead of refusing and blows the 1s timeout below.
+            upstream_transient_route_cooldown_base_seconds: 10,
             // T2.3 regression guard: with truncation on, the request would
             // spend the remaining ~5s budget and then probe (blowing the 1s
             // test timeout) instead of refusing immediately.  This test pins
@@ -2787,6 +2811,11 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
         AppConfig {
             upstream_transient_route_cooldown_base_seconds: 2,
             upstream_transient_route_cooldown_max_seconds: 2,
+            // The third probe must escalate `consecutive_failures` to 3, so the
+            // step cap is stated explicitly: the shipped default is 2 (P0
+            // lowered it from 3), which would saturate the step and make the
+            // final assertion below indistinguishable from the first one.
+            upstream_transient_route_cooldown_max_step: 3,
             upstream_route_exhaustion_retry_max_wait_ms: 1_000,
             upstream_transient_same_route_retry_enabled: false,
             // T2.3 regression guard: with truncation on, the first request
@@ -2955,4 +2984,333 @@ async fn route_retry_last_resort_probe_disabled_keeps_zero_physical_attempts() {
         0,
         "the disabled switch must keep the zero-physical-attempt terminal path"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T2.1: the last-resort probe's *second* arm (P1.2)
+//
+// The three probe tests above all seed pre-existing cooldowns, so round one
+// makes zero physical attempts — they only ever exercise the original arm
+// (`attempt_count() == 0 && is_all_cooled_transient_family()`).  The T2.1 arm
+// at `src/server/gateway.rs:8246` is the opposite case: the request DID
+// attempt the whole pool, every physical attempt was a transient-family
+// failure, and no candidate is left.  That arm had no positive test at all —
+// its existence was only visible through
+// `route_retry_wait_budget_and_round_limit_are_bounded`, which switches the
+// probe off precisely because it would otherwise fire.  These tests pin it.
+//
+// `upstream_transient_same_route_retry_enabled` is off in all three so the
+// physical-attempt arithmetic is one attempt per candidate; the same-route
+// retry is an orthogonal mechanism with its own coverage (`a1_same_route_
+// failures_across_rounds_keep_step_flat`).
+// ---------------------------------------------------------------------------
+
+fn t21_probe_after_attempts_config() -> AppConfig {
+    AppConfig {
+        // Cooldown must outlive the wait budget so round two cannot be a
+        // plain budget-funded wait: the only way a 4th attempt happens is
+        // the last-resort probe ignoring the remaining cooldown.
+        upstream_transient_route_cooldown_base_seconds: 60,
+        upstream_transient_route_cooldown_max_seconds: 60,
+        upstream_route_exhaustion_retry_max_wait_ms: 1_000,
+        upstream_transient_same_route_retry_enabled: false,
+        // T2.2 off so this file tests ONE mechanism.  With it on, the probe's
+        // 502 is the 4th same-host transient failure, which reaches
+        // `upstream_common_mode_transient_threshold` (default 4), latches the
+        // common-mode breaker and spends a 500ms replay round re-attempting the
+        // whole pool — 7 upstream hits instead of 4, and a terminal error that
+        // loses its details (see the P4 gap test below).
+        upstream_common_mode_same_host_transient_enabled: false,
+        ..AppConfig::default()
+    }
+}
+
+/// Three upstreams sharing one base_url — the intranet aggregation-gateway
+/// shape, where "three routes" is three keys on one physical hop.
+fn t21_probe_after_attempts_upstreams(base_url: &str) -> Vec<UpstreamConfig> {
+    vec![
+        route_retry_upstream_config("up-a", "primary-a", base_url.to_string()),
+        route_retry_upstream_config("up-b", "primary-b", base_url.to_string()),
+        route_retry_upstream_config("up-c", "primary-c", base_url.to_string()),
+    ]
+}
+
+#[tokio::test]
+async fn t21_last_resort_probe_fires_after_the_whole_pool_failed_physically() {
+    // Round one attempts all three candidates and every one 502s, so the pool
+    // is empty with `attempt_count() == 3`.  The T2.1 arm then grants exactly
+    // one half-open probe, which the recovered upstream answers 200 — the
+    // first request to hit a freshly-failing pool recovers by itself instead
+    // of returning 503 and leaving the recovery to the next request.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    // Fail exactly the three round-one attempts; the 4th hit (the probe) is OK.
+    let base_url = spawn_retry_after_upstream(hits.clone(), 3, StatusCode::BAD_GATEWAY, None).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(t21_probe_after_attempts_upstreams(&base_url)),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        t21_probe_after_attempts_config(),
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("probe request must terminate")
+    .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "T2.1: the last-resort probe must let the first request recover on its own"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        4,
+        "three round-one attempts plus exactly one last-resort probe"
+    );
+}
+
+#[tokio::test]
+async fn t21_last_resort_probe_is_reported_and_happens_at_most_once() {
+    // Same shape, but the upstream never recovers: the terminal 503 must
+    // report the probe honestly, and the probe must fire at most once per
+    // request no matter how many rounds the budget would allow.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), usize::MAX, StatusCode::BAD_GATEWAY, None).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(t21_probe_after_attempts_upstreams(&base_url)),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        t21_probe_after_attempts_config(),
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("request must terminate")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let details = &payload["error"]["details"];
+    // After the probe is spent every candidate is cooled, so the terminal error
+    // comes from the exhaustion arm rather than the class-derived one — which is
+    // what makes the T0 details below available at all.
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        4,
+        "at most one probe per request: three attempts plus one probe, never a probe per round"
+    );
+    assert_eq!(
+        details["last_resort_probe_attempted"], true,
+        "T2.1: the terminal error must disclose that a probe was spent, got {details}"
+    );
+    assert!(
+        details["routing_rounds"].as_u64().unwrap() >= 2,
+        "the probe round is a second routing round, got {details}"
+    );
+    assert_eq!(
+        details["physical_attempt_count"].as_u64().unwrap(),
+        4,
+        "physical_attempt_count must count the probe, got {details}"
+    );
+}
+
+#[tokio::test]
+async fn t21_probe_with_common_mode_on_keeps_terminal_details_p4() {
+    // P4 regression guard — was `t21_probe_with_common_mode_on_loses_the_terminal_details_p4_gap`.
+    //
+    // Same pool as `t21_last_resort_probe_is_reported_and_happens_at_most_once`
+    // but with the shipped default T2.2 switch ON.  The probe's 502 is the 4th
+    // same-host transient failure, which reaches
+    // `upstream_common_mode_transient_threshold` (default 4) and latches
+    // `common_mode_tripped`.  P4: the latch must ONLY decide whether the
+    // gateway keeps replaying — it must never strip the terminal error's
+    // details.  The terminal status (503) and `error.code`
+    // (`upstream_temporary_unavailable`) are the client contract and must stay
+    // untouched, while the details carry BOTH the aggregated T0 routing
+    // details (attempt_count / routing_rounds / give_up_reason /
+    // last_resort_probe_attempted / remaining_candidates ...) AND the
+    // common-mode verdict fields (common_mode / failed_route_count /
+    // distinct_hosts / streak / threshold / retried).  Before P4 the client
+    // got neither group — only the bare passthrough
+    // `{"request_id","scope","upstream_status"}`.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), usize::MAX, StatusCode::BAD_GATEWAY, None).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(t21_probe_after_attempts_upstreams(&base_url)),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        AppConfig {
+            // The shipped default, restored on top of the isolating config.
+            upstream_common_mode_same_host_transient_enabled: true,
+            ..t21_probe_after_attempts_config()
+        },
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("request must terminate")
+    .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "P4 must not change the terminal HTTP status (client contract)"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"]["code"], "upstream_temporary_unavailable",
+        "P4 must not change the terminal error code (client contract), got {payload}"
+    );
+    let details = &payload["error"]["details"];
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        7,
+        "three attempts, one probe, then the common-mode replay round re-attempts the pool"
+    );
+    // The passthrough's own fields survive the merge.
+    assert_eq!(
+        details["upstream_status"], 502,
+        "the passthrough keeps its upstream status, got {details}"
+    );
+    // T0 routing details are present.
+    assert_eq!(
+        details["last_resort_probe_attempted"], true,
+        "P4: the terminal error must disclose the spent probe, got {details}"
+    );
+    assert!(
+        details["routing_rounds"].as_u64().unwrap() >= 2,
+        "P4: routing_rounds must be present and at least 2, got {details}"
+    );
+    assert_eq!(
+        details["physical_attempt_count"].as_u64().unwrap(),
+        7,
+        "P4: physical_attempt_count must count every hit incl. the replay round, got {details}"
+    );
+    assert!(
+        details["attempt_count"].as_u64().unwrap() >= 3,
+        "P4: attempt_count must be present, got {details}"
+    );
+    assert!(
+        details["give_up_reason"].is_string(),
+        "P4: give_up_reason must be present, got {details}"
+    );
+    assert!(
+        details["remaining_candidates"].is_number(),
+        "P4: remaining_candidates must be the real value, got {details}"
+    );
+    // The common-mode verdict fields join the same details.
+    assert_eq!(details["common_mode"], true, "got {details}");
+    assert_eq!(details["failed_route_count"], 4, "got {details}");
+    assert_eq!(details["streak"], 4, "got {details}");
+    assert_eq!(details["threshold"], 4, "got {details}");
+    assert_eq!(details["retried"], true, "got {details}");
+    assert_eq!(
+        details["distinct_hosts"].as_array().unwrap().len(),
+        1,
+        "single aggregation gateway: one distinct host, got {details}"
+    );
+}
+
+#[tokio::test]
+async fn t21_last_resort_probe_switch_off_keeps_the_pool_failure_terminal() {
+    // OFF control for the pair above.  Identical pool and identical upstream;
+    // only the switch differs.  If this ever reports the same attempt count
+    // as the test above, the T2.1 arm has stopped being gated.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), usize::MAX, StatusCode::BAD_GATEWAY, None).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(t21_probe_after_attempts_upstreams(&base_url)),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        AppConfig {
+            upstream_transient_last_resort_probe_enabled: false,
+            ..t21_probe_after_attempts_config()
+        },
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("request must terminate")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let details = &payload["error"]["details"];
+    assert_eq!(
+        details["last_resort_probe_attempted"], false,
+        "the disabled switch must not arm a probe, got {details}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        3,
+        "one attempt per candidate and no probe"
+    );
+    assert_eq!(details["physical_attempt_count"].as_u64().unwrap(), 3);
 }

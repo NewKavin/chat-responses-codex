@@ -946,6 +946,19 @@ impl CommonModeStreak {
     }
 }
 
+/// P4: snapshot of the request-level common-mode verdict, taken at the exact
+/// moment the latch trips.  The latch can immediately spend its remaining
+/// budget on a delayed replay round that resets `common_mode` to a fresh
+/// streak — so without this snapshot the terminal error would lose the
+/// common-mode fields on exactly the single-aggregation-gateway shape T0 was
+/// built for.
+struct CommonModeVerdict {
+    threshold: u32,
+    failed_route_count: usize,
+    distinct_hosts: Vec<String>,
+    streak_count: u32,
+}
+
 /// Request-level error for a common-mode breaker trip: the upstream pool
 /// rejected this request shape on multiple routes, so the gateway stops
 /// replaying it and reports the first upstream error instead of burning all
@@ -1035,6 +1048,38 @@ fn common_mode_transient_pool_error(
         streak.retry_after.map(duration_seconds_ceil),
         Some(Value::Object(details)),
     )
+}
+
+/// P4: enrich a request-level common-mode terminal error's `details` with the
+/// aggregated T0 routing details (from `terminal_route_failure_error`) plus
+/// the common-mode verdict fields, while keeping the terminal status, `code`
+/// and message — the client contract — untouched.  The two groups are
+/// complementary, not mutually exclusive: the latch only decides whether the
+/// gateway keeps replaying, never how richly the client is told what happened.
+fn merge_common_mode_terminal_details(
+    error: GatewayError,
+    t0: &GatewayError,
+    verdict: Option<CommonModeVerdict>,
+    transient_pool_retried: bool,
+) -> GatewayError {
+    let mut extra = Map::new();
+    if let Value::Object(t0_details) = t0.safe_details() {
+        for (key, value) in t0_details {
+            extra.insert(key, value);
+        }
+    }
+    if let Some(verdict) = verdict {
+        extra.insert("common_mode".to_string(), json!(true));
+        extra.insert(
+            "failed_route_count".to_string(),
+            json!(verdict.failed_route_count),
+        );
+        extra.insert("distinct_hosts".to_string(), json!(verdict.distinct_hosts));
+        extra.insert("streak".to_string(), json!(verdict.streak_count));
+        extra.insert("threshold".to_string(), json!(verdict.threshold));
+        extra.insert("retried".to_string(), json!(transient_pool_retried));
+    }
+    error.merge_details(extra)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -6060,6 +6105,7 @@ async fn process_gateway_request_inner(
     let mut common_mode_first_message: Option<String> = None;
     let mut common_mode_failed_routes: Vec<RouteHealthKey> = Vec::new();
     let mut common_mode_tripped = false;
+    let mut common_mode_verdict: Option<CommonModeVerdict> = None;
     let mut transient_pool_replay_done = false;
     let mut transient_pool_retried = false;
 
@@ -8054,14 +8100,22 @@ async fn process_gateway_request_inner(
                                             streak.retry_after = retry_after;
                                         }
                                         common_mode_failed_routes.push(route_health_key.clone());
-                                        if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
-                                            eprintln!("[TRACE] common-mode: class={:?} count={} threshold={} same_host_counts={} host={:?} route_local={} tripping={}",
-                                                class, streak.count, threshold, same_host_counts, host.as_deref(), streak.route_local_fault(&route_health_key, &host, same_host_counts), streak.count + 1 >= threshold);
-                                        }
+                                        tracing::debug!("common-mode: class={:?} count={} threshold={} same_host_counts={} host={:?} route_local={} tripping={}",
+                                            class, streak.count, threshold, same_host_counts, host.as_deref(), streak.route_local_fault(&route_health_key, &host, same_host_counts), streak.count + 1 >= threshold);
                                         if streak.count >= threshold {
                                             common_mode_tripped = true;
                                             let failed_route_count =
                                                 common_mode_failed_routes.len();
+                                            // P4: snapshot the verdict before the
+                                            // replay branch resets `common_mode`, so
+                                            // the terminal error can still report the
+                                            // common-mode fields.
+                                            common_mode_verdict = Some(CommonModeVerdict {
+                                                threshold,
+                                                failed_route_count,
+                                                distinct_hosts: streak.hosts.clone(),
+                                                streak_count: streak.count,
+                                            });
                                             for failed_route in common_mode_failed_routes.drain(..)
                                             {
                                                 state.clear_route_health(&failed_route).await.map_err(
@@ -8219,16 +8273,14 @@ async fn process_gateway_request_inner(
         // off too: an operator who disables exhaustion retries must not see
         // their request still probed/replayed.
         request_route_attempts.clear_last_resort_probe();
-        if std::env::var_os("GATEWAY_RETRY_TRACE").is_some() {
-            eprintln!(
-                "[TRACE] round end: attempts={} all_transient={} avail={} cooled={} all_cooled={}",
-                round_ledger.attempt_count(),
-                round_ledger.is_all_transient_family_failures(),
-                request_route_attempts.available_candidate_count(),
-                round_ledger.cooled_candidate_count(),
-                round_ledger.is_all_cooled_transient_family(),
-            );
-        }
+        tracing::debug!(
+            "round end: attempts={} all_transient={} avail={} cooled={} all_cooled={}",
+            round_ledger.attempt_count(),
+            round_ledger.is_all_transient_family_failures(),
+            request_route_attempts.available_candidate_count(),
+            round_ledger.cooled_candidate_count(),
+            round_ledger.is_all_cooled_transient_family(),
+        );
         if runtime_settings.upstream_route_exhaustion_retry_enabled
             && runtime_settings.upstream_transient_last_resort_probe_enabled
             && !stream_only_final_attempt
@@ -8377,8 +8429,7 @@ async fn process_gateway_request_inner(
         let attempt_ledger = request_route_attempts.ledger_snapshot();
         let fallback_upstream_status = last_route_error.upstream_status();
         let fallback_failure_class = last_route_error.route_failure_class();
-        let should_aggregate = !common_mode_tripped
-            && !attempt_ledger.is_empty()
+        let should_aggregate = !attempt_ledger.is_empty()
             && (attempt_ledger.distinct_route_count() > 1
                 || matches!(
                     last_route_error.route_failure_class(),
@@ -8401,7 +8452,15 @@ async fn process_gateway_request_inner(
         } else {
             None
         };
-        let mut error = if should_aggregate {
+        // P4: the common-mode latch only decides whether the gateway keeps
+        // replaying the request — it must never decide how richly the client
+        // is told what happened.  Keep the request-level common-mode verdict
+        // (its status / code / message are the client contract) and merge both
+        // the aggregated T0 routing details and the common-mode fields into
+        // its `details` right below.
+        let mut error = if common_mode_tripped {
+            last_route_error
+        } else if should_aggregate {
             terminal_route_failure_error(
                 &attempt_ledger,
                 request_route_attempts.routing_round(),
@@ -8422,6 +8481,36 @@ async fn process_gateway_request_inner(
         } else {
             last_route_error
         };
+        // P4: when the common-mode breaker latched, enrich the terminal
+        // error's details with the T0 routing details (attempt_count,
+        // routing_rounds, give_up_reason, last_resort_probe_attempted,
+        // remaining_candidates, ...) plus the common-mode verdict fields.  The
+        // two groups are complementary, not mutually exclusive.
+        if common_mode_tripped && should_aggregate {
+            let t0 = terminal_route_failure_error(
+                &attempt_ledger,
+                request_route_attempts.routing_round(),
+                route_retry_budget
+                    .waited()
+                    .saturating_add(account_recovery.waited()),
+                live_recovery,
+                request_route_attempts.physical_attempt_count(),
+                request_route_attempts.give_up_reason(),
+                request_route_attempts.last_resort_probe_granted(),
+                upstream_retry_after_cap,
+                continuation_pin_escaped.load(Ordering::Relaxed),
+                continuation_profile_key.is_some(),
+                candidate_pass_count,
+                continuation_route_count,
+                request_route_attempts.available_candidate_count(),
+            );
+            error = merge_common_mode_terminal_details(
+                error,
+                &t0,
+                common_mode_verdict,
+                transient_pool_retried,
+            );
+        }
         if should_rollback_downstream_reservation(&error) {
             let rollback = state
                 .rollback_downstream_request_reservation(downstream_request_reservation)

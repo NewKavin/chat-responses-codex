@@ -1141,6 +1141,40 @@ impl GatewayError {
             _ => json!({ "scope": "gateway" }),
         }
     }
+    /// P4: merge extra detail fields into a `Classified` error's `details`,
+    /// preserving status/code/message/request_id — the client contract.
+    /// Non-`Classified` variants are returned unchanged (they carry no
+    /// actionable details slot).  Used to keep the T0 routing details and the
+    /// common-mode verdict fields on the terminal error even when the
+    /// common-mode latch fired.
+    pub(super) fn merge_details(self, extra: Map<String, Value>) -> Self {
+        match self {
+            GatewayError::Classified {
+                status,
+                message,
+                retry_after,
+                mut meta,
+            } => {
+                let mut details = meta
+                    .details
+                    .take()
+                    .unwrap_or_else(|| json!({ "scope": "gateway" }));
+                if let Some(object) = details.as_object_mut() {
+                    for (key, value) in extra {
+                        object.insert(key, value);
+                    }
+                }
+                meta.details = Some(details);
+                GatewayError::Classified {
+                    status,
+                    message,
+                    retry_after,
+                    meta,
+                }
+            }
+            other => other,
+        }
+    }
     pub(super) fn into_response(self) -> Response {
         let error_type = self.error_type();
         let error_code = self.error_code();
