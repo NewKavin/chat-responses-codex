@@ -3922,6 +3922,13 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
         // truncation switch is turned off explicitly.
         AppConfig {
             upstream_route_exhaustion_alignment_truncated_enabled: false,
+            // Stated explicitly rather than inherited.  The assertion below is
+            // only discriminating while the local curve differs from BOTH the
+            // raw upstream hint (30) and the cooldown cap (5): at the shipped
+            // default base of 5s the effective cooldown is also ~5s, which
+            // collides with `upstream_retry_after_cooldown_cap_seconds` and the
+            // test could no longer tell "local curve" from "capped hint".
+            upstream_transient_route_cooldown_base_seconds: 10,
             ..AppConfig::default()
         },
     );
@@ -3953,9 +3960,9 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
 
     // Post-T1.2 the client hint reflects the route's *effective* recovery
     // (local backoff curve, upstream hint bounded by the 5s cooldown cap),
-    // not a raw echo of the upstream `Retry-After: 30`.  Default transient
-    // base = 10s, step-1 deterministic jitter -> ~9s effective cooldown,
-    // ceil -> 9.  The upstream hint only governs route health up to
+    // not a raw echo of the upstream `Retry-After: 30`.  Transient base = 10s
+    // as configured above, step-1 deterministic jitter -> ~9s effective
+    // cooldown, ceil -> 9.  The upstream hint only governs route health up to
     // `upstream_retry_after_cooldown_cap_seconds`;
     // `upstream_retry_after_cap_seconds` still bounds the client header.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

@@ -7,12 +7,16 @@ use chat_responses_codex::state::{
 use std::time::Duration;
 use tempfile::tempdir;
 
-/// T1.1: a config whose local backoff curve (base=2, max_step=3 => ceiling
-/// 2 << 2 = 8s, bounded by cap=5 via max()) satisfies the cooldown-ceiling
+/// T1.1: a config whose local backoff curve (base=2, max_step=2 => ceiling
+/// 2 << 1 = 4s, raised to the cap=5 by max()) satisfies the cooldown-ceiling
 /// invariant against the default 30s intra-gateway retry wait budget:
-/// 8s * 1000 = 8000ms < 30000ms.  `AppConfig::default()` (base=10, max_step=3
-/// => 40s ceiling) intentionally violates the invariant and is rejected by
-/// `validate_and_normalize`, so round-trip tests must start from this config.
+/// 5s * 1000 = 5000ms < 30000ms.
+///
+/// `AppConfig::default()` is compliant too (base=5, max_step=2 => 10s ceiling)
+/// and `shipped_default_config_satisfies_cooldown_ceiling_invariant` pins that
+/// — it used to ship base=10 / max_step=3 for a 40s ceiling, i.e. a default
+/// configuration its own validator rejected.  This helper only exists to keep
+/// round-trip tests independent of the shipped curve.
 fn compliant_config() -> AppConfig {
     AppConfig {
         upstream_transient_route_cooldown_base_seconds: 2,
@@ -331,9 +335,9 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
     let mut legacy = AppConfig {
         app_name: "Legacy env".into(),
         upstream_route_exhaustion_retry_max_rounds: 3,
-        // T1.1: keep the startup config compliant so the persisted
-        // `RuntimeSettingsDocument` derived from it passes validation and is
-        // not discarded in `config_with_persisted_runtime_settings`.
+        // T1.1: pin a compliant curve explicitly rather than inheriting the
+        // shipped one, so this round-trip keeps testing persistence even if the
+        // shipped cooldown defaults are retuned later.
         upstream_transient_route_cooldown_base_seconds: 2,
         ..Default::default()
     };
@@ -574,11 +578,16 @@ fn runtime_settings_round_trip_transient_breaker_tuning() {
 }
 #[test]
 fn runtime_settings_reject_t1_1_cooldown_ceiling_invariant_violation() {
-    // `AppConfig::default()` has base=10 / max_step=3 => curve ceiling
-    // 10 << 2 = 40s; max(upstream_retry_after_cooldown_cap=5, 40) = 40s
-    // => 40000ms >= 30000ms budget => must be rejected, and the message must
-    // spell out both concrete numbers so the operator sees the collision.
-    let settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    // base=10 / max_step=3 => curve ceiling 10 << 2 = 40s;
+    // max(upstream_retry_after_cooldown_cap=5, 40) = 40s => 40000ms >= 30000ms
+    // budget => must be rejected, and the message must spell out both concrete
+    // numbers so the operator sees the collision.  These were the shipped
+    // defaults until P0.1; they are set explicitly here because the shipped
+    // defaults are now required to be compliant
+    // (`shipped_default_config_satisfies_cooldown_ceiling_invariant`).
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    settings.upstream_transient_route_cooldown_base_seconds = 10;
+    settings.upstream_transient_route_cooldown_max_step = 3;
     let error = settings.validate_and_normalize().unwrap_err();
     assert_eq!(error.field(), "upstream_route_exhaustion_retry_max_wait_ms");
     let message = error.message();
@@ -604,4 +613,127 @@ fn runtime_settings_reject_t1_1_cooldown_ceiling_invariant_violation() {
     let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
     settings.upstream_route_exhaustion_retry_max_wait_ms = 60_000;
     settings.validate_and_normalize().unwrap();
+}
+
+/// P0.3: the shipped defaults must pass their own validator.  Nothing asserted
+/// this before, which is how base=10 / max_step=3 (40s ceiling) shipped against
+/// a 30s wait budget: every default boot logged an error and auto-corrected
+/// itself, Admin refused to save untouched settings, and the persisted-settings
+/// loader discarded the operator's whole document on upgrade.
+#[test]
+fn shipped_default_config_satisfies_cooldown_ceiling_invariant() {
+    let defaults = RuntimeSettings::from_app_config(&AppConfig::default());
+    let ceiling_seconds = defaults.effective_cooldown_ceiling_seconds();
+    let budget_ms = defaults.upstream_route_exhaustion_retry_max_wait_ms;
+
+    assert!(
+        ceiling_seconds.saturating_mul(1_000) < budget_ms,
+        "shipped defaults violate T1.1: cooldown ceiling {ceiling_seconds}s \
+         (= {}ms) must stay strictly below the {budget_ms}ms wait budget",
+        ceiling_seconds.saturating_mul(1_000)
+    );
+
+    let mut untouched = defaults.clone();
+    assert_eq!(
+        untouched.repair_cooldown_ceiling_invariant(),
+        None,
+        "shipped defaults must need no auto-correction at startup"
+    );
+
+    defaults
+        .validate_and_normalize()
+        .expect("shipped default configuration must pass its own validator");
+}
+
+/// P0.2/P0.3: a persisted document that violates the cooldown-ceiling invariant
+/// is repaired, not discarded.  The all-or-nothing predecessor was a silent
+/// data-loss path: tightening the invariant in a release invalidated every
+/// previously saved document, and dropping it reverted *every* runtime setting
+/// the operator had ever changed through Admin.
+#[test]
+fn persisted_settings_violating_cooldown_ceiling_are_repaired_not_discarded() {
+    let tempdir = tempdir().unwrap();
+    let legacy = AppConfig {
+        app_name: "Legacy env".into(),
+        ..Default::default()
+    };
+
+    let mut document = RuntimeSettingsDocument::startup(&legacy);
+    // Unrelated settings the operator saved through Admin — these must survive.
+    document.settings.app_name = "Saved settings".into();
+    document.settings.upstream_route_exhaustion_retry_max_rounds = 9;
+    // The pre-P0.1 shipped curve: base=10, max_step=3 => ceiling 40s >= 30s budget.
+    document
+        .settings
+        .upstream_transient_route_cooldown_base_seconds = 10;
+    document.settings.upstream_transient_route_cooldown_max_step = 3;
+
+    let state = AppState::new(
+        PersistedState {
+            runtime_settings: Some(document),
+            model_aliases: vec![],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        legacy,
+    );
+
+    assert_eq!(
+        state.config.app_name, "Saved settings",
+        "an unrelated saved setting must survive the cooldown-ceiling repair"
+    );
+    assert_eq!(
+        state
+            .runtime_settings()
+            .upstream_route_exhaustion_retry_max_rounds,
+        9,
+        "an unrelated saved setting must survive the cooldown-ceiling repair"
+    );
+    assert_eq!(
+        state
+            .runtime_settings()
+            .upstream_route_exhaustion_retry_max_wait_ms,
+        60_000,
+        "the wait budget must be raised to ceiling (40s) * 1.5"
+    );
+    assert_eq!(
+        state
+            .runtime_settings()
+            .upstream_transient_route_cooldown_base_seconds,
+        10,
+        "the repair adjusts the budget, not the operator's cooldown curve"
+    );
+}
+
+/// P0.2 boundary: only the cooldown-ceiling arm is repairable.  Any other
+/// validation failure must still discard the whole document, so the repair path
+/// cannot be mistaken for "accept anything persisted".
+#[test]
+fn persisted_settings_invalid_for_other_reasons_are_still_discarded() {
+    let tempdir = tempdir().unwrap();
+    let legacy = AppConfig {
+        app_name: "Legacy env".into(),
+        ..Default::default()
+    };
+
+    let mut document = RuntimeSettingsDocument::startup(&legacy);
+    document.settings.app_name = "Saved settings".into();
+    // Not repairable: keepalive must stay below the idle timeout.
+    document.settings.upstream_stream_keepalive_interval_seconds = 20;
+    document.settings.upstream_stream_idle_timeout_seconds = 10;
+
+    let state = AppState::new(
+        PersistedState {
+            runtime_settings: Some(document),
+            model_aliases: vec![],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        legacy,
+    );
+
+    assert_eq!(
+        state.config.app_name, "Legacy env",
+        "a non-repairable document must fall back to the startup configuration"
+    );
 }

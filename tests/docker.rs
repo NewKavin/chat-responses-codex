@@ -351,7 +351,7 @@ fn deployment_exposes_transient_route_retry_configuration() {
         DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS
     );
     assert!(defaults.upstream_same_route_retry_enabled);
-    assert_eq!(defaults.upstream_transient_route_cooldown_base_seconds, 10);
+    assert_eq!(defaults.upstream_transient_route_cooldown_base_seconds, 5);
     assert_eq!(defaults.upstream_transient_route_cooldown_max_seconds, 300);
 
     for key in [
