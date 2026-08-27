@@ -365,7 +365,11 @@ No extra headroom is needed — overflow is absorbed by the C3
    `true`; do not turn it off "for speed".
 
 Edit the groups per downstream key via the admin UI (Downstreams → 编辑 → 模型并发组)
-or the update API; the field is in the batch-update whitelist.
+or the update API. For bulk maintenance across many keys (the common shape —
+several downstream keys share the same group set), use
+`POST /api/admin/downstreams/batch-update` with
+`{ "ids": [...], "updates": { ..., "model_concurrency_groups": [...] } }`
+(whitelist-gated, per-id success/failure, mirrors the upstream batch-update).
 
 ### `upstream_routes_exhausted` 三步定位法 (runbook)
 

@@ -379,6 +379,12 @@ export const adminApi = {
     data
   ),
 
+  batchUpdateDownstreams: (ids: string[], updates: Record<string, unknown>) =>
+    adminHttp.post<{
+      updated: string[]
+      failed: Array<{ id: string; error: string }>
+    }>('/admin/downstreams/batch-update', { ids, updates }),
+
   getDownstreamRuntime: () =>
     adminHttp.get<DownstreamRuntimeResponse>('/admin/downstreams/runtime'),
 

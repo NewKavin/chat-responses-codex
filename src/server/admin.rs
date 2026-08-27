@@ -2203,6 +2203,163 @@ pub(super) async fn admin_get_downstream(
 }
 
 /// Update downstream by ID
+/// Apply an admin partial-merge update map onto a downstream in place. One
+/// helper keeps the single-downstream PUT and the batch endpoint from drifting.
+/// Identity/credential fields (`id`, `hash`, `plaintext_key*`) are deliberately
+/// not merged here — the batch endpoint's allow-list already excludes them, and
+/// the single PUT never touches them. Returns an error message when a field
+/// value is rejected; the caller decides whether that aborts the whole request
+/// (single PUT -> 400) or a single batch item (batch -> per-id failure).
+fn apply_downstream_updates(
+    downstream: &mut DownstreamConfig,
+    updates: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+        downstream.name = name.to_string();
+    }
+    if let Some(per_minute_limit) = updates.get("per_minute_limit").and_then(|v| v.as_u64()) {
+        downstream.per_minute_limit = per_minute_limit as u32;
+    }
+    if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
+        downstream.max_concurrency = max_concurrency as u32;
+    }
+    if let Some(rate_limit_enabled) = updates.get("rate_limit_enabled").and_then(|v| v.as_bool()) {
+        downstream.rate_limit_enabled = rate_limit_enabled;
+    }
+    if let Some(billing_mode) = updates.get("billing_mode").and_then(|v| v.as_str()) {
+        if billing_mode != "request" && billing_mode != "token" {
+            return Err("billing_mode must be \"request\" or \"token\"".to_string());
+        }
+        downstream.billing_mode = billing_mode.to_string();
+    }
+    if let Some(request_quota_window_hours) = updates
+        .get("request_quota_window_hours")
+        .and_then(|v| v.as_u64())
+    {
+        downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
+    }
+    if updates
+        .get("request_quota_window_hours")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.request_quota_window_hours = None;
+    }
+    if let Some(request_quota_requests) = updates
+        .get("request_quota_requests")
+        .and_then(|v| v.as_u64())
+    {
+        downstream.request_quota_requests = Some(request_quota_requests as u32);
+    }
+    if updates
+        .get("request_quota_requests")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.request_quota_requests = None;
+    }
+    if let Some(model_allowlist) = updates.get("model_allowlist").and_then(|v| v.as_array()) {
+        downstream.model_allowlist = model_allowlist
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
+        downstream.ip_allowlist = ip_allowlist
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(daily_token_limit) = updates.get("daily_token_limit").and_then(|v| v.as_u64()) {
+        downstream.daily_token_limit = Some(daily_token_limit);
+    }
+    if updates
+        .get("daily_token_limit")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.daily_token_limit = None;
+    }
+    if let Some(monthly_token_limit) = updates.get("monthly_token_limit").and_then(|v| v.as_u64()) {
+        downstream.monthly_token_limit = Some(monthly_token_limit);
+    }
+    if updates
+        .get("monthly_token_limit")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.monthly_token_limit = None;
+    }
+    if let Some(price) = updates
+        .get("input_token_price_per_million_cents")
+        .and_then(|v| v.as_u64())
+    {
+        downstream.input_token_price_per_million_cents = Some(price);
+    }
+    if updates
+        .get("input_token_price_per_million_cents")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.input_token_price_per_million_cents = None;
+    }
+    if let Some(price) = updates
+        .get("output_token_price_per_million_cents")
+        .and_then(|v| v.as_u64())
+    {
+        downstream.output_token_price_per_million_cents = Some(price);
+    }
+    if updates
+        .get("output_token_price_per_million_cents")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.output_token_price_per_million_cents = None;
+    }
+    if let Some(cost_limit) = updates
+        .get("daily_cost_limit_cents")
+        .and_then(|v| v.as_u64())
+    {
+        downstream.daily_cost_limit_cents = Some(cost_limit);
+    }
+    if updates
+        .get("daily_cost_limit_cents")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        downstream.daily_cost_limit_cents = None;
+    }
+    if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
+        downstream.active = active;
+    }
+    if let Some(groups_value) = updates.get("model_concurrency_groups") {
+        if groups_value.is_null() {
+            downstream.model_concurrency_groups = Vec::new();
+        } else {
+            let groups = serde_json::from_value::<Vec<crate::state::ModelConcurrencyGroup>>(
+                groups_value.clone(),
+            )
+            .map_err(|_| {
+                "model_concurrency_groups must be an array of objects {\"name\", \"match\", \"max_concurrency\"}"
+                    .to_string()
+            })?;
+            let mut candidate = downstream.clone();
+            candidate.model_concurrency_groups = groups;
+            candidate
+                .validate_model_concurrency_groups()
+                .map_err(|message| message.to_string())?;
+            let cap_sum: u64 = candidate
+                .model_concurrency_groups
+                .iter()
+                .map(|group| u64::from(group.max_concurrency))
+                .sum();
+            if cap_sum > u64::from(downstream.max_concurrency.max(1)) {
+                tracing::warn!(
+                    downstream_id = %downstream.id,
+                    cap_sum,
+                    global_max_concurrency = downstream.max_concurrency,
+                    "model_concurrency_groups caps sum above the global max_concurrency (legal overbooking; the global cap stays the backstop)"
+                );
+            }
+            downstream.model_concurrency_groups = candidate.model_concurrency_groups;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn admin_update_downstream(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2211,181 +2368,14 @@ pub(super) async fn admin_update_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
-        // Apply updates (preserve hash)
-        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
-            downstream.name = name.to_string();
-        }
-        if let Some(per_minute_limit) = updates.get("per_minute_limit").and_then(|v| v.as_u64()) {
-            downstream.per_minute_limit = per_minute_limit as u32;
-        }
-        if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
-            downstream.max_concurrency = max_concurrency as u32;
-        }
-        if let Some(rate_limit_enabled) =
-            updates.get("rate_limit_enabled").and_then(|v| v.as_bool())
-        {
-            downstream.rate_limit_enabled = rate_limit_enabled;
-        }
-        if let Some(billing_mode) = updates.get("billing_mode").and_then(|v| v.as_str()) {
-            if billing_mode != "request" && billing_mode != "token" {
+        // Apply updates (preserve hash).
+        if let Some(updates_object) = updates.as_object() {
+            if let Err(message) = apply_downstream_updates(&mut downstream, updates_object) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": {
-                            "message": "billing_mode must be \"request\" or \"token\""
-                        }
-                    })),
+                    Json(json!({ "error": { "message": message } })),
                 )
                     .into_response();
-            }
-            downstream.billing_mode = billing_mode.to_string();
-        }
-        if let Some(request_quota_window_hours) = updates
-            .get("request_quota_window_hours")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
-        }
-        if updates.get("request_quota_window_hours").is_some()
-            && updates
-                .get("request_quota_window_hours")
-                .is_some_and(Value::is_null)
-        {
-            downstream.request_quota_window_hours = None;
-        }
-        if let Some(request_quota_requests) = updates
-            .get("request_quota_requests")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.request_quota_requests = Some(request_quota_requests as u32);
-        }
-        if updates.get("request_quota_requests").is_some()
-            && updates
-                .get("request_quota_requests")
-                .is_some_and(Value::is_null)
-        {
-            downstream.request_quota_requests = None;
-        }
-        if let Some(model_allowlist) = updates.get("model_allowlist").and_then(|v| v.as_array()) {
-            downstream.model_allowlist = model_allowlist
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
-            downstream.ip_allowlist = ip_allowlist
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        if let Some(daily_token_limit) = updates.get("daily_token_limit").and_then(|v| v.as_u64()) {
-            downstream.daily_token_limit = Some(daily_token_limit);
-        }
-        if updates.get("daily_token_limit").is_some()
-            && updates.get("daily_token_limit").is_some_and(Value::is_null)
-        {
-            downstream.daily_token_limit = None;
-        }
-        if let Some(monthly_token_limit) =
-            updates.get("monthly_token_limit").and_then(|v| v.as_u64())
-        {
-            downstream.monthly_token_limit = Some(monthly_token_limit);
-        }
-        if updates.get("monthly_token_limit").is_some()
-            && updates
-                .get("monthly_token_limit")
-                .is_some_and(Value::is_null)
-        {
-            downstream.monthly_token_limit = None;
-        }
-        if let Some(price) = updates
-            .get("input_token_price_per_million_cents")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.input_token_price_per_million_cents = Some(price);
-        }
-        if updates.get("input_token_price_per_million_cents").is_some()
-            && updates
-                .get("input_token_price_per_million_cents")
-                .is_some_and(Value::is_null)
-        {
-            downstream.input_token_price_per_million_cents = None;
-        }
-        if let Some(price) = updates
-            .get("output_token_price_per_million_cents")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.output_token_price_per_million_cents = Some(price);
-        }
-        if updates
-            .get("output_token_price_per_million_cents")
-            .is_some()
-            && updates
-                .get("output_token_price_per_million_cents")
-                .is_some_and(Value::is_null)
-        {
-            downstream.output_token_price_per_million_cents = None;
-        }
-        if let Some(cost_limit) = updates
-            .get("daily_cost_limit_cents")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.daily_cost_limit_cents = Some(cost_limit);
-        }
-        if updates.get("daily_cost_limit_cents").is_some()
-            && updates
-                .get("daily_cost_limit_cents")
-                .is_some_and(Value::is_null)
-        {
-            downstream.daily_cost_limit_cents = None;
-        }
-        if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
-            downstream.active = active;
-        }
-        if let Some(groups_value) = updates.get("model_concurrency_groups") {
-            if groups_value.is_null() {
-                downstream.model_concurrency_groups = Vec::new();
-            } else {
-                match serde_json::from_value::<Vec<crate::state::ModelConcurrencyGroup>>(
-                    groups_value.clone(),
-                ) {
-                    Ok(groups) => {
-                        let mut candidate = downstream.clone();
-                        candidate.model_concurrency_groups = groups;
-                        if let Err(message) = candidate.validate_model_concurrency_groups() {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({ "error": { "message": message } })),
-                            )
-                                .into_response();
-                        }
-                        let cap_sum: u64 = candidate
-                            .model_concurrency_groups
-                            .iter()
-                            .map(|group| u64::from(group.max_concurrency))
-                            .sum();
-                        if cap_sum > u64::from(downstream.max_concurrency.max(1)) {
-                            tracing::warn!(
-                                downstream_id = %id,
-                                cap_sum,
-                                global_max_concurrency = downstream.max_concurrency,
-                                "model_concurrency_groups caps sum above the global max_concurrency (legal overbooking; the global cap stays the backstop)"
-                            );
-                        }
-                        downstream.model_concurrency_groups = candidate.model_concurrency_groups;
-                    }
-                    Err(_) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": {
-                                    "message": "model_concurrency_groups must be an array of objects {\"name\", \"match\", \"max_concurrency\"}"
-                                }
-                            })),
-                        )
-                            .into_response();
-                    }
-                }
             }
         }
 
@@ -2645,6 +2635,118 @@ pub(super) async fn admin_batch_update_upstreams(
                 };
                 failed.push(json!({ "id": id, "error": message }));
             }
+        }
+    }
+
+    Json(json!({ "updated": updated, "failed": failed })).into_response()
+}
+
+/// Batch update downstream operational fields. `updates` is a partial-merge
+/// payload applied per id (same semantics as the single-downstream PUT via
+/// `apply_downstream_updates`); the allow-list below must match the set of
+/// fields that merge supports — anything else is rejected up front instead of
+/// being silently ignored.
+#[derive(serde::Deserialize)]
+pub(super) struct BatchDownstreamUpdateRequest {
+    ids: Vec<String>,
+    updates: serde_json::Value,
+}
+
+/// Operational fields that may be changed in a batch update across downstream
+/// keys. Deliberately excludes the identity/credential fields (`id`, `hash`,
+/// `plaintext_key`, `plaintext_key_prefix`): mutating any of them across many
+/// keys at once risks identity/credential collisions (they stay available on
+/// the single-downstream PUT endpoint).
+const BATCH_UPDATE_DOWNSTREAM_ALLOWED_FIELDS: &[&str] = &[
+    "name",
+    "active",
+    "max_concurrency",
+    "rate_limit_enabled",
+    "per_minute_limit",
+    "billing_mode",
+    "request_quota_window_hours",
+    "request_quota_requests",
+    "model_allowlist",
+    "ip_allowlist",
+    "daily_token_limit",
+    "monthly_token_limit",
+    "input_token_price_per_million_cents",
+    "output_token_price_per_million_cents",
+    "daily_cost_limit_cents",
+    "model_concurrency_groups",
+];
+
+pub(super) async fn admin_batch_update_downstreams(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchDownstreamUpdateRequest>,
+) -> impl IntoResponse {
+    if payload.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "message": "ids must not be empty" }
+            })),
+        )
+            .into_response();
+    }
+    let update_object = match payload.updates.as_object() {
+        Some(object) => object,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "updates must be a JSON object of field -> value"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    // Whitelist gate: reject unknown/forbidden fields up front, listing the
+    // offending names. Never silently ignore — a typo'd or identity field
+    // would otherwise look like a successful edit and confuse operators.
+    let mut rejected: Vec<&str> = update_object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !BATCH_UPDATE_DOWNSTREAM_ALLOWED_FIELDS.contains(key))
+        .collect();
+    rejected.sort_unstable();
+    rejected.dedup();
+    if !rejected.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": format!(
+                        "batch update rejected fields outside the allow-list: {}",
+                        rejected.join(", ")
+                    ),
+                    "code": "batch_update_rejected_fields",
+                    "rejected_fields": rejected,
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let snapshot = state.snapshot().await;
+    let mut updated: Vec<String> = Vec::new();
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+    for id in &payload.ids {
+        let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == *id).cloned()
+        else {
+            failed.push(json!({ "id": id, "error": "not found" }));
+            continue;
+        };
+        if let Err(message) = apply_downstream_updates(&mut downstream, update_object) {
+            failed.push(json!({ "id": id, "error": message }));
+            continue;
+        }
+        match state.update_downstream(id, downstream).await {
+            Ok(true) => updated.push(id.clone()),
+            Ok(false) => failed.push(json!({ "id": id, "error": "not found" })),
+            Err(error) => failed.push(json!({ "id": id, "error": error.to_string() })),
         }
     }
 

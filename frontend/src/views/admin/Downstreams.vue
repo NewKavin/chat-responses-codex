@@ -7,6 +7,9 @@
         <p class="crc-page-description">管理门户身份、可用模型、调用限额、生命周期和访问密钥。</p>
       </div>
       <div style="display: flex; gap: 8px; align-items: center;">
+        <el-button :disabled="!selectedRows.length" @click="batchUpdateVisible = true">
+          <SlidersHorizontal :size="15" :stroke-width="2" style="margin-right: 5px" />批量修改字段
+        </el-button>
         <el-button :disabled="!selectedRows.length" @click="batchDialogVisible = true">
           <Settings2 :size="15" :stroke-width="2" style="margin-right: 5px" />批量设置计费模式
         </el-button>
@@ -388,6 +391,71 @@
       </template>
     </el-dialog>
 
+    <!-- Batch Update Downstream Fields (C7.3) -->
+    <el-dialog
+      v-model="batchUpdateVisible"
+      title="批量修改下游字段"
+      width="min(620px, calc(100vw - 32px))"
+      :close-on-click-modal="false"
+    >
+      <p class="batch-update-hint">
+        将对选中的 {{ selectedRows.length }} 个下游应用以下字段（不填的字段保持不变）。
+      </p>
+      <el-form label-position="top">
+        <el-form-item label="并发限制（全局兜底）">
+          <el-input-number v-model="batchUpdateForm.max_concurrency" :min="1" :max="5000" controls-position="right" />
+          <span class="batch-update-clear" @click="batchUpdateForm.max_concurrency = undefined">清除</span>
+        </el-form-item>
+        <el-form-item label="限额开关">
+          <el-radio-group v-model="batchUpdateForm.rate_limit_enabled">
+            <el-radio label="keep">保持不变</el-radio>
+            <el-radio label="true">开启</el-radio>
+            <el-radio label="false">关闭</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="启用状态">
+          <el-radio-group v-model="batchUpdateForm.active">
+            <el-radio label="keep">保持不变</el-radio>
+            <el-radio label="true">启用</el-radio>
+            <el-radio label="false">禁用</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="模型并发组">
+          <div class="concurrency-groups">
+            <div v-for="(group, index) in batchConcurrencyGroups" :key="index" class="concurrency-group-row">
+              <el-input v-model="group.name" placeholder="组名，如 deepseek" class="group-name-input" />
+              <el-input v-model="group.matchText" placeholder="匹配模型，逗号分隔，支持 * 通配" class="group-match-input" />
+              <el-input-number v-model="group.max_concurrency" :min="1" :max="5000" class="group-cap-input" />
+              <el-button
+                :icon="Trash2"
+                circle
+                size="small"
+                :aria-label="`删除模型组 ${group.name || index + 1}`"
+                @click="removeBatchGroup(index)"
+              />
+            </div>
+            <el-button size="small" @click="addBatchGroup">
+              <Plus :size="13" :stroke-width="2" style="margin-right: 4px" />添加模型组
+            </el-button>
+            <el-checkbox v-model="batchUpdateForm.clearGroups">清空所选下游的模型并发组</el-checkbox>
+            <el-alert
+              title="说明"
+              type="info"
+              :closable="false"
+              class="helper-text"
+            >
+              添加了模型组则替换所选下游的整组配置（按序先匹配先生效）；勾选「清空」则设为空数组；
+              两者都不操作则保持不变。未命中任何组的模型仍走上方「并发限制」全局兜底。
+            </el-alert>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchUpdateVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchUpdating" @click="submitBatchUpdate">提交修改</el-button>
+      </template>
+    </el-dialog>
+
     <!-- Rotate Key Dialog -->
     <el-dialog
       v-model="rotateDialogVisible"
@@ -446,6 +514,7 @@ import {
   Search,
   Settings2,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Wallet
 } from '@lucide/vue'
@@ -502,6 +571,31 @@ const batchForm = ref({
   output_token_price_per_million_cents: undefined as number | undefined,
   daily_cost_limit_cents: undefined as number | undefined
 })
+const batchUpdateVisible = ref(false)
+const batchUpdating = ref(false)
+const batchUpdateForm = ref({
+  max_concurrency: undefined as number | undefined,
+  rate_limit_enabled: 'keep' as 'keep' | 'true' | 'false',
+  active: 'keep' as 'keep' | 'true' | 'false',
+  clearGroups: false
+})
+const batchConcurrencyGroups = ref<ConcurrencyGroupUI[]>([])
+
+const addBatchGroup = () => {
+  batchConcurrencyGroups.value.push({ name: '', matchText: '', max_concurrency: 4 })
+}
+const removeBatchGroup = (index: number) => {
+  batchConcurrencyGroups.value.splice(index, 1)
+}
+const resetBatchUpdateForm = () => {
+  batchUpdateForm.value = {
+    max_concurrency: undefined,
+    rate_limit_enabled: 'keep',
+    active: 'keep',
+    clearGroups: false
+  }
+  batchConcurrencyGroups.value = []
+}
 
 const filters = ref({
   status: 'all',
@@ -918,6 +1012,70 @@ const submitBatchMode = async () => {
   }
 }
 
+const submitBatchUpdate = async () => {
+  try {
+    const ids = selectedRows.value.map(row => row.id)
+    const updates: Record<string, unknown> = {}
+    if (batchUpdateForm.value.max_concurrency !== undefined) {
+      updates.max_concurrency = batchUpdateForm.value.max_concurrency
+    }
+    if (batchUpdateForm.value.rate_limit_enabled !== 'keep') {
+      updates.rate_limit_enabled = batchUpdateForm.value.rate_limit_enabled === 'true'
+    }
+    if (batchUpdateForm.value.active !== 'keep') {
+      updates.active = batchUpdateForm.value.active === 'true'
+    }
+    if (batchUpdateForm.value.clearGroups) {
+      updates.model_concurrency_groups = []
+    } else if (batchConcurrencyGroups.value.length) {
+      const groups = batchConcurrencyGroups.value.map(group => ({
+        name: group.name.trim(),
+        match: group.matchText.split(/[,，\n]/).map(s => s.trim()).filter(Boolean),
+        max_concurrency: group.max_concurrency
+      }))
+      const seen = new Set<string>()
+      for (const group of groups) {
+        if (!group.name) {
+          ElMessage.error('模型并发组：组名不能为空')
+          return
+        }
+        if (seen.has(group.name)) {
+          ElMessage.error(`模型并发组：组名重复：${group.name}`)
+          return
+        }
+        seen.add(group.name)
+        if (!group.match.length) {
+          ElMessage.error(`模型并发组「${group.name}」：匹配模型列表不能为空`)
+          return
+        }
+        if (!group.max_concurrency || group.max_concurrency < 1) {
+          ElMessage.error(`模型并发组「${group.name}」：并发上限必须 ≥ 1`)
+          return
+        }
+      }
+      updates.model_concurrency_groups = groups
+    }
+    batchUpdating.value = true
+    const { data } = await adminApi.batchUpdateDownstreams(ids, updates)
+    if (data.failed.length) {
+      ElMessage.warning(
+        `已更新 ${data.updated.length} 个下游，${data.failed.length} 个失败：` +
+          data.failed.map(f => `${f.id}: ${f.error}`).join('；')
+      )
+    } else {
+      ElMessage.success(`已更新 ${data.updated.length} 个下游`)
+    }
+    batchUpdateVisible.value = false
+    resetBatchUpdateForm()
+    loadData()
+  } catch (error: any) {
+    const message = error?.response?.data?.error?.message
+    ElMessage.error(message ? `批量修改失败：${message}` : '批量修改失败')
+  } finally {
+    batchUpdating.value = false
+  }
+}
+
 const isDocumentVisible = () =>
   typeof document === 'undefined' || document.visibilityState === 'visible'
 
@@ -1062,6 +1220,20 @@ code {
   display: flex;
   gap: 12px;
   width: 100%;
+}
+
+.batch-update-hint {
+  margin: 0 0 14px;
+  color: var(--crc-text-muted);
+  font-size: 13px;
+}
+
+.batch-update-clear {
+  margin-left: 10px;
+  color: var(--crc-accent);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .concurrency-groups {

@@ -1172,3 +1172,340 @@ async fn downstream_batch_set_mode_clears_cost_billing_fields() {
     assert_eq!(downstream.output_token_price_per_million_cents, None);
     assert_eq!(downstream.daily_cost_limit_cents, None);
 }
+
+#[tokio::test]
+async fn downstream_batch_update_sets_groups_and_operational_fields() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1", "downstream-2"],
+                        "updates": {
+                            "max_concurrency": 32,
+                            "active": true,
+                            "model_concurrency_groups": [
+                                { "name": "glm", "match": ["glm-5.2", "glm-5.1"], "max_concurrency": 4 },
+                                { "name": "deepseek", "match": ["deepseek-*"], "max_concurrency": 28 }
+                            ]
+                        }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let updated = payload["updated"].as_array().unwrap();
+    assert_eq!(
+        updated,
+        &vec![json!("downstream-1"), json!("downstream-2")],
+        "unexpected updated list: {payload}"
+    );
+    assert!(
+        payload["failed"].as_array().unwrap().is_empty(),
+        "unexpected failures: {payload}"
+    );
+
+    let snapshot = state.snapshot().await;
+    for id in ["downstream-1", "downstream-2"] {
+        let downstream = snapshot.downstreams.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(downstream.max_concurrency, 32);
+        assert!(downstream.active);
+        assert_eq!(downstream.model_concurrency_groups.len(), 2);
+        assert_eq!(downstream.model_concurrency_groups[0].name, "glm");
+        assert_eq!(
+            downstream.model_concurrency_groups[0].patterns,
+            vec!["glm-5.2".to_string(), "glm-5.1".to_string()]
+        );
+        assert_eq!(downstream.model_concurrency_groups[0].max_concurrency, 4);
+        assert_eq!(downstream.model_concurrency_groups[1].name, "deepseek");
+        // The reservation code path must honor the group for the C7 semantics
+        // (probed below on the local backend).
+        assert_eq!(downstream.model_concurrency_groups[1].max_concurrency, 28);
+    }
+}
+
+#[tokio::test]
+async fn downstream_batch_update_whitelisted_groups_actually_gate_concurrency() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Batch-apply a small glm group cap, then verify the downstream gate
+    // enforces it per group (batch-set fields take effect for later requests).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1"],
+                        "updates": {
+                            "model_concurrency_groups": [
+                                { "name": "glm", "match": ["glm-*"], "max_concurrency": 1 }
+                            ]
+                        }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap()
+        .clone();
+
+    let first = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+        .await
+        .expect("first glm lease within group cap");
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.1")
+        .await
+        .expect_err("second glm lease must hit the group cap");
+    let (limit, group) = match rejection {
+        chat_responses_codex::state::DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+            limit,
+            group,
+            ..
+        } => (limit, group),
+        other => panic!("unexpected rejection: {other:?}"),
+    };
+    assert_eq!(limit, 1);
+    assert_eq!(group.as_deref(), Some("glm"));
+    drop(first);
+}
+
+#[tokio::test]
+async fn downstream_batch_update_rejects_whitelist_violations() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1"],
+                        "updates": {
+                            "max_concurrency": 16,
+                            "plaintext_key": "sk-should-be-rejected"
+                        }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "batch_update_rejected_fields");
+    let rejected = payload["error"]["rejected_fields"].as_array().unwrap();
+    assert_eq!(
+        rejected,
+        &vec![json!("plaintext_key")],
+        "rejected fields must list the offending name(s)"
+    );
+    // Nothing was applied: the whitelist gates the whole batch up front.
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert_eq!(downstream.max_concurrency, 10);
+}
+
+#[tokio::test]
+async fn downstream_batch_update_rejects_empty_ids_and_non_object_updates() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Empty ids
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({ "ids": [], "updates": {} })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Non-object updates
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({ "ids": ["downstream-1"], "updates": 42 }))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn downstream_batch_update_reports_missing_id_per_item() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // A missing id fails per-item while the valid ids still update
+    // (partial failure, no whole-batch rollback).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1", "missing-id", "downstream-2"],
+                        "updates": { "active": false }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+
+    let updated = payload["updated"].as_array().unwrap();
+    assert_eq!(updated, &vec![json!("downstream-1"), json!("downstream-2")]);
+    let failed = payload["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["id"], json!("missing-id"));
+
+    // Valid ids were actually persisted; the missing id changed nothing.
+    let snapshot = state.snapshot().await;
+    for id in ["downstream-1", "downstream-2"] {
+        let downstream = snapshot.downstreams.iter().find(|d| d.id == id).unwrap();
+        assert!(!downstream.active);
+    }
+}
+
+#[tokio::test]
+async fn downstream_batch_update_reports_invalid_group_per_item() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // An invalid group list (empty name) is a per-item validation failure:
+    // model_concurrency_groups IS whitelisted, so the batch is not rejected up
+    // front; each affected downstream reports the validation message and no
+    // field is persisted.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1", "downstream-2"],
+                        "updates": {
+                            "model_concurrency_groups": [
+                                { "name": "", "match": ["glm-*"], "max_concurrency": 4 }
+                            ]
+                        }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(payload["updated"].as_array().unwrap().is_empty());
+    let failed = payload["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 2);
+    for entry in failed {
+        assert!(
+            entry["error"]
+                .as_str()
+                .unwrap()
+                .contains("group name must not be empty"),
+            "unexpected per-item error: {entry}"
+        );
+    }
+
+    // Nothing persisted.
+    let snapshot = state.snapshot().await;
+    for id in ["downstream-1", "downstream-2"] {
+        let downstream = snapshot.downstreams.iter().find(|d| d.id == id).unwrap();
+        assert!(downstream.model_concurrency_groups.is_empty());
+    }
+}
