@@ -213,6 +213,12 @@ Relevant settings (see `Runtime Settings Operations`):
 | `upstream_error_body_excerpt_max_chars` | 200 | Maximum excerpt length (50–2000); longer bodies are truncated with `…`. Only read when the excerpt switch is on. |
 | `upstream_continuation_pin_escape_enabled` | true | When the previously-successful continuation route is unavailable, allow the gateway to purge supplier-bound artifacts from the session history and re-run the full candidate pool, re-pinning the session to a working route. Off = the session can only wait for the original route to recover. |
 | `upstream_local_lease_ttl_seconds` | 3600 | Local-backend fallback TTL for upstream concurrency leases that were never released (reclaimed lazily, renewed for running streams). Lower than the longest stream duration would reclaim live slots; keep above `upstream_stream_max_duration_seconds`. Redis backend ignores this (its leases already carry a TTL). |
+| `upstream_account_queue_enabled` | true | When a round fails purely because the local pre-dispatch concurrency gate is full (no upstream attempt was made), queue the request behind the free slot (C3) instead of rejecting + retrying. Off = immediate rejection (which then uses the C4 fast-fail / legacy code). |
+| `upstream_account_queue_max_depth` | 16 | Bound on how many requests may wait on one (upstream, key) local-concurrency queue at a time; overflow fast-fails. |
+| `upstream_account_queue_max_wait_ms` | 10000 | Deadline for a queued local-concurrency wait; expiry fast-fails with the C4.2 error code. |
+| `upstream_local_gate_max_wait_ms` | 3000 | Bounds the C4.1 fast-fail scenario: a round served entirely by local-gate rejections gives up immediately instead of burning the 30s ConcurrencySaturated budget. It realises as an immediate rejection, so a lowered value also lowers the worst-case client wait for a fully-saturated single-key upstream. |
+| `upstream_local_gate_fast_fail_enabled` | true | Master switch for C4.1. On: a round whose every candidate was rejected by the *local gate* (zero physical upstream attempts) fast-fails. Off: old behavior (falls into the ConcurrencySaturated retry budget). |
+| `upstream_local_gate_distinct_error_code_enabled` | true | C4.2: terminal code `gateway_concurrency_saturated` (HTTP still 429) so a gateway-gate fact is never misread as upstream rate limiting. Off: legacy `upstream_routes_exhausted` aggregation for local-gate rejections. |
 
 Recommended values for a single aggregated gateway deployment:
 
@@ -267,7 +273,27 @@ Keep these as-is for the aggregated-gateway shape:
 
 - **Concurrency capacity (the other half of `upstream_routes_exhausted`):**
   each upstream admits at most `max_concurrency` concurrent streams per
-  (upstream, key) — default **4**. Claude Code / Codex spawn parallel
+  (upstream, key) — default **4**.
+
+> **`ConcurrencySaturated` has its own retry budget — do not compare rounds (C4.3).**
+> The ConcurrencySaturated path (429 family, including the gateway's own local
+> gate) runs on `upstream_concurrency_recovery_max_rounds = 32` and
+> `upstream_concurrency_recovery_max_wait_ms = 30_000`,
+> completely independent of `upstream_route_exhaustion_retry_max_rounds = 3`.
+> An error message that says "retried for 32.1s across 6 routing rounds" is
+> *not* evidence the round cap was changed or exceeded — it used the 30s
+> time budget of the concurrency path and is well below 32 rounds. Do not
+> "fix" the round count; the numbers are not comparable.
+> - Since C4, a request that never reaches the upstream and only ever hits the
+>   gateway's own local gate (leaked/held slots, `max_concurrency` reached)
+>   fast-fails with code `gateway_concurrency_saturated` (HTTP 429) instead of
+>   spooling through that budget — bounded by
+>   `upstream_local_gate_max_wait_ms`. Read its
+>   `details.in_flight / max_concurrency / stale_lease_count / queue_depth` to
+>   see whether live requests or stale leases hold the slots.
+> - A route-health `ConcurrencySaturated` recovery (upstream actually returned
+>   429, or a cooldown is in flight) is *not* a local-gate verdict and still
+>   waits on the 32-round budget via the shared-probe recovery. Claude Code / Codex spawn parallel
   sub-tasks and hold long streams, so a small team can pin 4 slots for
   minutes. If `details.class_counts.concurrency_saturated` (or the
   `concurrency_saturated` share of 429s) stays high after the half-open /
@@ -316,6 +342,21 @@ Troubleshooting:
   upstream hosts failed identically even after the replay round. Check the
   shared egress / aggregated gateway, not the request. `details` include
   `failed_route_count`, `distinct_hosts`, `streak`, `threshold`.
+- Downstream sees `429 gateway_concurrency_saturated` (C4): the gateway's
+  *own* local pre-dispatch gate rejected the request — the upstream was never
+  called and is **not** rate limiting you. Read `details`:
+  - `in_flight` / `max_concurrency` — how many of the (upstream, key) slots
+    are held (`in_flight == max_concurrency` with nothing actually running ⇒ a
+    leaked lease; it self-heals via `upstream_lease_stale_after_ms`).
+  - `stale_lease_count` — leases whose heartbeat lapsed; a non-zero count
+    means slots are held by dead owners that the stale sweep is about to free.
+  - `queue_depth` — how many requests are queued behind the gate (C3).
+  - `retry_after_source: "local_gate"` — this 429 is a gateway-gate fact, not
+    an upstream signal; do not tune the upstream's rate limits.
+  - Mitigation: check `in_flight` for leaks, raise per-upstream
+    `max_concurrency` only if the upstream truly allows more, or use the
+    Admin `POST /api/admin/upstreams/{id}/concurrency/reset` endpoint to
+    clear held leases immediately.
 - Downstream sees `503 upstream_routes_exhausted` (or `429` for a pure
   rate-limit family): read the error `details` to tell *why* the gateway gave
   up and how to tune:
