@@ -4943,6 +4943,7 @@ async fn test_upstreams_batch_requires_jwt_token() {
     for uri in [
         "/api/admin/upstreams/batch-toggle",
         "/api/admin/upstreams/batch-delete",
+        "/api/admin/upstreams/batch-update",
     ] {
         let response = app
             .clone()
@@ -4958,6 +4959,183 @@ async fn test_upstreams_batch_requires_jwt_token() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+}
+
+// ============================================================================
+// C6 — batch update upstream fields
+// ============================================================================
+
+#[tokio::test]
+async fn test_upstreams_batch_update_changes_operational_fields() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "ids": ["upstream-b1", "upstream-b2"],
+                        "updates": {
+                            "max_concurrency": 7,
+                            "active": false,
+                            "priority": 3
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["updated"], json!(["upstream-b1", "upstream-b2"]));
+    assert_eq!(result["failed"].as_array().unwrap().len(), 0);
+
+    let snapshot = state.snapshot().await;
+    let by_id = |id: &str| snapshot.upstreams.iter().find(|u| u.id == id).unwrap();
+    assert_eq!(by_id("upstream-b1").max_concurrency, 7);
+    assert_eq!(by_id("upstream-b2").max_concurrency, 7);
+    assert!(!by_id("upstream-b1").active);
+    assert!(!by_id("upstream-b2").active);
+    assert_eq!(by_id("upstream-b1").priority, 3);
+    // upstream-b3 untouched.
+    assert_eq!(by_id("upstream-b3").max_concurrency, 4);
+    assert!(by_id("upstream-b3").active);
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_update_is_partial_merge_per_id() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Only touch max_concurrency; the rest of each upstream must survive.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "ids": ["upstream-b1", "upstream-b2", "missing-id"],
+                        "updates": { "max_concurrency": 9 }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["updated"], json!(["upstream-b1", "upstream-b2"]));
+    assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+    assert_eq!(result["failed"][0]["id"], "missing-id");
+
+    let snapshot = state.snapshot().await;
+    let by_id = |id: &str| snapshot.upstreams.iter().find(|u| u.id == id).unwrap();
+    assert_eq!(by_id("upstream-b1").max_concurrency, 9);
+    assert_eq!(by_id("upstream-b1").base_url, "https://api.b1.example.com");
+    assert_eq!(by_id("upstream-b1").api_key, "sk-b1");
+    assert!(by_id("upstream-b1").active);
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_update_rejects_whitelist_violations() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Credential + identity + typo fields must be rejected up front, with the
+    // offending names listed — never silently ignored.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "ids": ["upstream-b1"],
+                        "updates": {
+                            "api_key": "sk-leak",
+                            "id": "upstream-b1",
+                            "max_concurreny": 10
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["error"]["code"], "batch_update_rejected_fields");
+    let rejected = result["error"]["rejected_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(rejected.contains(&"api_key"));
+    assert!(rejected.contains(&"id"));
+    assert!(rejected.contains(&"max_concurreny"));
+
+    // Nothing was mutated.
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-b1")
+        .unwrap();
+    assert_eq!(upstream.max_concurrency, 4);
+    assert_eq!(upstream.api_key, "sk-b1");
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_update_rejects_empty_ids() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ids": [], "updates": { "max_concurrency": 5 } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 // ============================================================================

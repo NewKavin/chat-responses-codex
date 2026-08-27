@@ -29,6 +29,13 @@
           <Trash2 :size="15" :stroke-width="2" style="margin-right: 5px" />
           批量删除<template v-if="selectedUpstreams.length">（{{ selectedUpstreams.length }}）</template>
         </el-button>
+        <el-button
+          :disabled="selectedUpstreams.length === 0"
+          @click="openBatchUpdate"
+        >
+          <Settings2 :size="15" :stroke-width="2" style="margin-right: 5px" />
+          批量修改字段<template v-if="selectedUpstreams.length">（{{ selectedUpstreams.length }}）</template>
+        </el-button>
         <el-button type="primary" @click="handleCreate">
           <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建上游
         </el-button>
@@ -516,12 +523,48 @@
         </div>
       </template>
     </el-drawer>
+
+    <!-- Batch update upstream fields (C6) -->
+    <el-dialog
+      v-model="batchUpdateVisible"
+      title="批量修改上游字段"
+      width="480px"
+      :close-on-click-modal="false"
+      @closed="resetBatchUpdateForm"
+    >
+      <p class="batch-update-hint">
+        将对选中的 {{ selectedUpstreams.length }} 个上游应用以下字段（不填的字段保持不变）。
+      </p>
+      <el-form label-position="top">
+        <el-form-item label="每 Key 最大并发">
+          <el-input-number v-model="batchUpdateForm.max_concurrency" :min="1" :max="1000" controls-position="right" />
+          <span class="batch-update-clear" @click="batchUpdateForm.max_concurrency = undefined">清除</span>
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-input-number v-model="batchUpdateForm.priority" :min="0" :max="1000" controls-position="right" />
+          <span class="batch-update-clear" @click="batchUpdateForm.priority = undefined">清除</span>
+        </el-form-item>
+        <el-form-item label="启用状态">
+          <el-radio-group v-model="batchUpdateForm.active">
+            <el-radio :label="'keep'">保持不变</el-radio>
+            <el-radio :label="'true'">启用</el-radio>
+            <el-radio :label="'false'">禁用</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchUpdateVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchUpdating" @click="submitBatchUpdate">
+          提交修改
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
-import { Activity, CircleCheck, CircleSlash, PlugZap, Plus, RefreshCw, Search, Trash2 } from '@lucide/vue'
+import { Activity, CircleCheck, CircleSlash, PlugZap, Plus, RefreshCw, Search, Settings2, Trash2 } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
@@ -1310,6 +1353,74 @@ const handleBatchDelete = async () => {
   }
 }
 
+interface BatchUpdateForm {
+  max_concurrency?: number
+  priority?: number
+  active: 'keep' | 'true' | 'false'
+}
+
+const batchUpdateVisible = ref(false)
+const batchUpdating = ref(false)
+const batchUpdateForm = ref<BatchUpdateForm>({ active: 'keep' })
+
+const openBatchUpdate = () => {
+  batchUpdateForm.value = { active: 'keep' }
+  batchUpdateVisible.value = true
+}
+
+const resetBatchUpdateForm = () => {
+  batchUpdateForm.value = { active: 'keep' }
+}
+
+const submitBatchUpdate = async () => {
+  const ids = selectedUpstreams.value.map(row => row.id)
+  if (ids.length === 0) return
+  const updates: Record<string, unknown> = {}
+  if (batchUpdateForm.value.max_concurrency !== undefined) {
+    updates.max_concurrency = batchUpdateForm.value.max_concurrency
+  }
+  if (batchUpdateForm.value.priority !== undefined) {
+    updates.priority = batchUpdateForm.value.priority
+  }
+  if (batchUpdateForm.value.active !== 'keep') {
+    updates.active = batchUpdateForm.value.active === 'true'
+  }
+  if (Object.keys(updates).length === 0) {
+    ElMessage.warning('请至少填写一个要修改的字段')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定对选中的 ${ids.length} 个上游应用这些字段修改吗？`,
+      '批量修改字段',
+      { type: 'warning' }
+    )
+    batchUpdating.value = true
+    const { data } = await adminApi.batchUpdateUpstreams(ids, updates)
+    const failedCount = data.failed.length
+    if (data.updated.length > 0) {
+      ElMessage.success(
+        `已更新 ${data.updated.length} 个上游${failedCount ? `，${failedCount} 个失败` : ''}`
+      )
+    } else {
+      ElMessage.error(`批量修改失败：${data.failed.map(f => f.error).join('；') || '未知错误'}`)
+    }
+    if (failedCount > 0) {
+      ElMessage.warning(
+        `失败项：${data.failed.map(f => `${f.id}（${f.error}）`).join('；')}`
+      )
+    }
+    batchUpdateVisible.value = false
+    loadData()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('批量修改字段失败')
+    }
+  } finally {
+    batchUpdating.value = false
+  }
+}
+
 const fetchModels = async () => {
   if (!form.value.base_url || !form.value.api_key) {
     ElMessage.warning('请先填写 Base URL 和 API Key')
@@ -1545,6 +1656,20 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 14px;
+}
+
+.batch-update-hint {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--crc-text-muted, #888);
+}
+
+.batch-update-clear {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--crc-accent);
+  cursor: pointer;
+  user-select: none;
 }
 
 @media (max-width: 767px) {

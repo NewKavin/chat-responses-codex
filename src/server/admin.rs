@@ -2429,6 +2429,41 @@ pub(super) struct BatchUpstreamDeleteRequest {
     ids: Vec<String>,
 }
 
+/// Batch update upstream fields. `updates` is a partial-merge payload reused
+/// verbatim by `update_upstream_by_id`, so the allow-list below must match the
+/// set of *operational* fields that function actually merges — anything the
+/// partial-merge does not support (identity / credential / routing fields) is
+/// rejected up front instead of being silently ignored.
+#[derive(serde::Deserialize)]
+pub(super) struct BatchUpstreamUpdateRequest {
+    ids: Vec<String>,
+    updates: serde_json::Value,
+}
+
+/// Operational fields that may be changed in a batch update. Deliberately
+/// excludes `id`, `base_url`, `api_key`, `api_keys`, `api_key_models`,
+/// `supported_models`, `model_mappings`, `protocol(s)`, `model_contexts`,
+/// `continuation_provider_group` and `_replace_api_keys`: mutating any of them
+/// across many accounts at once risks silent identity/credential collisions
+/// (they stay available on the single-upstream PUT endpoint).
+const BATCH_UPDATE_UPSTREAM_ALLOWED_FIELDS: &[&str] = &[
+    "name",
+    "remark",
+    "max_concurrency",
+    "active",
+    "priority",
+    "request_quota_window_hours",
+    "request_quota_requests",
+    "request_quota_5h",
+    "requests_per_minute",
+    "premium_models",
+    "premium_only",
+    "protect_premium_quota",
+    "strip_nonstandard_chat_fields",
+    "dialect_preset",
+    "model_dialect_presets",
+];
+
 pub(super) async fn admin_batch_toggle_upstreams(
     State(state): State<AppState>,
     Json(payload): Json<BatchUpstreamToggleRequest>,
@@ -2489,6 +2524,85 @@ pub(super) async fn admin_batch_delete_upstreams(
     }
 
     Json(json!({ "deleted": deleted, "failed": failed })).into_response()
+}
+
+pub(super) async fn admin_batch_update_upstreams(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchUpstreamUpdateRequest>,
+) -> impl IntoResponse {
+    if payload.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "message": "ids must not be empty" }
+            })),
+        )
+            .into_response();
+    }
+    let update_object = match payload.updates.as_object() {
+        Some(object) => object,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "updates must be a JSON object of field -> value"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    // Whitelist gate: reject unknown/forbidden fields up front, listing the
+    // offending names.  Never silently ignore — a typo'd or identity field
+    // would otherwise look like a successful edit and confuse operators.
+    let mut rejected: Vec<&str> = update_object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !BATCH_UPDATE_UPSTREAM_ALLOWED_FIELDS.contains(key))
+        .collect();
+    rejected.sort_unstable();
+    rejected.dedup();
+    if !rejected.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": format!(
+                        "batch update rejected fields outside the allow-list: {}",
+                        rejected.join(", ")
+                    ),
+                    "code": "batch_update_rejected_fields",
+                    "rejected_fields": rejected,
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let mut updated: Vec<String> = Vec::new();
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+    for id in &payload.ids {
+        match state
+            .update_upstream_by_id(id, payload.updates.clone())
+            .await
+        {
+            Ok(_) => updated.push(id.clone()),
+            Err(error) => {
+                let message = match &error {
+                    UpstreamMutationError::NotFound(message) => message.clone(),
+                    UpstreamMutationError::InvalidInput(message) => message.clone(),
+                    UpstreamMutationError::Persist(message) => message.clone(),
+                    UpstreamMutationError::RuntimeCoordination(_) => {
+                        "runtime coordination unavailable".to_string()
+                    }
+                };
+                failed.push(json!({ "id": id, "error": message }));
+            }
+        }
+    }
+
+    Json(json!({ "updated": updated, "failed": failed })).into_response()
 }
 
 pub(super) async fn admin_batch_set_downstream_mode(

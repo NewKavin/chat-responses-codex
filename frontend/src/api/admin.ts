@@ -348,6 +348,11 @@ export const adminApi = {
       '/admin/upstreams/batch-delete',
       { ids }
     ),
+  batchUpdateUpstreams: (ids: string[], updates: Record<string, unknown>) =>
+    adminHttp.post<{
+      updated: string[]
+      failed: Array<{ id: string; error: string }>
+    }>('/admin/upstreams/batch-update', { ids, updates }),
 
   // Downstreams
   getDownstreams: (params?: { status?: string; lifecycle?: string; search?: string }) =>
