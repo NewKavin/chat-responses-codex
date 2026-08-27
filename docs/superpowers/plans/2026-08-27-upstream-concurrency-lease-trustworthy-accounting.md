@@ -468,7 +468,7 @@ pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 | C6.3 | 前端批量修改字段 | `f8a20bc` | ✅ |
 | C7.1 | `per_model_max_concurrency` + 闸门按 (key, 组) 计数 | `a47f237` | ✅ 字段名落点为 `DownstreamConfig.model_concurrency_groups`（`Vec<ModelConcurrencyGroup>`，`serde(rename="match")`），见下方「C7 字段名偏离说明」；本地 + Redis 双后端一致，全局兜底保留 |
 | C7.2 | 队头阻塞回归测试 + 组超限错误信息 | `a47f237` | ✅ `tests/downstream_quota.rs` HOL 回归 + 组超限错误信息（message/details 带组名）；Redis 后端另有 3 个 ignored live 测试（未执行，见 §6.1） |
-| C7.3 | 前端配置 + 运维文档配置指引 | `d3fae88` + `6b95ca0` | ✅ 前端 Downstreams.vue 组编辑（`d3fae88`）+ DEPLOYMENT.md 配置指引与三条运维规则（`6b95ca0`） |
+| C7.3 | 前端配置 + 运维文档配置指引 | `d3fae88` + `6b95ca0` + `139a51b` | ✅ 前端 Downstreams.vue 组编辑（`d3fae88`）+ DEPLOYMENT.md 配置指引与三条运维规则（`6b95ca0`）+ 批量改字段 `POST /api/admin/downstreams/batch-update`（`139a51b`，兑现「可运维」条款：`model_concurrency_groups` 进入批量白名单，多个下游 key 共用同一套组可一次维护） |
 
 **C7 字段名偏离说明**：方案原文的字段名是 `per_model_max_concurrency`；实现落点为
 `DownstreamConfig.model_concurrency_groups: Vec<ModelConcurrencyGroup>`，其中
@@ -483,7 +483,7 @@ pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 | --- | --- | --- | --- |
 | fmt | `rtk proxy cargo fmt --check` | 0 | ✅ |
 | clippy | `rtk proxy cargo clippy --all-targets` | 0 | ✅（仅既有 `field_reassign_with_default` warning，非 C7 文件） |
-| test | `rtk proxy cargo test` | 0 | ✅ 62 套件 / 1819 passed / 0 failed / 91 ignored |
+| test | `rtk proxy cargo test` | 0 | ✅ 62 套件 / 1825 passed / 0 failed / 91 ignored |
 | lib | `rtk proxy cargo test --lib` | 0 | ✅ 248 passed / 0 failed |
 | redis (live) | `TEST_REDIS_URL=… rtk proxy cargo test --test redis_runtime -- --ignored` | — | **未执行**（本地无 Redis）；非 ignored 的 replay/threading 守卫（含 C7 三参数串接 `redis_lua_scripts_thread_the_c7_downstream_group_limits`）已在常规套件中通过（redis_runtime 套件 10 passed / 88 ignored） |
 | redis | `REDIS_URL=… cargo test --test redis_runtime -- --ignored` | | 通过数 或「未执行」 |
