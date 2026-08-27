@@ -37,7 +37,20 @@ fn test_state(upstream: &UpstreamConfig) -> (AppState, tempfile::TempDir) {
 #[tokio::test(start_paused = true)]
 async fn leaked_lease_is_reclaimed_after_local_ttl() {
     let upstream = test_upstream("leak-reclaim");
-    let (state, _directory) = test_state(&upstream);
+    let mut config = AppConfig::default();
+    // C2.3: push the stale threshold far past the TTL so this test pins the
+    // expiry-based reclamation (`leaked_reclaimed_total`) instead of the stale
+    // path — the stale path has its own dedicated test below.
+    config.upstream_lease_stale_after_ms = 86_400_000;
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        config,
+    );
     let account = ("leak-reclaim".to_string(), "fingerprint-leak".to_string());
 
     let lease = state
@@ -58,8 +71,12 @@ async fn leaked_lease_is_reclaimed_after_local_ttl() {
         UpstreamAdmissionRejectionReason::LocalConcurrency
     ));
 
-    // Advance past the default local lease TTL (3600s): the slot must free.
-    advance(Duration::from_secs(3_661)).await;
+    // Advance past the default local lease TTL (300s): the slot must free.
+    // C2.3 stale reclamation is disabled for this test (stale_after pushed
+    // past the TTL) so it exercises the expiry path (`leaked_reclaimed_total`)
+    // rather than the stale path (`stale_reclaimed_total`), which has its own
+    // dedicated test below.
+    advance(Duration::from_secs(361)).await;
 
     let replacement = state
         .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
@@ -95,7 +112,7 @@ async fn long_stream_lease_is_renewed_before_ttl_expiry() {
         .unwrap();
 
     // Half the default TTL elapses; the stream is still producing chunks.
-    advance(Duration::from_secs(1_800)).await;
+    advance(Duration::from_secs(150)).await;
     state
         .renew_upstream_request(&lease)
         .await
@@ -103,7 +120,7 @@ async fn long_stream_lease_is_renewed_before_ttl_expiry() {
 
     // Past the original TTL but the lease was renewed: the slot must still be
     // pinned (a fresh request for the same account is rejected).
-    advance(Duration::from_secs(1_861)).await;
+    advance(Duration::from_secs(151)).await;
     let blocked = state
         .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
         .await
@@ -164,4 +181,45 @@ async fn expire_upstream_request_lease_sync_reclaims_without_runtime() {
     state.release_upstream_request(replacement).await.unwrap();
     let snapshots = state.upstream_runtime_snapshots().await.unwrap();
     assert_eq!(snapshots.get(&upstream.id).unwrap().in_flight, 0);
+}
+/// C2.3: a lease whose heartbeat stops (the holder is gone) is reclaimed by
+/// the stale sweep after `upstream_lease_stale_after_ms` — well before the TTL
+/// (300s) lapses — and counted separately from expiry-based reclamation.
+#[tokio::test(start_paused = true)]
+async fn leaked_lease_is_reclaimed_as_stale_before_ttl() {
+    let upstream = test_upstream("stale-reclaim");
+    let (state, _directory) = test_state(&upstream);
+    let account = ("stale-reclaim".to_string(), "fingerprint-stale".to_string());
+
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .unwrap();
+    // No release and no heartbeat — the holder is gone.  Default stale_after
+    // is 200s (2x the ttl/3 heartbeat), the default TTL is 300s.
+    std::mem::forget(lease);
+
+    // Advance past stale_after but well short of the TTL.
+    advance(Duration::from_secs(201)).await;
+
+    let replacement = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .expect("the stale lease must be reclaimed before the TTL lapses");
+    state.release_upstream_request(replacement).await.unwrap();
+
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
+    let snapshot = snapshots.get(&upstream.id).unwrap();
+    assert_eq!(
+        snapshot.in_flight, 0,
+        "in_flight must be zero after reclamation"
+    );
+    assert_eq!(
+        snapshot.stale_reclaimed_total, 1,
+        "the stale sweep must count separately"
+    );
+    assert_eq!(
+        snapshot.leaked_reclaimed_total, 0,
+        "the expiry counter must stay untouched"
+    );
 }

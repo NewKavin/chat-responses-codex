@@ -2999,6 +2999,7 @@ fn parse_upstream_snapshot(
         five_hour_cost,
         cooldown_until,
         leaked_reclaimed_total: 0,
+        stale_reclaimed_total: 0,
     })
 }
 
@@ -3031,6 +3032,7 @@ fn parse_upstream_snapshot_with_feedback(
         last_feedback_type,
         last_retry_after_seconds,
         leaked_reclaimed_total: 0,
+        stale_reclaimed_total: 0,
     })
 }
 

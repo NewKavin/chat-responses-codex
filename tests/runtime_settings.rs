@@ -288,7 +288,7 @@ fn runtime_settings_reject_out_of_range_upstream_local_lease_ttl() {
 #[test]
 fn runtime_settings_upstream_local_lease_ttl_round_trip() {
     let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
-    assert_eq!(settings.upstream_local_lease_ttl_seconds, 3600);
+    assert_eq!(settings.upstream_local_lease_ttl_seconds, 300);
     settings.upstream_local_lease_ttl_seconds = 7_200;
 
     let mut config = AppConfig::default();

@@ -3945,6 +3945,11 @@ impl AppState {
                     .get(upstream_id)
                     .copied()
                     .unwrap_or(0);
+                let stale_reclaimed_total = table
+                    .stale_reclaimed_total
+                    .get(upstream_id)
+                    .copied()
+                    .unwrap_or(0);
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
@@ -3955,6 +3960,7 @@ impl AppState {
                         five_hour_cost: quota_event_cost(&state.five_hour_events),
                         cooldown_until: state.cooldown_until,
                         leaked_reclaimed_total,
+                        stale_reclaimed_total,
                     },
                 )
             })
@@ -4192,6 +4198,11 @@ impl AppState {
                     .get(&upstream_id)
                     .copied()
                     .unwrap_or(0);
+                let stale_reclaimed_total = table
+                    .stale_reclaimed_total
+                    .get(&upstream_id)
+                    .copied()
+                    .unwrap_or(0);
 
                 let snapshot = UpstreamRuntimeSnapshotWithFeedback {
                     in_flight: table
@@ -4204,6 +4215,7 @@ impl AppState {
                     last_feedback_type: state.last_feedback_type.clone(),
                     last_retry_after_seconds: state.last_retry_after_seconds,
                     leaked_reclaimed_total,
+                    stale_reclaimed_total,
                 };
 
                 (upstream_id, snapshot)
@@ -6793,6 +6805,11 @@ pub struct UpstreamRuntimeSnapshot {
     /// Local backend only: expired leases reclaimed by lazy sweeps (P7).
     /// Always 0 on the Redis backend (its Lua sweeps self-heal natively).
     pub leaked_reclaimed_total: u64,
+    /// C2.3: local backend only: leases reclaimed by the *stale* sweep (no
+    /// heartbeat within `upstream_lease_stale_after_ms`) rather than by TTL
+    /// expiry.  Kept separate from `leaked_reclaimed_total` so an operator can
+    /// tell the two reclaim modes apart.  Always 0 on the Redis backend.
+    pub stale_reclaimed_total: u64,
 }
 
 impl UpstreamRuntimeSnapshot {
@@ -6815,6 +6832,8 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub last_feedback_type: Option<String>,
     pub last_retry_after_seconds: Option<u64>,
     pub leaked_reclaimed_total: u64,
+    /// C2.3: see `UpstreamRuntimeSnapshot::stale_reclaimed_total`.
+    pub stale_reclaimed_total: u64,
 }
 
 #[derive(Debug, Clone)]

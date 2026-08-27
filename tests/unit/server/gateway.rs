@@ -1230,6 +1230,72 @@ async fn upstream_guard_release_then_drop_is_idempotent() {
     state.release_upstream_request(replacement).await.unwrap();
 }
 
+/// C2.1: the ttl/3 heartbeat keeps a long *unary* request's lease alive even
+/// though no chunks ever flow (the per-chunk `renew_if_due` backstop cannot
+/// fire for a non-streaming request).  Pre-C2 a non-streaming request never
+/// renewed, so once the TTL became small (C2.2) it would have been reclaimed
+/// mid-flight; the heartbeat is exactly what makes the smaller TTL safe.
+///
+/// Real-clock test (spawned heartbeat tasks are not driven by
+/// `start_paused`/`advance`): TTL is pinned to 6s (heartbeat interval = 2s)
+/// and stale-after to 4s in this test's own config so a ~7s wait sits well
+/// past the original TTL (6s) — without the heartbeat the slot would be
+/// reclaimed by then and the second reserve would succeed.
+#[tokio::test]
+async fn non_streaming_lease_is_kept_alive_by_heartbeat() {
+    let directory = tempdir().unwrap();
+    let mut config = AppConfig::default();
+    config.upstream_local_lease_ttl_seconds = 6;
+    config.upstream_lease_stale_after_ms = 4_000;
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        config,
+    );
+    let upstream = crate::state::UpstreamConfig {
+        id: "heartbeat-unary".into(),
+        active: true,
+        max_concurrency: 1,
+        ..Default::default()
+    };
+    let fingerprint = crate::keys::upstream_key_fingerprint(&upstream.id, "account");
+
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint, "model-a")
+        .await
+        .unwrap();
+    let reservation =
+        UpstreamRequestReservation::new(UpstreamRequestGuard::new(state.clone(), lease.clone()));
+
+    // Past the original TTL (6s) with no chunks at all: the heartbeat
+    // (ttl/3 = 2s) must have renewed the lease, so the slot stays pinned
+    // instead of being reclaimed as stale/expired.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+
+    let blocked = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint, "model-a")
+        .await
+        .expect_err("the heartbeated lease must still pin the single slot");
+    assert!(matches!(
+        blocked.reason,
+        crate::state::UpstreamAdmissionRejectionReason::LocalConcurrency
+    ));
+
+    reservation.release().await.unwrap();
+
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
+    assert_eq!(
+        snapshots.get(&upstream.id).unwrap().in_flight,
+        0,
+        "releasing the reservation must free the slot"
+    );
+    assert_eq!(
+        snapshots.get(&upstream.id).unwrap().stale_reclaimed_total,
+        0,
+        "a live heartbeated lease must never be reclaimed as stale"
+    );
+}
+
 #[tokio::test]
 async fn configured_upstream_concurrency_applies_independently_to_eight_keys() {
     let directory = tempdir().unwrap();

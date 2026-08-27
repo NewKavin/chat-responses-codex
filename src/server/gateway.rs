@@ -46,6 +46,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch, Mutex as TokioMutex};
+use tokio::task::AbortHandle;
 use tokio::time::Instant as TokioInstant;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::compression::CompressionLayer;
@@ -3356,6 +3357,18 @@ impl UpstreamRequestGuard {
     }
 }
 
+/// C2.1: the shared `AbortHandle` slot for the spawned lease heartbeat.
+/// The heartbeat renews the upstream lease at ttl/3 regardless of chunk flow,
+/// so neither a long unary request nor a silent stretch inside a stream is
+/// ever reclaimed as stale (C2.3) once the TTL is small (C2.2).  The spawned
+/// task owns only `state` + `lease` clones, never the guard, so it cannot
+/// prevent the final guard clone from dropping and releasing synchronously
+/// (C1.2).
+#[derive(Default)]
+struct HeartbeatSlot {
+    abort: TokioMutex<Option<AbortHandle>>,
+}
+
 #[derive(Clone)]
 struct UpstreamRequestReservation {
     guard: Arc<TokioMutex<Option<UpstreamRequestGuard>>>,
@@ -3363,15 +3376,57 @@ struct UpstreamRequestReservation {
     /// local/Redis upstream lease at half the configured TTL so the slot is
     /// never reclaimed mid-stream; leaked guards (dropped without release)
     /// stop producing chunks and therefore stop renewing, letting the TTL
-    /// lapse and the lazy sweep reclaim the slot.
+    /// lapse and the lazy sweep reclaim the slot.  C2.1 adds a ttl/3 heartbeat
+    /// (see `heartbeat`) so even unary requests and silent streams renew.
     last_renewed_at: Arc<AtomicU64>,
+    /// C2.1: handle to the spawned ttl/3 heartbeat for the current guard's
+    /// lease.  Shared across clones so the last clone's `Drop` can abort it.
+    heartbeat: Arc<HeartbeatSlot>,
 }
 
 impl UpstreamRequestReservation {
     fn new(guard: UpstreamRequestGuard) -> Self {
-        Self {
+        let reservation = Self {
             guard: Arc::new(TokioMutex::new(Some(guard))),
             last_renewed_at: Arc::new(AtomicU64::new(unix_millis())),
+            heartbeat: Arc::new(HeartbeatSlot::default()),
+        };
+        reservation.spawn_heartbeat();
+        reservation
+    }
+
+    /// C2.1: (re)start the ttl/3 lease heartbeat for the current guard's
+    /// lease.  Silently skipped when no Tokio runtime is usable (the per-chunk
+    /// `renew_if_due` backstop and the TTL fallback still apply) or when the
+    /// guard is already released.  Replaces and aborts any previous heartbeat,
+    /// which is how `reserve_next` moves the heartbeat onto a fresh lease.
+    fn spawn_heartbeat(&self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let Some(guard) = self.guard.try_lock().ok().and_then(|slot| slot.clone()) else {
+            return;
+        };
+        let state = guard.inner.state.clone();
+        let lease = guard.inner.lease.clone();
+        let interval_secs = (state.config.upstream_local_lease_ttl_seconds / 3).max(1);
+        let interval = Duration::from_secs(interval_secs);
+        let handle = runtime.spawn(upstream_lease_heartbeat(state, lease, interval));
+        if let Ok(mut slot) = self.heartbeat.abort.try_lock() {
+            if let Some(previous) = slot.replace(handle.abort_handle()) {
+                previous.abort();
+            }
+        }
+    }
+
+    /// C2.1: stop the running heartbeat (if any).  Called from `release` so a
+    /// released lease is not renewed forever by a straggling task, and from
+    /// the last-clone `Drop` so a dropped reservation does not leak the task.
+    fn abort_heartbeat(&self) {
+        if let Ok(mut slot) = self.heartbeat.abort.try_lock() {
+            if let Some(handle) = slot.take() {
+                handle.abort();
+            }
         }
     }
 
@@ -3408,6 +3463,8 @@ impl UpstreamRequestReservation {
     }
 
     async fn release(&self) -> Result<(), RuntimeCoordinationError> {
+        // C2.1: stop renewing the about-to-be-released lease before it goes.
+        self.abort_heartbeat();
         let guard = self.guard.lock().await.clone();
         let Some(guard) = guard else {
             return Ok(());
@@ -3444,7 +3501,44 @@ impl UpstreamRequestReservation {
                 )
             })?;
         *self.guard.lock().await = Some(UpstreamRequestGuard::new(state.clone(), lease));
+        // C2.1: the released heartbeat was aborted by `self.release()`; start a
+        // fresh one so the new lease is covered for its whole lifetime.
+        self.spawn_heartbeat();
         Ok(())
+    }
+}
+
+impl Drop for UpstreamRequestReservation {
+    fn drop(&mut self) {
+        // C2.1: when the last reservation clone goes away, stop the heartbeat
+        // so the spawned task does not keep renewing a lease that is (or is
+        // about to be) released by the final guard clone's `Drop`.  Without
+        // this the detached task would leak and pin the lease as live.
+        if Arc::strong_count(&self.heartbeat) == 1 {
+            self.abort_heartbeat();
+        }
+    }
+}
+
+/// C2.1: renews an upstream lease every `interval` (ttl/3) independent of any
+/// chunk flow, so long unary requests and silent streams keep their lease
+/// alive.  Renewing a lease that was already released or reclaimed is a no-op
+/// success (`renew_upstream_request`), so a tick that races a release is
+/// harmless.  The task exits only when aborted by the reservation lifecycle.
+async fn upstream_lease_heartbeat(
+    state: AppState,
+    lease: UpstreamRequestLease,
+    interval: Duration,
+) {
+    loop {
+        tokio::time::sleep(interval).await;
+        if let Err(error) = state.renew_upstream_request(&lease).await {
+            tracing::warn!(
+                upstream_id = %lease.upstream_id(),
+                error = %error,
+                "upstream lease heartbeat failed; relying on per-chunk renewal and the TTL backstop"
+            );
+        }
     }
 }
 
