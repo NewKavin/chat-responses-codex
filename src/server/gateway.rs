@@ -2438,6 +2438,12 @@ pub fn build_router(state: AppState) -> Router {
             ),
         )
         .route(
+            "/api/admin/upstreams/{id}/concurrency/reset",
+            post(admin_reset_upstream_concurrency).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
+        .route(
             "/api/admin/upstreams/batch-toggle",
             post(admin_batch_toggle_upstreams).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),

@@ -1344,6 +1344,20 @@ impl AppState {
         counts.get(account).copied().unwrap_or(0)
     }
 
+    /// C5.1: total C3 slot-queue depth across all of `upstream_id`'s accounts
+    /// (the queue is keyed per account, the admin snapshot is per upstream).
+    pub fn upstream_slot_waiter_count(&self, upstream_id: &str) -> usize {
+        let counts = self
+            .local_slot_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        counts
+            .iter()
+            .filter(|(account, _)| account.upstream_id == upstream_id)
+            .map(|(_, count)| count)
+            .sum()
+    }
+
     pub async fn observe_account_concurrency(
         &self,
         account: &AccountConcurrencyKey,
@@ -1863,6 +1877,41 @@ impl AppState {
             self.clear_route_health(route).await?;
         }
         Ok(Some(routes.len()))
+    }
+
+    /// C5.2: force-release the local upstream concurrency gate for `upstream_id`:
+    /// clear the leases it holds as if they had been released (optionally
+    /// restricted to one `key_fingerprint`).  Waiting C3 queue requests poll
+    /// for a free slot on a short interval, so clearing the leases unbars them
+    /// within one poll tick — there is no explicit wake primitive to touch.
+    /// Returns `Ok(None)` when the upstream does not exist, otherwise the
+    /// number of leases cleared.  Redis backend clears all of the upstream's
+    /// lease keys (the per-key filter is a local-backend facility).
+    pub async fn reset_upstream_concurrency(
+        &self,
+        upstream_id: &str,
+        key_fingerprint: Option<&str>,
+    ) -> Result<Option<usize>, RuntimeCoordinationError> {
+        let exists = self
+            .snapshot()
+            .await
+            .upstreams
+            .iter()
+            .any(|upstream| upstream.id == upstream_id);
+        if !exists {
+            return Ok(None);
+        }
+        let cleared = match &self.runtime_coordination {
+            RuntimeCoordinationBackend::Redis(coordinator) => {
+                coordinator.reset_upstream_concurrency(upstream_id).await?
+            }
+            RuntimeCoordinationBackend::Local => self
+                .upstream_lease_table
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove_leases_for_upstream(upstream_id, key_fingerprint),
+        };
+        Ok(Some(cleared))
     }
 
     pub async fn key_health_snapshot(
@@ -4022,11 +4071,18 @@ impl AppState {
                     .upstream_lease_table
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                prune_expired_upstream_leases(
-                    &mut table,
-                    tokio::time::Instant::now(),
-                    &self.config,
-                );
+                let lease_now = tokio::time::Instant::now();
+                // C5.1: report the *pre-sweep* lease state.  The snapshot
+                // doubles as a lazy sweep (prune below), so counting after it
+                // would always read 0 — the operator needs to see that the
+                // gate was full of stale/leaked leases *as of this snapshot*.
+                let stale_after =
+                    Duration::from_millis(self.config.upstream_lease_stale_after_ms.max(1));
+                let stale_lease_count =
+                    table.upstream_stale_lease_count(upstream_id, stale_after, lease_now);
+                let oldest_lease_age_seconds =
+                    table.upstream_oldest_lease_age_seconds(upstream_id, lease_now);
+                prune_expired_upstream_leases(&mut table, lease_now, &self.config);
                 let leaked_reclaimed_total = table
                     .leaked_reclaimed_total
                     .get(upstream_id)
@@ -4048,6 +4104,11 @@ impl AppState {
                         cooldown_until: state.cooldown_until,
                         leaked_reclaimed_total,
                         stale_reclaimed_total,
+                        stale_lease_count: stale_lease_count.min(u32::MAX as usize) as u32,
+                        oldest_lease_age_seconds,
+                        queue_depth: self
+                            .upstream_slot_waiter_count(upstream_id)
+                            .min(u32::MAX as usize) as u32,
                     },
                 )
             })
@@ -4275,11 +4336,16 @@ impl AppState {
                     .upstream_lease_table
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                prune_expired_upstream_leases(
-                    &mut table,
-                    tokio::time::Instant::now(),
-                    &self.config,
-                );
+                let lease_now = tokio::time::Instant::now();
+                // C5.1: report the *pre-sweep* lease state (see the identical
+                // note in `upstream_runtime_snapshots`).
+                let stale_after =
+                    Duration::from_millis(self.config.upstream_lease_stale_after_ms.max(1));
+                let stale_lease_count =
+                    table.upstream_stale_lease_count(&upstream_id, stale_after, lease_now);
+                let oldest_lease_age_seconds =
+                    table.upstream_oldest_lease_age_seconds(&upstream_id, lease_now);
+                prune_expired_upstream_leases(&mut table, lease_now, &self.config);
                 let leaked_reclaimed_total = table
                     .leaked_reclaimed_total
                     .get(&upstream_id)
@@ -4303,6 +4369,11 @@ impl AppState {
                     last_retry_after_seconds: state.last_retry_after_seconds,
                     leaked_reclaimed_total,
                     stale_reclaimed_total,
+                    stale_lease_count: stale_lease_count.min(u32::MAX as usize) as u32,
+                    oldest_lease_age_seconds,
+                    queue_depth: self
+                        .upstream_slot_waiter_count(&upstream_id)
+                        .min(u32::MAX as usize) as u32,
                 };
 
                 (upstream_id, snapshot)
@@ -6753,6 +6824,72 @@ impl UpstreamLeaseTable {
             .unwrap_or(0)
     }
 
+    /// C5.1: leases currently held for `upstream_id` (all keys whose heartbeat
+    /// is older than `stale_after`).  Same predicate as the stale sweep; fed
+    /// into `UpstreamRuntimeSnapshot.stale_lease_count`.
+    fn upstream_stale_lease_count(
+        &self,
+        upstream_id: &str,
+        stale_after: Duration,
+        now: tokio::time::Instant,
+    ) -> usize {
+        self.leases
+            .iter()
+            .filter(|(account, _)| account.upstream_id == upstream_id)
+            .map(|(_, leases)| {
+                leases
+                    .values()
+                    .filter(|record| {
+                        now.saturating_duration_since(record.last_renewed_at) > stale_after
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// C5.1: age in seconds of the oldest currently-held lease for
+    /// `upstream_id`, i.e. the maximum `now - last_renewed_at` across all its
+    /// accounts' leases.  0 when the upstream holds no leases.
+    fn upstream_oldest_lease_age_seconds(
+        &self,
+        upstream_id: &str,
+        now: tokio::time::Instant,
+    ) -> u64 {
+        self.leases
+            .iter()
+            .filter(|(account, _)| account.upstream_id == upstream_id)
+            .flat_map(|(_, leases)| leases.values())
+            .map(|record| {
+                now.saturating_duration_since(record.last_renewed_at)
+                    .as_secs()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// C5.2: remove every lease belonging to `upstream_id`, optionally
+    /// restricted to a single `key_fingerprint`.  Returns how many leases were
+    /// removed.  Does not touch reclamation counters: this is an operator
+    /// reset, not a reclamation event.
+    fn remove_leases_for_upstream(
+        &mut self,
+        upstream_id: &str,
+        key_fingerprint: Option<&str>,
+    ) -> usize {
+        let mut removed = 0usize;
+        self.leases.retain(|account, leases| {
+            if account.upstream_id != upstream_id {
+                return true;
+            }
+            if key_fingerprint.is_some_and(|fp| fp != account.key_fingerprint) {
+                return true;
+            }
+            removed += leases.len();
+            false
+        });
+        removed
+    }
+
     fn insert(
         &mut self,
         account: AccountConcurrencyKey,
@@ -6846,27 +6983,52 @@ fn prune_expired_upstream_leases(
     let stale_after = Duration::from_millis(config.upstream_lease_stale_after_ms.max(1));
     let mut reclaimed = 0u64;
     for (account, leases) in table.leases.iter_mut() {
-        let before = leases.len();
-        leases.retain(|_, record| record.expires_at > now);
-        let expired = before - leases.len();
-        if expired > 0 {
+        // C5.3: reclamation is an event worth a warn — a lease that was never
+        // released is either a leaked guard (TTL expiry) or a dead owner (stale
+        // heartbeat).  Log each lease individually with the facts an operator
+        // needs to hunt the leak (upstream, key, lease id, age, kind).
+        let mut expired = Vec::new();
+        let mut stale = Vec::new();
+        leases.retain(|lease_id, record| {
+            if record.expires_at <= now {
+                expired.push((lease_id.clone(), record.clone()));
+                return false;
+            }
+            if now.saturating_duration_since(record.last_renewed_at) > stale_after {
+                stale.push((lease_id.clone(), record.clone()));
+                return false;
+            }
+            true
+        });
+        for (lease_id, record) in expired {
+            tracing::warn!(
+                upstream_id = %account.upstream_id,
+                key_fingerprint = %account.key_fingerprint,
+                lease_id = %lease_id,
+                age_ms = now.saturating_duration_since(record.last_renewed_at).as_millis() as u64,
+                kind = ?record.kind,
+                "local upstream lease reclaimed by TTL expiry (possibly leaked guard)"
+            );
             *table
                 .leaked_reclaimed_total
                 .entry(account.upstream_id.clone())
-                .or_default() += expired as u64;
-            reclaimed += expired as u64;
+                .or_default() += 1;
+            reclaimed += 1;
         }
-        let before_stale = leases.len();
-        leases.retain(|_, record| {
-            now.saturating_duration_since(record.last_renewed_at) <= stale_after
-        });
-        let stale = before_stale - leases.len();
-        if stale > 0 {
+        for (lease_id, record) in stale {
+            tracing::warn!(
+                upstream_id = %account.upstream_id,
+                key_fingerprint = %account.key_fingerprint,
+                lease_id = %lease_id,
+                age_ms = now.saturating_duration_since(record.last_renewed_at).as_millis() as u64,
+                kind = ?record.kind,
+                "local upstream lease reclaimed as stale: no heartbeat within upstream_lease_stale_after_ms"
+            );
             *table
                 .stale_reclaimed_total
                 .entry(account.upstream_id.clone())
-                .or_default() += stale as u64;
-            reclaimed += stale as u64;
+                .or_default() += 1;
+            reclaimed += 1;
         }
     }
     table.leases.retain(|_, leases| !leases.is_empty());
@@ -6919,6 +7081,25 @@ pub struct UpstreamRuntimeSnapshot {
     /// expiry.  Kept separate from `leaked_reclaimed_total` so an operator can
     /// tell the two reclaim modes apart.  Always 0 on the Redis backend.
     pub stale_reclaimed_total: u64,
+    /// C5.1: local backend only: leases currently held for this upstream whose
+    /// last heartbeat is older than `upstream_lease_stale_after_ms` — i.e. how
+    /// many slots the stale sweep would reclaim *right now*.  A non-zero value
+    /// means slots are held by dead owners (leaked guards) rather than live
+    /// in-flight traffic.  Always 0 on the Redis backend (its Lua sweeps
+    /// self-heal on every reserve).
+    pub stale_lease_count: u32,
+    /// C5.1: local backend only: age in seconds of the oldest currently-held
+    /// lease for this upstream (max `now - last_renewed_at`).  0 when no
+    /// leases are held.  Interpreting it together with
+    /// `upstream_lease_stale_after_ms` distinguishes "about to be swept"
+    /// (age > stale_after) from "recently heartbeated and healthy".  Always 0
+    /// on the Redis backend.
+    pub oldest_lease_age_seconds: u64,
+    /// C5.1: how many requests are currently queued behind the local
+    /// concurrency gate (C3) for this upstream's accounts.  Process-local, so
+    /// it is meaningful on both backends; the queue itself is a per-process
+    /// in-memory structure.
+    pub queue_depth: u32,
 }
 
 impl UpstreamRuntimeSnapshot {
@@ -6943,6 +7124,12 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub leaked_reclaimed_total: u64,
     /// C2.3: see `UpstreamRuntimeSnapshot::stale_reclaimed_total`.
     pub stale_reclaimed_total: u64,
+    /// C5.1: see `UpstreamRuntimeSnapshot::stale_lease_count`.
+    pub stale_lease_count: u32,
+    /// C5.1: see `UpstreamRuntimeSnapshot::oldest_lease_age_seconds`.
+    pub oldest_lease_age_seconds: u64,
+    /// C5.1: see `UpstreamRuntimeSnapshot::queue_depth`.
+    pub queue_depth: u32,
 }
 
 #[derive(Debug, Clone)]

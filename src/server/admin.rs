@@ -593,6 +593,11 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
     #[derive(serde::Serialize)]
     struct UpstreamRuntimeStateResponse {
         in_flight: u32,
+        stale_lease_count: u32,
+        oldest_lease_age_seconds: u64,
+        queue_depth: u32,
+        leaked_reclaimed_total: u64,
+        stale_reclaimed_total: u64,
         minute_cost: f64,
         minute_limit: u32,
         minute_percentage: f64,
@@ -620,6 +625,11 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
 
             UpstreamRuntimeStateResponse {
                 in_flight: runtime.in_flight,
+                stale_lease_count: runtime.stale_lease_count,
+                oldest_lease_age_seconds: runtime.oldest_lease_age_seconds,
+                queue_depth: runtime.queue_depth,
+                leaked_reclaimed_total: runtime.leaked_reclaimed_total,
+                stale_reclaimed_total: runtime.stale_reclaimed_total,
                 minute_cost: runtime.minute_cost,
                 minute_limit: config.requests_per_minute,
                 minute_percentage,
@@ -1954,6 +1964,38 @@ pub(super) async fn admin_reset_upstream_route_health(
         Ok(Some(cleared_routes)) => Json(json!({
             "upstream_id": id,
             "cleared_routes": cleared_routes,
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Upstream '{}' not found", id),
+                    "code": "upstream_not_found"
+                }
+            })),
+        )
+            .into_response(),
+        Err(_) => runtime_coordination_unavailable_admin_response(),
+    }
+}
+
+/// C5.2: emergency force-release of the local upstream concurrency gate for
+/// one upstream — clears the leases it holds (optionally filtered to a single
+/// key fingerprint via `?key_fingerprint=…`) and returns how many leases were
+/// cleared.  Waiting C3 queue requests are unbarred by the freed slots on the
+/// next poll tick.  This is the "un-stick a saturated account without
+/// restarting the gateway" knob.
+pub(super) async fn admin_reset_upstream_concurrency(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let key_fingerprint = params.get("key_fingerprint").map(String::as_str);
+    match state.reset_upstream_concurrency(&id, key_fingerprint).await {
+        Ok(Some(cleared_leases)) => Json(json!({
+            "upstream_id": id,
+            "cleared_leases": cleared_leases,
         }))
         .into_response(),
         Ok(None) => (

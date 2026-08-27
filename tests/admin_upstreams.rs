@@ -4959,3 +4959,320 @@ async fn test_upstreams_batch_requires_jwt_token() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
+
+// ============================================================================
+// C5 — concurrency gate observability + emergency reset
+// ============================================================================
+
+fn concurrency_reset_upstream(id: &str, api_key: &str, max_concurrency: u32) -> UpstreamConfig {
+    UpstreamConfig {
+        id: id.to_string(),
+        name: format!("concurrency {id}"),
+        base_url: "https://concurrency-reset.example.invalid".to_string(),
+        api_key: api_key.to_string(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4.1".to_string()],
+        max_concurrency,
+        active: true,
+        ..UpstreamConfig::default()
+    }
+}
+
+fn concurrency_reset_config() -> AppConfig {
+    AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        // Deterministic lease/stale curve instead of inheriting defaults: the
+        // reset and stale assertions below depend on these exact values.
+        upstream_local_lease_ttl_seconds: 300,
+        upstream_lease_stale_after_ms: 200_000,
+        upstream_concurrency_probe_delays_ms: vec![1_000],
+        // T1.1: base=2 keeps the cooldown ceiling (8s) below the 30s wait
+        // budget so update_runtime_settings validation passes.
+        upstream_transient_route_cooldown_base_seconds: 2,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn concurrency_reset_clears_leases_and_snapshot_exposes_gate_fields() {
+    let target_id = "upstream-concurrency-reset";
+    let target_key = "reset-gate-secret";
+    let state = create_test_state_with_upstreams_and_config(
+        vec![concurrency_reset_upstream(target_id, target_key, 4)],
+        concurrency_reset_config(),
+    );
+    let fingerprint = upstream_key_fingerprint(target_id, target_key);
+
+    let lease_a = state
+        .try_reserve_upstream_account_request(
+            &state.snapshot().await.upstreams[0],
+            &fingerprint,
+            "gpt-4.1",
+        )
+        .await
+        .expect("first reservation succeeds");
+    let lease_b = state
+        .try_reserve_upstream_account_request(
+            &state.snapshot().await.upstreams[0],
+            &fingerprint,
+            "gpt-4.1",
+        )
+        .await
+        .expect("second reservation succeeds");
+    std::mem::forget(lease_a);
+    std::mem::forget(lease_b);
+
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // The admin list exposes the C5.1 gate fields alongside in_flight.
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_slice(&list_body).unwrap();
+    let target = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == target_id)
+        .expect("target upstream listed");
+    let runtime = &target["runtime_state"];
+    assert_eq!(runtime["in_flight"], 2);
+    assert_eq!(runtime["leaked_reclaimed_total"], 0);
+    assert_eq!(runtime["stale_reclaimed_total"], 0);
+    assert_eq!(
+        runtime["stale_lease_count"], 0,
+        "fresh leases are not stale"
+    );
+    assert_eq!(runtime["queue_depth"], 0);
+    assert!(runtime["oldest_lease_age_seconds"].is_number());
+
+    // Emergency reset releases the gate without a restart.
+    let reset_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/admin/upstreams/{target_id}/concurrency/reset"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reset_response.status(), StatusCode::OK);
+    let reset_body = axum::body::to_bytes(reset_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reset: Value = serde_json::from_slice(&reset_body).unwrap();
+    assert_eq!(reset["upstream_id"], target_id);
+    assert_eq!(reset["cleared_leases"], 2);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_slice(&list_body).unwrap();
+    let target = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == target_id)
+        .unwrap();
+    assert_eq!(target["runtime_state"]["in_flight"], 0);
+}
+
+#[tokio::test]
+async fn concurrency_reset_with_key_fingerprint_filter_only_clears_that_key() {
+    let target_id = "upstream-concurrency-reset-filter";
+    let key_a = "filter-key-a";
+    let key_b = "filter-key-b";
+    let state = create_test_state_with_upstreams_and_config(
+        vec![concurrency_reset_upstream(target_id, key_a, 4)],
+        concurrency_reset_config(),
+    );
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    let fingerprint_a = upstream_key_fingerprint(target_id, key_a);
+    let fingerprint_b = upstream_key_fingerprint(target_id, key_b);
+
+    let lease_a = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_a, "gpt-4.1")
+        .await
+        .expect("key A reservation");
+    let lease_b = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_b, "gpt-4.1")
+        .await
+        .expect("key B reservation");
+    std::mem::forget(lease_a);
+    std::mem::forget(lease_b);
+
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let reset_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/admin/upstreams/{target_id}/concurrency/reset?key_fingerprint={fingerprint_a}"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reset_response.status(), StatusCode::OK);
+    let reset_body = axum::body::to_bytes(reset_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reset: Value = serde_json::from_slice(&reset_body).unwrap();
+    assert_eq!(reset["cleared_leases"], 1);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_slice(&list_body).unwrap();
+    let target = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == target_id)
+        .unwrap();
+    assert_eq!(
+        target["runtime_state"]["in_flight"], 1,
+        "the un-filtered key's lease must survive"
+    );
+}
+
+#[tokio::test]
+async fn concurrency_reset_unknown_upstream_returns_404() {
+    let state = create_test_state_with_upstreams_and_config(
+        vec![concurrency_reset_upstream(
+            "upstream-concurrency-reset-present",
+            "k",
+            4,
+        )],
+        concurrency_reset_config(),
+    );
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/does-not-exist/concurrency/reset")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn stale_leases_are_reported_and_reclaimed_by_snapshot() {
+    let target_id = "upstream-concurrency-stale";
+    let target_key = "stale-secret";
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        // A 60ms stale horizon: a lease reserved just before the snapshot is
+        // stale by the time the sweep runs, proving stale_lease_count is
+        // measured *pre-sweep* and the sweep then reclaims it.
+        upstream_lease_stale_after_ms: 60,
+        upstream_local_lease_ttl_seconds: 300,
+        upstream_transient_route_cooldown_base_seconds: 2,
+        ..Default::default()
+    };
+    let state = create_test_state_with_upstreams_and_config(
+        vec![concurrency_reset_upstream(target_id, target_key, 4)],
+        config,
+    );
+    let fingerprint = upstream_key_fingerprint(target_id, target_key);
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint, "gpt-4.1")
+        .await
+        .expect("reservation succeeds");
+    std::mem::forget(lease);
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    let target = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == target_id)
+        .unwrap();
+    assert_eq!(
+        target["runtime_state"]["stale_lease_count"], 1,
+        "the snapshot must report the stale lease it was about to reclaim"
+    );
+    assert_eq!(
+        target["runtime_state"]["stale_reclaimed_total"], 1,
+        "the sweep ran during this snapshot and reclaimed the stale lease"
+    );
+    assert_eq!(
+        target["runtime_state"]["in_flight"], 0,
+        "the stale lease is reclaimed by the snapshot's lazy sweep"
+    );
+}

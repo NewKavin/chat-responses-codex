@@ -1343,6 +1343,60 @@ impl RedisRuntimeCoordinator {
             .await
     }
 
+    /// C5.2: force-release every upstream concurrency lease for `upstream_id`
+    /// on the Redis backend: the per-account lease ZSETs
+    /// (`...:account:<account_identity>:leases`, where the admission gate
+    /// checks `ZCARD`) plus the aggregate per-upstream ZSET
+    /// (`...:leases`).  Account identities are hashed, so live keys are
+    /// discovered with a KEYS pattern scan scoped to this upstream's hash
+    /// tag; the aggregate key directly yields how many leases were held.
+    /// This is a rare operator-driven reset, so the KEYS scan cost is
+    /// acceptable.  Returns the number of leases cleared.
+    pub(super) async fn reset_upstream_concurrency(
+        &self,
+        upstream_id: &str,
+    ) -> Result<usize, RuntimeCoordinationError> {
+        let identity = stable_identity(upstream_id);
+        let aggregate_key = self.upstream_key(&identity, "leases");
+        let account_pattern = format!(
+            "{}:v1:upstream:{{{identity}}}:account:*:leases",
+            self.key_prefix
+        );
+        let mut connection = self.connection();
+        if self.coordination_fault.should_fail() != CoordinationFaultMode::None {
+            return Err(RuntimeCoordinationError);
+        }
+        let cleared = timeout_coordination(async {
+            let aggregate: i64 = redis::cmd("ZCARD")
+                .arg(&aggregate_key)
+                .query_async(&mut connection)
+                .await?;
+            let account_keys: Vec<String> = redis::cmd("KEYS")
+                .arg(&account_pattern)
+                .query_async(&mut connection)
+                .await?;
+            let mut to_delete: Vec<String> = account_keys;
+            to_delete.push(aggregate_key);
+            to_delete.dedup();
+            if !to_delete.is_empty() {
+                let mut del = redis::cmd("DEL");
+                for key in &to_delete {
+                    del.arg(key);
+                }
+                del.query_async::<i64>(&mut connection).await?;
+            }
+            Ok::<i64, redis::RedisError>(aggregate)
+        })
+        .await;
+        match cleared {
+            Ok(count) => Ok(count.max(0) as usize),
+            Err(_) => {
+                let _ = self.refresh_manager().await;
+                Err(RuntimeCoordinationError)
+            }
+        }
+    }
+
     async fn update_upstream_cooldown(
         &self,
         upstream_id: &str,
@@ -3000,6 +3054,14 @@ fn parse_upstream_snapshot(
         cooldown_until,
         leaked_reclaimed_total: 0,
         stale_reclaimed_total: 0,
+        // C5.1: the Redis backend self-heals leases in its Lua sweeps, so
+        // there is no per-lease stale/age accounting to surface; the C3
+        // slot-queue depth is a per-process in-memory structure reported by
+        // the local snapshot builder (this parser runs inside the Redis
+        // coordinator where the process-local queue is not visible).
+        stale_lease_count: 0,
+        oldest_lease_age_seconds: 0,
+        queue_depth: 0,
     })
 }
 
@@ -3033,6 +3095,9 @@ fn parse_upstream_snapshot_with_feedback(
         last_retry_after_seconds,
         leaked_reclaimed_total: 0,
         stale_reclaimed_total: 0,
+        stale_lease_count: 0,
+        oldest_lease_age_seconds: 0,
+        queue_depth: 0,
     })
 }
 
