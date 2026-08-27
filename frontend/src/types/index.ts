@@ -131,6 +131,11 @@ export interface RouteHealthSnapshot {
 
 export interface UpstreamRuntimeState {
   in_flight: number
+  stale_lease_count: number
+  oldest_lease_age_seconds: number
+  queue_depth: number
+  leaked_reclaimed_total: number
+  stale_reclaimed_total: number
   minute_cost: number
   minute_limit: number
   minute_percentage: number

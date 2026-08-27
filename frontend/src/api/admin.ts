@@ -332,6 +332,12 @@ export const adminApi = {
     adminHttp.post<{ upstream_id: string; cleared_routes: number }>(
       `/admin/upstreams/${id}/route-health/reset`
     ),
+  resetUpstreamConcurrency: (id: string, keyFingerprint?: string) =>
+    adminHttp.post<{ upstream_id: string; cleared_leases: number }>(
+      `/admin/upstreams/${id}/concurrency/reset`,
+      undefined,
+      { params: keyFingerprint ? { key_fingerprint: keyFingerprint } : undefined }
+    ),
   batchToggleUpstreams: (ids: string[], active: boolean) =>
     adminHttp.post<{ updated: number; failed: Array<{ id: string; error: string }> }>(
       '/admin/upstreams/batch-toggle',

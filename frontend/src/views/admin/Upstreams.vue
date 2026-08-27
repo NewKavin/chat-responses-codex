@@ -191,6 +191,37 @@
           </template>
         </el-table-column>
 
+        <el-table-column v-if="isColumnVisible('concurrency_gate')" label="并发闸门" min-width="170">
+          <template #default="{ row }">
+            <el-tooltip
+              :content="formatRuntimeStateDetail(row)"
+              :disabled="!formatRuntimeStateDetail(row)"
+              placement="top"
+            >
+              <span>
+                <el-tag size="small" :type="row.runtime_state?.in_flight ? 'primary' : 'info'">
+                  在途 {{ row.runtime_state?.in_flight ?? 0 }}
+                </el-tag>
+                <el-tag
+                  v-if="(row.runtime_state?.queue_depth ?? 0) > 0"
+                  size="small"
+                  type="warning"
+                >
+                  排队 {{ row.runtime_state?.queue_depth }}
+                </el-tag>
+                <el-tag
+                  v-if="(row.runtime_state?.stale_lease_count ?? 0) > 0"
+                  size="small"
+                  type="danger"
+                >
+                  陈旧 {{ row.runtime_state?.stale_lease_count }}
+                </el-tag>
+                <span v-if="!row.runtime_state" class="muted">-</span>
+              </span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
         <el-table-column v-if="isColumnVisible('priority')" label="优先级/权重" width="150" align="center">
           <template #default="{ row }">
             <el-input-number
@@ -223,6 +254,9 @@
               @click="handleResetRouteHealth(row)"
             >
               解除冷却
+            </el-button>
+            <el-button size="small" type="warning" @click="handleResetConcurrency(row)">
+              重置并发
             </el-button>
             <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
           </template>
@@ -523,6 +557,7 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'compatibility', label: '兼容清理' },
   { key: 'premium', label: '高端模型保护' },
   { key: 'route_health', label: '路由健康' },
+  { key: 'concurrency_gate', label: '并发闸门' },
   { key: 'status', label: '状态' },
   { key: 'priority', label: '优先级/权重' },
   { key: 'remark', label: '备注' }
@@ -759,6 +794,18 @@ const formatRouteFailureClasses = (health?: UpstreamConfig['route_health']) => {
     .filter(([key]) => key in failureClassLabels)
   if (entries.length === 0) return ''
   return entries.map(([key, count]) => `${failureClassLabels[key]} ${count}`).join('，')
+}
+
+const formatRuntimeStateDetail = (row: UpstreamConfig) => {
+  const rt = row.runtime_state
+  if (!rt) return ''
+  const parts: string[] = [`在途 ${rt.in_flight}`]
+  if (rt.queue_depth > 0) parts.push(`排队 ${rt.queue_depth}`)
+  if (rt.stale_lease_count > 0) parts.push(`陈旧租约 ${rt.stale_lease_count}`)
+  if (rt.oldest_lease_age_seconds > 0) parts.push(`最旧租约 ${rt.oldest_lease_age_seconds}s`)
+  if (rt.leaked_reclaimed_total > 0) parts.push(`累计泄漏回收 ${rt.leaked_reclaimed_total}`)
+  if (rt.stale_reclaimed_total > 0) parts.push(`累计陈旧回收 ${rt.stale_reclaimed_total}`)
+  return parts.join('，')
 }
 
 const formatRouteCooldown = (health?: UpstreamConfig['route_health']) => {
@@ -1175,6 +1222,23 @@ const handleResetRouteHealth = async (row: UpstreamConfig) => {
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('解除临时冷却失败')
+    }
+  }
+}
+
+const handleResetConcurrency = async (row: UpstreamConfig) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定重置上游 "${row.name}" 的并发闸门吗？将立即释放其全部在途/陈旧租约（可选按 Key 过滤），随后该账号的排队请求会在下一个轮询周期放行。此操作不会中断真正在途的上游请求。`,
+      '重置并发闸门',
+      { type: 'warning' }
+    )
+    const { data } = await adminApi.resetUpstreamConcurrency(row.id)
+    ElMessage.success(`已释放 ${data.cleared_leases} 个租约`)
+    await loadData()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('重置并发闸门失败')
     }
   }
 }
