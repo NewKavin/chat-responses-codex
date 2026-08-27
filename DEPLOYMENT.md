@@ -303,6 +303,70 @@ Keep these as-is for the aggregated-gateway shape:
   value. `requests_per_minute` and the 5h quota only gate **hedge** attempts,
   not primary windows, so they are rarely the limiter here.
 
+#### Downstream per-model concurrency groups (C7)
+
+The **downstream** gate (`try_reserve_downstream_concurrency`, per
+`DownstreamConfig.max_concurrency`) is model-agnostic by default. When one
+downstream key serves models with very different upstream capacities, a single
+number is wrong for all of them, and worse, it head-of-line-blocks: a request
+holds its downstream lease from before upstream routing starts until the whole
+upstream retry/queue finishes, so a burst on the small-capacity model occupies
+every slot and the big-capacity model cannot even enter the downstream gate.
+
+`DownstreamConfig.model_concurrency_groups` splits the global budget per model:
+
+```jsonc
+"model_concurrency_groups": [
+  { "name": "glm",      "match": ["glm-5.2", "glm-5.1"], "max_concurrency": 4  },
+  { "name": "deepseek", "match": ["deepseek-*"],          "max_concurrency": 28 }
+]
+```
+
+- `match` patterns support exact names and `*` wildcards (prefix / suffix /
+  any-position); the list is **ordered, first match wins**. Matching runs on the
+  alias-resolved `normalized_model`, honoring `model_case_insensitive_matching`.
+- Models matching **no** group fall through to the global `max_concurrency` cap
+  (no error, no rejection) — new models cannot silently bypass or be starved.
+- Each group is checked against its own cap **and** the global cap (both must
+  pass), so the global `max_concurrency` stays a downstream-wide backstop. The
+  global cap also bounds the gateway process's own resources (SSE connections,
+  tasks), a dimension group caps do not cover.
+- Empty `model_concurrency_groups` behaves byte-for-byte like the legacy gate.
+- Sum of group caps may legally exceed the global cap (later groups then rely on
+  the global backstop); the admin API logs a warning, it is not an error.
+
+**Site reference values** (group cap = number of upstream keys serving that
+model × 4, matching the upstream `max_concurrency` hard ceiling):
+
+| Group | Upstream keys | Group cap |
+|-------|---------------|-----------|
+| glm5.2 | 1 | **4** |
+| deepseek | 7 | **28** |
+| global `max_concurrency` | — | **32** |
+
+No extra headroom is needed — overflow is absorbed by the C3
+`upstream_account_queue_*` queue; that is exactly what C3 is for.
+
+**Three operational rules:**
+
+1. **Group caps are per downstream key, not gateway-wide.** With M>1 downstream
+   keys each carrying `deepseek=28`, M×28 requests could cross the downstream
+   gate for the same 28 upstream slots. Either split capacity per key (each
+   key's cap = 28/M) or accept a deeper C3 queue (`upstream_account_queue_max_wait_ms`
+   gets hit sooner). Single-key deployments (the site shape) avoid this.
+2. **A key serving multiple models shares its 4 upstream slots across them —
+   do not count it in two groups.** Group capacity = (keys serving *only* that
+   model × 4) + (shared keys' apportioned share). If glm's key and deepseek's
+   keys do not overlap, glm=4 and deepseek=28 are correct as-is; if they
+   overlap, the sum of group caps must not exceed (non-duplicated key count × 4).
+3. **`rate_limit_enabled = false` skips the whole downstream gate** (the
+   gateway logs a warning when it is off), which disables *both* group caps and
+   the global cap and slams everything into the upstream local gate. Default is
+   `true`; do not turn it off "for speed".
+
+Edit the groups per downstream key via the admin UI (Downstreams → 编辑 → 模型并发组)
+or the update API; the field is in the batch-update whitelist.
+
 ### `upstream_routes_exhausted` 三步定位法 (runbook)
 
 When a request fails with `503 upstream_routes_exhausted`, read the terminal
