@@ -213,8 +213,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_transient_route_cooldown_max_step = 61 (T1.3),
     // plus upstream_shared_host_failure_domain_enabled = 62 (T1.4),
     // plus upstream_common_mode_same_host_transient_enabled = 63 (T2.2),
-    // plus upstream_route_exhaustion_alignment_truncated_enabled = 64 (T2.3).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 64);
+    // plus upstream_route_exhaustion_alignment_truncated_enabled = 64 (T2.3),
+    // plus upstream_lease_stale_after_ms = 65 (C2.3).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 65);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

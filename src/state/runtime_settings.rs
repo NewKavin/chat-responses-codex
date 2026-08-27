@@ -7,9 +7,9 @@ use super::types::{
     default_upstream_common_mode_transient_threshold,
     default_upstream_continuation_pin_escape_enabled,
     default_upstream_credentials_first_strike_seconds, default_upstream_error_body_excerpt_enabled,
-    default_upstream_error_body_excerpt_max_chars, default_upstream_local_lease_ttl_seconds,
-    default_upstream_max_concurrency, default_upstream_retry_after_cap_seconds,
-    default_upstream_retry_after_cooldown_cap_seconds,
+    default_upstream_error_body_excerpt_max_chars, default_upstream_lease_stale_after_ms,
+    default_upstream_local_lease_ttl_seconds, default_upstream_max_concurrency,
+    default_upstream_retry_after_cap_seconds, default_upstream_retry_after_cooldown_cap_seconds,
     default_upstream_route_exhaustion_alignment_truncated_enabled,
     default_upstream_route_exhaustion_budget_alignment_enabled,
     default_upstream_route_half_open_busy_max_rounds,
@@ -64,6 +64,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_error_body_excerpt_max_chars",
     "upstream_credentials_first_strike_seconds",
     "upstream_local_lease_ttl_seconds",
+    "upstream_lease_stale_after_ms",
     "upstream_continuation_pin_escape_enabled",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
@@ -151,6 +152,8 @@ pub struct RuntimeSettings {
     pub upstream_credentials_first_strike_seconds: u64,
     #[serde(default = "default_upstream_local_lease_ttl_seconds")]
     pub upstream_local_lease_ttl_seconds: u64,
+    #[serde(default = "default_upstream_lease_stale_after_ms")]
+    pub upstream_lease_stale_after_ms: u64,
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
@@ -321,6 +324,7 @@ impl RuntimeSettings {
             upstream_credentials_first_strike_seconds: config
                 .upstream_credentials_first_strike_seconds,
             upstream_local_lease_ttl_seconds: config.upstream_local_lease_ttl_seconds,
+            upstream_lease_stale_after_ms: config.upstream_lease_stale_after_ms,
             upstream_continuation_pin_escape_enabled: config
                 .upstream_continuation_pin_escape_enabled,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
@@ -418,6 +422,7 @@ impl RuntimeSettings {
         config.upstream_credentials_first_strike_seconds =
             self.upstream_credentials_first_strike_seconds;
         config.upstream_local_lease_ttl_seconds = self.upstream_local_lease_ttl_seconds;
+        config.upstream_lease_stale_after_ms = self.upstream_lease_stale_after_ms;
         config.upstream_continuation_pin_escape_enabled =
             self.upstream_continuation_pin_escape_enabled;
         config.upstream_route_exhaustion_retry_enabled =
@@ -594,6 +599,23 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_local_lease_ttl_seconds",
                 "must be between 60 and 86400",
+            ));
+        }
+        if self.upstream_lease_stale_after_ms < 1_000 {
+            return Err(invalid(
+                "upstream_lease_stale_after_ms",
+                "must be at least 1000 ms",
+            ));
+        }
+        // C2.3: stale-after must be >= 2x the heartbeat interval (ttl/3),
+        // otherwise a healthy-but-silent request (no chunks during a long
+        // inference) gets its lease reclaimed before its own heartbeat.
+        if self.upstream_lease_stale_after_ms
+            < 2 * (self.upstream_local_lease_ttl_seconds * 1_000 / 3)
+        {
+            return Err(invalid(
+                "upstream_lease_stale_after_ms",
+                "must be at least 2x the local lease heartbeat interval (ttl/3)",
             ));
         }
         require_positive(

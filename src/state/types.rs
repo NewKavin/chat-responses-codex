@@ -204,15 +204,24 @@ pub const DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS: u64 = 60;
 /// giving up with `give_up_reason = half_open_busy_cap`.  Busy waits never
 /// consume the ordinary `upstream_route_exhaustion_retry_max_rounds`.
 pub const DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS: u32 = 10;
-/// Local-backend upstream concurrency lease TTL (seconds, P7).  The in-memory
-/// `active_leases` map mirrors the Redis `lease_reserve.lua` lifecycle: every
-/// lease carries an absolute expiry and is pruned lazily on the next reserve /
-/// snapshot, so a guard dropped outside the Tokio runtime (whose release path
-/// never runs) stops pinning capacity once the TTL lapses.  Long streams renew
-/// their lease (`UpstreamRequestReservation::renew_if_due`) at half this TTL,
-/// mirroring the downstream lease renewal hook, so a stream may run far longer
-/// than the TTL without its slot being reclaimed.  Range 60..=86400.
+/// Local-backend upstream concurrency lease TTL (seconds, P7 / C1.1).  Leases
+/// live in `UpstreamLeaseTable` (`src/state.rs`) behind a plain
+/// `std::sync::Mutex` and mirror the Redis `lease_reserve.lua` lifecycle:
+/// every lease carries an absolute expiry and is pruned lazily on the next
+/// reserve / snapshot, so a guard dropped outside the Tokio runtime (whose
+/// release path never runs) stops pinning capacity once the TTL lapses.  Long
+/// streams renew their lease (`UpstreamRequestReservation::renew_if_due`) at
+/// half this TTL, mirroring the downstream lease renewal hook, so a stream may
+/// run far longer than the TTL without its slot being reclaimed.  Range
+/// 60..=86400.
 pub const DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS: u64 = 3600;
+
+/// C2.3: how old (ms) a lease may go without any heartbeat before the lazy
+/// sweep reclaims it immediately instead of waiting out the full TTL.  Default
+/// = 2 x the C2.1 heartbeat interval (heartbeat = ttl/3), i.e. leases are
+/// reclaimed roughly a third of a TTL after a leaked guard stops renewing,
+/// instead of up to a full TTL later.
+pub const DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS: u64 = 2_400_000;
 
 /// Whether an exhausted request may spend one final budget-aligned wait when
 /// the round cap is hit but a live transient recovery fits the remaining time
@@ -397,6 +406,8 @@ pub struct AppConfig {
     pub upstream_credentials_first_strike_seconds: u64,
     #[serde(default = "default_upstream_local_lease_ttl_seconds")]
     pub upstream_local_lease_ttl_seconds: u64,
+    #[serde(default = "default_upstream_lease_stale_after_ms")]
+    pub upstream_lease_stale_after_ms: u64,
 
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
@@ -515,6 +526,7 @@ impl Default for AppConfig {
             upstream_credentials_first_strike_seconds:
                 DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_local_lease_ttl_seconds: DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
+            upstream_lease_stale_after_ms: DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
             upstream_continuation_pin_escape_enabled:
                 DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
@@ -1244,6 +1256,10 @@ pub fn default_upstream_continuation_pin_escape_enabled() -> bool {
 }
 pub fn default_upstream_local_lease_ttl_seconds() -> u64 {
     DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS
+}
+
+pub fn default_upstream_lease_stale_after_ms() -> u64 {
+    DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

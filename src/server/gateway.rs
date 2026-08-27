@@ -3087,6 +3087,28 @@ impl DownstreamConcurrencyGuardInner {
         Option<tokio::task::JoinHandle<Result<(), RuntimeCoordinationError>>>,
         RuntimeCoordinationError,
     > {
+        // C1.2 (downstream counterpart): the local backend's
+        // `downstream_runtime` sits behind a plain `std::sync::Mutex` whose
+        // removal is synchronous, so release it right here instead of spawning
+        // a task.  A spawned release task is only polled when the runtime next
+        // schedules it; synchronous upstream release (C1.2) removed the
+        // implicit yield point that used to give that task a chance to run, and
+        // the downstream slot must not live or die by that scheduling detail.
+        if !self.state.is_redis_runtime_backend() {
+            let Some(release_guard) = GatewayReleaseGuard::acquire(&self.release_state)? else {
+                return Ok(None);
+            };
+            let removed = self.state.expire_downstream_request_lease_sync(&self.lease);
+            release_guard.complete();
+            if removed {
+                tracing::debug!(
+                    downstream_id = %self.lease.downstream_id(),
+                    "downstream concurrency lease released synchronously (local backend)"
+                );
+            }
+            return Ok(None);
+        }
+
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -3214,14 +3236,39 @@ impl UpstreamRequestGuardInner {
         Option<tokio::task::JoinHandle<Result<(), RuntimeCoordinationError>>>,
         RuntimeCoordinationError,
     > {
+        // C1.2: the local backend's lease table sits behind a plain
+        // `std::sync::Mutex` and its release is a synchronous `remove`, so
+        // release it right here instead of spawning a task.  This closes the
+        // §2.2(a) leak where a runtime that is shutting down spawns the
+        // release task but never polls it, silently pinning the slot for the
+        // whole TTL.  C1.3: on any failure the `GatewayReleaseGuard` drops
+        // back to ACTIVE, so a later drop of another guard clone retries.
+        if !self.state.is_redis_runtime_backend() {
+            let Some(release_guard) = GatewayReleaseGuard::acquire(&self.release_state)? else {
+                return Ok(None);
+            };
+            // C1.4: `expire_upstream_request_lease_sync` no longer uses
+            // `try_lock`; it removes the lease synchronously (or reports it
+            // as already gone, which is an idempotent success).
+            let removed = self.state.expire_upstream_request_lease_sync(&self.lease);
+            release_guard.complete();
+            if removed {
+                tracing::debug!(
+                    upstream_id = %self.lease.upstream_id(),
+                    "upstream request lease released synchronously (local backend)"
+                );
+            }
+            return Ok(None);
+        }
+
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
                 // Synchronous fallback (P7): the release task cannot be
                 // spawned, so mark the lease immediately expired instead of
                 // only logging and pinning the slot until the TTL sweep.
-                // Only the local backend can be touched synchronously; the
-                // Redis backend self-heals via its own lease TTL.
+                // The local backend was handled above; this branch only runs
+                // for the Redis backend, whose lease TTL self-heals natively.
                 if self.state.expire_upstream_request_lease_sync(&self.lease) {
                     tracing::warn!(
                         upstream_id = %self.lease.upstream_id(),

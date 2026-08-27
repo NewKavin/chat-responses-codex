@@ -1034,10 +1034,17 @@ async fn stream_completion_fixture(
 #[tokio::test]
 async fn local_upstream_concurrency_is_scoped_per_account() {
     let directory = tempdir().unwrap();
+    // C3.4: the local-gate retry-after is now an honest estimate (the max of
+    // the rejecting account's oldest active lease remaining TTL and the first
+    // probe-delay tier) instead of the old hard-coded 1s.  Pin the config so
+    // the estimate is exact instead of inheriting defaults.
+    let mut config = AppConfig::default();
+    config.upstream_local_lease_ttl_seconds = 60;
+    config.upstream_concurrency_probe_delays_ms = vec![1_000];
     let state = AppState::new(
         PersistedState::default(),
         directory.path().join("state.json"),
-        AppConfig::default(),
+        config,
     );
     let upstream = UpstreamConfig {
         id: "shared-upstream".into(),
@@ -1061,7 +1068,11 @@ async fn local_upstream_concurrency_is_scoped_per_account() {
         .await
         .expect_err("a second request on account A must exceed its limit");
 
-    assert_eq!(same_account_rejection.retry_after_seconds, 1);
+    // The rejecting account's single active lease has ~60s remaining (a
+    // fraction of a second already elapsed since reservation, floored to
+    // whole seconds => 59) and the probe floor is 1s, so the honest estimate
+    // is the remaining TTL, not the old hard-coded 1s.
+    assert_eq!(same_account_rejection.retry_after_seconds, 59);
     assert_eq!(
         state
             .upstream_runtime_snapshots()
@@ -1075,6 +1086,148 @@ async fn local_upstream_concurrency_is_scoped_per_account() {
 
     state.release_upstream_request(lease_a).await.unwrap();
     state.release_upstream_request(lease_b).await.unwrap();
+}
+
+/// C1.2: an `UpstreamRequestGuard` dropped with no Tokio runtime in scope must
+/// still release its local lease synchronously.  Pre-C1 the guard could only
+/// `tracing::error!` and leave the slot pinned until the TTL sweep (§2.2(a));
+/// with the local backend the release is a synchronous `remove` from the
+/// `std::sync::Mutex`-protected lease table, so the Drop path no longer needs
+/// a runtime at all — the §2.2(a) runtime-shutdown leak is closed.
+#[test]
+fn upstream_guard_drop_outside_runtime_frees_the_slot_immediately() {
+    let directory = tempdir().unwrap();
+    let mut config = AppConfig::default();
+    config.upstream_local_lease_ttl_seconds = 60;
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        config,
+    );
+    let upstream = crate::state::UpstreamConfig {
+        id: "drop-outside-runtime".into(),
+        active: true,
+        max_concurrency: 1,
+        ..Default::default()
+    };
+    let fingerprint = crate::keys::upstream_key_fingerprint(&upstream.id, "account");
+
+    let guard = {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let lease = state
+                .try_reserve_upstream_account_request(&upstream, &fingerprint, "model-a")
+                .await
+                .expect("reserve should succeed");
+            UpstreamRequestGuard::new(state.clone(), lease)
+        })
+    };
+    // The short-lived runtime above has been dropped; now drop the guard with
+    // no Tokio runtime in scope.  Must release synchronously (C1.2).
+    drop(guard);
+
+    let snapshots = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(state.upstream_runtime_snapshots())
+        .unwrap();
+    assert_eq!(
+        snapshots.get(&upstream.id).unwrap().in_flight,
+        0,
+        "a guard dropped outside a Tokio runtime must free the local slot immediately"
+    );
+}
+
+/// §4.1: `UpstreamRequestGuard` is `Clone`; keeping a sibling clone alive must
+/// keep pinning the slot, and the final clone's `Drop` must release the lease
+/// for sure (nothing is leaked by the clone bookkeeping).
+#[tokio::test]
+async fn upstream_guard_last_clone_drop_releases_the_lease() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let upstream = crate::state::UpstreamConfig {
+        id: "clone-release".into(),
+        active: true,
+        max_concurrency: 1,
+        ..Default::default()
+    };
+    let fingerprint = crate::keys::upstream_key_fingerprint(&upstream.id, "account");
+
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint, "model-a")
+        .await
+        .unwrap();
+    let guard = UpstreamRequestGuard::new(state.clone(), lease);
+    let guard_clone = guard.clone();
+
+    drop(guard);
+
+    let in_flight = || async {
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .unwrap()
+            .in_flight
+    };
+    assert_eq!(
+        in_flight().await,
+        1,
+        "a live clone must keep pinning the slot after its sibling drops"
+    );
+
+    drop(guard_clone);
+    assert_eq!(
+        in_flight().await,
+        0,
+        "the final clone's drop must release the lease"
+    );
+}
+
+/// C1.3 + the release-guard state machine: an explicit successful release
+/// followed by a Drop must be an idempotent no-op (never a double-release
+/// error or a panic), and the slot stays free.
+#[tokio::test]
+async fn upstream_guard_release_then_drop_is_idempotent() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let upstream = crate::state::UpstreamConfig {
+        id: "idempotent-release".into(),
+        active: true,
+        max_concurrency: 1,
+        ..Default::default()
+    };
+    let fingerprint = crate::keys::upstream_key_fingerprint(&upstream.id, "account");
+
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint, "model-a")
+        .await
+        .unwrap();
+    let guard = UpstreamRequestGuard::new(state.clone(), lease);
+
+    guard
+        .release()
+        .await
+        .expect("explicit release must succeed");
+    drop(guard); // second release must be a no-op
+
+    let replacement = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint, "model-a")
+        .await
+        .expect("the released slot must be free for the next request");
+    state.release_upstream_request(replacement).await.unwrap();
 }
 
 #[tokio::test]
