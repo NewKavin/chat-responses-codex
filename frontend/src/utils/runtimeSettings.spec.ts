@@ -37,7 +37,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_transient_same_route_retry_enabled: true,
   upstream_transient_route_cooldown_base_seconds: 5,
   upstream_transient_route_cooldown_max_seconds: 60,
-  upstream_transient_route_cooldown_max_step: 3,
+  upstream_transient_route_cooldown_max_step: 2,
   upstream_route_health_half_open_ttl_seconds: 30,
   upstream_route_half_open_exclusive_window_ms: 3_000,
   upstream_route_half_open_busy_max_rounds: 10,
@@ -142,10 +142,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(55)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(55)
+    expect(runtimeSettingFields).toHaveLength(57)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(57)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(42)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(44)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

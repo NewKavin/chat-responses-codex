@@ -899,6 +899,12 @@ onUnmounted(() => {
   margin-bottom: 0;
 }
 
+.downstream-table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 .key-result-surface {
   margin: 20px 0;
   padding: 16px;
