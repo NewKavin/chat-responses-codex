@@ -86,6 +86,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -237,6 +238,7 @@ async fn downstream_chat_request_uses_key_mapped_to_requested_model() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -394,6 +396,7 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -504,6 +507,7 @@ async fn persistent_credentials_failure_stays_502_after_route_cooldown() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 ..Default::default()
             },
@@ -653,6 +657,7 @@ async fn protocol_mismatch_hint_skips_only_the_failed_protocol_on_next_request()
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 ..Default::default()
             },
@@ -821,6 +826,7 @@ async fn capacity_failure_cools_only_the_failed_key_route_for_later_requests() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                model_concurrency_groups: vec![],
                 billing_mode: "request".into(),}]),
                 ..Default::default()
             },
@@ -988,6 +994,7 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                model_concurrency_groups: vec![],
                 billing_mode: "request".into(),}]),
                 ..Default::default()
             },
@@ -1180,6 +1187,7 @@ async fn feature_mismatch_hints_only_block_the_matching_effort_on_that_key() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                model_concurrency_groups: vec![],
                 billing_mode: "request".into(),}]),
                 ..Default::default()
             },
@@ -1342,6 +1350,7 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 ..Default::default()
             },
@@ -1528,6 +1537,7 @@ async fn generic_500_attempts(same_route_retry_enabled: bool) -> Vec<String> {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                model_concurrency_groups: vec![],
                 billing_mode: "request".into(),}]),
                 ..Default::default()
             },
@@ -1649,6 +1659,7 @@ async fn downstream_chat_request_does_not_fall_back_to_primary_key_for_unmapped_
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1781,6 +1792,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1881,6 +1893,7 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1978,6 +1991,7 @@ async fn premium_only_model_routes_to_protected_upstream() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2163,6 +2177,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2296,6 +2311,7 @@ async fn routing_rebalances_when_models_overlap() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2437,6 +2453,7 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2539,6 +2556,7 @@ fn priority_test_downstream(downstream_key: &GeneratedDownstreamKey) -> Downstre
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+        model_concurrency_groups: vec![],
     }
 }
 

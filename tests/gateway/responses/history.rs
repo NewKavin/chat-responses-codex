@@ -83,6 +83,8 @@ async fn run_versioned_v1_continuation_case(duplicate_exact_route: bool) -> (Sta
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -271,6 +273,8 @@ async fn legacy_continuation_rejects_ambiguous_multi_protocol_upstream_before_di
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -364,6 +368,8 @@ async fn legacy_continuation_does_not_downgrade_reasoning_tool_history() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -522,6 +528,8 @@ async fn responses_private_continuation_keys_are_stripped_before_upstream_dispat
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -645,6 +653,8 @@ async fn context_compaction_preserves_unresolved_tool_pairs_and_recent_reasoning
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -881,6 +891,8 @@ async fn codex_responses_overflow_compacts_once_for_chat_upstream() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -1128,6 +1140,8 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1400,6 +1414,8 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1595,6 +1611,8 @@ async fn downstream_responses_unknown_previous_response_id_is_safe_and_categoriz
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1727,6 +1745,8 @@ async fn response_history_is_isolated_by_downstream_key() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let state = AppState::new(
         PersistedState {
@@ -1900,6 +1920,8 @@ async fn concurrent_windows_with_repeated_upstream_id_keep_separate_history() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -2090,6 +2112,8 @@ async fn native_responses_repeated_upstream_id_keeps_concurrent_windows_separate
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -2313,6 +2337,8 @@ async fn chat_only_high_fidelity_stage_is_skipped_after_three_identical_failures
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2578,6 +2604,8 @@ async fn downstream_responses_request_downgrades_developer_role_for_chat_upstrea
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2720,6 +2748,8 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2875,6 +2905,8 @@ async fn downstream_responses_request_with_explicit_hosted_tool_choice_is_reject
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3026,6 +3058,8 @@ async fn downstream_responses_request_with_string_hosted_tool_choice_is_rejected
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3180,6 +3214,8 @@ async fn downstream_responses_request_with_unknown_function_tool_choice_drops_to
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3352,6 +3388,8 @@ async fn build_profile_switch_state(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },

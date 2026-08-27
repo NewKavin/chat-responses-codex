@@ -117,6 +117,8 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -274,6 +276,8 @@ async fn downstream_responses_stream_canonicalizes_domestic_chat_provider_eof_va
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -456,6 +460,8 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -660,6 +666,8 @@ async fn downstream_responses_stream_preserves_multiple_output_items_when_upstre
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -856,6 +864,8 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1015,6 +1025,8 @@ async fn downstream_responses_stream_recovers_when_chat_upstream_first_event_is_
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1188,6 +1200,8 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1383,6 +1397,8 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1543,6 +1559,8 @@ async fn downstream_responses_stream_tolerates_empty_data_keepalive_frames() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1673,6 +1691,8 @@ async fn downstream_responses_stream_tolerates_chat_keepalive_and_empty_data_fra
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1875,6 +1895,8 @@ async fn fragmented_tool_call_without_index_id_yields_valid_done_arguments() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -2058,6 +2080,8 @@ async fn run_fragmented_tool_call_stream(fragments: Vec<Value>) -> String {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },

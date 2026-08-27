@@ -149,13 +149,13 @@ pub use types::{
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
-    DownstreamConfig, GlobalContextProfile, ModelContextConfig, NonstandardFieldPolicy,
-    PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
-    UpstreamModelMapping, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
-    DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING, DEFAULT_TOOL_ARGUMENTS_STRICT,
-    DEFAULT_TOOL_CALL_MERGE_STRICT, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
-    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DownstreamConfig, GlobalContextProfile, ModelConcurrencyGroup, ModelContextConfig,
+    NonstandardFieldPolicy, PersistedState, RouteFailureClass, RouteHealthSnapshotDto,
+    StreamDiagnostics, UpstreamConfig, UpstreamModelMapping, UpstreamMutationError, UsageLog,
+    ADMIN_SESSION_TTL_SECONDS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
+    DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -400,6 +400,9 @@ impl DownstreamLeaseState {
 #[derive(Clone)]
 pub struct DownstreamConcurrencyLease {
     downstream_id: String,
+    /// Matched `model_concurrency_groups` entry name, or "" when the model
+    /// matched no group (legacy single-budget bucket).
+    group_name: String,
     lease_id: Option<String>,
     release_state: Arc<AtomicU8>,
 }
@@ -409,6 +412,7 @@ impl std::fmt::Debug for DownstreamConcurrencyLease {
         formatter
             .debug_struct("DownstreamConcurrencyLease")
             .field("downstream_id", &self.downstream_id)
+            .field("group_name", &self.group_name)
             .field("active", &self.lease_id.is_some())
             .finish_non_exhaustive()
     }
@@ -419,11 +423,34 @@ impl DownstreamConcurrencyLease {
         &self.downstream_id
     }
 
+    pub fn group_name(&self) -> &str {
+        &self.group_name
+    }
+
     /// The opaque lease identifier, when a runtime lease was actually
     /// reserved (rate limiting enabled). `None` for unrestricted leases.
     pub fn lease_id(&self) -> Option<&str> {
         self.lease_id.as_deref()
     }
+}
+
+/// Concurrency tracking key for the downstream gate. The first element is the
+/// downstream id; the second is the matched `model_concurrency_groups` entry
+/// name ("" = no group, the legacy single-budget bucket). Splitting the legacy
+/// single key into a tuple lets a downstream key budget each model group
+/// independently (C7) while keeping the no-group path byte-identical.
+type DownstreamLeaseKey = (String, String);
+
+/// All admitted-lease counts for a downstream across every group bucket.
+fn downstream_total_admitted(
+    runtime: &HashMap<DownstreamLeaseKey, DownstreamLeaseState>,
+    downstream_id: &str,
+) -> usize {
+    runtime
+        .iter()
+        .filter(|((id, _), _)| id == downstream_id)
+        .map(|(_, state)| state.admitted.len())
+        .sum()
 }
 
 #[derive(Clone)]
@@ -600,7 +627,7 @@ pub struct AppState {
     runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamRequestEvent>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
-    downstream_runtime: Arc<StdMutex<HashMap<String, DownstreamLeaseState>>>,
+    downstream_runtime: Arc<StdMutex<HashMap<DownstreamLeaseKey, DownstreamLeaseState>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
     fallback_stage_failures: Arc<StdMutex<HashMap<String, u8>>>,
@@ -1516,6 +1543,7 @@ impl AppState {
                     ticket,
                     &lease.downstream_id,
                     lease_id,
+                    &lease.group_name,
                 )
                 .await;
         }
@@ -1524,9 +1552,8 @@ impl AppState {
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
-        let downstream = runtime
-            .get_mut(&lease.downstream_id)
-            .ok_or(RuntimeCoordinationError)?;
+        let key = (lease.downstream_id.clone(), lease.group_name.clone());
+        let downstream = runtime.get_mut(&key).ok_or(RuntimeCoordinationError)?;
         if !downstream.admitted.contains_key(lease_id) || !downstream.waiting.contains(lease_id) {
             return Err(RuntimeCoordinationError);
         }
@@ -4613,11 +4640,20 @@ impl AppState {
     pub async fn reserve_downstream_admission(
         &self,
         downstream: &DownstreamConfig,
+        model: &str,
     ) -> Result<
         (DownstreamRequestReservation, DownstreamConcurrencyLease),
         DownstreamAdmissionRejection,
     > {
         if !downstream.rate_limit_enabled {
+            // rate_limit_enabled=false skips the ENTIRE downstream gate, so both
+            // per-model groups and the global max_concurrency are bypassed and
+            // every request lands straight on the upstream local gate. Make the
+            // operator aware that disabling this also disables the C7 groups.
+            tracing::warn!(
+                downstream_id = %downstream.id,
+                "downstream rate limiting disabled: per-model concurrency groups and global max_concurrency are bypassed"
+            );
             return Ok((
                 DownstreamRequestReservation {
                     downstream_id: downstream.id.clone(),
@@ -4625,17 +4661,31 @@ impl AppState {
                 },
                 DownstreamConcurrencyLease {
                     downstream_id: downstream.id.clone(),
+                    group_name: String::new(),
                     lease_id: None,
                     release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
                 },
             ));
         }
 
+        let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
+        let group = downstream.concurrency_group_for_model(model, case_insensitive);
+        let group_name = group
+            .as_ref()
+            .map(|group| group.name.clone())
+            .unwrap_or_default();
+
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let event_id = Uuid::new_v4().to_string();
             let lease_id = Uuid::new_v4().to_string();
             coordinator
-                .reserve_downstream_admission(downstream, &event_id, &lease_id)
+                .reserve_downstream_admission(
+                    downstream,
+                    &event_id,
+                    &lease_id,
+                    &group_name,
+                    group.as_ref().map(|group| group.max_concurrency),
+                )
                 .await?;
             return Ok((
                 DownstreamRequestReservation {
@@ -4644,6 +4694,7 @@ impl AppState {
                 },
                 DownstreamConcurrencyLease {
                     downstream_id: downstream.id.clone(),
+                    group_name,
                     lease_id: Some(lease_id),
                     release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
                 },
@@ -4651,7 +4702,10 @@ impl AppState {
         }
 
         let reservation = self.reserve_downstream_request(downstream).await?;
-        match self.try_reserve_downstream_concurrency(downstream).await {
+        match self
+            .try_reserve_downstream_concurrency(downstream, model)
+            .await
+        {
             Ok(lease) => Ok((reservation, lease)),
             Err(rejection) => {
                 // Best-effort rollback keeps local admission atomic: a rejected
@@ -4815,22 +4869,37 @@ impl AppState {
     pub async fn try_reserve_downstream_concurrency(
         &self,
         downstream: &DownstreamConfig,
+        model: &str,
     ) -> Result<DownstreamConcurrencyLease, DownstreamAdmissionRejection> {
         if !downstream.rate_limit_enabled {
             return Ok(DownstreamConcurrencyLease {
                 downstream_id: downstream.id.clone(),
+                group_name: String::new(),
                 lease_id: None,
                 release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
         }
 
+        let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
+        let group = downstream.concurrency_group_for_model(model, case_insensitive);
+        let group_name = group
+            .as_ref()
+            .map(|group| group.name.clone())
+            .unwrap_or_default();
+
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let lease_id = Uuid::new_v4().to_string();
             coordinator
-                .reserve_downstream_lease(downstream, &lease_id)
+                .reserve_downstream_lease(
+                    downstream,
+                    &lease_id,
+                    &group_name,
+                    group.as_ref().map(|group| group.max_concurrency),
+                )
                 .await?;
             return Ok(DownstreamConcurrencyLease {
                 downstream_id: downstream.id.clone(),
+                group_name,
                 lease_id: Some(lease_id),
                 release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
@@ -4841,12 +4910,33 @@ impl AppState {
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
-        let current = runtime.entry(downstream.id.clone()).or_default();
-        current.prune_expired(unix_millis());
-        if current.admitted.len() >= downstream.max_concurrency.max(1) as usize {
+        let key = (downstream.id.clone(), group_name.clone());
+        let group_cap = group.as_ref().map(|group| group.max_concurrency.max(1));
+        // Group cap first: a burst on one model must not eat another model's
+        // budget. The bucket is already per (downstream, group), so the count
+        // is the group's own occupancy.
+        if let Some(group_cap) = group_cap {
+            let current = runtime.entry(key.clone()).or_default();
+            current.prune_expired(unix_millis());
+            if current.admitted.len() >= group_cap as usize {
+                return Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                    retry_after_seconds: 1,
+                    limit: group_cap,
+                    group: Some(group_name.clone()),
+                });
+            }
+        }
+        // Global cap as a downstream-wide backstop (across every group). It
+        // bounds the gateway-process resources a single downstream key may
+        // consume; a group list whose caps sum above it is legal overbooking
+        // and the global cap keeps the total bounded.
+        if downstream_total_admitted(&runtime, &downstream.id)
+            >= downstream.max_concurrency.max(1) as usize
+        {
             return Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
                 retry_after_seconds: 1,
                 limit: downstream.max_concurrency.max(1),
+                group: (!group_name.is_empty()).then(|| group_name.clone()),
             });
         }
         let lease_duration_ms = self
@@ -4854,12 +4944,15 @@ impl AppState {
             .downstream_lease_ttl_seconds
             .saturating_mul(1_000)
             .max(60_000);
+        let current = runtime.entry(key).or_default();
+        current.prune_expired(unix_millis());
         current.admitted.insert(
             lease_id.clone(),
             unix_millis().saturating_add(lease_duration_ms),
         );
         Ok(DownstreamConcurrencyLease {
             downstream_id: downstream.id.clone(),
+            group_name,
             lease_id: Some(lease_id),
             release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
         })
@@ -4875,20 +4968,21 @@ impl AppState {
         let result = if let Some(lease_id) = lease.lease_id {
             if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
                 coordinator
-                    .release_downstream_lease(&lease.downstream_id, &lease_id)
+                    .release_downstream_lease(&lease.downstream_id, &lease_id, &lease.group_name)
                     .await
             } else {
                 let mut runtime = self
                     .downstream_runtime
                     .lock()
                     .expect("downstream runtime lock poisoned");
-                let remove_entry = runtime.get_mut(&lease.downstream_id).is_some_and(|state| {
+                let key = (lease.downstream_id.clone(), lease.group_name.clone());
+                let remove_entry = runtime.get_mut(&key).is_some_and(|state| {
                     state.admitted.remove(&lease_id);
                     state.waiting.remove(&lease_id);
                     state.is_empty()
                 });
                 if remove_entry {
-                    runtime.remove(&lease.downstream_id);
+                    runtime.remove(&key);
                 }
                 Ok(())
             }
@@ -4923,13 +5017,14 @@ impl AppState {
             .downstream_runtime
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let remove_entry = runtime.get_mut(&lease.downstream_id).is_some_and(|state| {
+        let key = (lease.downstream_id.clone(), lease.group_name.clone());
+        let remove_entry = runtime.get_mut(&key).is_some_and(|state| {
             state.admitted.remove(lease_id);
             state.waiting.remove(lease_id);
             state.is_empty()
         });
         if remove_entry {
-            runtime.remove(&lease.downstream_id);
+            runtime.remove(&key);
         }
         release_guard.complete();
         remove_entry
@@ -4944,14 +5039,15 @@ impl AppState {
         };
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             return coordinator
-                .renew_downstream_lease(&lease.downstream_id, lease_id)
+                .renew_downstream_lease(&lease.downstream_id, lease_id, &lease.group_name)
                 .await;
         }
         let mut runtime = self
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
-        let Some(state) = runtime.get_mut(&lease.downstream_id) else {
+        let key = (lease.downstream_id.clone(), lease.group_name.clone());
+        let Some(state) = runtime.get_mut(&key) else {
             // The lease was already released; renewal is a no-op.
             return Ok(());
         };
@@ -4978,16 +5074,15 @@ impl AppState {
         };
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             return coordinator
-                .mark_downstream_waiting(&lease.downstream_id, lease_id)
+                .mark_downstream_waiting(&lease.downstream_id, lease_id, &lease.group_name)
                 .await;
         }
         let mut runtime = self
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
-        let state = runtime
-            .get_mut(&lease.downstream_id)
-            .ok_or(RuntimeCoordinationError)?;
+        let key = (lease.downstream_id.clone(), lease.group_name.clone());
+        let state = runtime.get_mut(&key).ok_or(RuntimeCoordinationError)?;
         state.prune_expired(unix_millis());
         if !state.admitted.contains_key(lease_id) {
             return Err(RuntimeCoordinationError);
@@ -5005,14 +5100,15 @@ impl AppState {
         };
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             return coordinator
-                .unmark_downstream_waiting(&lease.downstream_id, lease_id)
+                .unmark_downstream_waiting(&lease.downstream_id, lease_id, &lease.group_name)
                 .await;
         }
         let mut runtime = self
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
-        if let Some(state) = runtime.get_mut(&lease.downstream_id) {
+        let key = (lease.downstream_id.clone(), lease.group_name.clone());
+        if let Some(state) = runtime.get_mut(&key) {
             state.waiting.remove(lease_id);
         }
         Ok(())
@@ -5023,27 +5119,33 @@ impl AppState {
         downstream: &DownstreamConfig,
     ) -> Result<DownstreamRuntimeCounts, RuntimeCoordinationError> {
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let group_names: Vec<String> = downstream
+                .model_concurrency_groups
+                .iter()
+                .map(|group| group.name.clone())
+                .collect();
             return coordinator
-                .downstream_runtime_snapshot(&downstream.id)
+                .downstream_runtime_snapshot(&downstream.id, &group_names)
                 .await;
         }
         let mut runtime = self
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
-        let should_prune = runtime
-            .get(&downstream.id)
-            .is_some_and(|state| !state.waiting.is_empty() || !state.admitted.is_empty());
-        if should_prune {
-            if let Some(state) = runtime.get_mut(&downstream.id) {
+        let mut admitted = 0u32;
+        let mut waiting_upstream = 0u32;
+        for ((_, _), state) in runtime
+            .iter_mut()
+            .filter(|((id, _), _)| id == downstream.id.as_str())
+        {
+            if !state.waiting.is_empty() || !state.admitted.is_empty() {
                 state.prune_expired(unix_millis());
             }
+            admitted =
+                admitted.saturating_add(u32::try_from(state.admitted.len()).unwrap_or(u32::MAX));
+            waiting_upstream = waiting_upstream
+                .saturating_add(u32::try_from(state.waiting.len()).unwrap_or(u32::MAX));
         }
-        let Some(state) = runtime.get(&downstream.id) else {
-            return Ok(DownstreamRuntimeCounts::default());
-        };
-        let admitted = u32::try_from(state.admitted.len()).unwrap_or(u32::MAX);
-        let waiting_upstream = u32::try_from(state.waiting.len()).unwrap_or(u32::MAX);
         let running = admitted
             .checked_sub(waiting_upstream)
             .ok_or(RuntimeCoordinationError)?;
@@ -5063,8 +5165,13 @@ impl AppState {
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let mut snapshots = Vec::with_capacity(routing.downstreams.len());
             for downstream in routing.downstreams.iter() {
+                let group_names: Vec<String> = downstream
+                    .model_concurrency_groups
+                    .iter()
+                    .map(|group| group.name.clone())
+                    .collect();
                 let counts = coordinator
-                    .downstream_runtime_snapshot(&downstream.id)
+                    .downstream_runtime_snapshot(&downstream.id, &group_names)
                     .await?;
                 snapshots.push((
                     downstream.id.clone(),
@@ -5092,14 +5199,18 @@ impl AppState {
             .iter()
             .map(|downstream| {
                 let (admitted, waiting) = runtime
-                    .get(&downstream.id)
-                    .map(|state| {
+                    .iter()
+                    .filter(|((id, _), _)| id == downstream.id.as_str())
+                    .fold((0u32, 0u32), |(admitted, waiting), (_, state)| {
                         (
-                            u32::try_from(state.admitted.len()).unwrap_or(u32::MAX),
-                            u32::try_from(state.waiting.len()).unwrap_or(u32::MAX),
+                            admitted.saturating_add(
+                                u32::try_from(state.admitted.len()).unwrap_or(u32::MAX),
+                            ),
+                            waiting.saturating_add(
+                                u32::try_from(state.waiting.len()).unwrap_or(u32::MAX),
+                            ),
                         )
-                    })
-                    .unwrap_or_default();
+                    });
                 (
                     downstream.id.clone(),
                     DownstreamConcurrencySnapshot::from_counts(
@@ -5116,9 +5227,12 @@ impl AppState {
     pub async fn clear_downstream_runtime(
         &self,
         downstream_id: &str,
+        group_names: &[String],
     ) -> Result<(), RuntimeCoordinationError> {
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            return coordinator.clear_downstream(downstream_id).await;
+            return coordinator
+                .clear_downstream(downstream_id, group_names)
+                .await;
         }
         self.downstream_request_windows
             .lock()
@@ -5131,7 +5245,7 @@ impl AppState {
         self.downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned")
-            .remove(downstream_id);
+            .retain(|(id, _), _| id != downstream_id);
         Ok(())
     }
 
@@ -5399,17 +5513,29 @@ impl AppState {
             RuntimeCoordinationBackend::Redis(_)
         );
         if redis_runtime {
-            let exists = {
+            let (exists, groups) = {
                 let state = self.inner.lock().await;
-                state
+                let found = state
                     .downstreams
                     .iter()
-                    .any(|downstream| downstream.id == downstream_id)
+                    .find(|downstream| downstream.id == downstream_id);
+                (
+                    found.is_some(),
+                    found
+                        .map(|downstream| {
+                            downstream
+                                .model_concurrency_groups
+                                .iter()
+                                .map(|group| group.name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                )
             };
             if !exists {
                 return Ok(false);
             }
-            self.clear_downstream_runtime(downstream_id)
+            self.clear_downstream_runtime(downstream_id, &groups)
                 .await
                 .map_err(io::Error::other)?;
         }
@@ -5422,7 +5548,7 @@ impl AppState {
             })
             .await?;
         if removed && !redis_runtime {
-            self.clear_downstream_runtime(downstream_id)
+            self.clear_downstream_runtime(downstream_id, &[])
                 .await
                 .map_err(io::Error::other)?;
         }
@@ -7197,6 +7323,9 @@ pub enum DownstreamAdmissionRejection {
     ConcurrencyLimitExceeded {
         retry_after_seconds: u64,
         limit: u32,
+        /// Matched `model_concurrency_groups` entry name, `None` when the
+        /// global `max_concurrency` backstop was hit (or no group matched).
+        group: Option<String>,
     },
     PerMinuteLimitExceeded {
         retry_after_seconds: u64,
@@ -7583,6 +7712,7 @@ mod tests {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+            model_concurrency_groups: vec![],
         }
     }
 
@@ -7632,12 +7762,12 @@ mod tests {
         );
         let downstream = test_downstream_config("local-ttl-capacity");
         let first = state
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .unwrap();
         assert!(
             state
-                .try_reserve_downstream_concurrency(&downstream)
+                .try_reserve_downstream_concurrency(&downstream, "test-model")
                 .await
                 .is_err(),
             "second reservation must be rejected while the first lease is live"
@@ -7651,7 +7781,7 @@ mod tests {
                 .insert(lease_id, crate::util::unix_millis() - 1_000);
         }
         let second = state
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .unwrap();
         assert!(
@@ -7669,7 +7799,7 @@ mod tests {
         );
         let downstream = test_downstream_config("local-ttl-renewal");
         let lease = state
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .unwrap();
         let lease_id = lease.lease_id.as_ref().expect("local lease id").clone();

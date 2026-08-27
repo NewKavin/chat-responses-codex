@@ -9,9 +9,9 @@ use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     AccountConcurrencyKey, AccountProbeOutcome, ApiKeyModelConfig, AppConfig, AppState,
     CoordinationTestFault, DownstreamAdmissionRejection, DownstreamConfig, KeyHealthKey,
-    ModelKeySyncService, PersistedState, ProbeDecision, RouteAvailability, RouteFailureClass,
-    RouteHealthKey, RouteOutcome, RouteSetAggregateKey, RuntimeCoordinationBackend, UpstreamConfig,
-    UsageLog,
+    ModelConcurrencyGroup, ModelKeySyncService, PersistedState, ProbeDecision, RouteAvailability,
+    RouteFailureClass, RouteHealthKey, RouteOutcome, RouteSetAggregateKey,
+    RuntimeCoordinationBackend, UpstreamConfig, UsageLog,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -152,6 +152,7 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+        model_concurrency_groups: vec![],
     }
 }
 
@@ -405,6 +406,10 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let token_key = format!("{}:replay:tokens", config.redis_key_prefix);
     let token_values_key = format!("{}:replay:token-values", config.redis_key_prefix);
     let downstream_lease_key = format!("{}:replay:downstream-leases", config.redis_key_prefix);
+    let downstream_aggregate_lease_key = format!(
+        "{}:replay:downstream-aggregate-leases",
+        config.redis_key_prefix
+    );
     let upstream_lease_key = format!("{}:replay:upstream-leases", config.redis_key_prefix);
     let upstream_aggregate_lease_key = format!(
         "{}:replay:upstream-aggregate-leases",
@@ -439,9 +444,11 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let lease_args = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/lease_reserve.lua").into(),
-        "1".into(),
+        "2".into(),
         downstream_lease_key.clone(),
+        downstream_aggregate_lease_key,
         "lease-id".into(),
+        "0".into(),
         "10".into(),
         "120000".into(),
     ];
@@ -612,12 +619,12 @@ async fn redis_downstream_concurrency_leases_are_shared_and_idempotent() {
     let downstream = redis_test_downstream("shared-concurrency-limit");
 
     let first_lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     assert!(
         second
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .is_err(),
         "the second coordinator must observe the first lease"
@@ -628,7 +635,7 @@ async fn redis_downstream_concurrency_leases_are_shared_and_idempotent() {
         .await
         .unwrap();
     let second_lease = second
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     first
@@ -637,7 +644,7 @@ async fn redis_downstream_concurrency_leases_are_shared_and_idempotent() {
         .unwrap();
     assert!(
         first
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .is_err(),
         "releasing a stale clone must not remove the replacement lease"
@@ -658,7 +665,7 @@ async fn redis_downstream_lease_renewal_extends_lease_ttl() {
     };
     let downstream = redis_test_downstream("renewal-extends-lease");
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     let lease_id = lease.lease_id().expect("redis lease id").to_string();
@@ -775,7 +782,7 @@ async fn redis_probe_grant_atomically_requires_and_clears_downstream_waiting() {
     let (first, second, _directory) = redis_test_states(&config).await;
     let downstream = redis_test_downstream("down-atomic-probe-grant");
     let lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     let account = AccountConcurrencyKey::new("up-atomic-probe-grant", "fingerprint-a");
@@ -826,7 +833,7 @@ async fn redis_downstream_snapshot_counts_admitted_and_waiting_without_false_zer
     let (first, second, _directory) = redis_test_states(&config).await;
     let downstream = redis_test_downstream("down-runtime");
     let lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     first.mark_downstream_waiting(&lease).await.unwrap();
@@ -946,7 +953,7 @@ async fn redis_short_waiting_lease_does_not_shorten_shared_waiting_ttl() {
     downstream.max_concurrency = 2;
 
     let long_lease = long_state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     long_state
@@ -960,7 +967,7 @@ async fn redis_short_waiting_lease_does_not_shorten_shared_waiting_ttl() {
 
     let observed_at = Instant::now();
     let short_lease = short_state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     short_state
@@ -1266,7 +1273,7 @@ async fn redis_downstream_release_removes_wait_state_atomically() {
     let (first, second, _directory) = redis_test_states(&config).await;
     let downstream = redis_test_downstream("down-release-waiting");
     let lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     first.mark_downstream_waiting(&lease).await.unwrap();
@@ -1725,7 +1732,7 @@ async fn redis_release_and_rollback_retry_once_after_timeout() {
     downstream.per_minute_limit = 1;
 
     let lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     let fault = coordination_fault(&first);
@@ -1735,7 +1742,7 @@ async fn redis_release_and_rollback_retry_once_after_timeout() {
         .await
         .expect("lease release must retry once after the first timeout");
     let replacement = second
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     second
@@ -1784,11 +1791,13 @@ async fn redis_reserves_retry_commit_after_response_loss_without_double_counting
     let downstream = redis_test_downstream("reserve-replay-lease");
     fault.lose_next_responses(1);
     let downstream_lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .expect("downstream lease reserve must replay the same lease after a lost response");
     assert!(matches!(
-        second.try_reserve_downstream_concurrency(&downstream).await,
+        second
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
+            .await,
         Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded { .. })
     ));
     first
@@ -1830,7 +1839,7 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
     second.insert_upstream(upstream.clone()).await.unwrap();
 
     let downstream_lease = first
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     let downstream_retry_during_outage = downstream_lease.clone();
@@ -1875,7 +1884,7 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
     upstream_result.unwrap();
 
     let replacement = second
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     second
@@ -4432,7 +4441,7 @@ async fn redis_downstream_lease_uses_short_ttl_not_upstream_stream_duration() {
     let (state, _second, _directory) = redis_test_states(&config).await;
     let downstream = redis_test_downstream("down-lease-ttl");
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
 
@@ -4485,7 +4494,7 @@ async fn redis_downstream_admission_reserves_request_and_lease_atomically() {
     let downstream = redis_test_downstream("shared-admission-atomic");
 
     let (reservation, lease) = first
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect("first combined admission must succeed");
     assert!(
@@ -4495,7 +4504,7 @@ async fn redis_downstream_admission_reserves_request_and_lease_atomically() {
 
     // The second instance must observe both the request slot and the lease.
     let rejection = second
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect_err("second admission must be rejected while lease is held");
     assert!(
@@ -4516,7 +4525,7 @@ async fn redis_downstream_admission_reserves_request_and_lease_atomically() {
         .unwrap();
     first.release_downstream_concurrency(lease).await.unwrap();
     let (reservation, lease) = second
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect("admission must succeed after rollback and release");
     second
@@ -4537,14 +4546,14 @@ async fn redis_downstream_admission_concurrency_rejection_records_nothing() {
     downstream.request_quota_requests = Some(2);
 
     let (first_reservation, first_lease) = first
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect("first admission must succeed");
 
     // With quota 2 and one request recorded, a second admission passes the
     // request checks but must be rejected on the concurrency limit.
     let rejection = second
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect_err("second admission must hit the concurrency limit");
     assert!(
@@ -4563,7 +4572,7 @@ async fn redis_downstream_admission_concurrency_rejection_records_nothing() {
         .await
         .unwrap();
     let (second_reservation, second_lease) = second
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect("rejected admission must not consume a request-quota slot");
     second
@@ -4725,4 +4734,287 @@ fn redis_lua_scripts_thread_the_t1_cooldown_parameters() {
              preserving the local backoff curve as the primary cooldown (T1.2)"
         );
     }
+}
+
+// ============================================================================
+// C7 (2026-08-27): no-Redis drift guard -- the downstream per-model group caps
+// must be threaded into the Redis backend's Lua scripts, mirroring the local
+// backend (group cap first, downstream-wide global backstop second).  This
+// plain test runs everywhere and statically locks the threading so a change
+// to the local backend can never silently leave the Redis backend behind.
+// ============================================================================
+#[test]
+fn redis_lua_scripts_thread_the_c7_downstream_group_limits() {
+    let reserve = include_str!("../src/state/redis_runtime/lease_reserve.lua");
+    let admission = include_str!("../src/state/redis_runtime/downstream_admission.lua");
+    let release = include_str!("../src/state/redis_runtime/lease_release.lua");
+    let renew = include_str!("../src/state/redis_runtime/lease_renew.lua");
+    let coordinator_source =
+        std::fs::read_to_string("src/state/redis_runtime.rs").expect("redis_runtime.rs");
+
+    // lease_reserve.lua (the try_reserve_downstream_concurrency path) must
+    // check the group cap on the group bucket first, then the global
+    // backstop on the aggregate zset.
+    assert!(
+        reserve.contains("local group_limit = tonumber(ARGV[2])"),
+        "lease_reserve.lua must read the group cap (C7)"
+    );
+    assert!(
+        reserve.contains("local global_limit = tonumber(ARGV[3])"),
+        "lease_reserve.lua must read the global backstop (C7)"
+    );
+    assert!(
+        reserve.contains("ZCARD', KEYS[1]) >= group_limit"),
+        "lease_reserve.lua must enforce the group cap on the group bucket (C7)"
+    );
+    assert!(
+        reserve.contains("ZCARD', KEYS[2]) >= global_limit"),
+        "lease_reserve.lua must enforce the global backstop on the aggregate zset (C7)"
+    );
+
+    // downstream_admission.lua (the merged request+lease path) must enforce
+    // the same group-first / global-backstop ordering.
+    assert!(
+        admission.contains("local group_limit = tonumber(ARGV[10])"),
+        "downstream_admission.lua must read the group cap (C7)"
+    );
+    assert!(
+        admission.contains("ZCARD', KEYS[4]) >= group_limit"),
+        "downstream_admission.lua must enforce the group cap on the group bucket (C7)"
+    );
+    assert!(
+        admission.contains("ZCARD', KEYS[5]) >= concurrency_limit"),
+        "downstream_admission.lua must enforce the global backstop on the aggregate zset (C7)"
+    );
+
+    // lease_release.lua / lease_renew.lua must keep the aggregate zset in
+    // sync so the global backstop never leaks slots or under-counts renewals.
+    assert!(
+        release.contains("if KEYS[3] then"),
+        "lease_release.lua must drop the aggregate member too (C7)"
+    );
+    assert!(
+        renew.contains("if KEYS[2] then"),
+        "lease_renew.lua must renew the aggregate member too (C7)"
+    );
+
+    // The coordinator must pass the aggregate key and the group cap on both
+    // reservation paths.
+    assert!(
+        coordinator_source.contains("\"leases_all\""),
+        "the coordinator must build the downstream aggregate lease key (C7)"
+    );
+    assert!(
+        coordinator_source.contains("group_cap"),
+        "coordinate must accept the group cap and forward it into the Lua invocation (C7)"
+    );
+    assert!(
+        coordinator_source.contains(".key(aggregate_lease_key)"),
+        "the coordinator must pass the aggregate key into the Lua invocation (C7)"
+    );
+}
+
+// ============================================================================
+// C7 live-Redis suite: group caps behave per group on the Redis backend the
+// same way they do on the local backend.  `#[ignore]`d; set TEST_REDIS_URL.
+// ============================================================================
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_group_budget_is_per_group_not_global() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("down-group-budgets");
+    downstream.per_minute_limit = 100;
+    // Global backstop is deliberately NOT simply the sum of the group caps:
+    // the group caps sum to 2, so set the global to 3 to prove the global
+    // backstop is a separate bound.
+    downstream.max_concurrency = 3;
+    downstream.model_concurrency_groups = vec![
+        ModelConcurrencyGroup {
+            name: "glm".into(),
+            patterns: vec!["glm-*".into()],
+            max_concurrency: 1,
+        },
+        ModelConcurrencyGroup {
+            name: "deepseek".into(),
+            patterns: vec!["deepseek-*".into()],
+            max_concurrency: 3,
+        },
+    ];
+
+    // glm group cap = 1: a second glm must be rejected by the GROUP cap while
+    // the deepseek group still has plenty of capacity (C7 HOL regression).
+    let glm_lease = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+        .await
+        .expect("first glm lease must succeed");
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.1")
+        .await
+        .expect_err("second glm must hit the glm group cap");
+    match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit, group, .. } => {
+            assert_eq!(limit, 1, "group rejection must report the glm cap");
+            assert_eq!(
+                group.as_deref(),
+                Some("glm"),
+                "group rejection must name the glm group"
+            );
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+
+    // deepseek is a different bucket: it must still be admitted even though
+    // the glm group is full.
+    let deepseek_lease = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4")
+        .await
+        .expect("deepseek must not be blocked by the full glm group");
+
+    // Both groups now hold 1 lease each = 2 admitted total, under the global
+    // 3. A second deepseek is fine.
+    let deepseek_lease_2 = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4-flash")
+        .await
+        .expect("second deepseek must succeed (group 3, global 3 not reached)");
+
+    state
+        .release_downstream_concurrency(glm_lease)
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(deepseek_lease)
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(deepseek_lease_2)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_admission_global_backstop_bounds_group_sum() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("down-group-backstop");
+    downstream.per_minute_limit = 100;
+    // Legal overbooking on purpose: group caps sum to 4 but the global
+    // backstop is 3. The global bound must still win across the aggregate.
+    downstream.max_concurrency = 3;
+    downstream.model_concurrency_groups = vec![
+        ModelConcurrencyGroup {
+            name: "glm".into(),
+            patterns: vec!["glm-*".into()],
+            max_concurrency: 2,
+        },
+        ModelConcurrencyGroup {
+            name: "deepseek".into(),
+            patterns: vec!["deepseek-*".into()],
+            max_concurrency: 2,
+        },
+    ];
+
+    // Fill glm (2) and deepseek (1) = 3 total = global backstop.
+    let mut leases = Vec::new();
+    for _ in 0..2 {
+        leases.push(
+            state
+                .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+                .await
+                .expect("glm lease must succeed"),
+        );
+    }
+    leases.push(
+        state
+            .try_reserve_downstream_concurrency(&downstream, "deepseek-v4")
+            .await
+            .expect("deepseek lease must succeed"),
+    );
+
+    // A third deepseek is under its group cap (2) but over the global
+    // backstop (3): the global limit must be the one that rejects it.
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4-flash")
+        .await
+        .expect_err("global backstop must reject the third deepseek");
+    match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit, group, .. } => {
+            assert_eq!(
+                limit, 3,
+                "global backstop must report downstream.max_concurrency"
+            );
+            assert_eq!(
+                group.as_deref(),
+                Some("deepseek"),
+                "global rejection still names the matched group"
+            );
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+
+    for lease in leases {
+        state.release_downstream_concurrency(lease).await.unwrap();
+    }
+}
+
+// The merged request+lease path (reserve_downstream_admission) must reject on
+// the group cap through the same Lua limits and must NOT record the request
+// slot when it does (atomicity preserved).
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_admission_group_rejection_names_the_group() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("down-admission-group");
+    downstream.per_minute_limit = 100;
+    downstream.max_concurrency = 4;
+    downstream.model_concurrency_groups = vec![ModelConcurrencyGroup {
+        name: "glm".into(),
+        patterns: vec!["glm-*".into()],
+        max_concurrency: 1,
+    }];
+
+    let (first_reservation, first_lease) = first
+        .reserve_downstream_admission(&downstream, "glm-5.2")
+        .await
+        .expect("first combined admission must succeed");
+    let rejection = first
+        .reserve_downstream_admission(&downstream, "glm-5.1")
+        .await
+        .expect_err("second combined admission must hit the glm group cap");
+    match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit, group, .. } => {
+            assert_eq!(limit, 1, "group rejection must report the glm cap");
+            assert_eq!(
+                group.as_deref(),
+                Some("glm"),
+                "group rejection must name the glm group"
+            );
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+
+    // Atomicity: the rejected admission must not have recorded a request
+    // event. After release, a fresh glm admission succeeds again.
+    first
+        .release_downstream_concurrency(first_lease)
+        .await
+        .unwrap();
+    first
+        .rollback_downstream_request_reservation(first_reservation)
+        .await
+        .unwrap();
+    let (second_reservation, second_lease) = first
+        .reserve_downstream_admission(&downstream, "glm-5.1")
+        .await
+        .expect("admission must succeed after release");
+    second
+        .rollback_downstream_request_reservation(second_reservation)
+        .await
+        .unwrap();
+    second
+        .release_downstream_concurrency(second_lease)
+        .await
+        .unwrap();
 }

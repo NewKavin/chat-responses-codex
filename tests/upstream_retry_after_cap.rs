@@ -120,6 +120,8 @@ async fn build_state(address: String, config: AppConfig, max_concurrency: u32) -
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

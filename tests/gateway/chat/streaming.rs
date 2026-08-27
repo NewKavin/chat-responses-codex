@@ -80,6 +80,8 @@ async fn downstream_streaming_request_reports_model_routing_failure_precisely() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -220,6 +222,8 @@ async fn downstream_chat_request_supports_upstream_base_url_with_v1_prefix() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -344,6 +348,8 @@ async fn downstream_request_is_rejected_after_exceeding_per_minute_limit() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -480,6 +486,8 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -608,6 +616,8 @@ async fn downstream_chat_stream_canonicalizes_domestic_provider_eof_variants() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -767,6 +777,8 @@ async fn first_sse_error_retries_without_stream_before_output() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -998,6 +1010,8 @@ async fn slow_first_output_hedge_uses_the_next_upstream_account_impl() {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         ..Default::default()
     };
@@ -1289,6 +1303,8 @@ async fn full_cross_upstream_hedge_falls_through_to_the_next_key() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1449,6 +1465,8 @@ async fn normal_first_event_then_error_is_not_retried() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1612,6 +1630,8 @@ async fn responses_output_then_named_error_is_preserved_and_not_retried() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1743,6 +1763,8 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1825,7 +1847,7 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
         .iter()
         .all(|upstream| upstream.failure_count == 0));
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state.release_downstream_concurrency(lease).await.unwrap();
@@ -1970,6 +1992,8 @@ async fn first_sse_error_then_json_failure_advances_to_next_candidate() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -2124,6 +2148,8 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2291,6 +2317,8 @@ async fn downstream_chat_stream_normalizes_cumulative_usage_to_final_usage_chunk
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2465,6 +2493,8 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2632,6 +2662,8 @@ async fn downstream_chat_stream_preserves_multiple_choices_when_upstream_returns
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2889,6 +2921,8 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3055,6 +3089,8 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3207,6 +3243,8 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3339,6 +3377,8 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3502,6 +3542,8 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3633,6 +3675,8 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3765,6 +3809,8 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3906,6 +3952,8 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -4073,6 +4121,8 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -4285,6 +4335,8 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -4401,6 +4453,8 @@ async fn stream_disconnect_releases_runtime_state() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -4525,6 +4579,8 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -4588,7 +4644,10 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
                 .get("up-1")
                 .is_some_and(|runtime| runtime.in_flight == 0);
             if upstream_released {
-                if let Ok(lease) = state.try_reserve_downstream_concurrency(&downstream).await {
+                if let Ok(lease) = state
+                    .try_reserve_downstream_concurrency(&downstream, "test-model")
+                    .await
+                {
                     state.release_downstream_concurrency(lease).await.unwrap();
                     break;
                 }
@@ -4760,6 +4819,8 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -4843,7 +4904,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     drop(body);
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state.release_downstream_concurrency(lease).await.unwrap();
@@ -5086,6 +5147,8 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -5242,6 +5305,8 @@ async fn drop_after_terminal_chat_chunk_is_logged_as_success() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -5357,6 +5422,8 @@ fn truncated_stream_test_state(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -5617,6 +5684,8 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -5663,7 +5732,7 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
     let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.max_concurrency = 1;
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state.release_downstream_concurrency(lease).await.unwrap();
@@ -5742,6 +5811,8 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -5796,7 +5867,7 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
     let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.max_concurrency = 1;
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state.release_downstream_concurrency(lease).await.unwrap();
@@ -5916,6 +5987,8 @@ async fn claude_drop_after_first_outer_frame(with_text_delta: bool) -> (String, 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -6086,6 +6159,8 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -6217,6 +6292,8 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -6376,6 +6453,8 @@ async fn runtime_stream_idle_timeout_interrupts_later_hung_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -6556,6 +6635,8 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -6747,6 +6828,8 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -6931,6 +7014,8 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -7101,6 +7186,8 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

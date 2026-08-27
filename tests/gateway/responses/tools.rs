@@ -135,6 +135,8 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -485,6 +487,8 @@ async fn downstream_responses_stream_replays_namespace_tool_calls() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -631,6 +635,8 @@ async fn verified_native_responses_route_preserves_hosted_tools_unchanged() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

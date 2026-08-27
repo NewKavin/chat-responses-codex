@@ -148,6 +148,8 @@ async fn exhaustion_harness(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -419,6 +421,8 @@ async fn concurrency_saturated_retry_after_is_not_cut_by_cooldown_cap() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -612,6 +616,8 @@ async fn shipped_default_config_waits_between_rounds_and_reports_honest_state() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

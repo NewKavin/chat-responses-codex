@@ -375,6 +375,8 @@ fn qualification_persisted_state() -> PersistedState {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         ..Default::default()
     }

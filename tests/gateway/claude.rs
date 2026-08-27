@@ -315,6 +315,8 @@ impl ClaudeResponsesThinkingFixture {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -797,6 +799,8 @@ impl ClaudeThinkingFixture {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1160,6 +1164,8 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1331,6 +1337,8 @@ async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstre
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1544,6 +1552,8 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1683,6 +1693,8 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1860,6 +1872,8 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2032,7 +2046,8 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                billing_mode: "request".into(),}]),
+                billing_mode: "request".into(), model_concurrency_groups: vec![],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2212,7 +2227,8 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                billing_mode: "request".into(),}]),
+                billing_mode: "request".into(), model_concurrency_groups: vec![],
+                }]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2393,6 +2409,8 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2543,6 +2561,8 @@ async fn downstream_messages_supports_configured_portal_models() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2696,6 +2716,8 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2805,6 +2827,8 @@ async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2945,6 +2969,8 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

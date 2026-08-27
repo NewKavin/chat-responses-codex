@@ -218,6 +218,8 @@ async fn session_recovery_harness() -> SessionRecoveryHarness {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -852,6 +854,8 @@ async fn failover_recovery_harness() -> FailoverRecoveryHarness {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -1344,6 +1348,8 @@ async fn build_cross_account_harness() -> CrossAccountHarness {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },

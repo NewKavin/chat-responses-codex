@@ -76,6 +76,8 @@ fn canonical_upstream_state() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![
             UsageLog {
@@ -230,6 +232,8 @@ fn create_test_state() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![
             UsageLog {
@@ -330,6 +334,8 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![
             UsageLog {
@@ -456,6 +462,8 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs,
         announcement: None,
@@ -509,7 +517,7 @@ async fn portal_overview_reports_only_authenticated_downstream_runtime() {
     let snapshot = state.routing_snapshot().await;
     let downstream = snapshot.downstreams[0].clone();
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state.mark_downstream_waiting(&lease).await.unwrap();
@@ -1320,6 +1328,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1659,6 +1668,8 @@ fn create_state_with_context_limits() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1758,6 +1769,8 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![UsageLog {
             id: "tz-log-1".to_string(),
@@ -1976,6 +1989,8 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
             expires_at: None,
             active: true,
             billing_mode: "token".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![UsageLog {
             id: "cost-log-1".to_string(),
@@ -2078,6 +2093,8 @@ async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
             expires_at: None,
             active: true,
             billing_mode: "token".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![UsageLog {
             id: "cost-log-1".to_string(),

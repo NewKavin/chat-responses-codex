@@ -172,6 +172,8 @@ impl LearningHarness {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -967,6 +969,8 @@ async fn stream_only_learning_follower_429_has_one_final_exact_route_attempt() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1145,6 +1149,8 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1298,6 +1304,8 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1507,6 +1515,8 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

@@ -728,20 +728,33 @@ impl GatewayError {
             DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
                 retry_after_seconds,
                 limit,
-            } => Self::classified(
-                StatusCode::TOO_MANY_REQUESTS,
-                "downstream concurrency limit exceeded",
-                "gateway_quota_exceeded",
-                "gateway_concurrency_full",
-                "gateway_concurrency_full",
-                Some(retry_after_seconds),
-                Some(json!({
+                group,
+            } => {
+                let message = match &group {
+                    Some(group_name) => format!(
+                        "downstream concurrency limit exceeded for model group \"{group_name}\" ({limit} concurrent slots)"
+                    ),
+                    None => "downstream concurrency limit exceeded".to_string(),
+                };
+                let mut details = json!({
                     "scope": "gateway",
                     "quota": "concurrent_requests",
                     "limit": limit,
                     "retry_after_seconds": retry_after_seconds,
-                })),
-            ),
+                });
+                if let Some(group_name) = &group {
+                    details["concurrency_group"] = json!(group_name);
+                }
+                Self::classified(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &message,
+                    "gateway_quota_exceeded",
+                    "gateway_concurrency_full",
+                    "gateway_concurrency_full",
+                    Some(retry_after_seconds),
+                    Some(details),
+                )
+            }
             DownstreamAdmissionRejection::PerMinuteLimitExceeded {
                 retry_after_seconds,
                 limit,

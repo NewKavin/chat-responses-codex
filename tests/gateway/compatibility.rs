@@ -41,6 +41,8 @@ async fn basic_models_payload(uri: &str) -> Value {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -122,6 +124,8 @@ async fn case_variant_models_payload(uri: &str, case_insensitive: bool) -> Value
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -287,6 +291,8 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

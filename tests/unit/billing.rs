@@ -22,6 +22,7 @@ fn cost_downstream() -> DownstreamConfig {
         expires_at: None,
         active: true,
         billing_mode: "token".into(),
+        model_concurrency_groups: vec![],
     }
 }
 

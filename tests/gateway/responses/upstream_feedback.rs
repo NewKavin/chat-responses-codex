@@ -115,6 +115,8 @@ async fn responses_feedback_harness(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -336,6 +338,8 @@ async fn explicit_concurrency_5xx_uses_account_recovery_and_healthy_routes() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -522,6 +526,8 @@ async fn semantic_output_blocks_concurrency_failover() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -694,6 +700,8 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -846,6 +854,8 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -978,6 +988,8 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1141,6 +1153,8 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1272,6 +1286,8 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1399,6 +1415,8 @@ async fn route_failure_observability_separates_upstream_500_from_downstream_503(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1599,6 +1617,8 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1766,6 +1786,8 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1978,6 +2000,8 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2087,6 +2111,8 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2327,6 +2353,8 @@ async fn common_mode_breaker_threshold_zero_disables_the_breaker_and_tries_all_r
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2537,6 +2565,8 @@ async fn common_mode_breaker_single_key_failure_preserves_key_isolation() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2797,6 +2827,8 @@ async fn common_mode_pool_harness(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2942,6 +2974,8 @@ async fn common_mode_same_host_502_does_not_trip_and_tries_all_routes() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -3354,6 +3388,8 @@ async fn common_mode_transient_streaming_mid_stream_failure_never_retries_same_r
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

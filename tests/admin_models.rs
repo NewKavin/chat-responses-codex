@@ -151,6 +151,8 @@ fn models_harness() -> (axum::Router, AppState) {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },

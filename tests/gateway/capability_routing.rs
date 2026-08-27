@@ -167,6 +167,8 @@ fn catalog_state(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1929,6 +1931,8 @@ async fn required_image_never_routes_to_text_only_candidate() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2037,6 +2041,8 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2168,6 +2174,8 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2282,6 +2290,8 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2416,6 +2426,8 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2563,6 +2575,8 @@ async fn catalog_witness_considers_every_supported_protocol() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2731,6 +2745,8 @@ async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2943,6 +2959,8 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

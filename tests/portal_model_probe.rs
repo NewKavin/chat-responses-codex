@@ -63,6 +63,8 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,

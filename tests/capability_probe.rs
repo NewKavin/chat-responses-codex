@@ -1616,6 +1616,8 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -1726,6 +1728,8 @@ async fn probe_service_runtime_concurrency_setting_bounds_global_concurrency() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -1907,6 +1911,8 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -2062,6 +2068,8 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -4060,6 +4068,8 @@ async fn normal_gateway_request_never_launches_a_probe() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -4154,6 +4164,8 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -4255,6 +4267,8 @@ async fn recognized_field_level_5xx_with_request_evidence_queues_future_probe() 
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,

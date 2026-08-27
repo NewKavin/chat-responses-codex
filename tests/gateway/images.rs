@@ -90,6 +90,8 @@ async fn downstream_chat_image_detail_is_downgraded_when_route_lacks_it() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -281,6 +283,8 @@ async fn downstream_responses_image_detail_is_downgraded_when_route_lacks_it() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -448,6 +452,8 @@ async fn downstream_chat_file_id_requires_native_file_capability_before_routing(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

@@ -402,6 +402,8 @@ async fn run_matrix_cell(dialect: Dialect, scenario: Scenario) -> (String, Value
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },

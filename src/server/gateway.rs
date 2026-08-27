@@ -5396,7 +5396,7 @@ async fn process_gateway_request_inner(
     }
 
     let (downstream_request_reservation, downstream_concurrency_lease) = match state
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, &normalized_model)
         .await
     {
         Ok(admission) => admission,

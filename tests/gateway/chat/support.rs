@@ -133,6 +133,8 @@ pub(super) async fn capture_single_chat_request_with_options(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

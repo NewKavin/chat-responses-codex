@@ -1011,9 +1011,11 @@ async fn stream_completion_fixture(
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let downstream_lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     StreamCompletionContext {
@@ -1472,6 +1474,8 @@ async fn gateway_uses_independent_local_slots_for_keys_on_one_upstream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1602,6 +1606,8 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1730,6 +1736,8 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1831,6 +1839,8 @@ async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let state = AppState::new(
         PersistedState {
@@ -1856,7 +1866,7 @@ async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
         .await
         .unwrap();
     let downstream_lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     let mut session = AccountRecoverySession::new(
@@ -1974,6 +1984,8 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -2505,6 +2517,8 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -3156,6 +3170,8 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -3227,7 +3243,10 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 .get("up-1")
                 .is_some_and(|runtime| runtime.in_flight == 0);
             if upstream_released {
-                if let Ok(lease) = state.try_reserve_downstream_concurrency(&downstream).await {
+                if let Ok(lease) = state
+                    .try_reserve_downstream_concurrency(&downstream, "test-model")
+                    .await
+                {
                     state.release_downstream_concurrency(lease).await.unwrap();
                     break;
                 }

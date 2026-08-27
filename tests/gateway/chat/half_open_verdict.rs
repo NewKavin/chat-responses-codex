@@ -194,6 +194,8 @@ async fn half_open_verdict_harness(probe: ProbeStreamBehavior) -> HalfOpenVerdic
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },

@@ -133,6 +133,8 @@ async fn downstream_responses_supports_configured_portal_models() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -277,6 +279,8 @@ async fn codex_subagent_fast_preview_model_uses_authorized_base_route() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -398,6 +402,8 @@ async fn downstream_responses_allows_function_call_success_with_zero_output_toke
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -528,6 +534,8 @@ async fn downstream_models_do_not_live_discover_an_empty_portal_catalog() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -769,6 +777,8 @@ async fn empty_persisted_catalog_skips_discovery_but_preserves_legacy_request_ro
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

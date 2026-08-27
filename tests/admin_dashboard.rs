@@ -96,6 +96,8 @@ fn create_test_state() -> AppState {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
             DownstreamConfig {
                 id: "downstream-2".to_string(),
@@ -118,6 +120,8 @@ fn create_test_state() -> AppState {
                 expires_at: None,
                 active: false,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
         ]),
         usage_logs: vec![
@@ -671,6 +675,8 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
             DownstreamConfig {
                 id: "downstream-beta".to_string(),
@@ -693,6 +699,8 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
         ]),
         usage_logs: vec![

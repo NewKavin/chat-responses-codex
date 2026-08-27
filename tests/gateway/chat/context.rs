@@ -105,7 +105,8 @@ async fn context_limit_error_retries_once_with_reduced_max_tokens() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                billing_mode: "request".into(),}]),
+                billing_mode: "request".into(), model_concurrency_groups: vec![],
+                }]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -218,6 +219,8 @@ async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() 
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -379,6 +382,8 @@ async fn explicit_context_wrappers_do_not_cool_route() {
                         expires_at: None,
                         active: true,
                         billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                     }]),
                     usage_logs: vec![],
                     announcement: None,
@@ -576,6 +581,8 @@ async fn context_overflow_503_compacts_once_without_cooling_route() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -778,6 +785,8 @@ async fn protected_context_minimum_returns_stable_context_error() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
                 }]),
                 ..PersistedState::default()
             },
@@ -914,6 +923,8 @@ async fn generic_503_does_not_compact_history() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1093,7 +1104,8 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                billing_mode: "request".into(),}]),
+                billing_mode: "request".into(), model_concurrency_groups: vec![],
+                }]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1272,6 +1284,8 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -1487,7 +1501,8 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                billing_mode: "request".into(),}]),
+                billing_mode: "request".into(), model_concurrency_groups: vec![],
+                }]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1697,6 +1712,8 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

@@ -150,6 +150,8 @@ async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream_bo
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -308,6 +310,8 @@ async fn stream_disconnect_releases_runtime_state() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -436,6 +440,8 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -599,6 +605,8 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -679,7 +687,7 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.max_concurrency = 1;
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state.release_downstream_concurrency(lease).await.unwrap();
@@ -787,6 +795,8 @@ async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -918,6 +928,8 @@ async fn translated_drop_after_event(event_type: &str) -> (Vec<String>, u16, Str
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1102,6 +1114,8 @@ async fn native_drop_after_response_incomplete_is_not_499() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1300,6 +1314,8 @@ async fn native_responses_response_for_chunks(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -1635,6 +1651,8 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1766,6 +1784,8 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1955,6 +1975,8 @@ async fn translated_chat_to_responses_drop_after_completed_event_is_logged_as_su
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2129,6 +2151,8 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2293,6 +2317,8 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2480,6 +2506,8 @@ async fn native_responses_stream_keepalive_is_sse_comment_for_codex_clients() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2647,6 +2675,8 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2817,6 +2847,8 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

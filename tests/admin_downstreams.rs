@@ -59,6 +59,8 @@ fn create_test_state() -> AppState {
                 expires_at: Some(1735689600), // 2025-01-01
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
             DownstreamConfig {
                 id: "downstream-2".to_string(),
@@ -83,6 +85,8 @@ fn create_test_state() -> AppState {
                 expires_at: None,
                 active: false,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
         ]),
         usage_logs: vec![],
@@ -153,7 +157,7 @@ async fn downstream_runtime_endpoint_is_lightweight_and_includes_disabled_rows()
         .unwrap()
         .clone();
     let lease = state
-        .try_reserve_downstream_concurrency(&active_config)
+        .try_reserve_downstream_concurrency(&active_config, "test-model")
         .await
         .unwrap();
     state.mark_downstream_waiting(&lease).await.unwrap();

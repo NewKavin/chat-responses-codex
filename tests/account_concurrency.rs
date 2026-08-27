@@ -70,6 +70,8 @@ async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let state = AppState::new(
         PersistedState {
@@ -84,7 +86,7 @@ async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
     );
     let account = AccountConcurrencyKey::new("up-atomic-grant", "fingerprint-atomic");
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state

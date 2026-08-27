@@ -59,6 +59,8 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -195,6 +197,8 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -309,6 +313,8 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -416,6 +422,8 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -575,6 +583,8 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1236,6 +1246,8 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1393,6 +1405,8 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1476,6 +1490,7 @@ fn route_retry_downstream_config(downstream_key: &GeneratedDownstreamKey) -> Dow
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+        model_concurrency_groups: vec![],
     }
 }
 

@@ -240,6 +240,8 @@ async fn persist_config_round_trips_through_postgres() {
             expires_at: None,
             active: true,
             billing_mode: Default::default(),
+
+            model_concurrency_groups: vec![],
         })
         .await
         .expect("should persist downstream");

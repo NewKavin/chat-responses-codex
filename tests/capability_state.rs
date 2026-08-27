@@ -2867,6 +2867,8 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

@@ -63,6 +63,8 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: logs,
         announcement: None,
@@ -103,6 +105,8 @@ fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             expires_at: None,
             active: true,
             billing_mode: "token".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: logs,
         announcement: None,
@@ -363,6 +367,8 @@ async fn test_compute_request_quota_usage_returns_none_if_no_quota() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
 
     let usage = state.compute_request_quota_usage(&downstream).await;
@@ -1547,6 +1553,8 @@ async fn test_compute_model_stats_empty_allowlist() {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: logs,
         announcement: None,

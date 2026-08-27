@@ -45,6 +45,8 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
 
     let state = PersistedState {

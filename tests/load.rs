@@ -602,6 +602,8 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -763,6 +765,8 @@ async fn load_gateway_first_meaningful_event_baseline() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -961,6 +965,8 @@ async fn load_gateway_first_meaningful_event() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

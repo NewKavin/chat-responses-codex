@@ -78,6 +78,8 @@ async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_ha
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -126,6 +128,8 @@ async fn app_state_clears_invalid_plaintext_before_mutation_persistence_and_publ
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         })
         .await
         .unwrap();
@@ -172,6 +176,8 @@ async fn legacy_add_downstream_clears_invalid_plaintext_before_publication() {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         })
         .await
         .unwrap();
@@ -444,6 +450,8 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 },
                 DownstreamConfig {
                     id: "downstream-3".to_string(),
@@ -466,6 +474,8 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
+
+                    model_concurrency_groups: vec![],
                 },
             ]),
             usage_logs: vec![
@@ -561,6 +571,8 @@ async fn failed_local_downstream_removal_keeps_runtime_windows() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let state = AppState::new_with_store(
         PersistedState {
@@ -953,6 +965,8 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1025,6 +1039,8 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1100,6 +1116,8 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
                 expires_at: None,
                 active: true,
                 billing_mode: "token".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![UsageLog {
                 id: "log-lookup".to_string(),

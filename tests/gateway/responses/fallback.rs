@@ -102,6 +102,8 @@ async fn capability_ineligible_responses_route_does_not_suppress_chat_fallback()
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -308,6 +310,8 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -597,6 +601,8 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -810,6 +816,8 @@ async fn chat_only_fallback_drops_unpinned_reasoning_and_preserves_tool_history(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1013,6 +1021,8 @@ async fn downstream_responses_bad_response_status_preserves_tools_without_retry(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1156,6 +1166,8 @@ async fn chat_only_responses_required_hosted_tools_reject_before_dispatch() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1316,6 +1328,8 @@ async fn chat_only_responses_optional_hosted_tool_reports_downgrade() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1457,6 +1471,8 @@ async fn encrypted_agent_message_fails_before_chat_fallback_hits_upstream() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1599,6 +1615,8 @@ async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1720,6 +1738,8 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1924,6 +1944,8 @@ async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_p
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2076,6 +2098,8 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2253,6 +2277,8 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2442,6 +2468,8 @@ async fn polluted_replayed_history_repairs_and_anomaly_carries_dispatch_attribut
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },

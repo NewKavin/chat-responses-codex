@@ -184,7 +184,7 @@ impl PostgresStateStore {
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
                  request_quota_requests, expires_at, active, billing_mode, \
                  input_token_price_per_million_cents, output_token_price_per_million_cents, \
-                 daily_cost_limit_cents \
+                 daily_cost_limit_cents, model_concurrency_groups \
                  FROM downstreams ORDER BY id",
                 &[],
             )
@@ -218,6 +218,13 @@ impl PostgresStateStore {
                 daily_cost_limit_cents: row
                     .get::<_, Option<i64>>(16)
                     .map(i64_to_u64),
+                model_concurrency_groups: row
+                    .get::<_, Option<serde_json::Value>>(17)
+                    .and_then(|value| {
+                        serde_json::from_value::<Vec<crate::state::ModelConcurrencyGroup>>(value)
+                            .ok()
+                    })
+                    .unwrap_or_default(),
             });
         }
 
@@ -1359,6 +1366,11 @@ async fn sync_downstreams(
             .output_token_price_per_million_cents
             .map(|value| value as i64);
         let daily_cost_limit_cents = downstream.daily_cost_limit_cents.map(|value| value as i64);
+        let model_concurrency_groups = if downstream.model_concurrency_groups.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&downstream.model_concurrency_groups).ok()
+        };
         let params: &[&(dyn ToSql + Sync)] = &[
             &downstream.id,
             &downstream.name,
@@ -1377,9 +1389,10 @@ async fn sync_downstreams(
             &input_token_price_per_million_cents,
             &output_token_price_per_million_cents,
             &daily_cost_limit_cents,
+            &model_concurrency_groups,
         ];
 
-        const DOWNSTREAM_COLUMNS: [&str; 17] = [
+        const DOWNSTREAM_COLUMNS: [&str; 18] = [
             "id",
             "name",
             "hash",
@@ -1397,6 +1410,7 @@ async fn sync_downstreams(
             "input_token_price_per_million_cents",
             "output_token_price_per_million_cents",
             "daily_cost_limit_cents",
+            "model_concurrency_groups",
         ];
         const DOWNSTREAM_INSERT_CONFLICT: &str = "ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1414,7 +1428,8 @@ async fn sync_downstreams(
                 billing_mode = EXCLUDED.billing_mode,
                 input_token_price_per_million_cents = EXCLUDED.input_token_price_per_million_cents,
                 output_token_price_per_million_cents = EXCLUDED.output_token_price_per_million_cents,
-                daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents";
+                daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents,
+                model_concurrency_groups = EXCLUDED.model_concurrency_groups";
         debug_assert_eq!(DOWNSTREAM_COLUMNS.len(), params.len());
         let sql = insert_statement(
             "downstreams",
@@ -1919,6 +1934,8 @@ ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS output_token_price_per_million_cents BIGINT NULL;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS daily_cost_limit_cents BIGINT NULL;
+ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS model_concurrency_groups JSONB NULL;
 ALTER TABLE downstreams
     DROP COLUMN IF EXISTS token_price_per_million_cents;
 

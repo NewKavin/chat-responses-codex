@@ -2342,6 +2342,52 @@ pub(super) async fn admin_update_downstream(
         if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
             downstream.active = active;
         }
+        if let Some(groups_value) = updates.get("model_concurrency_groups") {
+            if groups_value.is_null() {
+                downstream.model_concurrency_groups = Vec::new();
+            } else {
+                match serde_json::from_value::<Vec<crate::state::ModelConcurrencyGroup>>(
+                    groups_value.clone(),
+                ) {
+                    Ok(groups) => {
+                        let mut candidate = downstream.clone();
+                        candidate.model_concurrency_groups = groups;
+                        if let Err(message) = candidate.validate_model_concurrency_groups() {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({ "error": { "message": message } })),
+                            )
+                                .into_response();
+                        }
+                        let cap_sum: u64 = candidate
+                            .model_concurrency_groups
+                            .iter()
+                            .map(|group| u64::from(group.max_concurrency))
+                            .sum();
+                        if cap_sum > u64::from(downstream.max_concurrency.max(1)) {
+                            tracing::warn!(
+                                downstream_id = %id,
+                                cap_sum,
+                                global_max_concurrency = downstream.max_concurrency,
+                                "model_concurrency_groups caps sum above the global max_concurrency (legal overbooking; the global cap stays the backstop)"
+                            );
+                        }
+                        downstream.model_concurrency_groups = candidate.model_concurrency_groups;
+                    }
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "message": "model_concurrency_groups must be an array of objects {\"name\", \"match\", \"max_concurrency\"}"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
 
         match state.update_downstream(&id, downstream.clone()).await {
             Ok(true) => Json(downstream).into_response(),

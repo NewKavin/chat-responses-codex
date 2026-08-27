@@ -161,6 +161,8 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -577,6 +579,8 @@ async fn run_compatible_continuation_failover_case(case: CompatibleContinuationC
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1098,6 +1102,8 @@ async fn responses_continuation_local_saturation_uses_compatible_account() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..PersistedState::default()
         },
@@ -1326,6 +1332,8 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1582,6 +1590,8 @@ async fn responses_continuation_rejects_same_profile_key_after_fingerprint_drift
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1802,6 +1812,8 @@ async fn responses_continuation_rejects_same_profile_key_after_probe_or_fingerpr
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2005,6 +2017,8 @@ async fn responses_continuation_rejects_deleted_exact_profile_before_dispatch() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -2161,6 +2175,8 @@ async fn downstream_responses_request_requires_verified_reasoning_carrier_before
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

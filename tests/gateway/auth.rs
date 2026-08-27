@@ -29,6 +29,8 @@ async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -111,6 +113,8 @@ async fn direct_hash_update_clears_mismatched_stored_plaintext() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -154,6 +158,8 @@ async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() 
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             ..Default::default()
         },
@@ -287,6 +293,8 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -414,6 +422,8 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -569,6 +579,8 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -633,6 +645,8 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,

@@ -303,6 +303,8 @@ impl AggregateHarness {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         };
         let tempdir = tempdir().unwrap();
         let state = AppState::new(
@@ -424,12 +426,12 @@ impl AggregateHarness {
         assert!(self.state.active_gateway_requests(None).is_empty());
         let lease = self
             .state
-            .try_reserve_downstream_concurrency(&self.downstream)
+            .try_reserve_downstream_concurrency(&self.downstream, "test-model")
             .await
             .expect("downstream concurrency should return to zero");
         assert!(
             self.state
-                .try_reserve_downstream_concurrency(&self.downstream)
+                .try_reserve_downstream_concurrency(&self.downstream, "test-model")
                 .await
                 .is_err(),
             "max_concurrency=1 must make the zero-state probe exact"
@@ -491,6 +493,7 @@ fn downstream_config(
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+        model_concurrency_groups: vec![],
     }
 }
 
@@ -559,14 +562,14 @@ async fn assert_cancelled_request_cleanup(
     for _ in 0..expected_downstream_capacity {
         leases.push(
             state
-                .try_reserve_downstream_concurrency(downstream)
+                .try_reserve_downstream_concurrency(downstream, "test-model")
                 .await
                 .expect("downstream concurrency should return to zero"),
         );
     }
     assert!(
         state
-            .try_reserve_downstream_concurrency(downstream)
+            .try_reserve_downstream_concurrency(downstream, "test-model")
             .await
             .is_err(),
         "downstream capacity probe must reach the configured limit"

@@ -407,12 +407,19 @@ impl RedisRuntimeCoordinator {
         downstream: &DownstreamConfig,
         event_id: &str,
         lease_id: &str,
+        group_name: &str,
+        group_cap: Option<u32>,
     ) -> Result<(), DownstreamAdmissionRejection> {
         let identity = stable_identity(&downstream.id);
         let request_key = self.key(&identity, "requests");
         let token_key = self.key(&identity, "tokens");
         let token_values_key = self.key(&identity, "token_values");
-        let lease_key = self.key(&identity, "leases");
+        let lease_suffix = format!("leases{}", downstream_group_suffix(group_name));
+        let lease_key = self.key(&identity, &lease_suffix);
+        // Downstream-wide aggregate lease zset (C7 global backstop): every
+        // group bucket mirrors its leases here so `ZCARD` yields the total
+        // admitted count across groups in one ZSET.
+        let aggregate_lease_key = self.key(&identity, "leases_all");
         let request_window_seconds = downstream
             .request_quota_window_hours
             .zip(downstream.request_quota_requests)
@@ -435,6 +442,7 @@ impl RedisRuntimeCoordinator {
                 let token_key = token_key.clone();
                 let token_values_key = token_values_key.clone();
                 let lease_key = lease_key.clone();
+                let aggregate_lease_key = aggregate_lease_key.clone();
                 let event_id = event_id.to_string();
                 let lease_id = lease_id.to_string();
                 async move {
@@ -446,6 +454,7 @@ impl RedisRuntimeCoordinator {
                         .key(token_key)
                         .key(token_values_key)
                         .key(lease_key)
+                        .key(aggregate_lease_key)
                         .arg(event_id)
                         .arg(downstream.per_minute_limit)
                         .arg(request_window_seconds)
@@ -454,13 +463,14 @@ impl RedisRuntimeCoordinator {
                         .arg(monthly_limit)
                         .arg(lease_id)
                         .arg(downstream.max_concurrency.max(1))
-                        .arg(self.downstream_lease_duration_ms);
+                        .arg(self.downstream_lease_duration_ms)
+                        .arg(group_cap.map_or(0, |cap| cap.max(1)));
                     timeout_coordination(invocation.invoke_async::<Vec<i64>>(&mut connection)).await
                 }
             })
             .await
             .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
-        parse_downstream_admission(result)
+        parse_downstream_admission(result, group_name)
     }
 
     pub(super) async fn record_downstream_tokens(
@@ -500,13 +510,23 @@ impl RedisRuntimeCoordinator {
         &self,
         downstream: &DownstreamConfig,
         lease_id: &str,
+        group_name: &str,
+        group_cap: Option<u32>,
     ) -> Result<(), DownstreamAdmissionRejection> {
         let identity = stable_identity(&downstream.id);
-        let lease_key = self.key(&identity, "leases");
+        let lease_suffix = format!("leases{}", downstream_group_suffix(group_name));
+        let lease_key = self.key(&identity, &lease_suffix);
+        let aggregate_lease_key = self.key(&identity, "leases_all");
+        // Mirror the local backend: the group cap is enforced on the group
+        // bucket only when the model matched a group; 0 = no group check.
+        // The global limit is always enforced against the aggregate zset.
+        let group_limit = group_cap.map_or(0, |cap| cap.max(1));
+        let global_limit = downstream.max_concurrency.max(1);
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
                 let lease_key = lease_key.clone();
+                let aggregate_lease_key = aggregate_lease_key.clone();
                 let lease_id = lease_id.to_string();
                 async move {
                     let script =
@@ -514,8 +534,10 @@ impl RedisRuntimeCoordinator {
                     let mut invocation = script.prepare_invoke();
                     invocation
                         .key(lease_key)
+                        .key(aggregate_lease_key)
                         .arg(lease_id)
-                        .arg(downstream.max_concurrency.max(1))
+                        .arg(group_limit)
+                        .arg(global_limit)
                         .arg(self.downstream_lease_duration_ms);
                     timeout_coordination(invocation.invoke_async::<Vec<i64>>(&mut connection)).await
                 }
@@ -524,9 +546,18 @@ impl RedisRuntimeCoordinator {
             .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
         match result.first().copied() {
             Some(0) => Ok(()),
+            // Group cap exceeded: a group was matched, so the rejection names it.
             Some(1) => Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
                 retry_after_seconds: result.get(1).copied().unwrap_or(1).max(1) as u64,
-                limit: downstream.max_concurrency.max(1),
+                limit: group_limit.max(1),
+                group: Some(group_name.to_string()),
+            }),
+            // Global backstop exceeded: same semantics as the local backend
+            // (group is named only when the request matched a group).
+            Some(2) => Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                retry_after_seconds: result.get(1).copied().unwrap_or(1).max(1) as u64,
+                limit: global_limit,
+                group: (!group_name.is_empty()).then(|| group_name.to_string()),
             }),
             _ => Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable),
         }
@@ -536,19 +567,27 @@ impl RedisRuntimeCoordinator {
         &self,
         downstream_id: &str,
         lease_id: &str,
+        group_name: &str,
     ) -> Result<(), RuntimeCoordinationError> {
         let identity = stable_identity(downstream_id);
-        let lease_key = self.key(&identity, "leases");
-        let waiting_key = self.key(&identity, "waiting");
+        let group_suffix = downstream_group_suffix(group_name);
+        let lease_key = self.key(&identity, &format!("leases{group_suffix}"));
+        let waiting_key = self.key(&identity, &format!("waiting{group_suffix}"));
+        let aggregate_lease_key = self.key(&identity, "leases_all");
         self.retry_coordination_once(|| {
             let mut connection = self.connection();
             let lease_key = lease_key.clone();
             let waiting_key = waiting_key.clone();
+            let aggregate_lease_key = aggregate_lease_key.clone();
             let lease_id = lease_id.to_string();
             async move {
                 let script = redis::Script::new(include_str!("redis_runtime/lease_release.lua"));
                 let mut invocation = script.prepare_invoke();
-                invocation.key(lease_key).key(waiting_key).arg(lease_id);
+                invocation
+                    .key(lease_key)
+                    .key(waiting_key)
+                    .key(aggregate_lease_key)
+                    .arg(lease_id);
                 timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
                     .await
                     .map(|_| ())
@@ -561,18 +600,23 @@ impl RedisRuntimeCoordinator {
         &self,
         downstream_id: &str,
         lease_id: &str,
+        group_name: &str,
     ) -> Result<(), RuntimeCoordinationError> {
         let identity = stable_identity(downstream_id);
-        let lease_key = self.key(&identity, "leases");
+        let lease_suffix = format!("leases{}", downstream_group_suffix(group_name));
+        let lease_key = self.key(&identity, &lease_suffix);
+        let aggregate_lease_key = self.key(&identity, "leases_all");
         self.retry_coordination_once(|| {
             let mut connection = self.connection();
             let lease_key = lease_key.clone();
+            let aggregate_lease_key = aggregate_lease_key.clone();
             let lease_id = lease_id.to_string();
             async move {
                 let script = redis::Script::new(include_str!("redis_runtime/lease_renew.lua"));
                 let mut invocation = script.prepare_invoke();
                 invocation
                     .key(lease_key)
+                    .key(aggregate_lease_key)
                     .arg(lease_id)
                     .arg(self.downstream_lease_duration_ms);
                 timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
@@ -587,8 +631,9 @@ impl RedisRuntimeCoordinator {
         &self,
         downstream_id: &str,
         lease_id: &str,
+        group_name: &str,
     ) -> Result<(), RuntimeCoordinationError> {
-        self.mutate_downstream_waiting(downstream_id, lease_id, "mark_waiting")
+        self.mutate_downstream_waiting(downstream_id, lease_id, group_name, "mark_waiting")
             .await
     }
 
@@ -596,8 +641,9 @@ impl RedisRuntimeCoordinator {
         &self,
         downstream_id: &str,
         lease_id: &str,
+        group_name: &str,
     ) -> Result<(), RuntimeCoordinationError> {
-        self.mutate_downstream_waiting(downstream_id, lease_id, "unmark_waiting")
+        self.mutate_downstream_waiting(downstream_id, lease_id, group_name, "unmark_waiting")
             .await
     }
 
@@ -605,11 +651,13 @@ impl RedisRuntimeCoordinator {
         &self,
         downstream_id: &str,
         lease_id: &str,
+        group_name: &str,
         operation: &'static str,
     ) -> Result<(), RuntimeCoordinationError> {
         let identity = stable_identity(downstream_id);
-        let lease_key = self.key(&identity, "leases");
-        let waiting_key = self.key(&identity, "waiting");
+        let group_suffix = downstream_group_suffix(group_name);
+        let lease_key = self.key(&identity, &format!("leases{group_suffix}"));
+        let waiting_key = self.key(&identity, &format!("waiting{group_suffix}"));
         let expires_at_ms =
             unix_millis().saturating_add(self.tuning_snapshot().account_waiter_ttl_ms);
         let result = self
@@ -641,25 +689,46 @@ impl RedisRuntimeCoordinator {
     pub(super) async fn downstream_runtime_snapshot(
         &self,
         downstream_id: &str,
+        group_names: &[String],
     ) -> Result<DownstreamRuntimeCounts, RuntimeCoordinationError> {
-        let identity = stable_identity(downstream_id);
-        let lease_key = self.key(&identity, "leases");
-        let waiting_key = self.key(&identity, "waiting");
-        let result = self
-            .retry_coordination_once(|| {
-                let mut connection = self.connection();
-                let lease_key = lease_key.clone();
-                let waiting_key = waiting_key.clone();
-                async move {
-                    let script =
-                        redis::Script::new(include_str!("redis_runtime/downstream_runtime.lua"));
-                    let mut invocation = script.prepare_invoke();
-                    invocation.key(lease_key).key(waiting_key).arg("snapshot");
-                    timeout_coordination(invocation.invoke_async::<Vec<u64>>(&mut connection)).await
-                }
-            })
-            .await?;
-        parse_downstream_runtime_counts(result)
+        // Aggregate the legacy no-group bucket plus every configured group
+        // bucket so the admin/portal view keeps reporting a single per-key
+        // concurrency number.
+        let mut buckets = vec![String::new()];
+        buckets.extend(group_names.iter().cloned());
+        let mut admitted_total = 0u64;
+        let mut waiting_total = 0u64;
+        for group_name in buckets {
+            let identity = stable_identity(downstream_id);
+            let group_suffix = downstream_group_suffix(&group_name);
+            let lease_key = self.key(&identity, &format!("leases{group_suffix}"));
+            let waiting_key = self.key(&identity, &format!("waiting{group_suffix}"));
+            let result = self
+                .retry_coordination_once(|| {
+                    let mut connection = self.connection();
+                    let lease_key = lease_key.clone();
+                    let waiting_key = waiting_key.clone();
+                    async move {
+                        let script = redis::Script::new(include_str!(
+                            "redis_runtime/downstream_runtime.lua"
+                        ));
+                        let mut invocation = script.prepare_invoke();
+                        invocation.key(lease_key).key(waiting_key).arg("snapshot");
+                        timeout_coordination(invocation.invoke_async::<Vec<u64>>(&mut connection))
+                            .await
+                    }
+                })
+                .await?;
+            let counts = parse_downstream_runtime_counts(result)?;
+            admitted_total = admitted_total.saturating_add(u64::from(counts.admitted));
+            waiting_total = waiting_total.saturating_add(u64::from(counts.waiting_upstream));
+        }
+        Ok(DownstreamRuntimeCounts {
+            admitted: u32::try_from(admitted_total).unwrap_or(u32::MAX),
+            waiting_upstream: u32::try_from(waiting_total).unwrap_or(u32::MAX),
+            running: u32::try_from(admitted_total.saturating_sub(waiting_total))
+                .unwrap_or(u32::MAX),
+        })
     }
 
     pub(super) async fn reject_account_concurrency(
@@ -969,26 +1038,31 @@ impl RedisRuntimeCoordinator {
         ticket: &AccountWaitTicket,
         downstream_id: &str,
         downstream_lease_id: &str,
+        group_name: &str,
     ) -> Result<ProbeDecision, RuntimeCoordinationError> {
-        self.try_acquire_account_probe_inner(ticket, Some((downstream_id, downstream_lease_id)))
-            .await
+        self.try_acquire_account_probe_inner(
+            ticket,
+            Some((downstream_id, downstream_lease_id, group_name)),
+        )
+        .await
     }
 
     async fn try_acquire_account_probe_inner(
         &self,
         ticket: &AccountWaitTicket,
-        downstream: Option<(&str, &str)>,
+        downstream: Option<(&str, &str, &str)>,
     ) -> Result<ProbeDecision, RuntimeCoordinationError> {
         let identity = account_identity(&ticket.account);
         let queue_key = self.account_key(&identity, "waiters");
         let tickets_key = self.account_key(&identity, "tickets");
         let state_key = self.account_key(&identity, "state");
         let probe_key = self.account_key(&identity, "probe");
-        let downstream_keys = downstream.map(|(downstream_id, lease_id)| {
+        let downstream_keys = downstream.map(|(downstream_id, lease_id, group_name)| {
             let identity = stable_identity(downstream_id);
+            let group_suffix = downstream_group_suffix(group_name);
             (
-                self.key(&identity, "leases"),
-                self.key(&identity, "waiting"),
+                self.key(&identity, &format!("leases{group_suffix}")),
+                self.key(&identity, &format!("waiting{group_suffix}")),
                 lease_id.to_string(),
             )
         });
@@ -1153,17 +1227,25 @@ impl RedisRuntimeCoordinator {
     pub(super) async fn clear_downstream(
         &self,
         downstream_id: &str,
+        group_names: &[String],
     ) -> Result<(), RuntimeCoordinationError> {
         let identity = stable_identity(downstream_id);
-        let mut connection = self.connection();
-        let mut command = redis::cmd("DEL");
-        command.arg(&[
+        let mut keys = vec![
             self.key(&identity, "requests"),
             self.key(&identity, "tokens"),
             self.key(&identity, "token_values"),
             self.key(&identity, "leases"),
             self.key(&identity, "waiting"),
-        ]);
+            self.key(&identity, "leases_all"),
+        ];
+        for group_name in group_names {
+            let group_suffix = downstream_group_suffix(group_name);
+            keys.push(self.key(&identity, &format!("leases{group_suffix}")));
+            keys.push(self.key(&identity, &format!("waiting{group_suffix}")));
+        }
+        let mut connection = self.connection();
+        let mut command = redis::cmd("DEL");
+        command.arg(&keys);
         if self.coordination_fault.should_fail() != CoordinationFaultMode::None {
             return Err(RuntimeCoordinationError);
         }
@@ -2918,6 +3000,17 @@ fn stable_identity(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
+/// Redis key suffix for a downstream concurrency group. Empty for the
+/// legacy no-group budget so existing keys stay byte-identical when a
+/// downstream configures no groups (C7).
+fn downstream_group_suffix(group_name: &str) -> String {
+    if group_name.is_empty() {
+        String::new()
+    } else {
+        format!(":g{}", stable_identity(group_name))
+    }
+}
+
 fn parse_downstream_reservation(result: Vec<i64>) -> Result<(), DownstreamAdmissionRejection> {
     let tag = result.first().copied().unwrap_or(-1);
     let used = result.get(1).copied().unwrap_or_default().max(0) as u64;
@@ -2945,7 +3038,10 @@ fn parse_downstream_reservation(result: Vec<i64>) -> Result<(), DownstreamAdmiss
     }
 }
 
-fn parse_downstream_admission(result: Vec<i64>) -> Result<(), DownstreamAdmissionRejection> {
+fn parse_downstream_admission(
+    result: Vec<i64>,
+    group_name: &str,
+) -> Result<(), DownstreamAdmissionRejection> {
     let tag = result.first().copied().unwrap_or(-1);
     let used = result.get(1).copied().unwrap_or_default().max(0) as u64;
     let limit = result.get(2).copied().unwrap_or_default().max(0) as u64;
@@ -2968,10 +3064,28 @@ fn parse_downstream_admission(result: Vec<i64>) -> Result<(), DownstreamAdmissio
             limit,
             used,
         }),
-        5 => Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
-            retry_after_seconds: result.get(1).copied().unwrap_or(1).max(1) as u64,
-            limit: result.get(2).copied().unwrap_or_default().max(0) as u32,
-        }),
+        5 => {
+            let limit = result.get(2).copied().unwrap_or_default().max(0) as u32;
+            Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                retry_after_seconds: result.get(1).copied().unwrap_or(1).max(1) as u64,
+                limit,
+                group: if group_name.is_empty() {
+                    None
+                } else {
+                    Some(group_name.to_string())
+                },
+            })
+        }
+        6 => {
+            // Group cap exceeded (C7): a group was matched, so the rejection
+            // always names it.
+            let limit = result.get(2).copied().unwrap_or_default().max(0) as u32;
+            Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                retry_after_seconds: result.get(1).copied().unwrap_or(1).max(1) as u64,
+                limit,
+                group: Some(group_name.to_string()),
+            })
+        }
         _ => Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable),
     }
 }

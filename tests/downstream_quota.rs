@@ -1,7 +1,7 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
     unix_seconds, AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig,
-    PersistedState, UsageLog,
+    ModelConcurrencyGroup, PersistedState, UsageLog,
 };
 use tempfile::tempdir;
 
@@ -36,6 +36,8 @@ async fn downstream_legacy_token_limit_is_no_longer_enforced() {
                 expires_at: None,
                 active: true,
                 billing_mode: "token".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![UsageLog {
                 id: "log-1".into(),
@@ -112,6 +114,8 @@ async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhaust
                 expires_at: None,
                 active: true,
                 billing_mode: "token".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![UsageLog {
                 id: "log-cost-1".into(),
@@ -196,6 +200,8 @@ async fn downstream_request_rollback_is_exact_and_idempotent() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
 
     let first = state.reserve_downstream_request(&downstream).await.unwrap();
@@ -259,15 +265,17 @@ async fn downstream_concurrency_release_is_idempotent_across_clones() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
 
     let lease = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     assert!(
         state
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .is_err(),
         "the first lease must consume all concurrency"
@@ -280,12 +288,12 @@ async fn downstream_concurrency_release_is_idempotent_across_clones() {
     state.release_downstream_concurrency(lease).await.unwrap();
 
     state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     assert!(
         state
-            .try_reserve_downstream_concurrency(&downstream)
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
             .await
             .is_err(),
         "releasing a clone twice must not free the replacement lease"
@@ -321,24 +329,28 @@ async fn stale_downstream_lease_does_not_release_recreated_capacity() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
 
     let stale = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
     state
-        .clear_downstream_runtime(&downstream.id)
+        .clear_downstream_runtime(&downstream.id, &[])
         .await
         .unwrap();
     let replacement = state
-        .try_reserve_downstream_concurrency(&downstream)
+        .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
         .unwrap();
 
     state.release_downstream_concurrency(stale).await.unwrap();
     assert!(matches!(
-        state.try_reserve_downstream_concurrency(&downstream).await,
+        state
+            .try_reserve_downstream_concurrency(&downstream, "test-model")
+            .await,
         Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded { .. })
     ));
 
@@ -377,6 +389,8 @@ async fn request_quota_usage_remaining_calculation() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: (0..30)
                 .map(|i| UsageLog {
@@ -456,6 +470,8 @@ async fn request_quota_usage_remaining_when_exhausted() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: (0..15)
                 .map(|i| UsageLog {
@@ -537,6 +553,8 @@ async fn downstream_request_mode_ignores_token_limits() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![UsageLog {
                 id: "log-1".into(),
@@ -612,6 +630,8 @@ async fn downstream_token_mode_ignores_request_window_quota() {
                 expires_at: None,
                 active: true,
                 billing_mode: "token".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             // Two requests already sit inside the request window; token mode must
             // not apply the request-window quota (limit is 1).
@@ -691,6 +711,8 @@ async fn downstream_cost_daily_window_slides_after_24h() {
                 expires_at: None,
                 active: true,
                 billing_mode: "token".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             // Consumption 25h ago has slid out of the 24h rolling window.
             usage_logs: vec![UsageLog {
@@ -807,6 +829,8 @@ async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: logs,
             ..PersistedState::default()
@@ -904,6 +928,8 @@ async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: logs,
             ..PersistedState::default()
@@ -969,10 +995,12 @@ async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
         expires_at: None,
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
 
     let (first_reservation, first_lease) = state
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect("first admission must succeed");
     assert!(
@@ -981,7 +1009,7 @@ async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
     );
 
     let rejection = state
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect_err("second admission must be rejected while the lease is held");
     assert!(
@@ -1001,7 +1029,7 @@ async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
     // after the lease is released, a fresh admission succeeds even though the
     // per-minute counter saw two attempts.
     let (second_reservation, second_lease) = state
-        .reserve_downstream_admission(&downstream)
+        .reserve_downstream_admission(&downstream, "test-model")
         .await
         .expect("rollback of the rejected admission must free the request slot");
     state
@@ -1016,4 +1044,256 @@ async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
         .rollback_downstream_request_reservation(first_reservation)
         .await
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// C7: per-model downstream concurrency groups
+// ---------------------------------------------------------------------------
+
+fn c7_downstream(id: &str, max_concurrency: u32) -> DownstreamConfig {
+    DownstreamConfig {
+        id: id.into(),
+        name: "C7 downstream".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 1000,
+        max_concurrency,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+        billing_mode: "request".into(),
+        model_concurrency_groups: vec![],
+    }
+}
+
+fn c7_group(name: &str, patterns: &[&str], max_concurrency: u32) -> ModelConcurrencyGroup {
+    ModelConcurrencyGroup {
+        name: name.into(),
+        patterns: patterns.iter().map(|p| p.to_string()).collect(),
+        max_concurrency,
+    }
+}
+
+/// C7 head-of-line blocking regression: a small-capacity model group that is
+/// full must NOT block a large-capacity model group on the same downstream
+/// key. Before C7 this test fails because the gate counted only
+/// `(downstream_id)` and the glm leases ate the whole budget.
+#[tokio::test]
+async fn c7_full_glm_group_does_not_block_deepseek_into_its_own_group() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut downstream = c7_downstream("down-c7-hol", 32);
+    downstream.model_concurrency_groups = vec![
+        c7_group("glm", &["glm-5.1", "glm-5.2"], 2),
+        c7_group("deepseek", &["deepseek-*"], 4),
+    ];
+
+    // Fill the glm group to its cap (2).
+    let mut glm_leases = Vec::new();
+    for _ in 0..2 {
+        let lease = state
+            .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+            .await
+            .expect("glm lease within its own group cap must succeed");
+        glm_leases.push(lease);
+    }
+    // A third glm request must be rejected by the glm group cap.
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.1")
+        .await
+        .expect_err("glm group cap must reject the third glm request");
+    let (limit, group) = match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit, group, .. } => {
+            (limit, group)
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    };
+    assert_eq!(limit, 2);
+    assert_eq!(
+        group.as_deref(),
+        Some("glm"),
+        "rejection must name the glm group"
+    );
+
+    // deepseek must still be able to take its own 4 slots: the glm burst must
+    // not block it (global backstop is 32, far from full).
+    for _ in 0..4 {
+        // spell-checker:disable-next-line
+        state
+            .try_reserve_downstream_concurrency(&downstream, "deepseek-v4-flash-0731")
+            .await
+            .expect("deepseek lease must not be blocked by the full glm group");
+    }
+
+    // But the global backstop still bounds the total: one more deepseek is now
+    // over the group cap and must be rejected (naming deepseek).
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4")
+        .await
+        .expect_err("deepseek group cap must reject the fifth deepseek request");
+    let (limit, group) = match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit, group, .. } => {
+            (limit, group)
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    };
+    assert_eq!(limit, 4);
+    assert_eq!(group.as_deref(), Some("deepseek"));
+
+    for lease in glm_leases {
+        state.release_downstream_concurrency(lease).await.unwrap();
+    }
+}
+
+/// Empty `model_concurrency_groups` must keep the byte-identical legacy
+/// behaviour: the gate counts only `(downstream_id, "")` and the global
+/// `max_concurrency` is the only bound.
+#[tokio::test]
+async fn c7_empty_groups_keep_legacy_single_budget_behaviour() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let downstream = c7_downstream("down-c7-empty", 1);
+
+    let first = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+        .await
+        .expect("first lease must succeed");
+    assert_eq!(
+        first.group_name(),
+        "",
+        "no group matched => legacy empty bucket"
+    );
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4")
+        .await
+        .expect_err("no groups => single global budget must reject the second lease");
+    match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+            limit: 1,
+            group: None,
+            ..
+        } => {}
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+    state.release_downstream_concurrency(first).await.unwrap();
+    state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4")
+        .await
+        .expect("release must free the only slot");
+}
+
+/// Group caps that sum above the global `max_concurrency` are legal overbooking;
+/// the global backstop must still bound the total across groups.
+#[tokio::test]
+async fn c7_global_backstop_bounds_groups_that_sum_above_global() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut downstream = c7_downstream("down-c7-backstop", 3);
+    downstream.model_concurrency_groups = vec![
+        c7_group("glm", &["glm-*"], 2),
+        c7_group("deepseek", &["deepseek-*"], 2),
+    ];
+
+    // Fill glm (2) and take 1 deepseek: total 3 = global backstop.
+    let glm_lease = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+        .await
+        .unwrap();
+    let glm_lease2 = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.1")
+        .await
+        .unwrap();
+    let ds_lease = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4")
+        .await
+        .unwrap();
+
+    // The second deepseek is over its own group cap (2) AND the global cap (3).
+    // Both rejections are valid; we assert the strictest signal: the global
+    // backstop must reject before the group cap would admit.
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "deepseek-v4-flash-0731")
+        .await
+        .expect_err("global backstop must bound the sum");
+    match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit: 3, .. } => {}
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+
+    for lease in [glm_lease, glm_lease2, ds_lease] {
+        state.release_downstream_concurrency(lease).await.unwrap();
+    }
+}
+
+/// A model that matched no group falls back to the global `max_concurrency`
+/// bucket keyed `(downstream_id, "")` — the legacy path stays live even when
+/// other models are grouped, and the global backstop still bounds the sum.
+#[tokio::test]
+async fn c7_unmatched_model_uses_global_budget_independently_of_groups() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut downstream = c7_downstream("down-c7-unmatched", 2);
+    downstream.model_concurrency_groups = vec![c7_group("glm", &["glm-*"], 100)];
+
+    // glm group cap is huge; an unmatched model must not be admitted into the
+    // glm bucket. Global cap is 2: glm takes one slot, the unmatched model a
+    // second — both succeed, proving the unmatched model lives in its own
+    // empty bucket and is not limited by the glm group cap.
+    let a = state
+        .try_reserve_downstream_concurrency(&downstream, "glm-5.2")
+        .await
+        .unwrap();
+    assert_eq!(a.group_name(), "glm");
+    let b = state
+        .try_reserve_downstream_concurrency(&downstream, "some-other-model")
+        .await
+        .expect("unmatched model uses its own empty bucket, not the glm bucket");
+    assert_eq!(
+        b.group_name(),
+        "",
+        "unmatched model must land in the legacy empty bucket"
+    );
+
+    // The global backstop (2) is now full: a third lease is rejected even
+    // though the glm group cap (100) is nowhere near full.
+    let rejection = state
+        .try_reserve_downstream_concurrency(&downstream, "another-unknown")
+        .await
+        .expect_err("global backstop must reject the third lease");
+    match rejection {
+        DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+            limit: 2,
+            group: None,
+            ..
+        } => {}
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+    state.release_downstream_concurrency(a).await.unwrap();
+    state.release_downstream_concurrency(b).await.unwrap();
 }

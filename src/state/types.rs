@@ -967,6 +967,46 @@ pub struct DownstreamConfig {
     pub active: bool,
     #[serde(default = "default_downstream_billing_mode")]
     pub billing_mode: String,
+    /// Optional per-model concurrency groups. Each group names a set of
+    /// model patterns (exact names or `*` wildcards) and a dedicated
+    /// concurrency cap. A downstream key serving models with very different
+    /// upstream capacities (e.g. glm=4 vs deepseek=28) can split its single
+    /// global `max_concurrency` budget per model so a burst on one model
+    /// cannot head-of-line block another. Matching is ordered: the first
+    /// group whose pattern list matches the (alias-resolved normalized)
+    /// model wins. Models matching no group fall through to the global
+    /// `max_concurrency` cap. Empty groups behave exactly like the legacy
+    /// single-budget gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_concurrency_groups: Vec<ModelConcurrencyGroup>,
+}
+
+impl Default for DownstreamConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            hash: String::new(),
+            plaintext_key: None,
+            plaintext_key_prefix: None,
+            model_allowlist: Vec::new(),
+            rate_limit_enabled: default_downstream_rate_limit_enabled(),
+            per_minute_limit: default_downstream_per_minute_limit(),
+            max_concurrency: default_downstream_max_concurrency(),
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            input_token_price_per_million_cents: None,
+            output_token_price_per_million_cents: None,
+            daily_cost_limit_cents: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: Vec::new(),
+            expires_at: None,
+            active: default_true(),
+            billing_mode: default_downstream_billing_mode(),
+            model_concurrency_groups: Vec::new(),
+        }
+    }
 }
 
 impl DownstreamConfig {
@@ -1025,6 +1065,120 @@ impl DownstreamConfig {
         // cost_cents = input_tokens * input_price / 1M + output_tokens * output_price / 1M
         (input_cost + output_cost) as u64
     }
+
+    /// Validate the per-model group configuration. Returns an error message
+    /// describing the first problem found. Sum-of-caps exceeding the global
+    /// `max_concurrency` is deliberately NOT an error (documented legal
+    /// overbooking so the global cap stays the downstream-wide backstop); the
+    /// admin layer logs a warning for that instead.
+    pub fn validate_model_concurrency_groups(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for group in &self.model_concurrency_groups {
+            if group.name.trim().is_empty() {
+                return Err("model_concurrency_groups: group name must not be empty".into());
+            }
+            if !seen.insert(group.name.trim().to_string()) {
+                return Err(format!(
+                    "model_concurrency_groups: duplicate group name {:?}",
+                    group.name
+                ));
+            }
+            if group.max_concurrency == 0 {
+                return Err(format!(
+                    "model_concurrency_groups: group {:?} max_concurrency must be >= 1",
+                    group.name
+                ));
+            }
+            if group.patterns.is_empty() {
+                return Err(format!(
+                    "model_concurrency_groups: group {:?} match list must not be empty",
+                    group.name
+                ));
+            }
+            for pattern in &group.patterns {
+                if pattern.trim().is_empty() {
+                    return Err(format!(
+                        "model_concurrency_groups: group {:?} has an empty match pattern",
+                        group.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the concurrency group for an already-normalized model name,
+    /// honoring the runtime case-insensitivity switch exactly like the rest
+    /// of the identity layer. Returns `None` when no group matches; the
+    /// caller then falls back to the downstream's global `max_concurrency`
+    /// budget. Matching is ordered (first matching group wins).
+    pub fn concurrency_group_for_model(
+        &self,
+        model: &str,
+        case_insensitive: bool,
+    ) -> Option<&ModelConcurrencyGroup> {
+        if self.model_concurrency_groups.is_empty() || model.trim().is_empty() {
+            return None;
+        }
+        let needle = if case_insensitive {
+            model.trim().to_ascii_lowercase()
+        } else {
+            model.trim().to_owned()
+        };
+        for group in &self.model_concurrency_groups {
+            let matched = group.patterns.iter().any(|pattern| {
+                let pattern_needle = if case_insensitive {
+                    pattern.trim().to_ascii_lowercase()
+                } else {
+                    pattern.trim().to_owned()
+                };
+                glob_match_star(&pattern_needle, &needle)
+            });
+            if matched {
+                return Some(group);
+            }
+        }
+        None
+    }
+}
+
+/// One per-model concurrency group. Patterns support exact names and `*`
+/// wildcards (prefix / suffix / any-position substring). A group list is
+/// ordered: the first group whose pattern list matches the normalized model
+/// wins, so operators control precedence by ordering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConcurrencyGroup {
+    pub name: String,
+    #[serde(rename = "match")]
+    pub patterns: Vec<String>,
+    pub max_concurrency: u32,
+}
+
+/// Star-only glob matcher (`*` matches any run of characters, zero or more).
+/// Supports prefix (`foo*`), suffix (`*foo`), and substring (`*foo*` / `a*b`)
+/// forms. Matching is byte-wise on the (already folded) input; there is no
+/// support for `?`, character classes or brace expansion.
+pub fn glob_match_star(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut remainder = text;
+    let first = parts[0];
+    if !remainder.starts_with(first) {
+        return false;
+    }
+    remainder = &remainder[first.len()..];
+    for part in &parts[1..parts.len() - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        match remainder.find(part) {
+            Some(index) => remainder = &remainder[index + part.len()..],
+            None => return false,
+        }
+    }
+    remainder.ends_with(parts[parts.len() - 1])
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1362,4 +1516,194 @@ pub fn default_model_context_output_reserve() -> u32 {
 
 pub fn default_model_case_insensitive_matching() -> bool {
     DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING
+}
+
+#[cfg(test)]
+mod downstream_concurrency_group_tests {
+    use super::*;
+
+    fn sample_downstream() -> DownstreamConfig {
+        DownstreamConfig {
+            id: "group-test".into(),
+            name: "group test".into(),
+            rate_limit_enabled: true,
+            per_minute_limit: 60,
+            max_concurrency: 32,
+            model_concurrency_groups: vec![
+                ModelConcurrencyGroup {
+                    name: "glm".into(),
+                    patterns: vec!["glm-5.2".into(), "glm-5.1".into()],
+                    max_concurrency: 4,
+                },
+                ModelConcurrencyGroup {
+                    name: "deepseek".into(),
+                    patterns: vec!["deepseek-*".into()],
+                    max_concurrency: 27,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn glob_match_star_exact_prefix_suffix_and_substring() {
+        assert!(glob_match_star("glm-5.2", "glm-5.2"));
+        assert!(!glob_match_star("glm-5.2", "glm-5.21"));
+        assert!(glob_match_star("deepseek-*", "deepseek-v4-flash-0731"));
+        assert!(glob_match_star("deepseek-*", "deepseek"));
+        assert!(!glob_match_star("glm-*", "deepseek-v4"));
+        assert!(glob_match_star("*fast", "deepseek-v4-flash-fast"));
+        assert!(glob_match_star("*v4*", "deepseek-v4-flash-0731"));
+        assert!(glob_match_star("d*e*1", "deepseek-v4-flash-0731"));
+        assert!(glob_match_star("*", "anything"));
+        assert!(!glob_match_star("a*b", "aXbY"));
+    }
+
+    #[test]
+    fn first_matching_group_wins_in_order() {
+        let downstream = sample_downstream();
+        let case_insensitive = true;
+        assert_eq!(
+            downstream
+                .concurrency_group_for_model("glm-5.2", case_insensitive)
+                .unwrap()
+                .name,
+            "glm"
+        );
+        assert_eq!(
+            downstream
+                .concurrency_group_for_model("deepseek-v4-flash-0731", case_insensitive)
+                .unwrap()
+                .name,
+            "deepseek"
+        );
+        // A model matching no group falls through.
+        assert_eq!(
+            downstream.concurrency_group_for_model("claude-opus-5", case_insensitive),
+            None
+        );
+    }
+
+    #[test]
+    fn case_insensitive_matching_honors_the_switch() {
+        let downstream = sample_downstream();
+        // Case-insensitive on the wire: "GLM-5.2" folds to the glm group.
+        assert_eq!(
+            downstream
+                .concurrency_group_for_model("GLM-5.2", true)
+                .unwrap()
+                .name,
+            "glm"
+        );
+        // Case-sensitive mode: mixed case must not match the exact pattern.
+        assert_eq!(
+            downstream.concurrency_group_for_model("GLM-5.2", false),
+            None
+        );
+        assert_eq!(
+            downstream
+                .concurrency_group_for_model("glm-5.2", false)
+                .unwrap()
+                .name,
+            "glm"
+        );
+    }
+
+    #[test]
+    fn precedence_is_by_order_not_length() {
+        let downstream = DownstreamConfig {
+            model_concurrency_groups: vec![
+                ModelConcurrencyGroup {
+                    name: "precise".into(),
+                    patterns: vec!["glm-*".into()],
+                    max_concurrency: 2,
+                },
+                ModelConcurrencyGroup {
+                    name: "generic".into(),
+                    patterns: vec!["*".into()],
+                    max_concurrency: 8,
+                },
+            ],
+            ..sample_downstream()
+        };
+        // "glm-*" comes first so the precise group wins over the catch-all.
+        assert_eq!(
+            downstream
+                .concurrency_group_for_model("glm-5.2", true)
+                .unwrap()
+                .name,
+            "precise"
+        );
+        assert_eq!(
+            downstream
+                .concurrency_group_for_model("deepseek-v4", true)
+                .unwrap()
+                .name,
+            "generic"
+        );
+    }
+
+    #[test]
+    fn empty_groups_never_match() {
+        let downstream = DownstreamConfig {
+            model_concurrency_groups: vec![],
+            ..sample_downstream()
+        };
+        assert_eq!(
+            downstream.concurrency_group_for_model("anything", true),
+            None
+        );
+    }
+
+    #[test]
+    fn validation_rejects_bad_groups() {
+        let base = sample_downstream();
+        // Duplicate name
+        let dup = DownstreamConfig {
+            model_concurrency_groups: vec![
+                ModelConcurrencyGroup {
+                    name: "g".into(),
+                    patterns: vec!["a".into()],
+                    max_concurrency: 1,
+                },
+                ModelConcurrencyGroup {
+                    name: "g".into(),
+                    patterns: vec!["b".into()],
+                    max_concurrency: 1,
+                },
+            ],
+            ..base.clone()
+        };
+        assert!(dup.validate_model_concurrency_groups().is_err());
+        // Empty name
+        let empty_name = DownstreamConfig {
+            model_concurrency_groups: vec![ModelConcurrencyGroup {
+                name: "".into(),
+                patterns: vec!["a".into()],
+                max_concurrency: 1,
+            }],
+            ..base.clone()
+        };
+        assert!(empty_name.validate_model_concurrency_groups().is_err());
+        // Zero cap
+        let zero_cap = DownstreamConfig {
+            model_concurrency_groups: vec![ModelConcurrencyGroup {
+                name: "g".into(),
+                patterns: vec!["a".into()],
+                max_concurrency: 0,
+            }],
+            ..base.clone()
+        };
+        assert!(zero_cap.validate_model_concurrency_groups().is_err());
+        // Empty match list
+        let empty_match = DownstreamConfig {
+            model_concurrency_groups: vec![ModelConcurrencyGroup {
+                name: "g".into(),
+                patterns: vec![],
+                max_concurrency: 1,
+            }],
+            ..base
+        };
+        assert!(empty_match.validate_model_concurrency_groups().is_err());
+    }
 }

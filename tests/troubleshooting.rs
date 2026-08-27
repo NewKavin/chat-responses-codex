@@ -142,6 +142,8 @@ async fn app_with_reasoning_capable_upstream(
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -277,6 +279,8 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -390,6 +394,8 @@ fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> 
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -450,6 +456,8 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -509,6 +517,8 @@ fn app_with_two_downstreams_and_config(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
             DownstreamConfig {
                 id: "other".to_string(),
@@ -531,6 +541,8 @@ fn app_with_two_downstreams_and_config(
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
             },
         ]),
         usage_logs: vec![],
@@ -577,6 +589,8 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1282,6 +1296,8 @@ fn app_with_model_state() -> (axum::Router, String, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1342,6 +1358,8 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1406,6 +1424,8 @@ fn app_with_priority_ranked_chat_upstreams(
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,

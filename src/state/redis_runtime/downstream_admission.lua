@@ -3,7 +3,8 @@
 --   KEYS[1] = requests zset (event_id -> score in ms)
 --   KEYS[2] = tokens zset (event_id -> score in ms)
 --   KEYS[3] = token_values hash (event_id -> token count)
---   KEYS[4] = leases zset (lease_id -> expiry ms)
+--   KEYS[4] = group leases zset (lease_id -> expiry ms)
+--   KEYS[5] = downstream-wide aggregate leases zset (global backstop, C7)
 -- Args:
 --   ARGV[1] = event_id
 --   ARGV[2] = per_minute_limit
@@ -12,15 +13,17 @@
 --   ARGV[5] = daily_limit (0 = disabled)
 --   ARGV[6] = monthly_limit (0 = disabled)
 --   ARGV[7] = lease_id
---   ARGV[8] = concurrency_limit
+--   ARGV[8] = global concurrency limit (downstream.max_concurrency)
 --   ARGV[9] = lease_duration_ms
+--   ARGV[10] = group_limit (0 = no group matched / no group cap)
 -- Returns:
 --   {0}                              success (request + lease reserved)
 --   {1, used, limit, retry}          per-minute limit
 --   {2, used, limit, retry, window}  request quota
 --   {3, used, limit, retry}          daily token/cost limit
 --   {4, used, limit, retry}          monthly token/cost limit
---   {5, retry, limit}                concurrency limit (nothing recorded)
+--   {5, retry, limit}                global concurrency backstop (nothing recorded)
+--   {6, retry, limit}                group concurrency cap (nothing recorded)
 local time = redis.call('TIME')
 local now_ms = (time[1] * 1000) + math.floor(time[2] / 1000)
 local event_id = ARGV[1]
@@ -32,6 +35,7 @@ local monthly_limit = tonumber(ARGV[6])
 local lease_id = ARGV[7]
 local concurrency_limit = tonumber(ARGV[8])
 local lease_duration_ms = tonumber(ARGV[9])
+local group_limit = tonumber(ARGV[10])
 
 local request_retention_seconds = math.max(60, request_window_seconds)
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms - (request_retention_seconds * 1000))
@@ -136,13 +140,24 @@ if monthly_limit > 0 then
   end
 end
 
--- Concurrency lease: prune expired leases, then admit if under the limit.
+-- Concurrency lease: prune expired leases from both zsets, then admit only
+-- when the group cap (C7) and the downstream-wide global backstop are both
+-- satisfied. Order mirrors the local backend: group first, then global.
 redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', now_ms)
+redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now_ms)
 if redis.call('ZSCORE', KEYS[4], lease_id) then
   return {0}
 end
-if redis.call('ZCARD', KEYS[4]) >= concurrency_limit then
+if group_limit > 0 and redis.call('ZCARD', KEYS[4]) >= group_limit then
   local oldest = redis.call('ZRANGE', KEYS[4], 0, 0, 'WITHSCORES')
+  local retry_after = 1
+  if #oldest >= 2 then
+    retry_after = math.max(1, math.ceil((tonumber(oldest[2]) - now_ms) / 1000))
+  end
+  return {6, retry_after, group_limit}
+end
+if redis.call('ZCARD', KEYS[5]) >= concurrency_limit then
+  local oldest = redis.call('ZRANGE', KEYS[5], 0, 0, 'WITHSCORES')
   local retry_after = 1
   if #oldest >= 2 then
     retry_after = math.max(1, math.ceil((tonumber(oldest[2]) - now_ms) / 1000))
@@ -154,4 +169,6 @@ redis.call('ZADD', KEYS[1], now_ms, event_id)
 redis.call('EXPIRE', KEYS[1], request_retention_seconds + 60)
 redis.call('ZADD', KEYS[4], now_ms + lease_duration_ms, lease_id)
 redis.call('PEXPIRE', KEYS[4], lease_duration_ms + 60000)
+redis.call('ZADD', KEYS[5], now_ms + lease_duration_ms, lease_id)
+redis.call('PEXPIRE', KEYS[5], lease_duration_ms + 60000)
 return {0}

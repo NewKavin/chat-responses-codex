@@ -344,6 +344,8 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         expires_at: Some(1_725_000_000),
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let log = UsageLog {
         id: "log-1".into(),
@@ -1531,6 +1533,8 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         expires_at: Some(1_725_000_000),
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let log = UsageLog {
         id: format!("log-{suffix}"),
@@ -1661,6 +1665,8 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         expires_at: Some(1_725_000_000),
         active: true,
         billing_mode: "request".into(),
+
+        model_concurrency_groups: vec![],
     };
     let log = UsageLog {
         id: format!("log-{suffix}"),
@@ -1778,6 +1784,8 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         })
         .await
         .expect("should persist delete fixture downstream");

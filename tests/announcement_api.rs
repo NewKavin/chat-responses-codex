@@ -46,6 +46,8 @@ fn create_test_state_without_announcement() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -93,6 +95,8 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
+
+            model_concurrency_groups: vec![],
         }]),
         usage_logs: vec![],
         announcement: Some(AnnouncementConfig {
