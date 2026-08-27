@@ -190,8 +190,20 @@ export interface DownstreamConfig {
   expires_at?: number
   active: boolean
   billing_mode?: 'request' | 'token'
+  /** 可选：按模型拆分的并发组。先匹配先生效（顺序敏感），未命中任何组的模型走 max_concurrency 全局兜底。 */
+  model_concurrency_groups?: DownstreamModelConcurrencyGroup[]
   /** 管理端列表附加的用量汇总（今日/本月 token 与金额，按分计）。 */
   usage?: DownstreamUsage | null
+}
+
+/** 一个下游并发组：把全局 max_concurrency 预算按模型拆分，避免 A 模型打满阻塞 B 模型。 */
+export interface DownstreamModelConcurrencyGroup {
+  /** 组名，同一下游下不可重复。 */
+  name: string
+  /** 模型匹配模式列表（精确名或含 * 通配），同组内任一命中即算匹配。 */
+  match: string[]
+  /** 该组并发上限。 */
+  max_concurrency: number
 }
 
 export interface DownstreamUsage {

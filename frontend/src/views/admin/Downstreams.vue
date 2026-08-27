@@ -222,8 +222,37 @@
               :closable="false"
               class="helper-text"
             >
-              所有计费模式下生效：同一时刻允许并发处理中的请求数上限。
+              所有计费模式下生效：同一时刻允许并发处理中的请求数上限；也是未命中任何模型组的全局兜底。
             </el-alert>
+          </el-form-item>
+          <el-form-item label="模型并发组">
+            <div class="concurrency-groups">
+              <div v-for="(group, index) in concurrencyGroups" :key="index" class="concurrency-group-row">
+                <el-input v-model="group.name" placeholder="组名，如 deepseek" class="group-name-input" />
+                <el-input v-model="group.matchText" placeholder="匹配模型，逗号分隔，支持 * 通配，如 deepseek-*" class="group-match-input" />
+                <el-input-number v-model="group.max_concurrency" :min="1" :max="5000" class="group-cap-input" />
+                <el-button
+                  :icon="Trash2"
+                  circle
+                  size="small"
+                  :aria-label="`删除模型组 ${group.name || index + 1}`"
+                  @click="removeGroup(index)"
+                />
+              </div>
+              <el-button size="small" @click="addGroup">
+                <Plus :size="13" :stroke-width="2" style="margin-right: 4px" />添加模型组
+              </el-button>
+              <el-alert
+                title="说明"
+                type="info"
+                :closable="false"
+                class="helper-text"
+              >
+                把全局并发上限按模型拆分，避免一个模型打满把其他模型堵死。先匹配的组先生效（顺序敏感），支持精确名与 *
+                通配（前缀/后缀/包含）；未命中任何组的模型走上方「并发限制」兜底。组上限按此下游 key 单独计算，不是全网关共享。
+                参考取值：组上限 = 该模型可用的上游 key 数 × 4。
+              </el-alert>
+            </div>
           </el-form-item>
           <el-form-item label="计费模式">
             <el-radio-group v-model="form.billing_mode">
@@ -417,6 +446,7 @@ import {
   Search,
   Settings2,
   ShieldCheck,
+  Trash2,
   Wallet
 } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
@@ -502,6 +532,51 @@ const ipAllowlistText = computed({
     form.value.ip_allowlist = value.split('\n').filter(line => line.trim())
   }
 })
+
+// 模型并发组（C7）：编辑态用「逗号/换行分隔」的文本表达 match 列表，提交时再拆回数组。
+interface ConcurrencyGroupUI {
+  name: string
+  matchText: string
+  max_concurrency: number
+}
+const concurrencyGroups = ref<ConcurrencyGroupUI[]>([])
+
+const addGroup = () => {
+  concurrencyGroups.value.push({ name: '', matchText: '', max_concurrency: 4 })
+}
+
+const removeGroup = (index: number) => {
+  concurrencyGroups.value.splice(index, 1)
+}
+
+// 校验并转成后端 DownstreamConfig.model_concurrency_groups 形态；非法时返回 null。
+const buildConcurrencyGroups = (): { name: string; match: string[]; max_concurrency: number }[] | null => {
+  const seen = new Set<string>()
+  const groups: { name: string; match: string[]; max_concurrency: number }[] = []
+  for (const group of concurrencyGroups.value) {
+    const name = group.name.trim()
+    if (!name) {
+      ElMessage.error('模型并发组：组名不能为空')
+      return null
+    }
+    if (seen.has(name)) {
+      ElMessage.error(`模型并发组：组名重复：${name}`)
+      return null
+    }
+    seen.add(name)
+    const match = group.matchText.split(/[,，\n]/).map(s => s.trim()).filter(Boolean)
+    if (match.length === 0) {
+      ElMessage.error(`模型并发组「${name}」：匹配模型列表不能为空`)
+      return null
+    }
+    if (!group.max_concurrency || group.max_concurrency < 1) {
+      ElMessage.error(`模型并发组「${name}」：并发上限必须 ≥ 1`)
+      return null
+    }
+    groups.push({ name, match, max_concurrency: group.max_concurrency })
+  }
+  return groups
+}
 
 const rules = {
   id: [
@@ -626,6 +701,7 @@ const handleCreate = () => {
   }
   requestQuotaHours.value = 5
   requestQuotaCount.value = 600
+  concurrencyGroups.value = []
   resetCostFields()
   dialogVisible.value = true
 }
@@ -638,6 +714,11 @@ const handleEdit = (row: DownstreamConfig) => {
     max_concurrency: row.max_concurrency ?? 10,
     billing_mode: isCostRow(row) ? 'cost' : 'request'
   }
+  concurrencyGroups.value = (row.model_concurrency_groups || []).map(group => ({
+    name: group.name,
+    matchText: (group.match || []).join(', '),
+    max_concurrency: group.max_concurrency
+  }))
   requestQuotaHours.value = row.request_quota_window_hours || 5
   requestQuotaCount.value = row.request_quota_requests || 600
   if (isCostRow(row)) {
@@ -687,11 +768,16 @@ const handleSubmit = async () => {
         }
       }
     }
+    const modelGroups = buildConcurrencyGroups()
+    if (modelGroups === null) {
+      return
+    }
     submitting.value = true
 
     const isCost = form.value.billing_mode === 'cost'
     const submitData: Record<string, unknown> = {
       ...form.value,
+      model_concurrency_groups: modelGroups,
       billing_mode: isCost ? 'token' : 'request',
       daily_token_limit: null,
       input_token_price_per_million_cents: isCost ? Math.round((inputTokenPricePerMillion.value ?? 0) * 100) : null,
@@ -976,6 +1062,33 @@ code {
   display: flex;
   gap: 12px;
   width: 100%;
+}
+
+.concurrency-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.concurrency-group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.group-name-input {
+  width: 180px;
+}
+
+.group-match-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.group-cap-input {
+  width: 150px;
 }
 
 .price-field {
