@@ -18,6 +18,8 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
+    DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
+    DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED, DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
     DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
@@ -151,6 +153,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
     )
     .max(100);
+    let upstream_local_gate_max_wait_ms = env_u64(
+        "UPSTREAM_LOCAL_GATE_MAX_WAIT_MS",
+        DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
+    )
+    .max(100);
+    let upstream_local_gate_fast_fail_enabled = env_bool(
+        "UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED",
+        DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
+    );
+    let upstream_local_gate_distinct_error_code_enabled = env_bool(
+        "UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED",
+        DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
+    );
     let mut config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -296,6 +311,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_account_queue_enabled,
         upstream_account_queue_max_depth,
         upstream_account_queue_max_wait_ms,
+        upstream_local_gate_max_wait_ms,
+        upstream_local_gate_fast_fail_enabled,
+        upstream_local_gate_distinct_error_code_enabled,
         upstream_continuation_pin_escape_enabled: env_bool(
             "UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED",
             DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,

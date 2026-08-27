@@ -303,6 +303,26 @@ pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH: usize = 16;
 /// them before the gateway serves the fast-fail error.
 pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS: u64 = 10_000;
 
+/// C4.1: total wait budget (ms) a purely-local pre-dispatch concurrency
+/// rejection is allowed to burn before the gateway fast-fails.  Substitutes
+/// `upstream_concurrency_recovery_max_wait_ms` (default 30s) for rounds served
+/// entirely by the local gate (zero physical upstream attempts) so a
+/// local-only rejection cannot silently eat the 30s / 32-round
+/// ConcurrencySaturated budget.  The C3 queue has its own separate deadline
+/// (`upstream_account_queue_max_wait_ms`): queueing has concrete evidence a
+/// slot will free, blind retrying does not, so the two budgets are distinct.
+pub const DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS: u64 = 3_000;
+/// C4.1: master switch for the local-gate fast-fail path.  Off restores the
+/// pre-C4 behavior where a purely-local concurrency rejection burns the
+/// ordinary ConcurrencySaturated retry budget (30s / 32 rounds).
+pub const DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED: bool = true;
+/// C4.2: whether a fast-failed local-gate rejection returns the distinct
+/// `gateway_concurrency_saturated` error code so clients and operators can
+/// tell "the gateway's own concurrency gate is full" apart from "the upstream
+/// rate-limited us".  HTTP status stays 429 either way.  Off restores the
+/// legacy aggregated error (`upstream_routes_exhausted` / `rate_limit_error`).
+pub const DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED: bool = true;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub admin_username: String,
@@ -445,6 +465,12 @@ pub struct AppConfig {
     pub upstream_account_queue_max_depth: usize,
     #[serde(default = "default_upstream_account_queue_max_wait_ms")]
     pub upstream_account_queue_max_wait_ms: u64,
+    #[serde(default = "default_upstream_local_gate_max_wait_ms")]
+    pub upstream_local_gate_max_wait_ms: u64,
+    #[serde(default = "default_upstream_local_gate_fast_fail_enabled")]
+    pub upstream_local_gate_fast_fail_enabled: bool,
+    #[serde(default = "default_upstream_local_gate_distinct_error_code_enabled")]
+    pub upstream_local_gate_distinct_error_code_enabled: bool,
 
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
@@ -567,6 +593,10 @@ impl Default for AppConfig {
             upstream_account_queue_enabled: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
             upstream_account_queue_max_depth: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
             upstream_account_queue_max_wait_ms: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+            upstream_local_gate_max_wait_ms: DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
+            upstream_local_gate_fast_fail_enabled: DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
+            upstream_local_gate_distinct_error_code_enabled:
+                DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
             upstream_continuation_pin_escape_enabled:
                 DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
@@ -1312,6 +1342,18 @@ pub fn default_upstream_account_queue_max_depth() -> usize {
 
 pub fn default_upstream_account_queue_max_wait_ms() -> u64 {
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS
+}
+
+pub fn default_upstream_local_gate_max_wait_ms() -> u64 {
+    DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS
+}
+
+pub fn default_upstream_local_gate_fast_fail_enabled() -> bool {
+    DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED
+}
+
+pub fn default_upstream_local_gate_distinct_error_code_enabled() -> bool {
+    DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

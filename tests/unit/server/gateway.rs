@@ -1777,13 +1777,20 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body["error"]["code"], "upstream_routes_exhausted");
+    // C4: the local pre-dispatch gate rejection now surfaces the distinct
+    // `gateway_concurrency_saturated` code (shipped default) so the gateway's
+    // own gate is not mistaken for upstream rate limiting.
+    assert_eq!(body["error"]["code"], "gateway_concurrency_saturated");
     assert_eq!(body["error"]["type"], "rate_limit_error");
     assert_eq!(body["error"]["details"]["physical_attempt_count"], 0);
     let message = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("upstream concurrency limit saturated"),
-        "message should name concurrency saturation, got: {message}"
+        message.contains("the gateway's own local concurrency gate is full"),
+        "message should name the local gate, got: {message}"
+    );
+    assert!(
+        message.contains("not upstream rate limiting"),
+        "message should distinguish the gateway gate from upstream limiting, got: {message}"
     );
     assert!(
         !message.contains("upstream_invalid_response"),

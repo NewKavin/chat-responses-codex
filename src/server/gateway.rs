@@ -1121,6 +1121,50 @@ fn common_mode_transient_pool_error(
     )
 }
 
+/// C4.2: terminal error for a request that fast-failed at the *local*
+/// pre-dispatch concurrency gate (no upstream was ever called).  HTTP status
+/// stays 429 for compatibility, but the code is distinct so a gateway-side
+/// capacity fact can never be misread as an upstream rate limit again.  The
+/// `gateway_` category makes `route_failure_class()` return `None`, so the
+/// terminal block returns this error unchanged (no route-exhaustion
+/// aggregation) — exactly what a local-gate verdict wants.
+#[allow(clippy::too_many_arguments)] // all args are distinct scalar facts of the gate snapshot
+fn local_gate_concurrency_saturated_error(
+    message: &str,
+    in_flight: usize,
+    max_concurrency: u32,
+    stale_lease_count: usize,
+    queue_depth: usize,
+    queue_position: usize,
+    retry_after_seconds: u64,
+    max_wait_ms: u64,
+) -> GatewayError {
+    let entry_message = format!(
+        "{message} — the gateway's own local concurrency gate is full ({} of {} slots in use), not upstream rate limiting; retry after {}s",
+        in_flight, max_concurrency, retry_after_seconds
+    );
+    let details = Map::from_iter([
+        ("scope".to_string(), json!("upstream")),
+        ("in_flight".to_string(), json!(in_flight)),
+        ("max_concurrency".to_string(), json!(max_concurrency)),
+        ("stale_lease_count".to_string(), json!(stale_lease_count)),
+        ("queue_depth".to_string(), json!(queue_depth)),
+        ("queue_position".to_string(), json!(queue_position)),
+        ("physical_attempt_count".to_string(), json!(0)),
+        ("retry_after_source".to_string(), json!("local_gate")),
+        ("max_wait_ms".to_string(), json!(max_wait_ms)),
+    ]);
+    GatewayError::classified(
+        StatusCode::TOO_MANY_REQUESTS,
+        entry_message,
+        "rate_limit_error",
+        "gateway_concurrency_saturated",
+        "gateway_concurrency_saturated",
+        Some(retry_after_seconds),
+        Some(Value::Object(details)),
+    )
+}
+
 /// P4: enrich a request-level common-mode terminal error's `details` with the
 /// aggregated T0 routing details (from `terminal_route_failure_error`) plus
 /// the common-mode verdict fields, while keeping the terminal status, `code`
@@ -6317,6 +6361,13 @@ async fn process_gateway_request_inner(
     let mut common_mode_failed_routes: Vec<RouteHealthKey> = Vec::new();
     let mut common_mode_tripped = false;
     let mut common_mode_verdict: Option<CommonModeVerdict> = None;
+    // C4.2: the request fast-failed at the local pre-dispatch concurrency gate
+    // (zero physical upstream attempts) and the terminal error is the distinct
+    // `gateway_concurrency_saturated` verdict.  When set, the terminal block
+    // must NOT aggregate the ledger into an `upstream_routes_exhausted` error
+    // — a local-gate verdict is a gateway-side capacity fact, not a route
+    // exhaustion story, and the two must stay distinguishable.
+    let mut local_gate_fast_failed = false;
     let mut transient_pool_replay_done = false;
     let mut transient_pool_retried = false;
 
@@ -8591,9 +8642,108 @@ async fn process_gateway_request_inner(
                     // Queue gave up (depth limit / deadline): fast-fail with
                     // the local-gate terminal error instead of burning the
                     // ConcurrencySaturated budget.
+                    if runtime_settings.upstream_local_gate_distinct_error_code_enabled {
+                        last_error = Some(local_gate_concurrency_saturated_error(
+                            "upstream request concurrency capacity is full",
+                            state.local_account_lease_count(account_key),
+                            upstream_for_slot.max_concurrency,
+                            state.local_account_stale_lease_count(
+                                account_key,
+                                Duration::from_millis(
+                                    runtime_settings.upstream_lease_stale_after_ms,
+                                ),
+                            ),
+                            state.local_slot_waiter_count(account_key),
+                            0,
+                            last_error
+                                .as_ref()
+                                .and_then(|error| error.retry_after())
+                                .map(duration_seconds_ceil)
+                                .unwrap_or(1),
+                            runtime_settings.upstream_local_gate_max_wait_ms,
+                        ));
+                        request_route_attempts.set_give_up_reason(GiveUpReason::LocalGateExhausted);
+                        local_gate_fast_failed = true;
+                    }
                     break 'routing_rounds;
                 }
             }
+        }
+
+        // C4.1: a round served entirely by the local pre-dispatch concurrency
+        // gate (zero physical upstream attempts) fast-fails instead of burning
+        // the ConcurrencySaturated budget (32 rounds / 30s).  The C3 queue
+        // above already had its chance to park the request behind a real slot;
+        // reaching here means the queue is disabled, unavailable, or gave up —
+        // there is no evidence a blind retry will help, only the accounting
+        // cost of waiting out 30s.  `upstream_local_gate_max_wait_ms` bounds
+        // this scenario (the fast-fail realises that bound as an immediate
+        // rejection).  Pending account-recovery probes are excluded: they are
+        // evidence-backed and waited out by the branch below instead.  A round
+        // that only ever saw route-health cooling (no local-gate rejection
+        // this round) is NOT a local-gate verdict: the route is in a
+        // ConcurrencySaturated recovery with a real probe/cooldown in flight,
+        // and the retry-decision budget below is the right place to wait for
+        // it — fast-failing there would break the shared-probe recovery.
+        if round_terminal.is_some()
+            && round_ledger.is_pure_concurrency_exhaustion()
+            && request_route_attempts.physical_attempt_count() == 0
+            && last_local_concurrency_account.is_some()
+            && runtime_settings.upstream_local_gate_fast_fail_enabled
+            && !account_recovery.has_pending_recovery()
+        {
+            tracing::info!(
+                request_id = %request_id,
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %&normalized_model,
+                routing_round = request_route_attempts.routing_round(),
+                local_gate_max_wait_ms = runtime_settings.upstream_local_gate_max_wait_ms,
+                "local concurrency gate exhausted the round with zero physical attempts: fast-failing"
+            );
+            if runtime_settings.upstream_local_gate_distinct_error_code_enabled {
+                let (in_flight, stale_lease_count, queue_depth, max_concurrency) =
+                    match last_local_concurrency_account.as_ref() {
+                        Some(account_key) => {
+                            let upstream_for_slot = routing_snapshot
+                                .upstreams
+                                .iter()
+                                .find(|candidate| candidate.id == account_key.upstream_id);
+                            (
+                                state.local_account_lease_count(account_key),
+                                state.local_account_stale_lease_count(
+                                    account_key,
+                                    Duration::from_millis(
+                                        runtime_settings.upstream_lease_stale_after_ms,
+                                    ),
+                                ),
+                                state.local_slot_waiter_count(account_key),
+                                upstream_for_slot
+                                    .map(|upstream| upstream.max_concurrency)
+                                    .unwrap_or(0),
+                            )
+                        }
+                        None => (0, 0, 0, 0),
+                    };
+                last_error = Some(local_gate_concurrency_saturated_error(
+                    "upstream request concurrency capacity is full",
+                    in_flight,
+                    max_concurrency,
+                    stale_lease_count,
+                    queue_depth,
+                    0,
+                    last_error
+                        .as_ref()
+                        .and_then(|error| error.retry_after())
+                        .map(duration_seconds_ceil)
+                        .unwrap_or(1),
+                    runtime_settings.upstream_local_gate_max_wait_ms,
+                ));
+                request_route_attempts.set_give_up_reason(GiveUpReason::LocalGateExhausted);
+                local_gate_fast_failed = true;
+            }
+            break 'routing_rounds;
         }
 
         if round_terminal.is_some()
@@ -8705,7 +8855,8 @@ async fn process_gateway_request_inner(
         let attempt_ledger = request_route_attempts.ledger_snapshot();
         let fallback_upstream_status = last_route_error.upstream_status();
         let fallback_failure_class = last_route_error.route_failure_class();
-        let should_aggregate = !attempt_ledger.is_empty()
+        let should_aggregate = !local_gate_fast_failed
+            && !attempt_ledger.is_empty()
             && (attempt_ledger.distinct_route_count() > 1
                 || matches!(
                     last_route_error.route_failure_class(),

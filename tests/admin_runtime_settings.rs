@@ -214,8 +214,12 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_shared_host_failure_domain_enabled = 62 (T1.4),
     // plus upstream_common_mode_same_host_transient_enabled = 63 (T2.2),
     // plus upstream_route_exhaustion_alignment_truncated_enabled = 64 (T2.3),
-    // plus upstream_lease_stale_after_ms = 65 (C2.3).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 65);
+    // plus upstream_lease_stale_after_ms = 65 (C2.3),
+    // plus upstream_account_queue_enabled / _max_depth / _max_wait_ms = 68 (C3),
+    // plus upstream_local_gate_max_wait_ms = 69 (C4.1),
+    // plus upstream_local_gate_fast_fail_enabled = 70 (C4.1),
+    // plus upstream_local_gate_distinct_error_code_enabled = 71 (C4.2).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 71);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

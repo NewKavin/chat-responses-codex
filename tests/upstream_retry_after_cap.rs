@@ -446,6 +446,16 @@ async fn local_concurrency_full_retry_after_stays_within_cap() {
 
     let config = AppConfig {
         upstream_retry_after_cap_seconds: 1,
+        // This test pins the pre-C3 "reject immediately" contract: without it
+        // the second request would wait in the local-concurrency queue (C3)
+        // for up to 10s and the 5s timeout below would fire.  The queue-on
+        // path is covered by tests/gateway/upstream_local_gate_fast_fail.rs.
+        upstream_account_queue_enabled: false,
+        // C4.2: the fast-fail path would otherwise return the distinct
+        // gateway_concurrency_saturated code; this test pins the legacy
+        // aggregated code for the queue-off + distinct-code-off compatibility
+        // path (the switch is the documented rollback hatch).
+        upstream_local_gate_distinct_error_code_enabled: false,
         ..AppConfig::default()
     };
     let app = build_state(format!("http://{}", address), config, 1).await;

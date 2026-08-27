@@ -194,8 +194,11 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + upstream_account_queue_enabled (C3)
     // + upstream_account_queue_max_depth (C3)
     // + upstream_account_queue_max_wait_ms (C3)
-    // = 67.
-    assert_eq!(all.len(), 67);
+    // + upstream_local_gate_max_wait_ms (C4.1)
+    // + upstream_local_gate_fast_fail_enabled (C4.1)
+    // + upstream_local_gate_distinct_error_code_enabled (C4.2)
+    // = 70.
+    assert_eq!(all.len(), 70);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -223,6 +226,9 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_account_queue_enabled",
         "upstream_account_queue_max_depth",
         "upstream_account_queue_max_wait_ms",
+        "upstream_local_gate_max_wait_ms",
+        "upstream_local_gate_fast_fail_enabled",
+        "upstream_local_gate_distinct_error_code_enabled",
         "upstream_continuation_pin_escape_enabled",
         "model_case_insensitive_matching",
     ] {

@@ -64,6 +64,11 @@ pub(super) enum GiveUpReason {
     /// (`upstream_route_half_open_busy_max_rounds`) while the whole pool
     /// stayed in half-open recovery (T3).
     HalfOpenBusyCap,
+    /// C4.1: the round was served entirely by the local pre-dispatch
+    /// concurrency gate (zero physical upstream attempts) and the gateway
+    /// fast-failed with the distinct local-gate error instead of burning the
+    /// ConcurrencySaturated budget (32 rounds / 30s).
+    LocalGateExhausted,
 }
 
 impl GiveUpReason {
@@ -74,6 +79,7 @@ impl GiveUpReason {
             Self::NoRecovery => "no_recovery",
             Self::AlignmentExhausted => "alignment_exhausted",
             Self::HalfOpenBusyCap => "half_open_busy_cap",
+            Self::LocalGateExhausted => "local_gate_exhausted",
         }
     }
 }

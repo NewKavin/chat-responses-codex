@@ -34,3 +34,5 @@ mod stream_only;
 mod stream_only_learning;
 #[path = "gateway/upstream_concurrency_queue.rs"]
 mod upstream_concurrency_queue;
+#[path = "gateway/upstream_local_gate_fast_fail.rs"]
+mod upstream_local_gate_fast_fail;

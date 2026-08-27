@@ -165,6 +165,8 @@ pub use types::{
     DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
+    DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
+    DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED, DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
     DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
@@ -1278,6 +1280,23 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         table.account_lease_count(account)
+    }
+
+    /// C4.2: number of leases for `account` whose last heartbeat is older than
+    /// `stale_after` — i.e. leases the lazy stale sweep (C2.3) would reclaim on
+    /// its next pass.  Surfaces "the gate is full because of stale/leaked
+    /// leases" as opposed to "the gate is full because of genuine in-flight
+    /// traffic"; both feed the fast-fail error's `stale_lease_count` detail.
+    pub fn local_account_stale_lease_count(
+        &self,
+        account: &AccountConcurrencyKey,
+        stale_after: Duration,
+    ) -> usize {
+        let table = self
+            .upstream_lease_table
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        table.account_stale_lease_count(account, stale_after, tokio::time::Instant::now())
     }
 
     /// C3: atomically reserve a queue slot on the local concurrency gate for
@@ -6710,6 +6729,28 @@ impl UpstreamLeaseTable {
             .filter(|(account, _)| account.upstream_id == upstream_id)
             .map(|(_, leases)| leases.len())
             .sum()
+    }
+
+    /// C4.2: leases for `account` whose last heartbeat is older than
+    /// `stale_after`.  The stale sweep (C2.3) uses the same predicate, so this
+    /// number is exactly what that sweep would reclaim right now.
+    fn account_stale_lease_count(
+        &self,
+        account: &AccountConcurrencyKey,
+        stale_after: Duration,
+        now: tokio::time::Instant,
+    ) -> usize {
+        self.leases
+            .get(account)
+            .map(|leases| {
+                leases
+                    .values()
+                    .filter(|record| {
+                        now.saturating_duration_since(record.last_renewed_at) > stale_after
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     fn insert(

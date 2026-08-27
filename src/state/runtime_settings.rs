@@ -9,6 +9,8 @@ use super::types::{
     default_upstream_continuation_pin_escape_enabled,
     default_upstream_credentials_first_strike_seconds, default_upstream_error_body_excerpt_enabled,
     default_upstream_error_body_excerpt_max_chars, default_upstream_lease_stale_after_ms,
+    default_upstream_local_gate_distinct_error_code_enabled,
+    default_upstream_local_gate_fast_fail_enabled, default_upstream_local_gate_max_wait_ms,
     default_upstream_local_lease_ttl_seconds, default_upstream_max_concurrency,
     default_upstream_retry_after_cap_seconds, default_upstream_retry_after_cooldown_cap_seconds,
     default_upstream_route_exhaustion_alignment_truncated_enabled,
@@ -69,6 +71,9 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_account_queue_enabled",
     "upstream_account_queue_max_depth",
     "upstream_account_queue_max_wait_ms",
+    "upstream_local_gate_max_wait_ms",
+    "upstream_local_gate_fast_fail_enabled",
+    "upstream_local_gate_distinct_error_code_enabled",
     "upstream_continuation_pin_escape_enabled",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
@@ -164,6 +169,12 @@ pub struct RuntimeSettings {
     pub upstream_account_queue_max_depth: usize,
     #[serde(default = "default_upstream_account_queue_max_wait_ms")]
     pub upstream_account_queue_max_wait_ms: u64,
+    #[serde(default = "default_upstream_local_gate_max_wait_ms")]
+    pub upstream_local_gate_max_wait_ms: u64,
+    #[serde(default = "default_upstream_local_gate_fast_fail_enabled")]
+    pub upstream_local_gate_fast_fail_enabled: bool,
+    #[serde(default = "default_upstream_local_gate_distinct_error_code_enabled")]
+    pub upstream_local_gate_distinct_error_code_enabled: bool,
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
@@ -338,6 +349,10 @@ impl RuntimeSettings {
             upstream_account_queue_enabled: config.upstream_account_queue_enabled,
             upstream_account_queue_max_depth: config.upstream_account_queue_max_depth,
             upstream_account_queue_max_wait_ms: config.upstream_account_queue_max_wait_ms,
+            upstream_local_gate_max_wait_ms: config.upstream_local_gate_max_wait_ms,
+            upstream_local_gate_fast_fail_enabled: config.upstream_local_gate_fast_fail_enabled,
+            upstream_local_gate_distinct_error_code_enabled: config
+                .upstream_local_gate_distinct_error_code_enabled,
             upstream_continuation_pin_escape_enabled: config
                 .upstream_continuation_pin_escape_enabled,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
@@ -439,6 +454,10 @@ impl RuntimeSettings {
         config.upstream_account_queue_enabled = self.upstream_account_queue_enabled;
         config.upstream_account_queue_max_depth = self.upstream_account_queue_max_depth;
         config.upstream_account_queue_max_wait_ms = self.upstream_account_queue_max_wait_ms;
+        config.upstream_local_gate_max_wait_ms = self.upstream_local_gate_max_wait_ms;
+        config.upstream_local_gate_fast_fail_enabled = self.upstream_local_gate_fast_fail_enabled;
+        config.upstream_local_gate_distinct_error_code_enabled =
+            self.upstream_local_gate_distinct_error_code_enabled;
         config.upstream_continuation_pin_escape_enabled =
             self.upstream_continuation_pin_escape_enabled;
         config.upstream_route_exhaustion_retry_enabled =
@@ -644,6 +663,18 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_account_queue_max_wait_ms",
                 "must be at least 100 ms",
+            ));
+        }
+        if self.upstream_local_gate_max_wait_ms < 100 {
+            return Err(invalid(
+                "upstream_local_gate_max_wait_ms",
+                "must be at least 100 ms",
+            ));
+        }
+        if self.upstream_local_gate_max_wait_ms > 60_000 {
+            return Err(invalid(
+                "upstream_local_gate_max_wait_ms",
+                "must be at most 60000 ms",
             ));
         }
         require_positive(
