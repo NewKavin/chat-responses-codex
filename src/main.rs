@@ -7,7 +7,8 @@ use chat_responses_codex::state::{
     ModelKeySyncService, RuntimeSettings, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
-    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -136,6 +137,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
     )
     .max(1_000);
+    let upstream_account_queue_enabled = env_bool(
+        "UPSTREAM_ACCOUNT_QUEUE_ENABLED",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    );
+    let upstream_account_queue_max_depth = env_usize(
+        "UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
+    )
+    .max(1);
+    let upstream_account_queue_max_wait_ms = env_u64(
+        "UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    )
+    .max(100);
     let mut config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -278,6 +293,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_credentials_first_strike_seconds,
         upstream_local_lease_ttl_seconds,
         upstream_lease_stale_after_ms,
+        upstream_account_queue_enabled,
+        upstream_account_queue_max_depth,
+        upstream_account_queue_max_wait_ms,
         upstream_continuation_pin_escape_enabled: env_bool(
             "UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED",
             DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,

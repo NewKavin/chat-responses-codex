@@ -32,3 +32,5 @@ mod slow_stream;
 mod stream_only;
 #[path = "gateway/stream_only_learning.rs"]
 mod stream_only_learning;
+#[path = "gateway/upstream_concurrency_queue.rs"]
+mod upstream_concurrency_queue;

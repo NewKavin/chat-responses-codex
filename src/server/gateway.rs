@@ -830,6 +830,76 @@ fn record_cooled_route_attempt(
 /// by the whole pool (B2 common-mode breaker).  `RequestRejected` keeps the
 /// request-shape semantics; transient classes get the shared-gateway-outage
 /// treatment (one delayed replay round before a request-level 502).
+
+const LOCAL_SLOT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// C3: bounded wait for a free local pre-dispatch concurrency slot on
+/// `account_key`.  The upstream account's `max_concurrency` is a hard ceiling
+/// on real slots, so overflow is *served by waiting* rather than by raising
+/// the ceiling.  Returns `Ok(true)` once a slot is observed free (the caller
+/// re-enters the routing round and reserves it through the ordinary
+/// candidate path); `Ok(false)` means the queue was already at `max_depth` or
+/// the `max_wait_ms` deadline elapsed and the caller falls through to the
+/// terminal (fast-fail) flow.  Local backend only: the Redis backend enforces
+/// concurrency inside Lua and never produces the LocalConcurrency rejection
+/// this queue exists to absorb.
+///
+/// The wait is a short-interval poll rather than a sleep of the retry-after
+/// estimate: after C1/C2 a lease is released synchronously when its request
+/// finishes (not at the TTL), so the oldest-lease TTL remaining is no longer
+/// a meaningful release ETA and could be up to `upstream_local_lease_ttl_seconds`
+/// (default 300s) — far past the queue deadline.  A slot can free at any
+/// instant, so 100ms polling (the same cadence `AccountRecoverySession` uses)
+/// keeps the queue responsive and cheap.
+async fn wait_for_local_slot_free(
+    state: &AppState,
+    upstream: &UpstreamConfig,
+    account_key: &AccountConcurrencyKey,
+    max_depth: usize,
+    max_wait_ms: u64,
+    request_id: &str,
+) -> Result<bool, GatewayError> {
+    let queue_position = state.local_slot_waiter_count(account_key) + 1;
+    if !state.try_enter_local_slot_wait(account_key, max_depth) {
+        return Ok(false);
+    }
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_millis(max_wait_ms);
+    let freed = loop {
+        if state.local_account_lease_count(account_key) < upstream.max_concurrency.max(1) as usize {
+            break true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break false;
+        }
+        let sleep_for = LOCAL_SLOT_POLL_INTERVAL.min(deadline.saturating_duration_since(now));
+        tokio::time::sleep(sleep_for).await;
+    };
+    state.leave_local_slot_wait(account_key);
+    let waited_ms = started.elapsed().as_millis() as u64;
+    if freed {
+        tracing::info!(
+            request_id = %request_id,
+            upstream_id = %upstream.id,
+            queue_position,
+            waited_ms,
+            max_wait_ms,
+            "local concurrency queue hit: a slot freed up"
+        );
+    } else {
+        tracing::info!(
+            request_id = %request_id,
+            upstream_id = %upstream.id,
+            queue_position,
+            waited_ms,
+            max_wait_ms,
+            "local concurrency queue gave up (depth limit or wait deadline)"
+        );
+    }
+    Ok(freed)
+}
+
 fn is_common_mode_breaker_class(class: FailureClass) -> bool {
     matches!(
         class,
@@ -6258,6 +6328,12 @@ async fn process_gateway_request_inner(
         last_error = None;
         last_failure_upstream = None;
         let mut stream_only_final_attempt = false;
+        // C3: the account of the most recent local pre-dispatch concurrency
+        // rejection in this round.  When the whole round is a pure local
+        // concurrency exhaustion (every candidate hit the gate, no physical
+        // attempt), the request queues for a free slot on this account instead
+        // of burning the ConcurrencySaturated retry budget.
+        let mut last_local_concurrency_account: Option<AccountConcurrencyKey> = None;
 
         for protocol in candidate_protocols.iter().copied() {
             for upstream in routing_snapshot.upstreams.iter() {
@@ -6940,6 +7016,7 @@ async fn process_gateway_request_inner(
                                 // classified as ConcurrencySaturated (429/503
                                 // family with retry-after) instead of a
                                 // misleading 502 "upstream_invalid_response".
+                                last_local_concurrency_account = Some(account_key.clone());
                                 let retry_after =
                                     Duration::from_secs(admission_error.retry_after_seconds.max(1))
                                         .min(upstream_retry_after_cap);
@@ -8458,6 +8535,64 @@ async fn process_gateway_request_inner(
                 request_route_attempts.arm_last_resort_probe(probe_route);
                 request_route_attempts = request_route_attempts.next_round();
                 continue 'routing_rounds;
+            }
+        }
+
+        // C3: a round whose only touchpoint was the local pre-dispatch
+        // concurrency gate (no physical upstream attempt) is served by
+        // queueing for a free slot instead of burning the ConcurrencySaturated
+        // budget (32 rounds / 30s).  The account's `max_concurrency` is a hard
+        // ceiling on real slots; overflow is *waited out*, not rejected.  The
+        // queue is the only wait here: if it gives up (depth limit or wait
+        // deadline) the request fast-fails through the terminal flow below
+        // rather than falling back to the old reject-and-burn loop.  Gated on
+        // the master exhaustion-retry switch too: an operator who disables
+        // exhaustion retries wants a quick rejection, not a queued request.
+        // The whole round must be local-concurrency-only so the multi-key
+        // case (one account full, a sibling account free) keeps its
+        // fallback-to-sibling behaviour instead of parking behind the full
+        // account.
+        if round_terminal.is_some()
+            && round_ledger.is_pure_concurrency_exhaustion()
+            && runtime_settings.upstream_route_exhaustion_retry_enabled
+            && runtime_settings.upstream_account_queue_enabled
+            && !payload_rejected
+            && !stream_only_final_attempt
+        {
+            if let Some(account_key) = last_local_concurrency_account.as_ref() {
+                let upstream_for_slot = routing_snapshot
+                    .upstreams
+                    .iter()
+                    .find(|candidate| candidate.id == account_key.upstream_id);
+                if let Some(upstream_for_slot) = upstream_for_slot {
+                    if wait_for_local_slot_free(
+                        &state,
+                        upstream_for_slot,
+                        account_key,
+                        runtime_settings.upstream_account_queue_max_depth,
+                        runtime_settings.upstream_account_queue_max_wait_ms,
+                        &request_id,
+                    )
+                    .await?
+                    {
+                        tracing::info!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %&normalized_model,
+                            upstream_id = %account_key.upstream_id,
+                            routing_round = request_route_attempts.routing_round(),
+                            "local concurrency queue hit: re-running the routing round"
+                        );
+                        request_route_attempts = request_route_attempts.next_round();
+                        continue 'routing_rounds;
+                    }
+                    // Queue gave up (depth limit / deadline): fast-fail with
+                    // the local-gate terminal error instead of burning the
+                    // ConcurrencySaturated budget.
+                    break 'routing_rounds;
+                }
             }
         }
 

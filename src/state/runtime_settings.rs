@@ -2,7 +2,8 @@ use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_tool_arguments_strict, default_tool_call_merge_strict,
-    default_upstream_common_mode_breaker_threshold,
+    default_upstream_account_queue_enabled, default_upstream_account_queue_max_depth,
+    default_upstream_account_queue_max_wait_ms, default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_same_host_transient_enabled,
     default_upstream_common_mode_transient_threshold,
     default_upstream_continuation_pin_escape_enabled,
@@ -65,6 +66,9 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_credentials_first_strike_seconds",
     "upstream_local_lease_ttl_seconds",
     "upstream_lease_stale_after_ms",
+    "upstream_account_queue_enabled",
+    "upstream_account_queue_max_depth",
+    "upstream_account_queue_max_wait_ms",
     "upstream_continuation_pin_escape_enabled",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
@@ -154,6 +158,12 @@ pub struct RuntimeSettings {
     pub upstream_local_lease_ttl_seconds: u64,
     #[serde(default = "default_upstream_lease_stale_after_ms")]
     pub upstream_lease_stale_after_ms: u64,
+    #[serde(default = "default_upstream_account_queue_enabled")]
+    pub upstream_account_queue_enabled: bool,
+    #[serde(default = "default_upstream_account_queue_max_depth")]
+    pub upstream_account_queue_max_depth: usize,
+    #[serde(default = "default_upstream_account_queue_max_wait_ms")]
+    pub upstream_account_queue_max_wait_ms: u64,
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
@@ -325,6 +335,9 @@ impl RuntimeSettings {
                 .upstream_credentials_first_strike_seconds,
             upstream_local_lease_ttl_seconds: config.upstream_local_lease_ttl_seconds,
             upstream_lease_stale_after_ms: config.upstream_lease_stale_after_ms,
+            upstream_account_queue_enabled: config.upstream_account_queue_enabled,
+            upstream_account_queue_max_depth: config.upstream_account_queue_max_depth,
+            upstream_account_queue_max_wait_ms: config.upstream_account_queue_max_wait_ms,
             upstream_continuation_pin_escape_enabled: config
                 .upstream_continuation_pin_escape_enabled,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
@@ -423,6 +436,9 @@ impl RuntimeSettings {
             self.upstream_credentials_first_strike_seconds;
         config.upstream_local_lease_ttl_seconds = self.upstream_local_lease_ttl_seconds;
         config.upstream_lease_stale_after_ms = self.upstream_lease_stale_after_ms;
+        config.upstream_account_queue_enabled = self.upstream_account_queue_enabled;
+        config.upstream_account_queue_max_depth = self.upstream_account_queue_max_depth;
+        config.upstream_account_queue_max_wait_ms = self.upstream_account_queue_max_wait_ms;
         config.upstream_continuation_pin_escape_enabled =
             self.upstream_continuation_pin_escape_enabled;
         config.upstream_route_exhaustion_retry_enabled =
@@ -616,6 +632,18 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_lease_stale_after_ms",
                 "must be at least 2x the local lease heartbeat interval (ttl/3)",
+            ));
+        }
+        if self.upstream_account_queue_max_depth < 1 {
+            return Err(invalid(
+                "upstream_account_queue_max_depth",
+                "must be at least 1",
+            ));
+        }
+        if self.upstream_account_queue_max_wait_ms < 100 {
+            return Err(invalid(
+                "upstream_account_queue_max_wait_ms",
+                "must be at least 100 ms",
             ));
         }
         require_positive(

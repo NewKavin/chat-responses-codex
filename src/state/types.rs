@@ -285,6 +285,24 @@ pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
     [100, 200, 400, 800, 1_000, 2_000];
 
+/// C3: whether a request rejected by the *local* pre-dispatch concurrency
+/// gate (LocalConcurrency) waits in a bounded queue for a free slot instead
+/// of burning retry rounds immediately.  The upstream account key's
+/// `max_concurrency` (default 4) is a hard ceiling on real slots — the fix
+/// is to serve the overflow by queueing, not to raise `max_concurrency`.
+/// Set false to restore the pre-C3 behavior (reject + retry loop).
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED: bool = true;
+/// C3: maximum number of requests that may wait on one account's local
+/// concurrency slots at once.  Beyond this depth the request falls through
+/// to the ordinary rejection path (C4.2 fast-fail error) instead of growing
+/// the queue without bound.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH: usize = 16;
+/// C3: how long (ms) a queued request may wait for a free local concurrency
+/// slot before it gives up.  Long-lived LLM streams hold their lease for the
+/// whole stream, so this bounds how long an overflow request waits behind
+/// them before the gateway serves the fast-fail error.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS: u64 = 10_000;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub admin_username: String,
@@ -421,6 +439,12 @@ pub struct AppConfig {
     pub upstream_local_lease_ttl_seconds: u64,
     #[serde(default = "default_upstream_lease_stale_after_ms")]
     pub upstream_lease_stale_after_ms: u64,
+    #[serde(default = "default_upstream_account_queue_enabled")]
+    pub upstream_account_queue_enabled: bool,
+    #[serde(default = "default_upstream_account_queue_max_depth")]
+    pub upstream_account_queue_max_depth: usize,
+    #[serde(default = "default_upstream_account_queue_max_wait_ms")]
+    pub upstream_account_queue_max_wait_ms: u64,
 
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
@@ -540,6 +564,9 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
             upstream_local_lease_ttl_seconds: DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS,
             upstream_lease_stale_after_ms: DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
+            upstream_account_queue_enabled: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+            upstream_account_queue_max_depth: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
+            upstream_account_queue_max_wait_ms: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
             upstream_continuation_pin_escape_enabled:
                 DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
@@ -1273,6 +1300,18 @@ pub fn default_upstream_local_lease_ttl_seconds() -> u64 {
 
 pub fn default_upstream_lease_stale_after_ms() -> u64 {
     DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS
+}
+
+pub fn default_upstream_account_queue_enabled() -> bool {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED
+}
+
+pub fn default_upstream_account_queue_max_depth() -> usize {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH
+}
+
+pub fn default_upstream_account_queue_max_wait_ms() -> u64 {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

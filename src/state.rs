@@ -153,7 +153,9 @@ pub use types::{
     PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
     UpstreamModelMapping, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
     DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING, DEFAULT_TOOL_ARGUMENTS_STRICT,
-    DEFAULT_TOOL_CALL_MERGE_STRICT, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_TOOL_CALL_MERGE_STRICT, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -584,6 +586,12 @@ pub struct AppState {
     usage_log_flush_running: Arc<AtomicBool>,
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     upstream_lease_table: Arc<StdMutex<UpstreamLeaseTable>>,
+    /// C3: in-process count of requests currently waiting on the local
+    /// pre-dispatch concurrency gate for a free slot, keyed by account.
+    /// Bounds the queue depth (`upstream_account_queue_max_depth`).  Local
+    /// backend only — the Redis backend enforces concurrency inside Lua and
+    /// never produces the LocalConcurrency rejection this queue serves.
+    local_slot_waiters: Arc<StdMutex<HashMap<AccountConcurrencyKey, usize>>>,
     route_health: Arc<Mutex<RouteHealthRegistry>>,
     account_concurrency: Arc<AccountConcurrencyRegistry>,
     runtime_coordination: RuntimeCoordinationBackend,
@@ -1043,6 +1051,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             upstream_lease_table: Arc::new(StdMutex::new(UpstreamLeaseTable::default())),
+            local_slot_waiters: Arc::new(StdMutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
             account_concurrency: account_concurrency_registry_from_config(&config),
             runtime_coordination,
@@ -1125,6 +1134,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             upstream_lease_table: Arc::new(StdMutex::new(UpstreamLeaseTable::default())),
+            local_slot_waiters: Arc::new(StdMutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
             account_concurrency: account_concurrency_registry_from_config(&config),
             runtime_coordination: RuntimeCoordinationBackend::Local,
@@ -1202,6 +1212,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             upstream_lease_table: Arc::new(StdMutex::new(UpstreamLeaseTable::default())),
+            local_slot_waiters: Arc::new(StdMutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
             account_concurrency: account_concurrency_registry_from_config(&config),
             runtime_coordination,
@@ -1255,6 +1266,63 @@ impl AppState {
 
     pub fn account_concurrency_registry(&self) -> Arc<AccountConcurrencyRegistry> {
         self.account_concurrency.clone()
+    }
+
+    /// C3: number of real leases currently held for an account (local
+    /// backend).  The Redis backend enforces concurrency inside Lua and never
+    /// produces the LocalConcurrency rejection this value serves, so callers
+    /// only reach it from the local-gate path.
+    pub fn local_account_lease_count(&self, account: &AccountConcurrencyKey) -> usize {
+        let table = self
+            .upstream_lease_table
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        table.account_lease_count(account)
+    }
+
+    /// C3: atomically reserve a queue slot on the local concurrency gate for
+    /// `account`, failing without side effects once the queue already holds
+    /// `max_depth` waiters (bounded queue, `upstream_account_queue_max_depth`).
+    pub fn try_enter_local_slot_wait(
+        &self,
+        account: &AccountConcurrencyKey,
+        max_depth: usize,
+    ) -> bool {
+        let mut counts = self
+            .local_slot_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = counts.entry(account.clone()).or_insert(0);
+        if *entry >= max_depth.max(1) {
+            return false;
+        }
+        *entry += 1;
+        true
+    }
+
+    /// C3: release a queue slot previously taken by [`Self::try_enter_local_slot_wait`].
+    pub fn leave_local_slot_wait(&self, account: &AccountConcurrencyKey) {
+        let mut counts = self
+            .local_slot_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = counts.get_mut(account) {
+            *entry = entry.saturating_sub(1);
+            if *entry == 0 {
+                counts.remove(account);
+            }
+        }
+    }
+
+    /// C3: current number of requests waiting on `account`'s local
+    /// concurrency slots (for the C4.2 `queue_depth` detail and, when needed,
+    /// depth checks before entering the wait).
+    pub fn local_slot_waiter_count(&self, account: &AccountConcurrencyKey) -> usize {
+        let counts = self
+            .local_slot_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        counts.get(account).copied().unwrap_or(0)
     }
 
     pub async fn observe_account_concurrency(
