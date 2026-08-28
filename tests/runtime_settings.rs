@@ -198,8 +198,9 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + upstream_local_gate_fast_fail_enabled (C4.1)
     // + upstream_local_gate_distinct_error_code_enabled (C4.2)
     // + upstream_capacity_failure_cooldown_enabled (E1)
-    // = 71.
-    assert_eq!(all.len(), 71);
+    // + upstream_account_queue_adaptive_budget_enabled (E4.2)
+    // = 72.
+    assert_eq!(all.len(), 72);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -271,7 +272,7 @@ fn runtime_settings_without_default_upstream_concurrency_use_canonical_default()
     let loaded: RuntimeSettings = serde_json::from_value(serialized).unwrap();
     let reserialized = serde_json::to_value(loaded).unwrap();
 
-    assert_eq!(reserialized["default_upstream_max_concurrency"], 4);
+    assert_eq!(reserialized["default_upstream_max_concurrency"], 32);
 }
 
 #[test]

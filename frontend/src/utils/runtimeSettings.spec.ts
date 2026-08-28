@@ -64,10 +64,11 @@ const validSettings = (): RuntimeSettings => ({
   upstream_continuation_pin_escape_enabled: true,
   upstream_local_lease_ttl_seconds: 300,
   upstream_lease_stale_after_ms: 200_000,
-  default_upstream_max_concurrency: 4,
+  default_upstream_max_concurrency: 32,
   upstream_account_queue_enabled: true,
   upstream_account_queue_max_depth: 16,
   upstream_account_queue_max_wait_ms: 10_000,
+  upstream_account_queue_adaptive_budget_enabled: true,
   upstream_local_gate_max_wait_ms: 3_000,
   upstream_local_gate_fast_fail_enabled: true,
   upstream_local_gate_distinct_error_code_enabled: true,
@@ -143,6 +144,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_account_queue_enabled',
   'upstream_account_queue_max_depth',
   'upstream_account_queue_max_wait_ms',
+  'upstream_account_queue_adaptive_budget_enabled',
   'upstream_local_gate_max_wait_ms',
   'upstream_local_gate_fast_fail_enabled',
   'upstream_local_gate_distinct_error_code_enabled',
@@ -172,10 +174,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(72)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(72)
+    expect(runtimeSettingFields).toHaveLength(73)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(73)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(59)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(60)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

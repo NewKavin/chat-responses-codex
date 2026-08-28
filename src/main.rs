@@ -7,8 +7,9 @@ use chat_responses_codex::state::{
     ModelKeySyncService, RuntimeSettings, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS, DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
@@ -154,6 +155,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
     )
     .max(100);
+    let upstream_account_queue_adaptive_budget_enabled = env_bool(
+        "UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
+    );
     let upstream_local_gate_max_wait_ms = env_u64(
         "UPSTREAM_LOCAL_GATE_MAX_WAIT_MS",
         DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
@@ -312,6 +317,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_account_queue_enabled,
         upstream_account_queue_max_depth,
         upstream_account_queue_max_wait_ms,
+        upstream_account_queue_adaptive_budget_enabled,
         upstream_local_gate_max_wait_ms,
         upstream_local_gate_fast_fail_enabled,
         upstream_local_gate_distinct_error_code_enabled,

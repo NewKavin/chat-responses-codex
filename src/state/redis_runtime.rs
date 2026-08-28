@@ -1,10 +1,10 @@
 use super::route_health::{
     concurrency_probe_schedule_ms, enumerable_route_health_routes, is_capacity_class,
-    is_shared_host_domain_class,
-    key_cooldown_schedule_ms, key_failure_has_cooldown, legacy_local_admission_cooldown_threshold,
-    normalize_concurrency_probe_delays, route_cooldown_schedule_ms, route_failure_has_cooldown,
-    route_health_aggregate_is_current, route_health_key_is_current, route_health_route_is_current,
-    summarize_route_health_routes, RedisHealthLease,
+    is_shared_host_domain_class, key_cooldown_schedule_ms, key_failure_has_cooldown,
+    legacy_local_admission_cooldown_threshold, normalize_concurrency_probe_delays,
+    route_cooldown_schedule_ms, route_failure_has_cooldown, route_health_aggregate_is_current,
+    route_health_key_is_current, route_health_route_is_current, summarize_route_health_routes,
+    RedisHealthLease,
 };
 use super::{
     AccountConcurrencyKey, AccountProbeLease, AccountProbeOutcome, AccountWaitTicket, AppConfig,
@@ -2869,9 +2869,16 @@ fn route_outcome_parts(
             sole_candidate,
             capacity_sole_route,
         ),
-        RouteOutcome::KeyFailure(class) => {
-            ("key_failure", Some(class), None, None, false, false, false, false)
-        }
+        RouteOutcome::KeyFailure(class) => (
+            "key_failure",
+            Some(class),
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        ),
         RouteOutcome::KeyFailureWithRetry { class, retry_after } => (
             "key_failure_with_retry",
             Some(class),

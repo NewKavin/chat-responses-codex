@@ -8690,12 +8690,31 @@ async fn process_gateway_request_inner(
                     .iter()
                     .find(|candidate| candidate.id == account_key.upstream_id);
                 if let Some(upstream_for_slot) = upstream_for_slot {
-                    if wait_for_local_slot_free(
+                    // E4.2: the queue budget is adaptive — clamp(p95_hold ×
+                    // 1.5, floor = upstream_account_queue_max_wait_ms,
+                    // ceiling) — and the queue is skipped entirely when the
+                    // median observed hold already exceeds that budget
+                    // ("the first slot would free after the deadline, so
+                    // waiting silently is pointless; fast-fail now").
+                    let (queue_budget_ms, skip_queue) =
+                        if runtime_settings.upstream_account_queue_adaptive_budget_enabled {
+                            state.local_slot_queue_plan(account_key)
+                        } else {
+                            (runtime_settings.upstream_account_queue_max_wait_ms, false)
+                        };
+                    if skip_queue {
+                        tracing::info!(
+                            request_id = %request_id,
+                            upstream_id = %account_key.upstream_id,
+                            queue_budget_ms,
+                            "local concurrency queue skipped: median hold exceeds the adaptive budget (E4.2)"
+                        );
+                    } else if wait_for_local_slot_free(
                         &state,
                         upstream_for_slot,
                         account_key,
                         runtime_settings.upstream_account_queue_max_depth,
-                        runtime_settings.upstream_account_queue_max_wait_ms,
+                        queue_budget_ms,
                         &request_id,
                     )
                     .await?

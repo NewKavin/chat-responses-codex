@@ -362,3 +362,48 @@ async fn e3_retry_after_floors_at_probe_delay_when_overdue() {
     );
     state.release_upstream_request(occupant).await.unwrap();
 }
+
+/// E4.1 migration safety: changing the factory default `max_concurrency` from
+/// 4 → 32 must only affect *newly created* upstreams.  Persisted upstreams
+/// store the explicit value; serde's `default` only kicks in when the field is
+/// absent from the stored JSON.  (The E7 migration docs tell operators to use
+/// `POST /api/admin/upstreams/batch-update` to adjust existing upstreams.)
+#[test]
+fn e4_1_persisted_max_concurrency_survives_default_change() {
+    // A persisted upstream that pinned max_concurrency = 4 stays 4 across a
+    // serialization round-trip (the old default's value, now different).
+    let persisted = UpstreamConfig {
+        id: "persisted-e4".into(),
+        name: "persisted".into(),
+        max_concurrency: 4,
+        ..UpstreamConfig::default()
+    };
+    let json = serde_json::to_string(&persisted).unwrap();
+    let back: UpstreamConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.max_concurrency, 4,
+        "persisted explicit max_concurrency must win over the new default"
+    );
+
+    // A freshly created upstream (no explicit field in its stored JSON) takes
+    // the E4.1 default of 32.
+    let mut fresh: serde_json::Value = serde_json::to_value(UpstreamConfig {
+        id: "fresh-e4".into(),
+        name: "fresh".into(),
+        ..UpstreamConfig::default()
+    })
+    .unwrap();
+    fresh.as_object_mut().unwrap().remove("max_concurrency");
+    let fresh_back: UpstreamConfig = serde_json::from_value(fresh).unwrap();
+    assert_eq!(
+        fresh_back.max_concurrency, 32,
+        "a field-less upstream JSON must deserialize to the new E4.1 default"
+    );
+
+    // And the in-code default itself is 32 (the admin runtime-setting surface
+    // already asserts `default_upstream_max_concurrency == 32`).
+    assert_eq!(
+        chat_responses_codex::state::default_upstream_max_concurrency(),
+        32
+    );
+}

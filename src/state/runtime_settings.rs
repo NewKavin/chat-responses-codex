@@ -2,8 +2,9 @@ use super::types::{
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_tool_arguments_strict, default_tool_call_merge_strict,
-    default_upstream_account_queue_enabled, default_upstream_account_queue_max_depth,
-    default_upstream_account_queue_max_wait_ms, default_upstream_capacity_failure_cooldown_enabled,
+    default_upstream_account_queue_adaptive_budget_enabled, default_upstream_account_queue_enabled,
+    default_upstream_account_queue_max_depth, default_upstream_account_queue_max_wait_ms,
+    default_upstream_capacity_failure_cooldown_enabled,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_same_host_transient_enabled,
     default_upstream_common_mode_transient_threshold,
@@ -73,6 +74,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_account_queue_enabled",
     "upstream_account_queue_max_depth",
     "upstream_account_queue_max_wait_ms",
+    "upstream_account_queue_adaptive_budget_enabled",
     "upstream_local_gate_max_wait_ms",
     "upstream_local_gate_fast_fail_enabled",
     "upstream_local_gate_distinct_error_code_enabled",
@@ -171,6 +173,8 @@ pub struct RuntimeSettings {
     pub upstream_account_queue_max_depth: usize,
     #[serde(default = "default_upstream_account_queue_max_wait_ms")]
     pub upstream_account_queue_max_wait_ms: u64,
+    #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
+    pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_local_gate_max_wait_ms")]
     pub upstream_local_gate_max_wait_ms: u64,
     #[serde(default = "default_upstream_local_gate_fast_fail_enabled")]
@@ -353,6 +357,8 @@ impl RuntimeSettings {
             upstream_account_queue_enabled: config.upstream_account_queue_enabled,
             upstream_account_queue_max_depth: config.upstream_account_queue_max_depth,
             upstream_account_queue_max_wait_ms: config.upstream_account_queue_max_wait_ms,
+            upstream_account_queue_adaptive_budget_enabled: config
+                .upstream_account_queue_adaptive_budget_enabled,
             upstream_local_gate_max_wait_ms: config.upstream_local_gate_max_wait_ms,
             upstream_local_gate_fast_fail_enabled: config.upstream_local_gate_fast_fail_enabled,
             upstream_local_gate_distinct_error_code_enabled: config
@@ -460,6 +466,8 @@ impl RuntimeSettings {
         config.upstream_account_queue_enabled = self.upstream_account_queue_enabled;
         config.upstream_account_queue_max_depth = self.upstream_account_queue_max_depth;
         config.upstream_account_queue_max_wait_ms = self.upstream_account_queue_max_wait_ms;
+        config.upstream_account_queue_adaptive_budget_enabled =
+            self.upstream_account_queue_adaptive_budget_enabled;
         config.upstream_local_gate_max_wait_ms = self.upstream_local_gate_max_wait_ms;
         config.upstream_local_gate_fast_fail_enabled = self.upstream_local_gate_fast_fail_enabled;
         config.upstream_local_gate_distinct_error_code_enabled =

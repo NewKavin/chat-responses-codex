@@ -154,8 +154,9 @@ pub use types::{
     StreamDiagnostics, UpstreamConfig, UpstreamModelMapping, UpstreamMutationError, UsageLog,
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS, DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
@@ -1371,6 +1372,40 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         counts.get(account).copied().unwrap_or(0)
+    }
+
+    /// E4.2 (§3.4 / §3.5): the C3 local-slot queue must only be entered when
+    /// the evidence says a slot can free within the wait budget.  Returns the
+    /// effective queue budget in ms and whether the queue is worth entering:
+    ///
+    /// * budget = `clamp(p95_hold × ADAPTIVE_QUEUE_BUDGET_FACTOR,
+    ///   floor = upstream_account_queue_max_wait_ms,
+    ///   ceiling = ADAPTIVE_QUEUE_BUDGET_CEILING_MS)`; falls back to the
+    ///   static floor when fewer than two hold samples exist.
+    /// * `should_skip` = the *static* `upstream_account_queue_max_wait_ms`
+    ///   floor is the only meaningful yardstick for "waiting is doomed":
+    ///   comparing `p50_hold` against the p95-derived budget can never fire
+    ///   (`budget ≥ p95 ≥ p50`), so the median observed hold outlasting the
+    ///   operator's configured wait limit is the signal that the queue's
+    ///   promise ("wait a little and a slot frees") is broken — the median
+    ///   request takes longer than the whole wait.  Skipping straight to the
+    ///   fast-fail removes the "10s silent wait for a doomed request" (E4's
+    ///   §2.4 fix) and cheaply hands the retry loop back to the client.
+    pub fn local_slot_queue_plan(&self, account: &AccountConcurrencyKey) -> (u64, bool) {
+        let config = &self.config;
+        let table = self
+            .upstream_lease_table
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let floor_ms = config.upstream_account_queue_max_wait_ms.max(1);
+        let Some(p95) = table.hold_p95_seconds(account) else {
+            return (floor_ms, false);
+        };
+        let p50 = table.hold_p50_seconds(account).unwrap_or(0);
+        let scaled = (p95 as f64 * ADAPTIVE_QUEUE_BUDGET_FACTOR) as u64;
+        let budget = scaled.clamp(floor_ms, ADAPTIVE_QUEUE_BUDGET_CEILING_MS);
+        let should_skip = p50 > 0 && p50 > floor_ms.div_ceil(1000);
+        (budget, should_skip)
     }
 
     /// C5.1: total C3 slot-queue depth across all of `upstream_id`'s accounts
@@ -6867,6 +6902,16 @@ pub enum UpstreamLeaseKind {
 /// release path: every successful local release appends its hold duration.
 const LEASE_HOLD_SAMPLE_SIZE: usize = 32;
 
+/// E4.2: the C3 local-slot queue budget is `p95_hold × this factor`, so the
+/// wait covers ~all observed service times (p95) with a small margin, instead
+/// of the flat pre-E4 static budget.
+const ADAPTIVE_QUEUE_BUDGET_FACTOR: f64 = 1.5;
+/// E4.2: hard ceiling on the adaptive queue budget.  The evidence-based
+/// budget never goes to minutes-long silent waits even for pathological p95 —
+/// a duration that long is better served by an honest fast-fail (E4 §3.4:
+/// do not turn a doomed wait into minutes of silence).
+const ADAPTIVE_QUEUE_BUDGET_CEILING_MS: u64 = 60_000;
+
 /// C1.1: A single upstream account lease record.  Replaces the bare
 /// `expires_at` `Instant` that used to sit in `UpstreamRuntimeState`:
 /// `last_renewed_at` lets the stale sweep tell a live-but-silent lease apart
@@ -7100,6 +7145,24 @@ impl UpstreamLeaseTable {
         holds.sort_unstable();
         let mid = holds.len() / 2;
         Some(holds[mid].as_secs())
+    }
+
+    /// E3: p95 observed hold duration for `account`, in whole seconds.
+    /// `None` when fewer than two samples exist (same discipline as
+    /// [`Self::hold_p50_seconds`]).
+    fn hold_p95_seconds(&self, account: &AccountConcurrencyKey) -> Option<u64> {
+        let mut holds = self
+            .hold_samples
+            .get(account)
+            .map(|samples| samples.iter().copied().collect::<Vec<_>>())?
+            .into_iter()
+            .collect::<Vec<_>>();
+        if holds.len() < 2 {
+            return None;
+        }
+        holds.sort_unstable();
+        let idx = ((holds.len() as f64) * 0.95).ceil() as usize;
+        Some(holds[idx.saturating_sub(1).min(holds.len() - 1)].as_secs())
     }
 
     /// E3: the longest *already-held* duration among `account`'s live leases

@@ -298,8 +298,10 @@ pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
 /// C3: whether a request rejected by the *local* pre-dispatch concurrency
 /// gate (LocalConcurrency) waits in a bounded queue for a free slot instead
 /// of burning retry rounds immediately.  The upstream account key's
-/// `max_concurrency` (default 4) is a hard ceiling on real slots — the fix
-/// is to serve the overflow by queueing, not to raise `max_concurrency`.
+/// `max_concurrency` (default 32, E4.1) is a snowplow safety net, not an
+/// authoritative mirror of upstream capacity — the upstream itself is the
+/// authority (it honestly 429s when full and the client's retry loop
+/// converges), so the fix is to serve the residual overflow by queueing.
 /// Set false to restore the pre-C3 behavior (reject + retry loop).
 pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED: bool = true;
 /// C3: maximum number of requests that may wait on one account's local
@@ -312,6 +314,14 @@ pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH: usize = 16;
 /// whole stream, so this bounds how long an overflow request waits behind
 /// them before the gateway serves the fast-fail error.
 pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS: u64 = 10_000;
+
+/// E4.2: whether the C3 local-slot queue budget is adaptive (per §3.5:
+/// `clamp(p95_hold × factor, floor = upstream_account_queue_max_wait_ms,
+/// ceiling)`) and skips the queue entirely when the median hold already
+/// exceeds that budget ("p50_hold > budget ⇒ the wait is doomed, fast-fail
+/// instead of a silent 10s").  Off restores the pre-E4 behavior: every
+/// local-gate overflow waits the full static `upstream_account_queue_max_wait_ms`.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED: bool = true;
 
 /// C4.1: total wait budget (ms) a purely-local pre-dispatch concurrency
 /// rejection is allowed to burn before the gateway fast-fails.  Substitutes
@@ -475,6 +485,8 @@ pub struct AppConfig {
     pub upstream_account_queue_max_depth: usize,
     #[serde(default = "default_upstream_account_queue_max_wait_ms")]
     pub upstream_account_queue_max_wait_ms: u64,
+    #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
+    pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_local_gate_max_wait_ms")]
     pub upstream_local_gate_max_wait_ms: u64,
     #[serde(default = "default_upstream_local_gate_fast_fail_enabled")]
@@ -605,6 +617,8 @@ impl Default for AppConfig {
             upstream_account_queue_enabled: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
             upstream_account_queue_max_depth: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
             upstream_account_queue_max_wait_ms: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+            upstream_account_queue_adaptive_budget_enabled:
+                DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
             upstream_local_gate_max_wait_ms: DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
             upstream_local_gate_fast_fail_enabled: DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
             upstream_local_gate_distinct_error_code_enabled:
@@ -1401,8 +1415,19 @@ pub fn default_upstream_requests_per_minute() -> u32 {
     20
 }
 
+/// E4.1: the local pre-dispatch concurrency gate is now a *snowplow safety
+/// net*, not the authoritative mirror of upstream capacity.  The upstream is
+/// the authority on its own capacity (it honestly 429s when full, and the
+/// client's retry loop converges); the gateway's gate only exists to prevent
+/// a single account from flooding the upstream.  The old default of 4 was
+/// tuned to "match" the provider's concurrency, which made the gateway the
+/// first and strictest limiter — and when its (then soft) lease accounting
+/// leaked, 4 leaked slots pinned a key for an hour.  Raising the net to 32
+/// only affects *newly created* upstreams: persisted `max_concurrency`
+/// values are stored and unchanged (see E7 migration notes — use
+/// `POST /api/admin/upstreams/batch-update` to adjust existing ones).
 pub fn default_upstream_max_concurrency() -> u32 {
-    4
+    32
 }
 
 pub fn default_capability_probe_concurrency() -> u32 {
@@ -1514,6 +1539,10 @@ pub fn default_upstream_account_queue_max_depth() -> usize {
 
 pub fn default_upstream_account_queue_max_wait_ms() -> u64 {
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS
+}
+
+pub fn default_upstream_account_queue_adaptive_budget_enabled() -> bool {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED
 }
 
 pub fn default_upstream_local_gate_max_wait_ms() -> u64 {

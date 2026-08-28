@@ -546,13 +546,21 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'upstream_account_queue_max_wait_ms',
     group: 'concurrency',
-    label: '排队最大等待',
+    label: '排队最大等待（静态下限）',
     apply: 'immediate',
     control: 'number',
     unit: '毫秒',
     min: 100,
     max: MAX_SAFE_INTEGER,
-    description: '排队请求等待槽位的最大时长，超时返回限流错误。'
+    description: '排队请求等待槽位的最大时长。开启自适应预算（E4.2）后此项是下限：实际预算 = clamp(观测 p95 持有时长 × 1.5, 此项, 60s)。'
+  },
+  {
+    key: 'upstream_account_queue_adaptive_budget_enabled',
+    group: 'concurrency',
+    label: '排队预算自适应',
+    apply: 'immediate',
+    control: 'switch',
+    description: '用租约持有时长观测（p95×1.5）动态计算排队预算；当 p50 持有时长已超过预算时直接快速失败、不白等（避免「注定失败的 10 秒静默」）。关闭则回到固定静态等待。'
   },
   {
     key: 'upstream_local_gate_max_wait_ms',

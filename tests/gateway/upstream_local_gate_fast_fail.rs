@@ -431,3 +431,113 @@ async fn real_upstream_429_keeps_the_upstream_rate_limit_path() {
         "a real upstream 429 must never be swept into the local-gate code: {payload}"
     );
 }
+
+/// E4.2 (§3.4): with hold samples showing the median request holds a slot
+/// longer than the static queue floor, the C3 queue is *not* worth entering —
+/// the median serve outlasts the whole wait, so queueing is the §2.4 "10s
+/// silent wait for a doomed request".  The overflow must skip the queue and
+/// fast-fail immediately (elapsed well under the 10s static wait), still with
+/// the distinct local-gate code and zero extra upstream hits.
+#[tokio::test]
+async fn adaptive_budget_skips_queue_when_median_hold_exceeds_floor() {
+    // Phase 1: 4 requests held 3s each build the hold samples (p50/p95 = 3s).
+    // Phase 2: 4 more held 3s pin all 4 slots while the 5th request arrives.
+    // First 8 hits are held; any 9th hit would be answered immediately, so
+    // `hits == 8` proves the overflow never reached the upstream.
+    let (base_url, hits) = holding_upstream(8, 3_000).await;
+    // Explicit local-gate / queue parameters — no reliance on default values.
+    let (app, state, downstream_key) = fast_fail_harness(base_url, 4, |config| AppConfig {
+        upstream_local_gate_max_wait_ms: 3_000,
+        upstream_local_gate_fast_fail_enabled: true,
+        upstream_local_gate_distinct_error_code_enabled: true,
+        upstream_account_queue_enabled: true,
+        upstream_account_queue_max_depth: 16,
+        // Static floor: 2s.  The 3s median hold must exceed it → skip queue.
+        upstream_account_queue_max_wait_ms: 2_000,
+        upstream_account_queue_adaptive_budget_enabled: true,
+        upstream_local_lease_ttl_seconds: 300,
+        ..config
+    })
+    .await;
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        "ff-upstream",
+        chat_responses_codex::keys::upstream_key_fingerprint("ff-upstream", "upstream-secret-c4"),
+    );
+
+    // Phase 1: pin all 4 slots until they release on their own (3s each).
+    let phase1 = (0..4)
+        .map(|_| {
+            let app = app.clone();
+            let downstream_key = downstream_key.clone();
+            tokio::spawn(async move { app.oneshot(chat_request(&downstream_key)).await.unwrap() })
+        })
+        .collect::<Vec<_>>();
+    wait_for_upstream_in_flight(&state, "ff-upstream", 4).await;
+    for holder in phase1 {
+        let response = holder.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "phase-1 holder served");
+    }
+    // The release task records the hold sample synchronously in `remove`;
+    // zero live leases ⇒ all 4 samples (3s) are recorded deterministically.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while state.local_account_lease_count(&account) != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "phase-1 leases never drained"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Phase 2: pin all 4 slots again with the same 3s holds.
+    let phase2 = (0..4)
+        .map(|_| {
+            let app = app.clone();
+            let downstream_key = downstream_key.clone();
+            tokio::spawn(async move { app.oneshot(chat_request(&downstream_key)).await.unwrap() })
+        })
+        .collect::<Vec<_>>();
+    wait_for_upstream_in_flight(&state, "ff-upstream", 4).await;
+
+    // 5th request: gate full, queue enabled, p50(3s) > floor(2s) ⇒ skip the
+    // queue and fast-fail immediately.
+    let started = tokio::time::Instant::now();
+    let response = app
+        .clone()
+        .oneshot(chat_request(&downstream_key))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    // Phase-2 holders release on their own after 3s.
+    for holder in phase2 {
+        let _ = holder.await;
+    }
+
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "skipped-queue overflow must stay HTTP 429: {payload}"
+    );
+    assert_eq!(
+        payload["error"]["code"], "gateway_concurrency_saturated",
+        "the skip path lands on the distinct local-gate fast-fail: {payload}"
+    );
+    assert_eq!(payload["error"]["details"]["physical_attempt_count"], 0);
+    assert_eq!(payload["error"]["details"]["in_flight"], 4);
+    assert_eq!(
+        payload["error"]["details"]["max_concurrency"], 4,
+        "{payload}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(1_500),
+        "E4.2: median hold > floor must skip the queue and fast-fail (no 10s silent wait): elapsed={elapsed:?}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        8,
+        "the skipped-queue request must never reach the upstream (first 8 hits are the two pinning phases)"
+    );
+}

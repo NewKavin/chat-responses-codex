@@ -5011,8 +5011,8 @@ async fn test_upstreams_batch_update_changes_operational_fields() {
     assert!(!by_id("upstream-b1").active);
     assert!(!by_id("upstream-b2").active);
     assert_eq!(by_id("upstream-b1").priority, 3);
-    // upstream-b3 untouched.
-    assert_eq!(by_id("upstream-b3").max_concurrency, 4);
+    // upstream-b3 untouched keeps the E4.1 factory default (32).
+    assert_eq!(by_id("upstream-b3").max_concurrency, 32);
     assert!(by_id("upstream-b3").active);
 }
 
@@ -5113,7 +5113,7 @@ async fn test_upstreams_batch_update_rejects_whitelist_violations() {
         .iter()
         .find(|u| u.id == "upstream-b1")
         .unwrap();
-    assert_eq!(upstream.max_concurrency, 4);
+    assert_eq!(upstream.max_concurrency, 32); // E4.1 factory default
     assert_eq!(upstream.api_key, "sk-b1");
 }
 
