@@ -1366,10 +1366,14 @@ async fn sync_downstreams(
             .output_token_price_per_million_cents
             .map(|value| value as i64);
         let daily_cost_limit_cents = downstream.daily_cost_limit_cents.map(|value| value as i64);
+        // The downstreams.model_concurrency_groups column is JSONB. Binding a plain
+        // String here fails with "error serializing parameter 17" because String only
+        // accepts TEXT/VARCHAR/BPCHAR/NAME/UNKNOWN. Bind serde_json::Value instead,
+        // mirroring how stream_diagnostics (usage_logs JSONB) is persisted below.
         let model_concurrency_groups = if downstream.model_concurrency_groups.is_empty() {
             None
         } else {
-            serde_json::to_string(&downstream.model_concurrency_groups).ok()
+            serde_json::to_value(&downstream.model_concurrency_groups).ok()
         };
         let params: &[&(dyn ToSql + Sync)] = &[
             &downstream.id,
