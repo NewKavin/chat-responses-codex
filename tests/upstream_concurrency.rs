@@ -225,3 +225,140 @@ async fn leaked_lease_is_reclaimed_as_stale_before_ttl() {
         "the expiry counter must stay untouched"
     );
 }
+
+/// E3 (§3.5 / §5.2): the local-concurrency Retry-After must be estimated from
+/// observed *hold* durations (release − reserve), not from the lease TTL.  The
+/// pre-E3 code used `oldest_remaining_secs`; with the C2 heartbeat keeping
+/// live leases topped up to ~full TTL (300s) that number was pinned near 300
+/// and the 30s cap flattened it to a constant — exactly the "retried for 32s
+/// across 6 rounds" artifact while the upstream was never even contacted.
+///
+/// With no hold samples there is no observation to lean on, so the estimate
+/// falls back to the static first-probe-delay floor (1s), not 30.
+#[tokio::test(start_paused = true)]
+async fn e3_retry_after_without_samples_is_not_the_constant_cap() {
+    let upstream = test_upstream("e3-no-samples");
+    let (state, _directory) = test_state(&upstream);
+    let account = ("e3-no-samples".to_string(), "fingerprint-e3ns".to_string());
+
+    // Fill the single slot and hold it, renewing the heartbeat exactly like a
+    // long stream would (C2 keeps the TTL near 300s).  Pre-E3 the rejection
+    // below advertised ~30s (300s remaining capped); E3 must not read the TTL.
+    let held = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .unwrap();
+    for _ in 0..3u32 {
+        advance(Duration::from_secs(80)).await;
+        state.renew_upstream_request(&held).await.unwrap();
+    }
+
+    let rejected = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .expect_err("the single slot is still pinned by the stream");
+    assert!(matches!(
+        rejected.reason,
+        UpstreamAdmissionRejectionReason::LocalConcurrency
+    ));
+    assert!(
+        rejected.retry_after_seconds <= 5,
+        "E3: with no hold samples the estimate must be the static probe floor, \
+         not the renewed-TTL/capped constant; got {}s",
+        rejected.retry_after_seconds
+    );
+    assert_ne!(
+        rejected.retry_after_seconds, 30,
+        "E3: the old 30s constant (renewed TTL capped) must be gone"
+    );
+
+    // Release the stream: its real 240s of service time becomes one sample.
+    state.release_upstream_request(held).await.unwrap();
+}
+
+/// E3: with a known hold-duration sample set, the estimate must land where
+/// §3.5 predicts: `p50_hold − oldest_lease_already_held`, floored by the
+/// probe delay.  This pins the formula against regressions back to TTL maths.
+#[tokio::test(start_paused = true)]
+async fn e3_retry_after_tracks_observed_hold_duration() {
+    let upstream = test_upstream("e3-known-holds");
+    let (state, _directory) = test_state(&upstream);
+    let account = ("e3-known-holds".to_string(), "fingerprint-e3kh".to_string());
+
+    // Build two observed holds: 60s then 40s => p50 (sorted [40,60]) = 60s.
+    let first = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .unwrap();
+    advance(Duration::from_secs(60)).await;
+    state.release_upstream_request(first).await.unwrap();
+
+    let second = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .unwrap();
+    advance(Duration::from_secs(40)).await;
+    state.release_upstream_request(second).await.unwrap();
+
+    // Third request: hold it 20s and ask for a new reservation.  The oldest
+    // occupant has already consumed 20s of the 60s p50 window, so the slot
+    // frees in ~40s.
+    let occupant = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .unwrap();
+    advance(Duration::from_secs(20)).await;
+
+    let rejected = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .expect_err("the single slot is occupied");
+    assert!(matches!(
+        rejected.reason,
+        UpstreamAdmissionRejectionReason::LocalConcurrency
+    ));
+    assert_eq!(
+        rejected.retry_after_seconds, 40,
+        "E3: p50_hold (60s) minus already-held (20s), not any TTL-derived value"
+    );
+
+    state.release_upstream_request(occupant).await.unwrap();
+}
+
+/// E3: a request that was held *longer* than the p50 window must not produce a
+/// negative retry-after — "the slot is already overdue" means "retry ~now",
+/// floored at the probe delay.
+#[tokio::test(start_paused = true)]
+async fn e3_retry_after_floors_at_probe_delay_when_overdue() {
+    let upstream = test_upstream("e3-overdue");
+    let (state, _directory) = test_state(&upstream);
+    let account = ("e3-overdue".to_string(), "fingerprint-e3od".to_string());
+
+    // Two quick samples: p50 = 2s.
+    for hold_secs in [1u64, 3] {
+        let lease = state
+            .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+            .await
+            .unwrap();
+        advance(Duration::from_secs(hold_secs)).await;
+        state.release_upstream_request(lease).await.unwrap();
+    }
+
+    // The next occupant is already 120s in — far past p50 — so the first slot
+    // is overdue; the estimate must bottom out at the probe floor (1s).
+    let occupant = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .unwrap();
+    advance(Duration::from_secs(120)).await;
+
+    let rejected = state
+        .try_reserve_upstream_account_request(&upstream, &account.1, "model-a")
+        .await
+        .expect_err("the single slot is occupied");
+    assert_eq!(
+        rejected.retry_after_seconds, 1,
+        "E3: overdue hold must floor at the probe delay"
+    );
+    state.release_upstream_request(occupant).await.unwrap();
+}

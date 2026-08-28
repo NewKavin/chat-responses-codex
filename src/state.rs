@@ -4165,7 +4165,9 @@ impl AppState {
                     .upstream_lease_table
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                table.remove(&lease.account, &lease.lease_id);
+                // E3: the release also samples the hold duration (release −
+                // reserve) into the account ring for the Retry-After estimate.
+                table.remove(&lease.account, &lease.lease_id, tokio::time::Instant::now());
                 Ok(())
             };
         if result.is_ok() {
@@ -4223,7 +4225,7 @@ impl AppState {
             .upstream_lease_table
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        table.remove(&lease.account, &lease.lease_id)
+        table.remove(&lease.account, &lease.lease_id, tokio::time::Instant::now())
     }
 
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
@@ -6859,6 +6861,12 @@ pub enum UpstreamLeaseKind {
     Unary,
 }
 
+/// E3: per-account ring of observed lease hold durations (release − reserve),
+/// sized to a fixed window so the p50/p95 estimate tracks recent service time
+/// instead of drifting toward a stale epoch.  Driven by the C1/C2 lease
+/// release path: every successful local release appends its hold duration.
+const LEASE_HOLD_SAMPLE_SIZE: usize = 32;
+
 /// C1.1: A single upstream account lease record.  Replaces the bare
 /// `expires_at` `Instant` that used to sit in `UpstreamRuntimeState`:
 /// `last_renewed_at` lets the stale sweep tell a live-but-silent lease apart
@@ -6875,6 +6883,13 @@ pub struct UpstreamLeaseRecord {
     /// that have not been renewed for longer than
     /// `upstream_lease_stale_after_ms`.
     last_renewed_at: tokio::time::Instant,
+    /// E3: when this lease was reserved.  Immutable (heartbeats only touch
+    /// `last_renewed_at` / `expires_at`), so `release − reserved_at` is the
+    /// true time the upstream slot was held — the quantity that decides when
+    /// a slot actually frees.  The C2 heartbeat keeps `expires_at` pinned at
+    /// ~full TTL, which is exactly why TTL-based Retry-After estimates are
+    /// meaningless for live requests.
+    reserved_at: tokio::time::Instant,
     kind: UpstreamLeaseKind,
 }
 
@@ -6883,6 +6898,7 @@ impl UpstreamLeaseRecord {
         Self {
             expires_at: now + ttl,
             last_renewed_at: now,
+            reserved_at: now,
             kind,
         }
     }
@@ -6902,6 +6918,11 @@ impl UpstreamLeaseRecord {
 #[derive(Debug, Default)]
 pub struct UpstreamLeaseTable {
     leases: HashMap<AccountConcurrencyKey, HashMap<String, UpstreamLeaseRecord>>,
+    /// E3: per-account ring of observed lease hold durations (release −
+    /// reserve), bounded to `LEASE_HOLD_SAMPLE_SIZE`.  Drives the p50/p95
+    /// Retry-After estimate for local-concurrency rejections — measuring the
+    /// *time slots are actually held* (service time) rather than the lease TTL.
+    hold_samples: HashMap<AccountConcurrencyKey, VecDeque<Duration>>,
     /// Per-upstream cumulative count of expired local leases reclaimed by the
     /// lazy sweeps (P7 observability): zero means no leak has ever actually
     /// happened.  Keyed by upstream_id.
@@ -7031,15 +7052,76 @@ impl UpstreamLeaseTable {
             .insert(lease_id, record);
     }
 
-    fn remove(&mut self, account: &AccountConcurrencyKey, lease_id: &str) -> bool {
-        let Some(account_leases) = self.leases.get_mut(account) else {
+    /// E3: remove a lease and, if it was actually held, record its hold
+    /// duration (now − `reserved_at`) into the account's sample ring.  The
+    /// hold duration is what decides when the slot frees — the C2 heartbeat
+    /// keeps the TTL pinned near full, so remaining-TTL bookkeeping cannot
+    /// answer "how long until a slot opens".  Returns whether a lease was
+    /// removed.  Only real releases end up in the ring: leases reclaimed by
+    /// the lazy sweeps (which never ran a release path) are not sampled.
+    fn remove(
+        &mut self,
+        account: &AccountConcurrencyKey,
+        lease_id: &str,
+        now: tokio::time::Instant,
+    ) -> bool {
+        let Some(record) = self
+            .leases
+            .get_mut(account)
+            .and_then(|leases| leases.remove(lease_id))
+        else {
             return false;
         };
-        let removed = account_leases.remove(lease_id).is_some();
-        if account_leases.is_empty() {
+        let hold = now.saturating_duration_since(record.reserved_at);
+        let samples = self.hold_samples.entry(account.clone()).or_default();
+        if samples.len() >= LEASE_HOLD_SAMPLE_SIZE {
+            samples.pop_front();
+        }
+        samples.push_back(hold);
+        if self.leases.get(account).map_or(true, HashMap::is_empty) {
             self.leases.remove(account);
         }
-        removed
+        true
+    }
+
+    /// E3: p50 observed hold duration (release − reserve) for `account`, in
+    /// whole seconds.  `None` when fewer than two samples exist — with a
+    /// single sample there is no central tendency worth trusting.
+    fn hold_p50_seconds(&self, account: &AccountConcurrencyKey) -> Option<u64> {
+        let mut holds = self
+            .hold_samples
+            .get(account)
+            .map(|samples| samples.iter().copied().collect::<Vec<_>>())?
+            .into_iter()
+            .collect::<Vec<_>>();
+        if holds.len() < 2 {
+            return None;
+        }
+        holds.sort_unstable();
+        let mid = holds.len() / 2;
+        Some(holds[mid].as_secs())
+    }
+
+    /// E3: the longest *already-held* duration among `account`'s live leases
+    /// (now − `reserved_at`).  This is the portion of the expected service
+    /// time already consumed by the oldest occupant — the best available
+    /// proxy for "how much of the p50 window is left before the first slot
+    /// frees".  0 when no lease is held.
+    fn oldest_held_seconds(
+        &self,
+        account: &AccountConcurrencyKey,
+        now: tokio::time::Instant,
+    ) -> u64 {
+        self.leases
+            .get(account)
+            .map(|leases| {
+                leases
+                    .values()
+                    .map(|record| now.saturating_duration_since(record.reserved_at).as_secs())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
     }
 
     fn renew(
@@ -7073,20 +7155,6 @@ impl UpstreamLeaseTable {
             }
             None => false,
         }
-    }
-
-    fn oldest_remaining_secs(
-        &self,
-        account: &AccountConcurrencyKey,
-        now: tokio::time::Instant,
-    ) -> Option<u64> {
-        self.leases.get(account).and_then(|leases| {
-            leases
-                .values()
-                .map(|record| record.expires_at.saturating_duration_since(now))
-                .min()
-                .map(|remaining| remaining.as_secs().max(1))
-        })
     }
 
     fn remove_upstream(&mut self, upstream_id: &str) {
@@ -7164,27 +7232,43 @@ fn prune_expired_upstream_leases(
     reclaimed
 }
 
-/// C3.4: Honest Retry-After estimate for a local-concurrency rejection.
-/// The old code returned a hard-coded 1s that had nothing to do with when a
-/// slot actually frees.  The worst case for a slot to free is the oldest
-/// active lease's remaining TTL (leases are reclaimed by the lazy sweep at
-/// expiry even if their release path never ran); floor it with the first
-/// probe-delay tier so fast-moving queues do not advertise sub-second waits
-/// that the retry loop cannot even use.
+/// E3: Retry-After estimate for a local-concurrency rejection, measured on
+/// the *right* object.  The pre-E3 code used the oldest active lease's
+/// remaining TTL (`oldest_remaining_secs`) — but the C2 heartbeat renews
+/// every live lease every ttl/3, so for any live request that value stays
+/// pinned near the full TTL (300s) and, after the 30s cap, the gateway
+/// advertised a constant ~30s regardless of how long a slot really takes to
+/// free.  That constant exactly matched the observed "retried for 32.1s
+/// across 6 rounds" pattern while the upstream was never even contacted.
+///
+/// E3 instead estimates from observed *hold* durations (release − reserve):
+///   retry_after ≈ p50_hold − oldest_lease_already_held
+/// i.e. "the median request takes p50_hold; the oldest occupant has already
+/// consumed `oldest_held` of that window, so the first slot frees in roughly
+/// the remainder".  Floored with the first probe-delay tier (fast-moving
+/// queues must not advertise sub-second waits a retry loop cannot use).
+/// With no samples yet there is no observation to lean on, so it falls back
+/// to the static probe-delay floor rather than pretending to know the server.
 fn estimate_local_concurrency_retry_after_seconds(
     config: &AppConfig,
     table: &UpstreamLeaseTable,
     account: &AccountConcurrencyKey,
     now: tokio::time::Instant,
 ) -> u64 {
-    let oldest_remaining = table.oldest_remaining_secs(account, now).unwrap_or(1);
     let probe_delay_secs = config
         .upstream_concurrency_probe_delays_ms
         .first()
         .copied()
         .map(|ms| (ms / 1_000).max(1))
         .unwrap_or(1);
-    oldest_remaining.max(probe_delay_secs)
+    let Some(p50_hold) = table.hold_p50_seconds(account) else {
+        return probe_delay_secs;
+    };
+    let oldest_held = table.oldest_held_seconds(account, now);
+    p50_hold
+        .saturating_sub(oldest_held)
+        .max(probe_delay_secs)
+        .max(1)
 }
 
 #[derive(Debug, Clone, Default)]

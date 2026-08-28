@@ -1037,10 +1037,12 @@ async fn stream_completion_fixture(
 #[tokio::test]
 async fn local_upstream_concurrency_is_scoped_per_account() {
     let directory = tempdir().unwrap();
-    // C3.4: the local-gate retry-after is now an honest estimate (the max of
-    // the rejecting account's oldest active lease remaining TTL and the first
-    // probe-delay tier) instead of the old hard-coded 1s.  Pin the config so
-    // the estimate is exact instead of inheriting defaults.
+    // E3: the local-gate retry-after is estimated from observed *hold*
+    // durations (release − reserve), falling back to the first probe-delay
+    // tier when no samples exist — never from the lease TTL (whose remaining
+    // value the heartbeat keeps pinned and is meaningless for live requests).
+    // Pin the config so the estimate is exact instead of inheriting defaults:
+    // probe floor = 1s, no hold samples have been recorded for account A yet.
     let config = AppConfig {
         upstream_local_lease_ttl_seconds: 60,
         upstream_concurrency_probe_delays_ms: vec![1_000],
@@ -1073,11 +1075,12 @@ async fn local_upstream_concurrency_is_scoped_per_account() {
         .await
         .expect_err("a second request on account A must exceed its limit");
 
-    // The rejecting account's single active lease has ~60s remaining (a
-    // fraction of a second already elapsed since reservation, floored to
-    // whole seconds => 59) and the probe floor is 1s, so the honest estimate
-    // is the remaining TTL, not the old hard-coded 1s.
-    assert_eq!(same_account_rejection.retry_after_seconds, 59);
+    // Account A's single lease is still held (never released), so its hold
+    // sample ring is empty -> the estimate must fall back to the probe-delay
+    // floor (1s).  Pre-E3 this asserted 59s (the remaining *TTL* of the held
+    // lease) — exactly the object-measurement bug E3 removes: TTL says nothing
+    // about when a slot actually frees for a live request.
+    assert_eq!(same_account_rejection.retry_after_seconds, 1);
     assert_eq!(
         state
             .upstream_runtime_snapshots()
