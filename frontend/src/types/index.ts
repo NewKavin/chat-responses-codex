@@ -923,6 +923,7 @@ export interface RuntimeSettings {
   upstream_transient_same_route_retry_enabled: boolean
   upstream_shared_host_failure_domain_enabled: boolean
   upstream_common_mode_same_host_transient_enabled: boolean
+  upstream_capacity_failure_cooldown_enabled: boolean
   upstream_transient_route_cooldown_base_seconds: number
   upstream_transient_route_cooldown_max_seconds: number
   upstream_transient_route_cooldown_max_step: number

@@ -1,5 +1,6 @@
 use super::route_health::{
-    concurrency_probe_schedule_ms, enumerable_route_health_routes, is_shared_host_domain_class,
+    concurrency_probe_schedule_ms, enumerable_route_health_routes, is_capacity_class,
+    is_shared_host_domain_class,
     key_cooldown_schedule_ms, key_failure_has_cooldown, legacy_local_admission_cooldown_threshold,
     normalize_concurrency_probe_delays, route_cooldown_schedule_ms, route_failure_has_cooldown,
     route_health_aggregate_is_current, route_health_key_is_current, route_health_route_is_current,
@@ -196,6 +197,8 @@ impl RuntimeCoordinationBackend {
                     credentials_first_strike: Duration::from_secs(
                         config.upstream_credentials_first_strike_seconds.max(1),
                     ),
+                    capacity_failure_cooldown_enabled: config
+                        .upstream_capacity_failure_cooldown_enabled,
                 }),
             });
             coordinator.ping().await?;
@@ -230,6 +233,7 @@ impl RuntimeCoordinationBackend {
                 settings.upstream_route_health_half_open_ttl_seconds,
                 settings.upstream_route_half_open_exclusive_window_ms,
                 settings.upstream_credentials_first_strike_seconds,
+                settings.upstream_capacity_failure_cooldown_enabled,
             );
         }
     }
@@ -258,6 +262,7 @@ struct RedisRuntimeTuning {
     transient_route_cooldown_max: Duration,
     transient_route_cooldown_max_step: u32,
     credentials_first_strike: Duration,
+    capacity_failure_cooldown_enabled: bool,
 }
 
 impl RedisRuntimeCoordinator {
@@ -271,6 +276,7 @@ impl RedisRuntimeCoordinator {
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
+        capacity_failure_cooldown_enabled: bool,
     ) {
         let base_seconds = transient_route_cooldown_base_seconds.max(1);
         let max_seconds = transient_route_cooldown_max_seconds
@@ -290,6 +296,7 @@ impl RedisRuntimeCoordinator {
         tuning.transient_route_cooldown_max_step = transient_route_cooldown_max_step.clamp(1, 8);
         tuning.credentials_first_strike =
             Duration::from_secs(credentials_first_strike_seconds.max(1));
+        tuning.capacity_failure_cooldown_enabled = capacity_failure_cooldown_enabled;
     }
 
     fn tuning_snapshot(&self) -> RedisRuntimeTuning {
@@ -1633,6 +1640,8 @@ impl RedisRuntimeCoordinator {
             upstream_status,
             repeat_within_request,
             shared_host_failure_domain,
+            _sole_candidate,
+            capacity_sole_route,
         ) = route_outcome_parts(outcome);
         // T1.4: a shared-host transient failure (several candidates of the
         // request on the same upstream host) is one outage observed many
@@ -1668,6 +1677,35 @@ impl RedisRuntimeCoordinator {
                 )
             })
             .unwrap_or_default();
+        // E1/E2: capacity-class failures (upstream 429 family) are "healthy
+        // but full", not health evidence — record them as observations only
+        // (Lua observe with observation_only=1, empty schedule) so the
+        // route/key is never cooldown-scheduled and the failure count never
+        // advances.  E2: a sole candidate is exempt from capacity cooldown
+        // even when the E1 switch is on.  (The local pre-dispatch gate is
+        // handled separately on the Cancelled path and never reaches here.)
+        let tuning = self.tuning_snapshot();
+        let route_capacity_observation_only = class.is_some_and(|class| {
+            is_capacity_class(class)
+                && (!tuning.capacity_failure_cooldown_enabled || capacity_sole_route)
+        });
+        let key_capacity_observation_only = class.is_some_and(|class| {
+            matches!(
+                class,
+                crate::state::RouteFailureClass::RateLimited
+                    | crate::state::RouteFailureClass::KeyQuota
+            ) && !tuning.capacity_failure_cooldown_enabled
+        });
+        let route_schedule = if route_capacity_observation_only {
+            Vec::new()
+        } else {
+            route_schedule
+        };
+        let key_schedule = if key_capacity_observation_only {
+            Vec::new()
+        } else {
+            key_schedule
+        };
         let probe_schedule =
             concurrency_probe_schedule_ms(&self.tuning_snapshot().concurrency_probe_delays);
         let ttl_seconds = self.retention_ttl_seconds_for(
@@ -1724,6 +1762,16 @@ impl RedisRuntimeCoordinator {
             invocation.arg(cooldown_ms);
         }
         invocation.arg(self.tuning_snapshot().transient_route_cooldown_max_step);
+        invocation.arg(if route_capacity_observation_only {
+            "1"
+        } else {
+            "0"
+        });
+        invocation.arg(if key_capacity_observation_only {
+            "1"
+        } else {
+            "0"
+        });
         let result = timeout_coordination(invocation.invoke_async::<i64>(&mut connection)).await?;
         parse_route_health_finish_result(result)
     }
@@ -1737,6 +1785,35 @@ impl RedisRuntimeCoordinator {
     ) -> Result<(), RuntimeCoordinationError> {
         if !route_failure_has_cooldown(class) {
             return self.clear_route_health(route).await;
+        }
+        // E1 (Redis mirror of the local observe_capacity_route_failure_at):
+        // with the E1 switch off, capacity-class failures (upstream 429
+        // family) are recorded as observations only — empty schedule +
+        // observation_only=1 keeps the failure count and never writes
+        // cooldown_until_ms.  This is the no-lease (settled stream) path; the
+        // E2 sole-route exemption is not available here and is handled on the
+        // lease path via `capacity_sole_route`.
+        let capacity_observation_only =
+            is_capacity_class(class) && !self.tuning_snapshot().capacity_failure_cooldown_enabled;
+        if capacity_observation_only {
+            return self
+                .observe_health_state(
+                    &self.route_health_state_key(route),
+                    &self.health_index_key(&route.upstream_id, "routes"),
+                    &self.health_global_index_key("routes"),
+                    "route",
+                    class,
+                    None,
+                    false,
+                    None,
+                    &route.upstream_id,
+                    &route.key_fingerprint,
+                    &route.runtime_model_slug,
+                    wire_protocol_name(route.protocol),
+                    &[],
+                    true,
+                )
+                .await;
         }
         // T1.4 mirror: shared-host transient failures use the EDGE_PROXY
         // schedule (3s..15s) and the repeat bit keeps the Lua step flat.
@@ -1767,6 +1844,7 @@ impl RedisRuntimeCoordinator {
             &route.runtime_model_slug,
             wire_protocol_name(route.protocol),
             &schedule,
+            false,
         )
         .await
     }
@@ -1793,6 +1871,33 @@ impl RedisRuntimeCoordinator {
         if !key_failure_has_cooldown(class) {
             return self.clear_key_health(key).await;
         }
+        // E1 (Redis mirror): a key-quota (429-family) rejection must not
+        // escalate into a key-level cooldown (60-minute max); record only.
+        if matches!(
+            class,
+            crate::state::RouteFailureClass::RateLimited
+                | crate::state::RouteFailureClass::KeyQuota
+        ) && !self.tuning_snapshot().capacity_failure_cooldown_enabled
+        {
+            return self
+                .observe_health_state(
+                    &self.key_health_state_key(key),
+                    &self.health_index_key(&key.upstream_id, "keys"),
+                    &self.health_global_index_key("keys"),
+                    "key",
+                    class,
+                    None,
+                    false,
+                    None,
+                    &key.upstream_id,
+                    &key.key_fingerprint,
+                    "",
+                    "",
+                    &[],
+                    true,
+                )
+                .await;
+        }
         let schedule =
             key_cooldown_schedule_ms(key, class, self.tuning_snapshot().credentials_first_strike);
         self.observe_health_state(
@@ -1809,6 +1914,7 @@ impl RedisRuntimeCoordinator {
             "",
             "",
             &schedule,
+            false,
         )
         .await
     }
@@ -1833,6 +1939,7 @@ impl RedisRuntimeCoordinator {
             &aggregate.runtime_model_slug,
             wire_protocol_name(aggregate.protocol),
             &[],
+            false,
         )
         .await
     }
@@ -1862,6 +1969,7 @@ impl RedisRuntimeCoordinator {
         model_slug: &str,
         protocol: &str,
         schedule: &[u64],
+        observation_only: bool,
     ) -> Result<(), RuntimeCoordinationError> {
         let ttl_seconds = self.retention_ttl_seconds_for(retry_after, &[schedule]);
         if self.coordination_fault.should_fail() != CoordinationFaultMode::None {
@@ -1898,6 +2006,7 @@ impl RedisRuntimeCoordinator {
             invocation.arg(*cooldown_ms);
         }
         invocation.arg(self.tuning_snapshot().transient_route_cooldown_max_step);
+        invocation.arg(if observation_only { 1 } else { 0 });
         let result = timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
             .await
             .and_then(parse_route_health_observe_result);
@@ -2720,14 +2829,17 @@ fn route_outcome_parts(
     Option<u16>,
     bool,
     bool,
+    bool,
+    bool,
 ) {
     match outcome {
-        RouteOutcome::Success => ("success", None, None, None, false, false),
+        RouteOutcome::Success => ("success", None, None, None, false, false, false, false),
         RouteOutcome::RouteFailure {
             class,
             upstream_status,
             repeat_within_request,
             sole_candidate,
+            capacity_sole_route,
             shared_host_failure_domain,
         } => (
             "route_failure",
@@ -2736,6 +2848,8 @@ fn route_outcome_parts(
             upstream_status,
             repeat_within_request || sole_candidate,
             shared_host_failure_domain,
+            sole_candidate,
+            capacity_sole_route,
         ),
         RouteOutcome::RouteFailureWithRetry {
             class,
@@ -2743,6 +2857,7 @@ fn route_outcome_parts(
             upstream_status,
             repeat_within_request,
             sole_candidate,
+            capacity_sole_route,
             shared_host_failure_domain,
         } => (
             "route_failure_with_retry",
@@ -2751,13 +2866,19 @@ fn route_outcome_parts(
             upstream_status,
             repeat_within_request || sole_candidate,
             shared_host_failure_domain,
+            sole_candidate,
+            capacity_sole_route,
         ),
-        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None, false, false),
+        RouteOutcome::KeyFailure(class) => {
+            ("key_failure", Some(class), None, None, false, false, false, false)
+        }
         RouteOutcome::KeyFailureWithRetry { class, retry_after } => (
             "key_failure_with_retry",
             Some(class),
             Some(retry_after),
             None,
+            false,
+            false,
             false,
             false,
         ),
@@ -2768,8 +2889,10 @@ fn route_outcome_parts(
             None,
             false,
             false,
+            false,
+            false,
         ),
-        RouteOutcome::Cancelled => ("cancelled", None, None, None, false, false),
+        RouteOutcome::Cancelled => ("cancelled", None, None, None, false, false, false, false),
     }
 }
 

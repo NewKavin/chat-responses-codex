@@ -37,11 +37,13 @@ fn test_state(upstream: &UpstreamConfig) -> (AppState, tempfile::TempDir) {
 #[tokio::test(start_paused = true)]
 async fn leaked_lease_is_reclaimed_after_local_ttl() {
     let upstream = test_upstream("leak-reclaim");
-    let mut config = AppConfig::default();
     // C2.3: push the stale threshold far past the TTL so this test pins the
     // expiry-based reclamation (`leaked_reclaimed_total`) instead of the stale
     // path — the stale path has its own dedicated test below.
-    config.upstream_lease_stale_after_ms = 86_400_000;
+    let config = AppConfig {
+        upstream_lease_stale_after_ms: 86_400_000,
+        ..AppConfig::default()
+    };
     let directory = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {

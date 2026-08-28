@@ -41,6 +41,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_transient_same_route_retry_enabled: true,
   upstream_shared_host_failure_domain_enabled: true,
   upstream_common_mode_same_host_transient_enabled: true,
+  upstream_capacity_failure_cooldown_enabled: false,
   upstream_transient_route_cooldown_base_seconds: 5,
   upstream_transient_route_cooldown_max_seconds: 60,
   upstream_transient_route_cooldown_max_step: 2,
@@ -115,6 +116,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_transient_same_route_retry_enabled',
   'upstream_shared_host_failure_domain_enabled',
   'upstream_common_mode_same_host_transient_enabled',
+  'upstream_capacity_failure_cooldown_enabled',
   'upstream_transient_route_cooldown_base_seconds',
   'upstream_transient_route_cooldown_max_seconds',
   'upstream_transient_route_cooldown_max_step',
@@ -170,10 +172,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(71)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(71)
+    expect(runtimeSettingFields).toHaveLength(72)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(72)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(58)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(59)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

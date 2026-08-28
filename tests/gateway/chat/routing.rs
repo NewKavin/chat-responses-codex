@@ -1278,17 +1278,26 @@ async fn feature_mismatch_hints_only_block_the_matching_effort_on_that_key() {
 #[tokio::test]
 async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
     with_proxy_env_cleared(|| async move {
-        let attempts = Arc::new(AtomicUsize::new(0));
+        // Two routes on distinct hosts so the E2 sole-route exemption
+        // (capacity-class failures never cool the *only* route, even with
+        // `upstream_capacity_failure_cooldown_enabled = true`) does not apply:
+        // this test locks the classic rollback behavior on a *multi*-route
+        // deployment, where a capacity cooldown is allowed again.  Route A is
+        // pinned first via priority; B is a second 429 upstream that is tried
+        // on failover within the same round (each 429 is a client-side retry
+        // signal — the gateway never absorbs it in-process).
+        let attempts_a = Arc::new(AtomicUsize::new(0));
+        let attempts_b = Arc::new(AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let upstream_app = Router::new().route(
             "/v1/chat/completions",
             post({
-                let attempts = attempts.clone();
+                let attempts_a = attempts_a.clone();
                 move || {
-                    let attempts = attempts.clone();
+                    let attempts_a = attempts_a.clone();
                     async move {
-                        attempts.fetch_add(1, Ordering::SeqCst);
+                        attempts_a.fetch_add(1, Ordering::SeqCst);
                         (
                             StatusCode::TOO_MANY_REQUESTS,
                             [(header::RETRY_AFTER, "60")],
@@ -1307,6 +1316,34 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
             axum::serve(listener, upstream_app).await.unwrap();
         });
 
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address_b = listener_b.local_addr().unwrap();
+        let upstream_app_b = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let attempts_b = attempts_b.clone();
+                move || {
+                    let attempts_b = attempts_b.clone();
+                    async move {
+                        attempts_b.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(header::RETRY_AFTER, "60")],
+                            axum::Json(json!({
+                                "error": {
+                                    "code": "rate_limit_error",
+                                    "message": "rate limited"
+                                }
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener_b, upstream_app_b).await.unwrap();
+        });
+
         let tempdir = tempdir().unwrap();
         let downstream_key = generate_downstream_key("gw");
         let upstream_id = "up-rate-health";
@@ -1314,21 +1351,41 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
         let model = "glm-5.2";
         let state = AppState::new(
             PersistedState {
-                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
-                    id: upstream_id.into(),
-                    name: "rate-health".into(),
-                    base_url: format!("http://{address}"),
-                    api_key: api_key.into(),
-                    api_key_models: vec![chat_responses_codex::state::ApiKeyModelConfig {
+                upstreams: std::sync::Arc::new(vec![
+                    UpstreamConfig {
+                        id: upstream_id.into(),
+                        name: "rate-health".into(),
+                        base_url: format!("http://{address}"),
                         api_key: api_key.into(),
+                        // Pinned first so the harness deterministically
+                        // observes A (not the tie-breaker rotating B to front).
+                        priority: 100,
+                        api_key_models: vec![chat_responses_codex::state::ApiKeyModelConfig {
+                            api_key: api_key.into(),
+                            supported_models: vec![model.into()],
+                        }],
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec![model.into()],
-                    }],
-                    protocol: UpstreamProtocol::ChatCompletions,
-                    protocols: vec![UpstreamProtocol::ChatCompletions],
-                    supported_models: vec![model.into()],
-                    active: true,
-                    ..Default::default()
-                }]),
+                        active: true,
+                        ..Default::default()
+                    },
+                    UpstreamConfig {
+                        id: "up-rate-health-b".into(),
+                        name: "rate-health-b".into(),
+                        base_url: format!("http://{address_b}"),
+                        api_key: "key-rate-limited-b".into(),
+                        api_key_models: vec![chat_responses_codex::state::ApiKeyModelConfig {
+                            api_key: "key-rate-limited-b".into(),
+                            supported_models: vec![model.into()],
+                        }],
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        protocols: vec![UpstreamProtocol::ChatCompletions],
+                        supported_models: vec![model.into()],
+                        active: true,
+                        ..Default::default()
+                    },
+                ]),
                 downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-rate-health".into(),
                     name: "rate-health-client".into(),
@@ -1355,7 +1412,10 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
                 ..Default::default()
             },
             tempdir.path().join("state.json"),
-            AppConfig::default(),
+            AppConfig {
+                upstream_capacity_failure_cooldown_enabled: true,
+                ..AppConfig::default()
+            },
         );
 
         let response = tokio::time::timeout(
@@ -1398,8 +1458,13 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
-        assert_eq!(payload["error"]["details"]["attempt_count"], 1);
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        // Both candidate routes are tried in the first round (each 429s with
+        // its own capped Retry-After); the request then exhausts the
+        // candidates and returns 429 to the client without any in-process
+        // sleep for the client-side rate-limit retry signal.
+        assert_eq!(payload["error"]["details"]["attempt_count"], 2);
+        assert_eq!(attempts_a.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts_b.load(Ordering::SeqCst), 1);
 
         let route = chat_responses_codex::state::RouteHealthKey {
             upstream_id: upstream_id.into(),
@@ -2658,7 +2723,10 @@ async fn cooling_high_priority_upstream_yields_to_healthy_lower_priority() {
                 model_aliases: vec![],
             },
             state_path,
-            AppConfig::default(),
+            AppConfig {
+                upstream_capacity_failure_cooldown_enabled: true,
+                ..AppConfig::default()
+            },
         );
 
         let app = build_router(state);

@@ -14,6 +14,10 @@ local schedule_count = tonumber(ARGV[15])
 -- schedule values live at ARGV[16..15+schedule_count]; max_step is appended
 -- after them. Guarded: the clear/reconcile actions pass fewer args.
 local max_step = schedule_count and tonumber(ARGV[16 + schedule_count]) or nil
+-- E1: capacity-class record-only observation (see observe_health_state): keep
+-- the existing failure count and never schedule a cooldown.
+local observation_only = tonumber(ARGV[17 + (schedule_count or 0)]) ~= nil
+    and tonumber(ARGV[17 + schedule_count]) == 1
 
 local function prune_index(index_key)
   local members = redis.call('ZRANGE', index_key, 0, -1)
@@ -86,18 +90,22 @@ local previous_class = redis.call('HGET', KEYS[1], 'failure_class')
 local previous_at = tonumber(redis.call('HGET', KEYS[1], 'last_failure_ms') or '0')
 local previous_count = tonumber(redis.call('HGET', KEYS[1], 'failure_count') or '0')
 local step = 1
-if previous_class == class and now_ms - previous_at <= streak_reset_ms then
-  step = math.max(1, previous_count + 1)
-  -- T1.3: non-half-open failures are capped at the configured max step so
-  -- the local backoff arm can never outrun the retry wait budget. Mirrors
-  -- failure_step in route_health.rs.
-  if max_step and max_step >= 1 then
-    step = math.min(step, max_step)
+if not observation_only then
+  if previous_class == class and now_ms - previous_at <= streak_reset_ms then
+    step = math.max(1, previous_count + 1)
+    -- T1.3: non-half-open failures are capped at the configured max step so
+    -- the local backoff arm can never outrun the retry wait budget. Mirrors
+    -- failure_step in route_health.rs.
+    if max_step and max_step >= 1 then
+      step = math.min(step, max_step)
+    end
   end
+else
+  step = math.max(1, previous_count)
 end
 
 local cooldown_ms = 0
-if schedule_count > 0 then
+if not observation_only and schedule_count > 0 then
   local schedule_index = math.min(step, schedule_count)
   cooldown_ms = tonumber(ARGV[15 + schedule_index])
 end

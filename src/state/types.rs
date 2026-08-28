@@ -279,6 +279,16 @@ pub const DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED: bool = true;
 /// choice and must not be relaxed).  Set false to restore the pre-T2.2
 /// behavior where only genuinely distinct hosts grow the transient streak.
 pub const DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED: bool = true;
+/// E1: whether capacity-class failures (upstream 429 / local concurrency-gate
+/// saturation) write a route/key cooldown at all.  An upstream 429 says "I am
+/// healthy, just full right now" — a capacity signal, not a health signal —
+/// so cooling the (possibly only) route turns the client's *correct* retry
+/// loop into a spurious upstream_routes_exhausted.  Default false: capacity
+/// failures are recorded as observations only (last_failure_class/status/at)
+/// and never set cooldown_until nor advance consecutive_failures.  Set true
+/// to restore the pre-E1 behavior (429-style rate-limit cooling on the 30s
+/// local curve) as a rollback path.
+pub const DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED: bool = false;
 
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
@@ -488,6 +498,8 @@ pub struct AppConfig {
     pub upstream_shared_host_failure_domain_enabled: bool,
     #[serde(default = "default_upstream_common_mode_same_host_transient_enabled")]
     pub upstream_common_mode_same_host_transient_enabled: bool,
+    #[serde(default = "default_upstream_capacity_failure_cooldown_enabled")]
+    pub upstream_capacity_failure_cooldown_enabled: bool,
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
@@ -620,6 +632,8 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
             upstream_common_mode_same_host_transient_enabled:
                 DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
+            upstream_capacity_failure_cooldown_enabled:
+                DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
             upstream_concurrency_recovery_max_wait_ms:
                 DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
             upstream_concurrency_recovery_max_rounds:
@@ -1421,6 +1435,10 @@ pub fn default_upstream_shared_host_failure_domain_enabled() -> bool {
 
 pub fn default_upstream_common_mode_same_host_transient_enabled() -> bool {
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED
+}
+
+pub fn default_upstream_capacity_failure_cooldown_enabled() -> bool {
+    DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED
 }
 
 pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {

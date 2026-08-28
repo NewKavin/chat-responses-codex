@@ -285,6 +285,14 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '同一 host 的 TransientServer/EdgeProxyError 计入共模 streak；请求形状类 RequestRejected 仍保持跨 host 语义（刻意设计）。'
   },
   {
+    key: 'upstream_capacity_failure_cooldown_enabled',
+    group: 'routing',
+    label: '容量类失败冷却路由',
+    apply: 'immediate',
+    control: 'switch',
+    description: '关闭（默认）：上游 429 / 本地并发闸门拒绝这类容量类失败只记观测、不写路由/Key 冷却、不推进失败计数——「我好着呢，只是现在满了」，冷却会把客户端本就正确的重试循环锁死成 upstream_routes_exhausted。开启则回到旧行为（按 30s 本地曲线冷却）。'
+  },
+  {
     key: 'upstream_transient_route_cooldown_base_seconds',
     group: 'routing',
     label: '瞬时错误基础冷却',

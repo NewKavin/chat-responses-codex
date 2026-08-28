@@ -825,6 +825,10 @@ fn send_route_hedge_attempt(
                             .route_attempts
                             .has_transient_failure_for(&route_health_key),
                         false,
+                        // Hedge attempts only launch when several candidates
+                        // exist, so a hedge-triggered failure is never on the
+                        // sole route; E2's capacity exemption does not apply.
+                        false,
                         retry_after_cap,
                     ),
                 )

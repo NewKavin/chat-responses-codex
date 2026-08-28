@@ -51,6 +51,14 @@ for index = 1, probe_schedule_count do
 end
 -- T1.3: max_step is appended after the variable-length schedules.
 local max_step = tonumber(ARGV[cursor])
+cursor = cursor + 1
+-- E1: capacity-class record-only flags (route & key). When set, the failure
+-- is written as an observation (failure_class/last_failure_ms/... indexes)
+-- with NO cooldown_until_ms and NO step advance — a capacity rejection
+-- ("healthy but full") must never schedule the route/key as broken.
+local route_capacity_observation_only = ARGV[cursor] == '1'
+cursor = cursor + 1
+local key_capacity_observation_only = ARGV[cursor] == '1' 
 
 local function owns(key, generation)
   if generation == '' then
@@ -150,7 +158,8 @@ local function observe(
   model_slug,
   protocol,
   half_open_probe,
-  repeat_within_request
+  repeat_within_request,
+  observation_only
 )
   if not ensure_capacity(state_key, upstream_index, global_index) then
     return false
@@ -159,41 +168,50 @@ local function observe(
   local previous_at = tonumber(redis.call('HGET', state_key, 'last_failure_ms') or '0')
   local previous_count = tonumber(redis.call('HGET', state_key, 'failure_count') or '0')
   local step = 1
-  if previous_class == failure_class and now_ms - previous_at <= streak_reset_ms then
-    if repeat_within_request then
-      -- Same downstream request already recorded a transient-family failure
-      -- for this route: reset the cooldown start without escalating the
-      -- step, mirroring failure_step in route_health.rs (R1).
-      step = math.max(1, previous_count)
-    else
-      step = math.max(1, previous_count + 1)
-    end
-    if half_open_probe and failure_class ~= 'concurrency_saturated' then
-      -- A half-open probe failure must not escalate the streak without
-      -- bound (B3): cap the step so the cooldown cannot pin at the
-      -- 5-minute maximum while the route keeps failing probes.
-      -- ConcurrencySaturated is exempt: it follows its own bounded probe
-      -- schedule and never escalates to the max. T1.3: also bounded by the
-      -- configured non-half-open max step (take the smaller of the two).
-      step = math.min(step, 5)
-      if max_step and max_step >= 1 then
-        step = math.min(step, max_step)
+  -- E1: record-only observation — keep the existing failure count and never
+  -- schedule any cooldown, regardless of the retry-after / schedule inputs.
+  if not observation_only then
+    if previous_class == failure_class and now_ms - previous_at <= streak_reset_ms then
+      if repeat_within_request then
+        -- Same downstream request already recorded a transient-family failure
+        -- for this route: reset the cooldown start without escalating the
+        -- step, mirroring failure_step in route_health.rs (R1).
+        step = math.max(1, previous_count)
+      else
+        step = math.max(1, previous_count + 1)
       end
-    elseif not half_open_probe then
-      -- T1.3: non-half-open failures are capped at the configured max step
-      -- so the local backoff arm can never outrun the retry wait budget
-      -- (mirrors failure_step in route_health.rs).
-      if max_step and max_step >= 1 then
-        step = math.min(step, max_step)
+      if half_open_probe and failure_class ~= 'concurrency_saturated' then
+        -- A half-open probe failure must not escalate the streak without
+        -- bound (B3): cap the step so the cooldown cannot pin at the
+        -- 5-minute maximum while the route keeps failing probes.
+        -- ConcurrencySaturated is exempt: it follows its own bounded probe
+        -- schedule and never escalates to the max. T1.3: also bounded by the
+        -- configured non-half-open max step (take the smaller of the two).
+        step = math.min(step, 5)
+        if max_step and max_step >= 1 then
+          step = math.min(step, max_step)
+        end
+      elseif not half_open_probe then
+        -- T1.3: non-half-open failures are capped at the configured max step
+        -- so the local backoff arm can never outrun the retry wait budget
+        -- (mirrors failure_step in route_health.rs).
+        if max_step and max_step >= 1 then
+          step = math.min(step, max_step)
+        end
       end
     end
+  else
+    step = math.max(1, previous_count)
   end
-  local cooldown_ms = schedule_value(schedule, schedule_count, step)
-  if explicit_retry_ms >= 0 then
-    if exact_retry then
-      cooldown_ms = explicit_retry_ms
-    else
-      cooldown_ms = math.max(cooldown_ms, explicit_retry_ms)
+  local cooldown_ms = 0
+  if not observation_only then
+    cooldown_ms = schedule_value(schedule, schedule_count, step)
+    if explicit_retry_ms >= 0 then
+      if exact_retry then
+        cooldown_ms = explicit_retry_ms
+      else
+        cooldown_ms = math.max(cooldown_ms, explicit_retry_ms)
+      end
     end
   end
   local generation = redis.call('INCR', KEYS[7])
@@ -201,7 +219,6 @@ local function observe(
     'failure_count', tostring(step),
     'failure_class', failure_class,
     'last_failure_ms', tostring(now_ms),
-    'cooldown_until_ms', tostring(now_ms + cooldown_ms),
     'state_generation', tostring(generation),
     'last_access_ms', tostring(now_ms),
     'upstream_id', ARGV[12],
@@ -210,6 +227,11 @@ local function observe(
     'model_slug', model_slug,
     'protocol', protocol
   )
+  if cooldown_ms > 0 then
+    redis.call('HSET', state_key, 'cooldown_until_ms', tostring(now_ms + cooldown_ms))
+  else
+    redis.call('HDEL', state_key, 'cooldown_until_ms')
+  end
   if failure_status == '' then
     redis.call('HDEL', state_key, 'failure_status')
   else
@@ -276,14 +298,15 @@ elseif outcome == 'route_failure' or outcome == 'route_failure_with_retry' then
     release_half_open(KEYS[1], key_generation, KEYS[3], KEYS[5])
   end
   if not route_reconcile_pending then
-    if route_schedule_count == 0 then
+    if route_schedule_count == 0 and not route_capacity_observation_only then
       clear_state(KEYS[2], KEYS[4], KEYS[6])
     elseif not observe(
       KEYS[2], KEYS[4], KEYS[6], class,
       route_schedule, route_schedule_count,
       class == 'concurrency_saturated' and explicit_retry_ms >= 0,
       ARGV[14], ARGV[15], route_generation ~= '',
-      repeat_within_request
+      repeat_within_request,
+      route_capacity_observation_only
     ) then
       return -1
     end
@@ -293,12 +316,13 @@ elseif outcome == 'key_failure' or outcome == 'key_failure_with_retry' then
     release_half_open(KEYS[2], route_generation, KEYS[4], KEYS[6])
   end
   if not key_reconcile_pending then
-    if key_schedule_count == 0 then
+    if key_schedule_count == 0 and not key_capacity_observation_only then
       clear_state(KEYS[1], KEYS[3], KEYS[5])
     elseif not observe(
       KEYS[1], KEYS[3], KEYS[5], class,
       key_schedule, key_schedule_count, false, '', '', key_generation ~= '',
-      false
+      false,
+      key_capacity_observation_only
     ) then
       return -1
     end

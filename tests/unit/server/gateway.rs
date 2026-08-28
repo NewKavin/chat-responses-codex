@@ -690,12 +690,13 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
         Some(FailureClass::CapacityUnavailable)
     );
     assert_eq!(
-        route_health_outcome(&error, false, false, Duration::from_secs(3600)),
+        route_health_outcome(&error, false, false, false, Duration::from_secs(3600)),
         RouteOutcome::RouteFailure {
             class: FailureClass::ConcurrencySaturated,
             upstream_status: None,
             repeat_within_request: false,
             sole_candidate: false,
+            capacity_sole_route: false,
             shared_host_failure_domain: false
         }
     );
@@ -1040,9 +1041,11 @@ async fn local_upstream_concurrency_is_scoped_per_account() {
     // the rejecting account's oldest active lease remaining TTL and the first
     // probe-delay tier) instead of the old hard-coded 1s.  Pin the config so
     // the estimate is exact instead of inheriting defaults.
-    let mut config = AppConfig::default();
-    config.upstream_local_lease_ttl_seconds = 60;
-    config.upstream_concurrency_probe_delays_ms = vec![1_000];
+    let config = AppConfig {
+        upstream_local_lease_ttl_seconds: 60,
+        upstream_concurrency_probe_delays_ms: vec![1_000],
+        ..AppConfig::default()
+    };
     let state = AppState::new(
         PersistedState::default(),
         directory.path().join("state.json"),
@@ -1099,8 +1102,10 @@ async fn local_upstream_concurrency_is_scoped_per_account() {
 #[test]
 fn upstream_guard_drop_outside_runtime_frees_the_slot_immediately() {
     let directory = tempdir().unwrap();
-    let mut config = AppConfig::default();
-    config.upstream_local_lease_ttl_seconds = 60;
+    let config = AppConfig {
+        upstream_local_lease_ttl_seconds: 60,
+        ..AppConfig::default()
+    };
     let state = AppState::new(
         PersistedState::default(),
         directory.path().join("state.json"),
@@ -1246,9 +1251,11 @@ async fn upstream_guard_release_then_drop_is_idempotent() {
 #[tokio::test]
 async fn non_streaming_lease_is_kept_alive_by_heartbeat() {
     let directory = tempdir().unwrap();
-    let mut config = AppConfig::default();
-    config.upstream_local_lease_ttl_seconds = 6;
-    config.upstream_lease_stale_after_ms = 4_000;
+    let config = AppConfig {
+        upstream_local_lease_ttl_seconds: 6,
+        upstream_lease_stale_after_ms: 4_000,
+        ..AppConfig::default()
+    };
     let state = AppState::new(
         PersistedState::default(),
         directory.path().join("state.json"),

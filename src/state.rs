@@ -155,7 +155,8 @@ pub use types::{
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS, DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS, DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
+    DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_TRANSIENT_THRESHOLD, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -663,6 +664,7 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_route_health_half_open_ttl_seconds,
         config.upstream_route_half_open_exclusive_window_ms,
         config.upstream_credentials_first_strike_seconds,
+        config.upstream_capacity_failure_cooldown_enabled,
     )))
 }
 
@@ -3149,6 +3151,7 @@ impl AppState {
                 settings.upstream_route_health_half_open_ttl_seconds,
                 settings.upstream_route_half_open_exclusive_window_ms,
                 settings.upstream_credentials_first_strike_seconds,
+                settings.upstream_capacity_failure_cooldown_enabled,
             );
         }
         self.account_concurrency.update_runtime_tuning(

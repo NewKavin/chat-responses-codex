@@ -132,6 +132,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("request-suppressed-step", "glm-5.2");
     let key = key("request-suppressed-step");
@@ -158,6 +159,7 @@ async fn repeated_transient_failure_within_same_request_keeps_step_flat() {
                 upstream_status: Some(500),
                 repeat_within_request: true,
                 sole_candidate: false,
+                capacity_sole_route: false,
                 shared_host_failure_domain: false,
             },
         );
@@ -192,6 +194,7 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("sole-candidate-pinned", "glm-5.2");
     let key = key("sole-candidate-pinned");
@@ -214,6 +217,7 @@ async fn sole_candidate_cross_request_failures_keep_step_flat() {
             upstream_status: Some(500),
             repeat_within_request: false,
             sole_candidate: true,
+            capacity_sole_route: false,
             shared_host_failure_domain: false,
         },
     );
@@ -241,6 +245,7 @@ async fn independent_request_failures_still_escalate_the_step() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("independent-escalation", "glm-5.2");
     let key = key("independent-escalation");
@@ -263,6 +268,7 @@ async fn independent_request_failures_still_escalate_the_step() {
             upstream_status: Some(500),
             repeat_within_request: false,
             sole_candidate: false,
+            capacity_sole_route: false,
             shared_host_failure_domain: false,
         },
     );
@@ -289,6 +295,7 @@ async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() 
         300,
         3000,
         60,
+        false,
     );
     let route = route("half-open-step-cap", "glm-5.2");
     let key = key("half-open-step-cap");
@@ -312,6 +319,7 @@ async fn half_open_probe_failure_step_is_capped_so_cooldown_cannot_pin_at_max() 
                 upstream_status: Some(500),
                 repeat_within_request: false,
                 sole_candidate: false,
+                capacity_sole_route: false,
                 shared_host_failure_domain: false,
             },
         );
@@ -342,6 +350,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
             300,
             3000,
             60,
+            false,
         );
         let route = route(class.as_str(), "glm-5.2");
 
@@ -370,6 +379,7 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
         300,
         3000,
         60,
+        true, // E1: ConcurrencySaturated cooldown is switch-gated; keep it on
     );
     let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
 
@@ -428,6 +438,7 @@ async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cool
         300,
         3000,
         60,
+        false,
     );
     let route = route("key-runtime", "model-runtime");
     registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
@@ -439,7 +450,7 @@ async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cool
             > Duration::from_secs(2)
     );
 
-    registry.update_runtime_tuning(vec![7, 11], 1, 2, 3, 5, 3000, 60);
+    registry.update_runtime_tuning(vec![7, 11], 1, 2, 3, 5, 3000, 60, false);
     let clamped = registry.route_health_snapshot(&route).unwrap();
     assert!(clamped.cooldown_remaining <= Duration::from_secs(2));
 
@@ -531,8 +542,18 @@ async fn credentials_first_strike_cools_short_then_escalates_to_key_curve() {
 async fn credentials_first_strike_honors_registry_tuning_and_key_quota_unaffected() {
     // T5: the first-strike window is runtime-tunable; KeyQuota (quota-style
     // 429 family) keeps its plain 30s base and is not shortened.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 3000, 2);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        3000,
+        2,
+        false, // Credentials is a health-class failure; E1 switch irrelevant
+    );
     let key = key("fingerprint-a");
     registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
     let first = registry.key_health_snapshot(&key).unwrap();
@@ -543,7 +564,18 @@ async fn credentials_first_strike_honors_registry_tuning_and_key_quota_unaffecte
         first.cooldown_remaining
     );
 
-    let mut quota_registry = RouteHealthRegistry::new(16, 16);
+    let mut quota_registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200, 400, 800, 1_000, 2_000],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: KeyQuota key cooldown is switch-gated; keep it on
+    );
     quota_registry.observe_key_failure(&key, RouteFailureClass::KeyQuota, None);
     let quota = quota_registry.key_health_snapshot(&key).unwrap();
     assert!(
@@ -623,10 +655,21 @@ async fn route_failure_isolated_from_another_model_on_the_same_key() {
 
 #[tokio::test(start_paused = true)]
 async fn concurrency_saturation_uses_configured_probe_sequence() {
-    let mut registry = RouteHealthRegistry::new_with_concurrency_probe_delays(
+    // E1: this test exercises the *capacity-class* cooldown machinery
+    // (probe delays, step escalation), which now lives behind the
+    // upstream_capacity_failure_cooldown_enabled switch.  Enable it so the
+    // rollback path keeps its regression coverage.
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
         16,
         16,
         vec![100, 200, 400, 800, 1_000, 2_000],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true,
     );
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
@@ -649,6 +692,7 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
                 upstream_status: None,
                 repeat_within_request: false,
                 sole_candidate: false,
+                capacity_sole_route: false,
                 shared_host_failure_domain: false,
             },
         );
@@ -666,8 +710,18 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
 
 #[tokio::test(start_paused = true)]
 async fn concurrency_half_open_uncertainty_reapplies_current_delay() {
-    let mut registry =
-        RouteHealthRegistry::new_with_concurrency_probe_delays(16, 16, vec![100, 200]);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: capacity-class cooldown behavior is switch-gated; keep it on
+    );
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
 
@@ -693,8 +747,18 @@ async fn concurrency_half_open_uncertainty_reapplies_current_delay() {
 
 #[tokio::test(start_paused = true)]
 async fn concurrency_retry_after_is_authoritative() {
-    let mut registry =
-        RouteHealthRegistry::new_with_concurrency_probe_delays(16, 16, vec![100, 200]);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: capacity-class cooldown behavior is switch-gated; keep it on
+    );
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
 
@@ -726,7 +790,18 @@ async fn concurrency_retry_after_is_authoritative() {
 
 #[tokio::test(start_paused = true)]
 async fn stale_healthy_success_does_not_clear_newer_concurrency_saturation() {
-    let mut registry = RouteHealthRegistry::new_with_concurrency_probe_delays(16, 16, vec![100]);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: capacity-class cooldown is switch-gated; keep it on
+    );
     let key = key("fingerprint-a");
     let route = route("fingerprint-a", "glm-5.2");
 
@@ -749,7 +824,18 @@ async fn stale_healthy_success_does_not_clear_newer_concurrency_saturation() {
 
 #[tokio::test(start_paused = true)]
 async fn explicit_retry_after_is_a_lower_bound_and_failure_streak_resets() {
-    let mut registry = RouteHealthRegistry::new(16, 16);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200, 400, 800, 1_000, 2_000],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: RateLimited cooldown is switch-gated; keep it on
+    );
     let route = route("fingerprint-a", "glm-5.2");
     let key = key("fingerprint-a");
 
@@ -942,7 +1028,18 @@ async fn route_and_key_half_open_leases_are_acquired_atomically() {
 
 #[tokio::test(start_paused = true)]
 async fn temporary_recovery_uses_larger_route_and_key_delay() {
-    let mut registry = RouteHealthRegistry::new(16, 16);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200, 400, 800, 1_000, 2_000],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: KeyQuota key cooldown is switch-gated; keep it on
+    );
     let route = route("fingerprint-recovery", "glm-5.2");
     let key = key("fingerprint-recovery");
 
@@ -1111,6 +1208,7 @@ async fn expired_route_half_open_lease_releases_for_next_caller() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("fingerprint-expired-lease", "glm-5.2");
     let key = key("fingerprint-expired-lease");
@@ -1155,6 +1253,7 @@ async fn expired_key_half_open_lease_releases_for_next_caller() {
         300,
         3000,
         60,
+        true, // E1: KeyQuota key cooldown is switch-gated; keep it on
     );
     let key = key("fingerprint-expired-key-lease");
     let route = route("fingerprint-expired-key-lease", "glm-5.2");
@@ -1196,6 +1295,7 @@ async fn half_open_busy_reports_wait_bounded_by_exclusive_window() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("fingerprint-busy-recovery", "glm-5.2");
     let key = key("fingerprint-busy-recovery");
@@ -1301,6 +1401,7 @@ async fn reserve_route_health_probe_ignores_cooldown_and_is_single_flight() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("early-probe-single-flight", "glm-5.2");
     let key = key("early-probe-single-flight");
@@ -1350,6 +1451,7 @@ async fn reserve_route_health_probe_enforces_one_second_interval_per_route() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("early-probe-interval", "glm-5.2");
     let key = key("early-probe-interval");
@@ -1398,6 +1500,7 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
         300,
         3000,
         60,
+        false,
     );
     let route = route("early-probe-capped-step", "glm-5.2");
     let key = key("early-probe-capped-step");
@@ -1421,6 +1524,7 @@ async fn reserve_route_health_probe_failure_stays_capped_and_keeps_interval() {
             upstream_status: Some(502),
             repeat_within_request: false,
             sole_candidate: false,
+            capacity_sole_route: false,
             shared_host_failure_domain: false,
         },
     );
@@ -1512,8 +1616,18 @@ async fn half_open_exclusive_window_zero_never_blocks_concurrent_requests() {
     // T1: window = 0 disables the exclusivity window entirely: the first
     // prober still holds the half-open lease, but every concurrent request
     // is admitted without a lease immediately.
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 0, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        0,
+        60,
+        false,
+    );
     let route = route("exclusive-window-zero", "glm-5.2");
     let key = key("exclusive-window-zero");
 
@@ -1548,6 +1662,7 @@ async fn half_open_exclusive_window_max_degrades_to_single_flight() {
         300,
         600_000,
         60,
+        false,
     );
     let route = route("exclusive-window-max", "glm-5.2");
     let key = key("exclusive-window-max");
@@ -1587,6 +1702,7 @@ async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases
         300,
         600_000,
         60,
+        false,
     );
     let route = route("exclusive-window-tuning", "glm-5.2");
     let key = key("exclusive-window-tuning");
@@ -1602,7 +1718,7 @@ async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases
         RouteAvailability::HalfOpenBusy { .. }
     ));
 
-    registry.update_runtime_tuning(vec![100, 200], 3, 4, 3, 300, 0, 60);
+    registry.update_runtime_tuning(vec![100, 200], 3, 4, 3, 300, 0, 60, false);
     assert!(matches!(
         registry.reserve(&route, &key),
         RouteAvailability::Ready(lease) if !lease.is_half_open()
@@ -1615,8 +1731,18 @@ async fn half_open_exclusive_window_does_not_affect_early_probe_single_flight() 
     // T1 invariant: the A3 last-resort early-probe path stays strictly
     // single-flight regardless of the exclusive window (probe-held leases
     // pin the route until the probe finishes).
-    let mut registry =
-        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 3, 300, 0, 60);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        3,
+        300,
+        0,
+        60,
+        false,
+    );
     let route = route("probe-single-flight-window", "glm-5.2");
     let key = key("probe-single-flight-window");
 
@@ -1658,6 +1784,7 @@ async fn early_probe_exclusivity_ends_with_the_cooldown_not_the_lease() {
         300,
         3_000,
         60,
+        false,
     );
     let route = route("early-probe-exclusivity", "glm-5.2");
     let key = key("early-probe-exclusivity");
@@ -1712,6 +1839,7 @@ async fn early_probe_at_cooldown_tail_keeps_a_full_exclusive_window() {
         300,
         3_000,
         60,
+        false,
     );
     let route = route("early-probe-tail-window", "glm-5.2");
     let key = key("early-probe-tail-window");
@@ -1778,6 +1906,7 @@ async fn t13_equivalence_effective_cooldown_bounded_by_t11_ceiling() {
             300,
             3_000,
             60,
+            false,
         );
         let route = route(&format!("t13-equiv-{raw_retry_after_secs}"), "glm-5.2");
         // The gateway clamps the upstream hint to the T1.2 cooldown cap before
@@ -1823,6 +1952,7 @@ async fn t12_upstream_hint_capped_so_local_curve_wins_never_28() {
         300,
         3_000,
         60,
+        false,
     );
     let route = route("t12-hint-capped", "glm-5.2");
 
@@ -1864,6 +1994,7 @@ async fn concurrency_saturated_retry_after_not_cut_by_t12_cooldown_cap() {
         300,
         3_000,
         60,
+        true, // E1: ConcurrencySaturated cooldown is switch-gated; keep it on
     );
     let route = route("t12-concurrency-exempt", "glm-5.2");
 
@@ -1898,6 +2029,7 @@ async fn t13_non_half_open_failures_cap_step_at_configured_max_step() {
         300,
         3_000,
         60,
+        false,
     );
     let route = route("t13-step-cap", "glm-5.2");
 
@@ -1937,7 +2069,18 @@ async fn t13_non_half_open_failures_cap_step_at_configured_max_step() {
 /// deterministic jitter), which is comfortably distinguishable from the
 /// EDGE_PROXY curve's 3s first step.
 fn shipped_default_registry() -> RouteHealthRegistry {
-    RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 5, 300, 2, 300, 3_000, 60)
+    RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        false,
+    )
 }
 
 #[tokio::test(start_paused = true)]
@@ -2087,6 +2230,7 @@ async fn shared_host_flattening_survives_the_route_outcome_path() {
                 upstream_status: Some(502),
                 repeat_within_request: false,
                 sole_candidate: false,
+                capacity_sole_route: false,
                 shared_host_failure_domain: true,
             },
         );
@@ -2310,7 +2454,18 @@ async fn concurrency_saturated_retry_after_is_exempt_from_the_local_floor() {
     // Retry-After is real slot information, so it is used verbatim instead of
     // `explicit.max(local)`.  Raising it to the local floor would turn a
     // 50ms slot wait into a multi-second removal and cause probe storms.
-    let mut registry = shipped_default_registry();
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        5,
+        300,
+        2,
+        300,
+        3_000,
+        60,
+        true, // E1: capacity-class cooldown is switch-gated; keep it on
+    );
     let route = route("t04-concurrency-exempt", "t04-concurrency-exempt-model");
 
     let line = cooldown_log_for("t04-concurrency-exempt-model", || {

@@ -7,6 +7,7 @@
 use super::redis_runtime::{RedisRuntimeCoordinator, RuntimeCoordinationError};
 use super::types::{
     RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig,
+    DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
@@ -245,6 +246,7 @@ impl RouteHealthPermit {
                         upstream_status: _,
                         repeat_within_request: _,
                         sole_candidate: _,
+                        capacity_sole_route: _,
                         shared_host_failure_domain,
                     } => {
                         state
@@ -257,6 +259,7 @@ impl RouteHealthPermit {
                         upstream_status: _,
                         repeat_within_request: _,
                         sole_candidate: _,
+                        capacity_sole_route: _,
                         shared_host_failure_domain,
                     } => {
                         state
@@ -416,6 +419,15 @@ pub enum RouteOutcome {
         /// start resets and the step stays flat, so the only reachable route
         /// cannot pin its own cooldown at max (P4/R3).
         sole_candidate: bool,
+        /// E2: whether this route is the *only* available route for its
+        /// (runtime_model_slug, protocol) at request time (or a
+        /// continuation-pinned pool of one).  A capacity-class failure must
+        /// never cool the only reachable route, regardless of the E1 switch —
+        /// cooling it buys nothing and turns a 1s-granularity client retry
+        /// loop into a global circuit break.  Unlike `sole_candidate` this
+        /// flag affects ONLY the capacity-class exemption and never the
+        /// health-class step/cooldown curve (byte-for-byte invariant).
+        capacity_sole_route: bool,
         /// T1.4: several candidate routes of this request resolve to the same
         /// upstream host (a single aggregated gateway), so a transient-family
         /// failure here is one shared outage observed many times, not
@@ -429,6 +441,7 @@ pub enum RouteOutcome {
         upstream_status: Option<u16>,
         repeat_within_request: bool,
         sole_candidate: bool,
+        capacity_sole_route: bool,
         shared_host_failure_domain: bool,
     },
     KeyFailure(RouteFailureClass),
@@ -581,6 +594,12 @@ pub struct RouteHealthRegistry {
     half_open_ttl: Duration,
     half_open_exclusive_window: Duration,
     credentials_first_strike: Duration,
+    /// E1: whether capacity-class failures (upstream 429 / local-gate
+    /// saturation) may write a route/key cooldown.  Default false: they are
+    /// recorded as observations only (no cooldown_until, no
+    /// consecutive_failures advance), so a client's retry loop can keep
+    /// hitting the (possibly only) route instead of being locked out.
+    capacity_failure_cooldown_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -646,6 +665,7 @@ impl RouteHealthRegistry {
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
             DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
             DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS,
+            DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
         )
     }
 
@@ -659,6 +679,7 @@ impl RouteHealthRegistry {
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
+        capacity_failure_cooldown_enabled: bool,
     ) -> Self {
         let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
         let transient_route_cooldown_max_seconds =
@@ -681,6 +702,7 @@ impl RouteHealthRegistry {
             half_open_ttl: Duration::from_secs(half_open_ttl_seconds.max(1)),
             half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
             credentials_first_strike: Duration::from_secs(credentials_first_strike_seconds.max(1)),
+            capacity_failure_cooldown_enabled,
         }
     }
 
@@ -693,6 +715,7 @@ impl RouteHealthRegistry {
         half_open_ttl_seconds: u64,
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
+        capacity_failure_cooldown_enabled: bool,
     ) {
         let base = Duration::from_secs(transient_route_cooldown_base_seconds.max(1));
         let max = Duration::from_secs(
@@ -716,6 +739,7 @@ impl RouteHealthRegistry {
         self.half_open_exclusive_window = half_open_exclusive_window;
         self.credentials_first_strike =
             Duration::from_secs(credentials_first_strike_seconds.max(1));
+        self.capacity_failure_cooldown_enabled = capacity_failure_cooldown_enabled;
 
         for state in self.routes.values_mut() {
             if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
@@ -1176,6 +1200,7 @@ impl RouteHealthRegistry {
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                capacity_sole_route,
                 shared_host_failure_domain,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
@@ -1187,6 +1212,7 @@ impl RouteHealthRegistry {
                     now,
                     repeat_within_request,
                     sole_candidate,
+                    capacity_sole_route,
                     shared_host_failure_domain,
                 );
             }
@@ -1196,6 +1222,7 @@ impl RouteHealthRegistry {
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                capacity_sole_route,
                 shared_host_failure_domain,
             } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
@@ -1207,6 +1234,7 @@ impl RouteHealthRegistry {
                     now,
                     repeat_within_request,
                     sole_candidate,
+                    capacity_sole_route,
                     shared_host_failure_domain,
                 );
             }
@@ -1227,6 +1255,7 @@ impl RouteHealthRegistry {
                         None,
                         None,
                         now,
+                        false,
                         false,
                         false,
                         false,
@@ -1255,6 +1284,7 @@ impl RouteHealthRegistry {
             retry_after,
             None,
             Instant::now(),
+            false,
             false,
             false,
             shared_host_failure_domain,
@@ -1344,10 +1374,29 @@ impl RouteHealthRegistry {
         now: Instant,
         repeat_within_request: bool,
         sole_candidate: bool,
+        capacity_sole_route: bool,
         shared_host_failure_domain: bool,
     ) {
         if !route_failure_has_cooldown(class) {
             self.clear_route(route, now);
+            return;
+        }
+        // E1/E2: capacity-class failures (upstream 429 family) are "healthy
+        // but full right now", not "this route is broken".  With the E1
+        // switch off (default) they are recorded as observations only —
+        // never cooldown_until, never a consecutive_failures advance — so a
+        // client's retry loop keeps reaching the route.  The local-gate
+        // rejection path is handled separately (Cancelled permit outcome,
+        // ledger-only cooling) and never reaches here.  E2: even when the
+        // switch is on, a *sole* candidate for (runtime_model_slug,
+        // protocol) must never be cooled by a capacity failure: with no
+        // second route the cooldown buys nothing and turns a 1s-granularity
+        // retry loop into a global circuit-break (glm5.2 is exactly this
+        // shape).
+        if is_capacity_class(class)
+            && (!self.capacity_failure_cooldown_enabled || capacity_sole_route)
+        {
+            self.observe_capacity_route_failure_at(route, class, upstream_status, now);
             return;
         }
         if !self.ensure_route_capacity(route, now) {
@@ -1463,6 +1512,39 @@ impl RouteHealthRegistry {
         }
     }
 
+    /// E1: record a capacity-class route failure as an observation only.
+    /// Writes last_failure_class/status/at + last_access (so operators can
+    /// see the 429 trail and admin snapshots can report it), but never sets
+    /// cooldown_until and never advances consecutive_failures.  Any existing
+    /// health-class cooldown is deliberately left untouched — a capacity
+    /// failure is not evidence the route recovered.
+    fn observe_capacity_route_failure_at(
+        &mut self,
+        route: &RouteHealthKey,
+        class: RouteFailureClass,
+        upstream_status: Option<u16>,
+        now: Instant,
+    ) {
+        if !self.ensure_route_capacity(route, now) {
+            return;
+        }
+        let state = self
+            .routes
+            .entry(route.clone())
+            .or_insert_with(|| HealthState::new(now));
+        state.last_failure_class = Some(class);
+        state.last_failure_status = upstream_status;
+        state.last_failure_at = Some(now);
+        state.last_access = now;
+        tracing::info!(
+            route_upstream_id = %route.upstream_id,
+            route_model_slug = %route.runtime_model_slug,
+            failure_class = %class.as_str(),
+            cooldown_skipped = true,
+            "capacity failure recorded as observation only; route cooldown skipped"
+        );
+    }
+
     fn observe_key_failure_at(
         &mut self,
         key: &KeyHealthKey,
@@ -1472,6 +1554,14 @@ impl RouteHealthRegistry {
     ) {
         if !key_failure_has_cooldown(class) {
             self.clear_key(key, now);
+            return;
+        }
+        // E1 key-level path: a key-quota (429-family) rejection must not
+        // escalate into a key-level cooldown (KEY_COOLDOWN_MAX is 60 minutes
+        // — far worse than the route-level 30s curve).  Record the
+        // observation, keep the key available.
+        if is_capacity_class(class) && !self.capacity_failure_cooldown_enabled {
+            self.observe_capacity_key_failure_at(key, class, now);
             return;
         }
         if !self.ensure_key_capacity(key, now) {
@@ -1506,6 +1596,32 @@ impl RouteHealthRegistry {
         let local = key_cooldown(class, step, key, max, self.credentials_first_strike);
         state.cooldown_until =
             Some(now + retry_after.map_or(local, |explicit| explicit.max(local)));
+    }
+
+    /// E1: key-level record-only capacity observation (mirror of the route
+    /// variant).  Never sets cooldown_until, never advances the step.
+    fn observe_capacity_key_failure_at(
+        &mut self,
+        key: &KeyHealthKey,
+        class: RouteFailureClass,
+        now: Instant,
+    ) {
+        if !self.ensure_key_capacity(key, now) {
+            return;
+        }
+        let state = self
+            .keys
+            .entry(key.clone())
+            .or_insert_with(|| HealthState::new(now));
+        state.last_failure_class = Some(class);
+        state.last_failure_at = Some(now);
+        state.last_access = now;
+        tracing::info!(
+            key_upstream_id = %key.upstream_id,
+            failure_class = %class.as_str(),
+            cooldown_skipped = true,
+            "capacity key failure recorded as observation only; key cooldown skipped"
+        );
     }
 
     fn clear_route(&mut self, route: &RouteHealthKey, now: Instant) {
@@ -1931,6 +2047,30 @@ pub(super) fn key_failure_has_cooldown(class: RouteFailureClass) -> bool {
     matches!(
         class,
         RouteFailureClass::Credentials | RouteFailureClass::KeyQuota
+    )
+}
+
+/// E1: whitelist of *capacity-class* failures — an upstream 429 family
+/// rejection saying "healthy but full right now".  These carry no health
+/// information: they must never be treated as evidence the route is broken
+/// (the way TransientServer / EdgeProxyError / ModelUnsupported / Credentials
+/// are).  Everything not in this whitelist stays on the health-class cooldown
+/// path, byte for byte.
+///
+/// NOTE: `ConcurrencySaturated` is deliberately NOT in this whitelist.  It
+/// covers two distinct situations:
+///   - the local pre-dispatch gate (healthy but full): that path already
+///     exits via `finish_route_health_permit(.., RouteOutcome::Cancelled)`
+///     and only records the cooled attempt on the request ledger — it never
+///     writes RouteHealthRegistry cooldown, so it needs no bypass here;
+///   - a real upstream 429 "concurrency limit exceeded", which drives the
+///     C3 in-process account-recovery budget (independent 32-round / 30s
+///     schedule with probes).  That mechanism must stay intact; absorbing it
+///     into capacity-only-observation would bypass the recovery accounting.
+pub(super) fn is_capacity_class(class: RouteFailureClass) -> bool {
+    matches!(
+        class,
+        RouteFailureClass::RateLimited | RouteFailureClass::KeyQuota
     )
 }
 

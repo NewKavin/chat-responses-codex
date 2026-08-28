@@ -4,6 +4,8 @@ mod aggregate;
 mod auth;
 #[path = "gateway/capability_routing.rs"]
 mod capability_routing;
+#[path = "gateway/capacity_failure_no_cooldown.rs"]
+mod capacity_failure_no_cooldown;
 #[path = "gateway/chat.rs"]
 mod chat;
 #[path = "gateway/claude.rs"]

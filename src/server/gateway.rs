@@ -677,12 +677,14 @@ fn route_health_outcome(
     error: &GatewayError,
     repeat_within_request: bool,
     sole_candidate: bool,
+    capacity_sole_route: bool,
     retry_after_cap: Duration,
 ) -> RouteOutcome {
     route_health_outcome_with_cooldown_cap(
         error,
         repeat_within_request,
         sole_candidate,
+        capacity_sole_route,
         retry_after_cap,
         retry_after_cap,
         false,
@@ -704,6 +706,7 @@ fn route_health_outcome_with_cooldown_cap(
     error: &GatewayError,
     repeat_within_request: bool,
     sole_candidate: bool,
+    capacity_sole_route: bool,
     retry_after_cap: Duration,
     retry_after_cooldown_cap: Duration,
     shared_host_failure_domain: bool,
@@ -718,6 +721,7 @@ fn route_health_outcome_with_cooldown_cap(
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                capacity_sole_route,
                 shared_host_failure_domain: false,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
@@ -725,6 +729,7 @@ fn route_health_outcome_with_cooldown_cap(
                 upstream_status,
                 repeat_within_request,
                 sole_candidate,
+                capacity_sole_route,
                 shared_host_failure_domain: false,
             });
     }
@@ -744,6 +749,7 @@ fn route_health_outcome_with_cooldown_cap(
                     upstream_status,
                     repeat_within_request,
                     sole_candidate,
+                    capacity_sole_route,
                     shared_host_failure_domain: shared_host,
                 })
                 .unwrap_or(RouteOutcome::RouteFailure {
@@ -751,6 +757,7 @@ fn route_health_outcome_with_cooldown_cap(
                     upstream_status,
                     repeat_within_request,
                     sole_candidate,
+                    capacity_sole_route,
                     shared_host_failure_domain: shared_host,
                 })
         }
@@ -830,7 +837,6 @@ fn record_cooled_route_attempt(
 /// by the whole pool (B2 common-mode breaker).  `RequestRejected` keeps the
 /// request-shape semantics; transient classes get the shared-gateway-outage
 /// treatment (one delayed replay round before a request-level 502).
-
 const LOCAL_SLOT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// C3: bounded wait for a free local pre-dispatch concurrency slot on
@@ -6317,6 +6323,42 @@ async fn process_gateway_request_inner(
     // on the real route count, not the pass count (T0.3).
     let sole_contract_candidate =
         continuation_profile_key.is_some() && continuation_route_count == 1;
+    // E2: number of *real* candidate routes (upstream × key tuples passing
+    // `route_is_candidate`) for a protocol — the request's true pool for that
+    // (runtime_model_slug, protocol).  When it is 1, a capacity-class failure
+    // (upstream 429 family) must never cool that only reachable route, even
+    // with the E1 switch turned on: cooling it buys nothing in failover and
+    // turns a 1s-granularity client retry loop into a global circuit break
+    // (glm5.2 is exactly this shape).  Contrast `sole_contract_candidate`,
+    // which is about the continuation pin; this is about the real pool.  The
+    // flag is plumbed as `capacity_sole_route` and touches ONLY the
+    // capacity-class exemption — the health-class step/cooldown curve stays
+    // byte-for-byte identical.
+    let candidate_route_count_for = |protocol: UpstreamProtocol| -> usize {
+        routing_snapshot
+            .upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .filter_map(|upstream| {
+                let runtime_model_slug =
+                    upstream.resolved_model_name_with(&normalized_model, case_insensitive)?;
+                Some(
+                    route_api_keys(upstream, &runtime_model_slug, case_insensitive)
+                        .into_iter()
+                        .filter(|api_key| {
+                            let key_fingerprint = route_key_fingerprint(upstream, api_key);
+                            route_is_candidate(upstream, &key_fingerprint, protocol)
+                        })
+                        .count(),
+                )
+            })
+            .sum()
+    };
+    // E2: a failure on a route is "capacity-sole" when the continuation pin
+    // singles it out OR it is the only real candidate of its protocol.
+    let capacity_sole_route_for = |protocol: UpstreamProtocol| -> bool {
+        sole_contract_candidate || candidate_route_count_for(protocol) == 1
+    };
     let route_retry_policy =
         RouteRetryPolicy::from_sources(&state.config, runtime_settings.as_ref());
     let mut route_retry_budget = RouteRetryBudget::default();
@@ -7860,6 +7902,7 @@ async fn process_gateway_request_inner(
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
                                         sole_contract_candidate,
+                                        capacity_sole_route_for(protocol),
                                         route_attempt_context.retry_after_cap,
                                         route_attempt_context.retry_after_cooldown_cap,
                                         shared_host_failure_domain(
@@ -7985,6 +8028,9 @@ async fn process_gateway_request_inner(
                                                             &route_health_key,
                                                         ),
                                                     sole_candidate: sole_contract_candidate,
+                                                    capacity_sole_route: capacity_sole_route_for(
+                                                        protocol,
+                                                    ),
                                                     shared_host_failure_domain: false,
                                                 }
                                             })
@@ -7994,6 +8040,9 @@ async fn process_gateway_request_inner(
                                                 repeat_within_request: request_route_attempts
                                                     .has_transient_failure_for(&route_health_key),
                                                 sole_candidate: sole_contract_candidate,
+                                                capacity_sole_route: capacity_sole_route_for(
+                                                    protocol,
+                                                ),
                                                 shared_host_failure_domain: false,
                                             })
                                     },
@@ -8072,6 +8121,7 @@ async fn process_gateway_request_inner(
                                             repeat_within_request: request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
                                             sole_candidate: sole_contract_candidate,
+                                            capacity_sole_route: capacity_sole_route_for(protocol),
                                             shared_host_failure_domain: false,
                                         }
                                     },
@@ -8158,6 +8208,7 @@ async fn process_gateway_request_inner(
                                             request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
                                             sole_contract_candidate,
+                                            capacity_sole_route_for(protocol),
                                             route_attempt_context.retry_after_cap,
                                             route_attempt_context.retry_after_cooldown_cap,
                                             shared_host_failure_domain(
@@ -8211,6 +8262,7 @@ async fn process_gateway_request_inner(
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
                                         sole_contract_candidate,
+                                        capacity_sole_route_for(protocol),
                                         route_attempt_context.retry_after_cap,
                                         route_attempt_context.retry_after_cooldown_cap,
                                         shared_host_failure_domain(
@@ -8267,6 +8319,7 @@ async fn process_gateway_request_inner(
                                             repeat_within_request: request_route_attempts
                                                 .has_transient_failure_for(&route_health_key),
                                             sole_candidate: sole_contract_candidate,
+                                            capacity_sole_route: capacity_sole_route_for(protocol),
                                             shared_host_failure_domain: shared_host_failure_domain(
                                                 upstream_host(&upstream.base_url).as_deref(),
                                                 &shared_host_candidate_counts,
@@ -8312,6 +8365,7 @@ async fn process_gateway_request_inner(
                                         request_route_attempts
                                             .has_transient_failure_for(&route_health_key),
                                         sole_contract_candidate,
+                                        capacity_sole_route_for(protocol),
                                         route_attempt_context.retry_after_cap,
                                         route_attempt_context.retry_after_cooldown_cap,
                                         shared_host_failure_domain(
