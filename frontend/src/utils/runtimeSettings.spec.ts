@@ -24,7 +24,11 @@ const validSettings = (): RuntimeSettings => ({
   capability_probe_queue_capacity: 64,
   capability_probe_request_timeout_seconds: 30,
   capability_probe_reasoning_timeout_seconds: 90,
+  capability_probe_concurrency: 4,
   automatic_capability_probes_enabled: false,
+  model_case_insensitive_matching: true,
+  tool_call_merge_strict: true,
+  tool_arguments_strict: false,
   upstream_rate_limit_default_retry_seconds: 1,
   routing_affinity_enabled: true,
   routing_affinity_ttl_seconds: 300,
@@ -35,6 +39,8 @@ const validSettings = (): RuntimeSettings => ({
   upstream_hedge_max_extra_attempts: 2,
   upstream_same_route_retry_enabled: true,
   upstream_transient_same_route_retry_enabled: true,
+  upstream_shared_host_failure_domain_enabled: true,
+  upstream_common_mode_same_host_transient_enabled: true,
   upstream_transient_route_cooldown_base_seconds: 5,
   upstream_transient_route_cooldown_max_seconds: 60,
   upstream_transient_route_cooldown_max_step: 2,
@@ -50,12 +56,20 @@ const validSettings = (): RuntimeSettings => ({
   upstream_route_exhaustion_retry_max_wait_ms: 15_000,
   upstream_route_exhaustion_retry_max_rounds: 3,
   upstream_route_exhaustion_budget_alignment_enabled: true,
+  upstream_route_exhaustion_alignment_truncated_enabled: true,
   upstream_transient_last_resort_probe_enabled: true,
   upstream_common_mode_breaker_threshold: 2,
   upstream_common_mode_transient_threshold: 4,
   upstream_continuation_pin_escape_enabled: true,
-  upstream_local_lease_ttl_seconds: 3_600,
+  upstream_local_lease_ttl_seconds: 300,
+  upstream_lease_stale_after_ms: 200_000,
   default_upstream_max_concurrency: 4,
+  upstream_account_queue_enabled: true,
+  upstream_account_queue_max_depth: 16,
+  upstream_account_queue_max_wait_ms: 10_000,
+  upstream_local_gate_max_wait_ms: 3_000,
+  upstream_local_gate_fast_fail_enabled: true,
+  upstream_local_gate_distinct_error_code_enabled: true,
   downstream_lease_ttl_seconds: 120,
   upstream_concurrency_recovery_max_wait_ms: 30_000,
   upstream_concurrency_recovery_max_rounds: 5,
@@ -82,9 +96,13 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_model_auto_discovery_enabled',
   'upstream_model_key_sync_interval_seconds',
   'capability_probe_queue_capacity',
+  'capability_probe_concurrency',
   'capability_probe_request_timeout_seconds',
   'capability_probe_reasoning_timeout_seconds',
   'automatic_capability_probes_enabled',
+  'model_case_insensitive_matching',
+  'tool_call_merge_strict',
+  'tool_arguments_strict',
   'upstream_rate_limit_default_retry_seconds',
   'routing_affinity_enabled',
   'routing_affinity_ttl_seconds',
@@ -95,6 +113,8 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_hedge_max_extra_attempts',
   'upstream_same_route_retry_enabled',
   'upstream_transient_same_route_retry_enabled',
+  'upstream_shared_host_failure_domain_enabled',
+  'upstream_common_mode_same_host_transient_enabled',
   'upstream_transient_route_cooldown_base_seconds',
   'upstream_transient_route_cooldown_max_seconds',
   'upstream_transient_route_cooldown_max_step',
@@ -110,12 +130,20 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_route_exhaustion_retry_max_wait_ms',
   'upstream_route_exhaustion_retry_max_rounds',
   'upstream_route_exhaustion_budget_alignment_enabled',
+  'upstream_route_exhaustion_alignment_truncated_enabled',
   'upstream_transient_last_resort_probe_enabled',
   'upstream_common_mode_breaker_threshold',
   'upstream_common_mode_transient_threshold',
   'upstream_continuation_pin_escape_enabled',
   'upstream_local_lease_ttl_seconds',
+  'upstream_lease_stale_after_ms',
   'default_upstream_max_concurrency',
+  'upstream_account_queue_enabled',
+  'upstream_account_queue_max_depth',
+  'upstream_account_queue_max_wait_ms',
+  'upstream_local_gate_max_wait_ms',
+  'upstream_local_gate_fast_fail_enabled',
+  'upstream_local_gate_distinct_error_code_enabled',
   'downstream_lease_ttl_seconds',
   'upstream_concurrency_recovery_max_wait_ms',
   'upstream_concurrency_recovery_max_rounds',
@@ -142,10 +170,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(57)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(57)
+    expect(runtimeSettingFields).toHaveLength(71)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(71)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(44)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(58)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
@@ -175,6 +203,11 @@ describe('runtime settings helpers', () => {
     invalid.upstream_concurrency_recovery_max_wait_ms = 60_000
     invalid.upstream_concurrency_recovery_max_rounds = 2
     invalid.upstream_concurrency_probe_delays_ms = [100]
+    invalid.capability_probe_concurrency = 0
+    invalid.upstream_lease_stale_after_ms = 500
+    invalid.upstream_account_queue_max_depth = 0
+    invalid.upstream_account_queue_max_wait_ms = 50
+    invalid.upstream_local_gate_max_wait_ms = 61_000
 
     const errors = validateRuntimeSettings(invalid)
     expect(errors.app_name).toBeTruthy()
@@ -185,6 +218,11 @@ describe('runtime settings helpers', () => {
     expect(errors.upstream_stream_idle_timeout_seconds).toBeTruthy()
     expect(errors.upstream_first_semantic_output_timeout_seconds).toBeTruthy()
     expect(errors.upstream_concurrency_recovery_max_rounds).toBeTruthy()
+    expect(errors.capability_probe_concurrency).toBeTruthy()
+    expect(errors.upstream_lease_stale_after_ms).toBeTruthy()
+    expect(errors.upstream_account_queue_max_depth).toBeTruthy()
+    expect(errors.upstream_account_queue_max_wait_ms).toBeTruthy()
+    expect(errors.upstream_local_gate_max_wait_ms).toBeTruthy()
   })
 
   it('tracks dirty state and restart-only differences without sharing arrays', () => {

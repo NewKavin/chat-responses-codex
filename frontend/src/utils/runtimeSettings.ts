@@ -135,12 +135,47 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'capability_probe_concurrency',
+    group: 'discovery',
+    label: '能力探测并发数',
+    apply: 'immediate',
+    control: 'number',
+    unit: '路',
+    min: 1,
+    max: MAX_U32,
+    description: '并行执行自动能力探测的最大数量。过高会占用上游额度，过低会拖慢探测覆盖。'
+  },
+  {
     key: 'automatic_capability_probes_enabled',
     group: 'discovery',
     label: '自动能力探测',
     apply: 'immediate',
     control: 'switch',
     description: '开启后会周期性对所有下游可见模型自动探测（消耗 token）'
+  },
+  {
+    key: 'model_case_insensitive_matching',
+    group: 'routing',
+    label: '模型名大小写不敏感匹配',
+    apply: 'immediate',
+    control: 'switch',
+    description: '下游请求的模型名与上游支持列表匹配时忽略大小写（如 GPT-4o 与 gpt-4o）。'
+  },
+  {
+    key: 'tool_call_merge_strict',
+    group: 'routing',
+    label: '工具调用合并严格模式',
+    apply: 'immediate',
+    control: 'switch',
+    description: '严格模式：同一消息内多次工具调用按更严格规则合并与校验，避免重复工具调用。'
+  },
+  {
+    key: 'tool_arguments_strict',
+    group: 'routing',
+    label: '工具参数严格模式',
+    apply: 'immediate',
+    control: 'switch',
+    description: '严格模式：工具参数缺失或类型不符时拒绝请求；关闭后宽松降级为可用的默认值。'
   },
   {
     key: 'upstream_rate_limit_default_retry_seconds',
@@ -232,6 +267,22 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     apply: 'immediate',
     control: 'switch',
     description: 'TransientServer 502/503/504 在进入 failover 前对同一路由快速重试一次（退避 200–500ms，尊重上游 Retry-After，上限 2s）。'
+  },
+  {
+    key: 'upstream_shared_host_failure_domain_enabled',
+    group: 'routing',
+    label: '同主机故障域',
+    apply: 'immediate',
+    control: 'switch',
+    description: '同一上游 host（多 key）的瞬态失败并入同一故障域，不逐 key 升级冷却；Credentials/key 配额类错误仍按 key 独立冷却。'
+  },
+  {
+    key: 'upstream_common_mode_same_host_transient_enabled',
+    group: 'routing',
+    label: '同主机瞬态计入共模',
+    apply: 'immediate',
+    control: 'switch',
+    description: '同一 host 的 TransientServer/EdgeProxyError 计入共模 streak；请求形状类 RequestRejected 仍保持跨 host 语义（刻意设计）。'
   },
   {
     key: 'upstream_transient_route_cooldown_base_seconds',
@@ -385,6 +436,14 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
       '轮数上限打满但 live 瞬态恢复仍在剩余时间预算内时，允许多等一次对齐等待后再放弃；429 族耗尽与关闭开关时维持原行为。'
   },
   {
+    key: 'upstream_route_exhaustion_alignment_truncated_enabled',
+    group: 'routing',
+    label: '预算对齐截断重试',
+    apply: 'immediate',
+    control: 'switch',
+    description: '轮数打满但仍在剩余时间预算内时，把最后一次等待截断到剩余预算后作为半开探测再打一次，而不是直接放弃。'
+  },
+  {
     key: 'upstream_transient_last_resort_probe_enabled',
     group: 'routing',
     label: '全冷却兜底探测',
@@ -437,6 +496,17 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
       '兜底回收未正常归还的并发槽；小于单次请求最长时长会误回收，勿低于流最大时长。'
   },
   {
+    key: 'upstream_lease_stale_after_ms',
+    group: 'concurrency',
+    label: '并发租约判停滞超时',
+    apply: 'immediate',
+    control: 'number',
+    unit: '毫秒',
+    min: 1_000,
+    max: MAX_SAFE_INTEGER,
+    description: '并发租约被判为停滞的超时。必须 >= 本地租约心跳间隔（ttl/3）的 2 倍，否则长请求的租约会在心跳前被误回收；后端会拒绝不满足该关系的组合。'
+  },
+  {
     key: 'default_upstream_max_concurrency',
     group: 'concurrency',
     label: '新建上游每 Key 默认最大并发',
@@ -445,6 +515,63 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     unit: '路',
     min: 1,
     max: MAX_U32
+  },
+  {
+    key: 'upstream_account_queue_enabled',
+    group: 'concurrency',
+    label: '并发饱和排队',
+    apply: 'immediate',
+    control: 'switch',
+    description: '上游账号并发槽位饱和时排队等待而不是立即拒绝；关闭后饱和即返回限流错误。'
+  },
+  {
+    key: 'upstream_account_queue_max_depth',
+    group: 'concurrency',
+    label: '排队最大深度',
+    apply: 'immediate',
+    control: 'number',
+    unit: '条',
+    min: 1,
+    max: MAX_U32,
+    description: '单账号排队请求的最大深度，超出部分的请求快速失败。'
+  },
+  {
+    key: 'upstream_account_queue_max_wait_ms',
+    group: 'concurrency',
+    label: '排队最大等待',
+    apply: 'immediate',
+    control: 'number',
+    unit: '毫秒',
+    min: 100,
+    max: MAX_SAFE_INTEGER,
+    description: '排队请求等待槽位的最大时长，超时返回限流错误。'
+  },
+  {
+    key: 'upstream_local_gate_max_wait_ms',
+    group: 'concurrency',
+    label: '本地闸门最大等待',
+    apply: 'immediate',
+    control: 'number',
+    unit: '毫秒',
+    min: 100,
+    max: 60_000,
+    description: '本地并发闸门（pre-dispatch 租约）等待槽位的时长上限，超时放弃本轮候选。'
+  },
+  {
+    key: 'upstream_local_gate_fast_fail_enabled',
+    group: 'concurrency',
+    label: '闸门快速失败',
+    apply: 'immediate',
+    control: 'switch',
+    description: '闸门满且无排队空间时快速失败，不占用轮间重试预算。'
+  },
+  {
+    key: 'upstream_local_gate_distinct_error_code_enabled',
+    group: 'concurrency',
+    label: '闸门独立错误码',
+    apply: 'immediate',
+    control: 'switch',
+    description: '本地闸门拒绝使用独立错误码（区别于真实上游限流），便于监控区分是本网关的本地排队而非上游限流。'
   },
   {
     key: 'downstream_lease_ttl_seconds',
@@ -718,6 +845,18 @@ export const validateRuntimeSettings = (
     settings.upstream_stream_idle_timeout_seconds
   ) {
     errors.upstream_stream_keepalive_interval_seconds = '必须短于流式空闲超时'
+  }
+  // C2.x: stale-after must be >= 2x the local lease heartbeat interval (ttl/3),
+  // otherwise a healthy-but-silent long request gets its lease reclaimed
+  // before its own heartbeat (mirrors the backend validation).
+  if (
+    Number.isSafeInteger(settings.upstream_local_lease_ttl_seconds) &&
+    settings.upstream_local_lease_ttl_seconds > 0 &&
+    settings.upstream_lease_stale_after_ms <
+      2 * ((settings.upstream_local_lease_ttl_seconds * 1_000) / 3)
+  ) {
+    errors.upstream_lease_stale_after_ms =
+      '必须 ≥ 本地并发租约心跳间隔（ttl/3）的 2 倍，否则长请求租约会被误回收'
   }
   // T1.1: cooldown-ceiling invariant linkage hint.  The effective ceiling
   // (max of the upstream Retry-After cooldown cap and the local backoff curve

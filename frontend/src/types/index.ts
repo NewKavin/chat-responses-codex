@@ -906,7 +906,11 @@ export interface RuntimeSettings {
   capability_probe_queue_capacity: number
   capability_probe_request_timeout_seconds: number
   capability_probe_reasoning_timeout_seconds: number
+  capability_probe_concurrency: number
   automatic_capability_probes_enabled: boolean
+  model_case_insensitive_matching: boolean
+  tool_call_merge_strict: boolean
+  tool_arguments_strict: boolean
   upstream_rate_limit_default_retry_seconds: number
   routing_affinity_enabled: boolean
   routing_affinity_ttl_seconds: number
@@ -917,6 +921,8 @@ export interface RuntimeSettings {
   upstream_hedge_max_extra_attempts: number
   upstream_same_route_retry_enabled: boolean
   upstream_transient_same_route_retry_enabled: boolean
+  upstream_shared_host_failure_domain_enabled: boolean
+  upstream_common_mode_same_host_transient_enabled: boolean
   upstream_transient_route_cooldown_base_seconds: number
   upstream_transient_route_cooldown_max_seconds: number
   upstream_transient_route_cooldown_max_step: number
@@ -932,11 +938,19 @@ export interface RuntimeSettings {
   upstream_route_exhaustion_retry_max_wait_ms: number
   upstream_route_exhaustion_retry_max_rounds: number
   upstream_route_exhaustion_budget_alignment_enabled: boolean
+  upstream_route_exhaustion_alignment_truncated_enabled: boolean
   upstream_transient_last_resort_probe_enabled: boolean
   upstream_common_mode_breaker_threshold: number
   upstream_common_mode_transient_threshold: number
   upstream_continuation_pin_escape_enabled: boolean
   upstream_local_lease_ttl_seconds: number
+  upstream_lease_stale_after_ms: number
+  upstream_account_queue_enabled: boolean
+  upstream_account_queue_max_depth: number
+  upstream_account_queue_max_wait_ms: number
+  upstream_local_gate_max_wait_ms: number
+  upstream_local_gate_fast_fail_enabled: boolean
+  upstream_local_gate_distinct_error_code_enabled: boolean
   default_upstream_max_concurrency: number
   downstream_lease_ttl_seconds: number
   upstream_concurrency_recovery_max_wait_ms: number
