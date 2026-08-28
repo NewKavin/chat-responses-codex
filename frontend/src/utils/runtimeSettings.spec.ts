@@ -84,6 +84,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_stream_idle_timeout_seconds: 60,
   upstream_stream_max_duration_seconds: 3_600,
   upstream_first_semantic_output_timeout_seconds: 180,
+  upstream_first_output_warn_after_seconds: 120,
   gateway_request_body_limit_mb: 32
 })
 
@@ -160,6 +161,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_stream_idle_timeout_seconds',
   'upstream_stream_max_duration_seconds',
   'upstream_first_semantic_output_timeout_seconds',
+  'upstream_first_output_warn_after_seconds',
   'gateway_request_body_limit_mb'
 ]
 
@@ -174,10 +176,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(73)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(73)
+    expect(runtimeSettingFields).toHaveLength(74)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(74)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(60)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(61)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
@@ -204,6 +206,7 @@ describe('runtime settings helpers', () => {
     invalid.upstream_stream_idle_timeout_seconds = 120
     invalid.upstream_stream_max_duration_seconds = 90
     invalid.upstream_first_semantic_output_timeout_seconds = 100
+    invalid.upstream_first_output_warn_after_seconds = 101
     invalid.upstream_concurrency_recovery_max_wait_ms = 60_000
     invalid.upstream_concurrency_recovery_max_rounds = 2
     invalid.upstream_concurrency_probe_delays_ms = [100]
@@ -221,6 +224,7 @@ describe('runtime settings helpers', () => {
     expect(errors.upstream_stream_keepalive_interval_seconds).toBeTruthy()
     expect(errors.upstream_stream_idle_timeout_seconds).toBeTruthy()
     expect(errors.upstream_first_semantic_output_timeout_seconds).toBeTruthy()
+    expect(errors.upstream_first_output_warn_after_seconds).toBeTruthy()
     expect(errors.upstream_concurrency_recovery_max_rounds).toBeTruthy()
     expect(errors.capability_probe_concurrency).toBeTruthy()
     expect(errors.upstream_lease_stale_after_ms).toBeTruthy()

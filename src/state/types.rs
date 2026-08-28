@@ -290,6 +290,14 @@ pub const DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED: bool = true;
 /// local curve) as a rollback path.
 pub const DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED: bool = false;
 
+/// E6: how long a streaming request may wait for its first semantic output
+/// before the gateway logs a warn and flags the active request as
+/// `awaiting_first_output` in the admin in-flight list.  This is a
+/// *visibility* threshold only — the hard timeout remains
+/// `upstream_first_semantic_output_timeout_seconds` (default 3300s), which
+/// is deliberately long for reasoning models and is NOT changed by E6.
+pub const DEFAULT_UPSTREAM_FIRST_OUTPUT_WARN_AFTER_SECONDS: u64 = 120;
+
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
@@ -516,6 +524,8 @@ pub struct AppConfig {
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
     pub upstream_first_semantic_output_timeout_seconds: u64,
+    #[serde(default = "default_upstream_first_output_warn_after_seconds")]
+    pub upstream_first_output_warn_after_seconds: u64,
     pub codex_stream_idle_timeout_ms: u64,
     /// Maximum request body size for gateway API endpoints (MiB). Axum's
     /// default is 2 MiB; Codex/Claude Code with long contexts or base64
@@ -655,6 +665,8 @@ impl Default for AppConfig {
             upstream_concurrency_probe_delays_ms: DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS
                 .to_vec(),
             upstream_first_semantic_output_timeout_seconds: 3_300,
+            upstream_first_output_warn_after_seconds:
+                DEFAULT_UPSTREAM_FIRST_OUTPUT_WARN_AFTER_SECONDS,
             codex_stream_idle_timeout_ms: 3_600_000,
             gateway_request_body_limit_mb: default_gateway_request_body_limit_mb(),
         }
@@ -1464,6 +1476,10 @@ pub fn default_upstream_common_mode_same_host_transient_enabled() -> bool {
 
 pub fn default_upstream_capacity_failure_cooldown_enabled() -> bool {
     DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED
+}
+
+pub fn default_upstream_first_output_warn_after_seconds() -> u64 {
+    DEFAULT_UPSTREAM_FIRST_OUTPUT_WARN_AFTER_SECONDS
 }
 
 pub fn default_upstream_route_exhaustion_budget_alignment_enabled() -> bool {

@@ -250,14 +250,46 @@ fn value_has_semantic_payload(value: &Value) -> bool {
 pub(super) struct FirstSemanticDeadline {
     started: Instant,
     deadline: Instant,
+    /// E6: visibility-only warn threshold — once the wait for the first
+    /// semantic output exceeds this, the stream loops log a warn and (where a
+    /// state handle exists) flag the active request as `awaiting_first_output`.
+    /// `Duration::ZERO` disables the warn.  The hard timeout is `deadline`,
+    /// which is NOT changed by this.
+    warn_after: std::time::Duration,
 }
 
 impl FirstSemanticDeadline {
     pub(super) fn new(started: Instant, budget: std::time::Duration) -> Self {
+        Self::new_with_warn(started, budget, std::time::Duration::ZERO)
+    }
+
+    pub(super) fn new_with_warn(
+        started: Instant,
+        budget: std::time::Duration,
+        warn_after: std::time::Duration,
+    ) -> Self {
         Self {
             started,
             deadline: started + budget,
+            warn_after,
         }
+    }
+
+    /// E6: elapsed wall time since the shared deadline started (i.e. since
+    /// the stream request began waiting for its first semantic output).
+    pub(super) fn elapsed_since_start(self) -> std::time::Duration {
+        Instant::now().saturating_duration_since(self.started)
+    }
+
+    /// E6: whether the warn threshold has been crossed and warning is enabled
+    /// (`warn_after > 0`).
+    pub(super) fn should_warn(self) -> bool {
+        !self.warn_after.is_zero() && self.elapsed_since_start() >= self.warn_after
+    }
+
+    /// E6: the configured warn threshold (zero = disabled).
+    pub(super) fn warn_after(self) -> std::time::Duration {
+        self.warn_after
     }
 
     /// Remaining budget.  Returns an error if the deadline has passed.
@@ -464,5 +496,36 @@ mod tests {
         // The deadline should have already passed (1 nanosecond).
         let result = deadline.remaining();
         assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn e6_first_output_warn_threshold_crosses_and_disable_is_respected() {
+        let started = tokio::time::Instant::now();
+        // Disabled warn (ZERO) never warns even after the elapsed window.
+        let disabled = FirstSemanticDeadline::new_with_warn(
+            started,
+            std::time::Duration::from_secs(600),
+            std::time::Duration::ZERO,
+        );
+        tokio::time::advance(std::time::Duration::from_secs(200)).await;
+        assert!(!disabled.should_warn());
+        assert_eq!(disabled.warn_after(), std::time::Duration::ZERO);
+
+        // warn_after = 120 -> not warned before the threshold.
+        let warned = FirstSemanticDeadline::new_with_warn(
+            tokio::time::Instant::now(),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(120),
+        );
+        assert!(!warned.should_warn());
+        assert_eq!(warned.warn_after(), std::time::Duration::from_secs(120));
+
+        // Crossing the threshold trips the warn.
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        assert!(warned.should_warn());
+        assert!(warned.elapsed_since_start() >= std::time::Duration::from_secs(120));
+
+        // The hard deadline is untouched by the warn threshold.
+        assert!(warned.remaining().is_ok());
     }
 }

@@ -173,6 +173,96 @@
 
     <el-row :gutter="20" class="charts-grid">
       <el-col :xs="24">
+        <el-card shadow="hover" class="chart-card">
+          <template #header>
+            <div class="card-header card-header--trend">
+              <div>
+                <p class="card-eyebrow">LIVE // REQUESTS</p>
+                <h2>在途请求</h2>
+                <p>当前网关正在处理的请求与阶段；首字静默（等待首个语义输出超阈值）高亮。</p>
+              </div>
+              <div class="active-requests-actions">
+                <el-tag v-if="firstOutputStalledCount > 0" type="danger" effect="light">
+                  首字静默 {{ firstOutputStalledCount }}
+                </el-tag>
+                <el-tag v-else effect="plain">在途 {{ activeRequests.length }}</el-tag>
+                <el-button
+                  :icon="RefreshCw"
+                  :loading="activeRequestsLoading"
+                  size="small"
+                  circle
+                  aria-label="刷新在途请求"
+                  title="刷新在途请求"
+                  @click="loadActiveRequests"
+                />
+              </div>
+            </div>
+          </template>
+
+          <el-empty
+            v-if="!activeRequestsLoading && activeRequests.length === 0"
+            description="当前没有在途请求"
+            :image-size="72"
+          />
+          <el-table
+            v-else
+            :data="activeRequests"
+            v-loading="activeRequestsLoading"
+            stripe
+            size="small"
+            style="width: 100%"
+            :row-class-name="activeRequestRowClass"
+          >
+            <el-table-column label="请求 ID" min-width="120">
+              <template #default="{ row }">
+                <span class="mono">{{ row.request_id }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="下游" min-width="110" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.downstream_name || row.downstream_id }}</template>
+            </el-table-column>
+            <el-table-column label="模型" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="mono">{{ row.model }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="协议" width="90">
+              <template #default="{ row }">{{ row.protocol }}</template>
+            </el-table-column>
+            <el-table-column label="上游" min-width="110" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.upstream_name || row.upstream_id || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="阶段" min-width="130">
+              <template #default="{ row }">
+                <el-tag :type="phaseMeta(row).type" size="small" effect="plain">
+                  {{ phaseMeta(row).label }}
+                </el-tag>
+                <el-tag
+                  v-if="row.phase === 'queued_local' && row.queue_position != null"
+                  size="small"
+                  type="info"
+                >
+                  位 {{ row.queue_position }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="已耗时" width="90" align="right">
+              <template #default="{ row }">{{ row.elapsed_seconds }}s</template>
+            </el-table-column>
+            <el-table-column label="状态" min-width="110">
+              <template #default="{ row }">
+                <el-tag :type="activeRequestHealth(row).type" size="small">
+                  {{ activeRequestHealth(row).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="20" class="charts-grid">
+      <el-col :xs="24">
         <el-card shadow="hover" class="chart-card chart-card--trend">
           <template #header>
             <div class="card-header card-header--trend">
@@ -351,7 +441,14 @@ import { Boxes, KeyRound, Radar, RefreshCw, SatelliteDish, ScrollText } from '@l
 import CountUpValue from '@/components/CountUpValue.vue'
 import SignalWave from '@/components/SignalWave.vue'
 import { adminApi } from '@/api/admin'
-import type { DashboardAnalyticsRange, DashboardBreakdownItem, DashboardData, ModelProbeResponse } from '@/types'
+import type {
+  ActiveGatewayRequest,
+  DashboardAnalyticsRange,
+  DashboardBreakdownItem,
+  DashboardData,
+  ModelProbeResponse
+} from '@/types'
+import { getActiveRequestHealth } from '@/utils/troubleshooting'
 import { loadEcharts } from '@/utils/echartsLoader'
 import { buildUserAgentChartSummary } from '@/utils/userAgentChart'
 import { formatCompactNumber } from '@/utils/numberFormat'
@@ -369,6 +466,8 @@ const { resolvedTheme } = useTheme()
 const loading = ref(false)
 const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
+const activeRequests = ref<ActiveGatewayRequest[]>([])
+const activeRequestsLoading = ref(false)
 const chartRange = ref<ChartRange>('7d')
 const lastRefreshedAt = ref(0)
 
@@ -901,6 +1000,46 @@ const openModelProbe = () => {
   void router.push('/admin/model-probe')
 }
 
+const PHASE_META: Record<string, { label: string; type: 'info' | 'warning' | 'success' | 'danger' | 'primary' }> = {
+  selecting: { label: '选路', type: 'primary' },
+  queued_local: { label: '本地排队', type: 'warning' },
+  dispatched: { label: '已派发', type: 'info' },
+  streaming: { label: '流式中', type: 'success' },
+  awaiting_first_output: { label: '首字静默', type: 'danger' }
+}
+
+const phaseMeta = (row: ActiveGatewayRequest) =>
+  PHASE_META[row.phase ?? 'selecting'] ?? PHASE_META.selecting
+
+const activeRequestHealth = (row: ActiveGatewayRequest) =>
+  getActiveRequestHealth({
+    idle_seconds: row.idle_seconds,
+    status: row.status,
+    phase: row.phase ?? null
+  })
+
+const firstOutputStalledCount = computed(
+  () => activeRequests.value.filter(request => request.phase === 'awaiting_first_output').length
+)
+
+const activeRequestRowClass = ({ row }: { row: ActiveGatewayRequest }) =>
+  row.phase === 'awaiting_first_output' ? 'active-request-row--stalled' : ''
+
+const loadActiveRequests = async () => {
+  if (activeRequestsLoading.value) return
+  try {
+    activeRequestsLoading.value = true
+    const response = await adminApi.getActiveTroubleshootingRequests()
+    activeRequests.value = response.data.active_requests ?? []
+  } catch {
+    // keep the last snapshot; the dashboard itself reports load failures.
+  } finally {
+    activeRequestsLoading.value = false
+  }
+}
+
+let activeRequestsTimer: ReturnType<typeof setInterval> | null = null
+
 const handleResize = () => {
   trendChart?.resize()
   modelUsageChart?.resize()
@@ -933,10 +1072,13 @@ onMounted(async () => {
   await nextTick()
   await initCharts()
   await loadDashboard()
+  await loadActiveRequests()
+  activeRequestsTimer = setInterval(() => void loadActiveRequests(), 5_000)
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
+  if (activeRequestsTimer !== null) clearInterval(activeRequestsTimer)
   window.removeEventListener('resize', handleResize)
   disposeCharts()
 })
@@ -945,6 +1087,21 @@ onUnmounted(() => {
 <style scoped>
 .dashboard-page {
   min-height: 100%;
+}
+
+.active-requests-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+:deep(.active-request-row--stalled > td.el-table__cell) {
+  background: var(--crc-danger-soft, rgba(244, 69, 84, 0.08)) !important;
+}
+
+.mono {
+  font-family: var(--crc-font-mono, 'JetBrains Mono', monospace);
+  font-size: 12px;
 }
 
 /* -- Command deck hero -------------------------------------------------------- */

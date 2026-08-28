@@ -145,9 +145,17 @@ export const buildTroubleshootingCopySummary = (run: TroubleshootingRunResponse)
 }
 
 export const getActiveRequestHealth = (
-  request: Pick<ActiveGatewayRequest, 'idle_seconds' | 'status'>
+  request: Pick<ActiveGatewayRequest, 'idle_seconds' | 'status' | 'phase'> & {
+    warn_after_seconds?: number
+  }
 ) => {
   if (request.status === 'error') return { label: '异常', type: 'danger' as const }
-  if (request.idle_seconds >= 120) return { label: '无增量', type: 'warning' as const }
+  // E6: first semantic output stalled past the warn threshold — high-visibility
+  // warning state driven by the gateway phase (not a hard timeout).
+  if (request.phase === 'awaiting_first_output') {
+    return { label: '首字静默', type: 'danger' as const }
+  }
+  const warnAfter = request.warn_after_seconds ?? 120
+  if (request.idle_seconds >= warnAfter) return { label: '无增量', type: 'warning' as const }
   return { label: '运行中', type: 'success' as const }
 }

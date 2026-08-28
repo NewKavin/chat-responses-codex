@@ -706,6 +706,17 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'upstream_first_output_warn_after_seconds',
+    group: 'http',
+    label: '首字静默告警阈值',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: MAX_SAFE_INTEGER,
+    description: '首字超过该时长仍未输出时打 warn 告警并在在途请求列表高亮（不改 55 分钟超时）'
+  },
+  {
     key: 'gateway_request_body_limit_mb',
     group: 'http',
     label: '网关请求体上限',
@@ -912,6 +923,13 @@ export const validateRuntimeSettings = (
   ) {
     errors.upstream_first_semantic_output_timeout_seconds =
       `不能小于并发、响应头和空闲预算之和 ${minimumFirstSemantic} 秒`
+  }
+
+  if (
+    settings.upstream_first_output_warn_after_seconds >
+    settings.upstream_first_semantic_output_timeout_seconds
+  ) {
+    errors.upstream_first_output_warn_after_seconds = '不能超过首个语义输出超时'
   }
 
   if (

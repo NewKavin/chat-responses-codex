@@ -17,7 +17,8 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
     DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS, DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED,
-    DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS,
+    DEFAULT_UPSTREAM_FIRST_OUTPUT_WARN_AFTER_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
     DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
@@ -392,6 +393,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_first_semantic_output_timeout_seconds: env_u64(
             "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS",
             3_300,
+        )
+        .max(1),
+        // E6: visibility-only warn threshold for a stalled first output.  The
+        // hard timeout above is unchanged; this only makes the stall visible.
+        upstream_first_output_warn_after_seconds: env_u64(
+            "UPSTREAM_FIRST_OUTPUT_WARN_AFTER_SECONDS",
+            DEFAULT_UPSTREAM_FIRST_OUTPUT_WARN_AFTER_SECONDS,
         )
         .max(1),
         codex_stream_idle_timeout_ms: env_u64("CODEX_STREAM_IDLE_TIMEOUT_MS", 3_600_000).max(1),

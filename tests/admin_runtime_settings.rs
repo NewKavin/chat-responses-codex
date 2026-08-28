@@ -220,8 +220,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_local_gate_fast_fail_enabled = 70 (C4.1),
     // plus upstream_local_gate_distinct_error_code_enabled = 71 (C4.2),
     // plus upstream_capacity_failure_cooldown_enabled = 72 (E1),
-    // plus upstream_account_queue_adaptive_budget_enabled = 73 (E4.2).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 73);
+    // plus upstream_account_queue_adaptive_budget_enabled = 73 (E4.2),
+    // plus upstream_first_output_warn_after_seconds = 74 (E6).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 74);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

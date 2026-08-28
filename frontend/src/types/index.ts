@@ -591,6 +591,8 @@ export interface ActiveGatewayRequest {
   elapsed_seconds: number
   idle_seconds: number
   status: string
+  phase?: string | null
+  queue_position?: number | null
   error_category?: string | null
 }
 
@@ -966,6 +968,7 @@ export interface RuntimeSettings {
   upstream_stream_idle_timeout_seconds: number
   upstream_stream_max_duration_seconds: number
   upstream_first_semantic_output_timeout_seconds: number
+  upstream_first_output_warn_after_seconds: number
   gateway_request_body_limit_mb: number
 }
 

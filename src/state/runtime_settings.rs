@@ -10,7 +10,8 @@ use super::types::{
     default_upstream_common_mode_transient_threshold,
     default_upstream_continuation_pin_escape_enabled,
     default_upstream_credentials_first_strike_seconds, default_upstream_error_body_excerpt_enabled,
-    default_upstream_error_body_excerpt_max_chars, default_upstream_lease_stale_after_ms,
+    default_upstream_error_body_excerpt_max_chars,
+    default_upstream_first_output_warn_after_seconds, default_upstream_lease_stale_after_ms,
     default_upstream_local_gate_distinct_error_code_enabled,
     default_upstream_local_gate_fast_fail_enabled, default_upstream_local_gate_max_wait_ms,
     default_upstream_local_lease_ttl_seconds, default_upstream_max_concurrency,
@@ -92,6 +93,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_concurrency_recovery_max_rounds",
     "upstream_stream_idle_timeout_seconds",
     "upstream_first_semantic_output_timeout_seconds",
+    "upstream_first_output_warn_after_seconds",
 ];
 
 pub const RESTART_RUNTIME_SETTING_FIELDS: &[&str] = &[
@@ -218,6 +220,8 @@ pub struct RuntimeSettings {
     pub upstream_stream_idle_timeout_seconds: u64,
     pub upstream_stream_max_duration_seconds: u64,
     pub upstream_first_semantic_output_timeout_seconds: u64,
+    #[serde(default = "default_upstream_first_output_warn_after_seconds")]
+    pub upstream_first_output_warn_after_seconds: u64,
     #[serde(default = "default_gateway_request_body_limit_mb")]
     pub gateway_request_body_limit_mb: u64,
 }
@@ -407,6 +411,8 @@ impl RuntimeSettings {
             upstream_stream_max_duration_seconds: config.upstream_stream_max_duration_seconds,
             upstream_first_semantic_output_timeout_seconds: config
                 .upstream_first_semantic_output_timeout_seconds,
+            upstream_first_output_warn_after_seconds: config
+                .upstream_first_output_warn_after_seconds,
             gateway_request_body_limit_mb: config.gateway_request_body_limit_mb,
         }
     }
@@ -515,6 +521,8 @@ impl RuntimeSettings {
         config.upstream_stream_max_duration_seconds = self.upstream_stream_max_duration_seconds;
         config.upstream_first_semantic_output_timeout_seconds =
             self.upstream_first_semantic_output_timeout_seconds;
+        config.upstream_first_output_warn_after_seconds =
+            self.upstream_first_output_warn_after_seconds;
         config.gateway_request_body_limit_mb = self.gateway_request_body_limit_mb;
     }
 
@@ -761,6 +769,18 @@ impl RuntimeSettings {
             self.upstream_first_semantic_output_timeout_seconds,
             "upstream_first_semantic_output_timeout_seconds",
         )?;
+        require_positive(
+            self.upstream_first_output_warn_after_seconds,
+            "upstream_first_output_warn_after_seconds",
+        )?;
+        if self.upstream_first_output_warn_after_seconds
+            > self.upstream_first_semantic_output_timeout_seconds
+        {
+            return Err(invalid(
+                "upstream_first_output_warn_after_seconds",
+                "must not exceed the first-semantic-output timeout",
+            ));
+        }
         if !(1..=4_096).contains(&self.gateway_request_body_limit_mb) {
             return Err(invalid(
                 "gateway_request_body_limit_mb",

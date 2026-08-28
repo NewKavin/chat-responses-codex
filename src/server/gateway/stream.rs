@@ -360,9 +360,17 @@ pub(super) async fn dispatch_streaming_request(
             .upstream_first_semantic_output_timeout_seconds
             .max(1),
     );
-    let first_semantic_deadline = super::stream_commit::FirstSemanticDeadline::new(
+    // E6: the visibility-only first-output warn threshold lives next to the
+    // hard deadline; the deadline itself is unchanged.
+    let first_output_warn_after = Duration::from_secs(
+        runtime_settings
+            .upstream_first_output_warn_after_seconds
+            .max(1),
+    );
+    let first_semantic_deadline = super::stream_commit::FirstSemanticDeadline::new_with_warn(
         TokioInstant::now(),
         first_semantic_budget,
+        first_output_warn_after,
     );
 
     let (tx, mut rx) = mpsc::channel::<Result<DispatchResult, GatewayError>>(1);
@@ -557,12 +565,24 @@ pub(super) async fn prefetch_first_usable_output(
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<UpstreamStreamReader, GatewayError> {
     let mut classifier = FirstUsableOutputClassifier::new(protocol);
+    // E6: one-shot warn while prefetching the first semantic output.
+    let mut first_output_warned = false;
 
     loop {
         // Race the upstream read against the first-semantic deadline.
         // If the deadline expires before semantic output is found, emit
         // the canonical timeout error rather than an idle/network error.
         let outcome = if let Some(deadline) = first_semantic_deadline {
+            if !first_output_warned && deadline.should_warn() {
+                first_output_warned = true;
+                warn_first_output_stalled(
+                    &diagnostic_context.request_id,
+                    Some(&diagnostic_context.upstream_id),
+                    deadline.elapsed_since_start().as_millis() as u64,
+                    deadline.warn_after().as_secs(),
+                    None,
+                );
+            }
             tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline.deadline()) => {
@@ -672,6 +692,33 @@ fn classify_prefetch_payload(
     }
 }
 
+/// E6: first-semantic-output stalled past the visibility warn threshold.
+/// Logs a warn with routing context and, when a state handle is available,
+/// flags the active request as `awaiting_first_output` so the admin in-flight
+/// list highlights it.  The hard first-output timeout
+/// (`upstream_first_semantic_output_timeout_seconds`) is NOT changed — this
+/// only makes the stall visible.
+fn warn_first_output_stalled(
+    request_id: &str,
+    upstream_id: Option<&str>,
+    elapsed_ms: u64,
+    warn_after_seconds: u64,
+    mark_phase: Option<&StreamUsageLogContext>,
+) {
+    tracing::warn!(
+        request_id,
+        upstream_id,
+        elapsed_ms,
+        warn_after_seconds,
+        "first semantic output stalled past the warn threshold (E6)"
+    );
+    if let Some(log_context) = mark_phase {
+        log_context
+            .state
+            .mark_active_gateway_request_awaiting_first_output(&log_context.request_id);
+    }
+}
+
 fn log_stream_body_read_diagnostic(
     context: &StreamBodyReadDiagnosticContext,
     stream_stage: &'static str,
@@ -755,6 +802,7 @@ pub(super) fn proxied_stream_body(
         semantic_terminal_emitted: false,
         usable_output_seen: false,
         usage_log_flushed: false,
+        first_output_warned: false,
         commit_tracker,
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
@@ -776,6 +824,19 @@ pub(super) fn proxied_stream_body(
 
             let chunk_outcome = if let Some(deadline) = first_semantic_deadline {
                 if !state.usable_output_seen {
+                    // E6: first output stalled past the warn threshold — make
+                    // it visible (warn + awaiting_first_output phase) without
+                    // touching the hard timeout.
+                    if !state.first_output_warned && deadline.should_warn() {
+                        state.first_output_warned = true;
+                        warn_first_output_stalled(
+                            &state.body_read_diagnostic_context.request_id,
+                            Some(&state.body_read_diagnostic_context.upstream_id),
+                            deadline.elapsed_since_start().as_millis() as u64,
+                            deadline.warn_after().as_secs(),
+                            state.log_context.as_ref(),
+                        );
+                    }
                     tokio::select! {
                         biased;
                         _ = tokio::time::sleep_until(deadline.deadline()) => {
@@ -969,6 +1030,9 @@ struct ProxiedStreamState {
     semantic_terminal_emitted: bool,
     usable_output_seen: bool,
     usage_log_flushed: bool,
+    // E6: one-shot warn when the first semantic output stalls past
+    // `upstream_first_output_warn_after_seconds` (visibility only).
+    first_output_warned: bool,
     commit_tracker: stream_commit::StreamCommitTracker,
 }
 
@@ -1539,6 +1603,7 @@ pub(super) fn translated_stream_body(
         usable_output_observed: false,
         usable_output_delivered: false,
         usage_log_flushed: false,
+        first_output_warned: false,
         commit_tracker,
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
@@ -1578,6 +1643,17 @@ pub(super) fn translated_stream_body(
 
             let chunk_outcome = if let Some(deadline) = first_semantic_deadline {
                 if !state.usable_output_observed {
+                    // E6: see the identical guard in proxied_stream_body.
+                    if !state.first_output_warned && deadline.should_warn() {
+                        state.first_output_warned = true;
+                        warn_first_output_stalled(
+                            &state.body_read_diagnostic_context.request_id,
+                            Some(&state.body_read_diagnostic_context.upstream_id),
+                            deadline.elapsed_since_start().as_millis() as u64,
+                            deadline.warn_after().as_secs(),
+                            state.log_context.as_ref(),
+                        );
+                    }
                     tokio::select! {
                         biased;
                         _ = tokio::time::sleep_until(deadline.deadline()) => {
@@ -1753,6 +1829,9 @@ struct TranslatedStreamState {
     usable_output_observed: bool,
     usable_output_delivered: bool,
     usage_log_flushed: bool,
+    // E6: one-shot warn when the first semantic output stalls past
+    // `upstream_first_output_warn_after_seconds` (visibility only).
+    first_output_warned: bool,
     commit_tracker: stream_commit::StreamCommitTracker,
 }
 
