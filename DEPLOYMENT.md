@@ -273,7 +273,25 @@ Keep these as-is for the aggregated-gateway shape:
 
 - **Concurrency capacity (the other half of `upstream_routes_exhausted`):**
   each upstream admits at most `max_concurrency` concurrent streams per
-  (upstream, key) — default **4**.
+  (upstream, key) — default **32** for newly created upstreams (E4).  Existing
+  deployments keep their persisted value; see the batch-adjustment note below.
+  **Semantics changed (E4): `max_concurrency` is no longer a "master gate"
+  that tries to mirror upstream capacity — it is a anti-snowball safety net.**
+  The upstream itself is the authority on its own capacity: it answers
+  honestly with 429 when saturated, and the client's retry loop converges
+  (this is exactly what happens when the client talks to the upstream
+  directly).  The gateway only enforces this net to keep a runaway client
+  from pinning every slot for minutes.  Because the local gate is a net, its
+  own rejection is cheap and never cools the route (E1) and its `Retry-After`
+  is estimated from observed lease hold times, not TTL (E3).
+
+  Batch-adjust `max_concurrency` for many upstreams at once:
+
+      POST /api/admin/upstreams/batch-update
+      { "ids": [101, 102, ...], "updates": { "max_concurrency": 32 } }
+
+  The endpoint answers per-id success/failure and 400s with the rejected
+  field names on any unknown field — it never silently ignores an update.
 
 > **`ConcurrencySaturated` has its own retry budget — do not compare rounds (C4.3).**
 > The ConcurrencySaturated path (429 family, including the gateway's own local
@@ -302,6 +320,55 @@ Keep these as-is for the aggregated-gateway shape:
   `default_upstream_max_concurrency` for upstreams without an explicit
   value. `requests_per_minute` and the 5h quota only gate **hedge** attempts,
   not primary windows, so they are rarely the limiter here.
+
+#### Why capacity-class failures never cool routes (E1/E2)
+
+Route-health cooldown means: **"this path is unhealthy, move traffic away."**
+Capacity-class failures do **not** carry any health information — the
+upstream is explicitly saying *"I am healthy, I am just full right now."*
+Writing that into the health registry is a semantic misuse.  Its concrete
+cost on the intranet shape is global breakage: a `429` from the single
+aggregated gateway (or the gateway's own local gate) cooled the *only* route
+for minutes, so the client's correct retry loop was served
+`upstream_routes_exhausted` without a single upstream request.
+
+Therefore, since the admission semantics work:
+
+- `RateLimited` / `KeyQuota` failures that are client-retryable, and the
+  local gate's `ConcurrencySaturated`, are **capacity class**: they are
+  observed (`last_failure_class`, counters, `last_retry_after_seconds`) but
+  never write `cooldown_until` and never advance `consecutive_failures` —
+  **including the key-level cooldown path** (`KEY_COOLDOWN_MAX` is 60
+  minutes; a 429 escalating to that would be worse than today).
+- `E2` adds a guard independent of the E1 switch: when a
+  `(runtime_model_slug, protocol)` has exactly **one** available route, any
+  capacity-class failure is unconditionally not cooled — with a single route
+  the cooldown's "switch to another path" benefit is zero and its cost is a
+  total outage.
+- The health class is a **whitelist** of exactly these capacity classes;
+  everything else — `TransientServer`, `EdgeProxyError`,
+  `CapacityUnavailable`, `ModelUnsupported`, credential failures — keeps its
+  exact previous cooldown and escalation behavior.  The upstream's own 429 is
+  now the only authority, and backpressure on a misbehaving client belongs to
+  the downstream key's `per_minute_limit`, not to route health.
+
+Controls: `upstream_capacity_failure_cooldown_enabled` (default **false** —
+setting it `true` restores the old cooldown-on-429 behavior as a rollback
+path), plus the `E2` guard is not switchable.
+
+#### How this differs from the `2026-08-27` plan (and why)
+
+The 2026-08-27 concurrency plan stated "`max_concurrency = 4` is the correct
+factory default — do not change it."  That conclusion rested on the
+assumption that *more than 4 concurrent requests would knock the upstream
+over*.  The on-site incident clarified the actual contract: the upstream
+answers honestly with 429 when saturated and the client's retry loop
+converges.  With that contract the gateway does not need to predict upstream
+capacity — doing so with a stale, leased-slot count is strictly worse than
+letting the upstream answer.  The correct default is therefore a
+safety-net-scale number (32), and **the upstream is the authority on its own
+capacity**.  Do not "fix" the default back to 4; see the batch-update note
+above if a deployed fleet still carries the old persisted value.
 
 #### Downstream per-model concurrency groups (C7)
 
