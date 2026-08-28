@@ -3306,6 +3306,14 @@ fn parse_upstream_snapshot(
         stale_lease_count: 0,
         oldest_lease_age_seconds: 0,
         queue_depth: 0,
+        // E5.3: hold samples live in the process-local lease table (E3) and
+        // the local-gate rejection happens in Lua on Redis, so these
+        // observables are local-backend-only (0/None here, mirroring the
+        // C5 leak-reclaim counters above).
+        hold_p50_ms: None,
+        hold_p95_ms: None,
+        capacity_reject_total: 0,
+        route_cooldown_skipped_total: 0,
     })
 }
 
@@ -3342,6 +3350,10 @@ fn parse_upstream_snapshot_with_feedback(
         stale_lease_count: 0,
         oldest_lease_age_seconds: 0,
         queue_depth: 0,
+        hold_p50_ms: None,
+        hold_p95_ms: None,
+        capacity_reject_total: 0,
+        route_cooldown_skipped_total: 0,
     })
 }
 

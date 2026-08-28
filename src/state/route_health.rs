@@ -17,6 +17,8 @@ use super::types::{
 use super::AppState;
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
+use crate::util::unix_seconds;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -600,6 +602,12 @@ pub struct RouteHealthRegistry {
     /// consecutive_failures advance), so a client's retry loop can keep
     /// hitting the (possibly only) route instead of being locked out.
     capacity_failure_cooldown_enabled: bool,
+    /// E5.3: per-upstream cumulative count of times E1/E2 skipped a route/key
+    /// cooldown for a capacity-class failure (recorded as observation only).
+    /// The incubating incidents never cool a route, and this counter is how
+    /// an operator can see the capacity pressure the gateway absorbed instead
+    /// of treating it as route failure.
+    cooldown_skipped_total: HashMap<String, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -618,6 +626,27 @@ pub struct HealthStateSnapshot {
     pub cooldown_remaining: Duration,
     pub half_open: bool,
     pub half_open_remaining: Duration,
+}
+
+/// E5.4: one cold, serializable view of a single route's health state —
+/// the exact "which route is cooled, by what class, until when" an operator
+/// must see to tell "the route is bad" (health-class failure, cooldown
+/// expected) from "the route is merely busy" (E1/E2 capacity-class failure
+/// that intentionally never cools).  Absent `cooldown_until_unix` means the
+/// route is not cooling; the row still exists so the admin surface can show
+/// every configured virtual route.
+#[derive(Clone, Debug, Serialize)]
+pub struct RouteHealthDetailDto {
+    pub upstream_id: String,
+    pub key_fingerprint: String,
+    pub runtime_model_slug: String,
+    pub protocol: WireProtocol,
+    pub cooldown_until_unix: Option<u64>,
+    pub cooldown_remaining_ms: u64,
+    pub half_open: bool,
+    pub consecutive_failures: u32,
+    pub last_failure_class: Option<String>,
+    pub last_failure_status: Option<u16>,
 }
 
 impl std::fmt::Debug for RouteHealthRegistry {
@@ -703,6 +732,7 @@ impl RouteHealthRegistry {
             half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
             credentials_first_strike: Duration::from_secs(credentials_first_strike_seconds.max(1)),
             capacity_failure_cooldown_enabled,
+            cooldown_skipped_total: HashMap::new(),
         }
     }
 
@@ -789,6 +819,39 @@ impl RouteHealthRegistry {
         self.keys
             .get(key)
             .map(|state| health_snapshot(state, Instant::now()))
+    }
+
+    /// E5.4: cold detail snapshot of every tracked route (see
+    /// [`RouteHealthDetailDto`]).  `cooldown_until_unix` is best-effort
+    /// wall-clock (computed from the remaining cooldown at snapshot time).
+    pub fn route_health_detail_snapshots(&self) -> Vec<RouteHealthDetailDto> {
+        let now = Instant::now();
+        self.routes
+            .iter()
+            .map(|(route, state)| {
+                let cooldown_remaining = state.retry_after(now);
+                RouteHealthDetailDto {
+                    upstream_id: route.upstream_id.clone(),
+                    key_fingerprint: route.key_fingerprint.clone(),
+                    runtime_model_slug: route.runtime_model_slug.clone(),
+                    protocol: route.protocol,
+                    cooldown_until_unix: (!cooldown_remaining.is_zero()).then(|| {
+                        unix_seconds().saturating_add(cooldown_remaining.as_secs().max(1))
+                    }),
+                    cooldown_remaining_ms: cooldown_remaining.as_millis().min(u64::MAX as u128)
+                        as u64,
+                    half_open: state.half_open_generation.is_some()
+                        && state
+                            .half_open_expires_at
+                            .is_some_and(|expires_at| expires_at > now),
+                    consecutive_failures: state.consecutive_failures,
+                    last_failure_class: state
+                        .last_failure_class
+                        .map(|class| class.as_str().to_string()),
+                    last_failure_status: state.last_failure_status,
+                }
+            })
+            .collect()
     }
 
     pub fn earliest_temporary_recovery(&self, routes: &[RouteHealthKey]) -> Option<RouteRecovery> {
@@ -899,6 +962,15 @@ impl RouteHealthRegistry {
 
     pub fn key_count(&self) -> usize {
         self.keys.len()
+    }
+
+    /// E5.3: cumulative count of E1 route/key cooldown skips for `upstream_id`
+    /// (capacity-class failures recorded as observations only).
+    pub fn cooldown_skipped_total(&self, upstream_id: &str) -> u64 {
+        self.cooldown_skipped_total
+            .get(upstream_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn aggregate_count(&self) -> usize {
@@ -1528,6 +1600,10 @@ impl RouteHealthRegistry {
         if !self.ensure_route_capacity(route, now) {
             return;
         }
+        *self
+            .cooldown_skipped_total
+            .entry(route.upstream_id.clone())
+            .or_insert(0) += 1;
         let state = self
             .routes
             .entry(route.clone())
@@ -1609,6 +1685,10 @@ impl RouteHealthRegistry {
         if !self.ensure_key_capacity(key, now) {
             return;
         }
+        *self
+            .cooldown_skipped_total
+            .entry(key.upstream_id.clone())
+            .or_insert(0) += 1;
         let state = self
             .keys
             .entry(key.clone())

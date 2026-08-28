@@ -131,10 +131,10 @@ pub use model_qualification::{
 };
 pub use route_health::{
     normalize_concurrency_probe_delays, HealthLease, HealthStateSnapshot, KeyHealthKey,
-    RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteHealthRegistry, RouteOutcome,
-    RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
-    DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS, HALF_OPEN_BUSY_RETRY, ROUTE_HEALTH_GLOBAL_CAPACITY,
-    ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+    RouteAvailability, RouteHealthDetailDto, RouteHealthKey, RouteHealthPermit,
+    RouteHealthRegistry, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+    HALF_OPEN_BUSY_RETRY, ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 use runtime_settings::differing_runtime_setting_fields;
 pub use runtime_settings::{
@@ -164,7 +164,8 @@ pub use types::{
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
     DEFAULT_UPSTREAM_CREDENTIALS_FIRST_STRIKE_SECONDS, DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_ENABLED,
-    DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    DEFAULT_UPSTREAM_ERROR_BODY_EXCERPT_MAX_CHARS,
+    DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
     DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
@@ -631,6 +632,14 @@ pub struct AppState {
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_runtime: Arc<StdMutex<HashMap<DownstreamLeaseKey, DownstreamLeaseState>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
+    /// E5.1: sliding-window count of client-visible *retryable-capacity*
+    /// terminal errors (code/category `upstream_routes_exhausted`,
+    /// `gateway_concurrency_saturated`, or the upstream 429
+    /// `upstream_rate_limited`), keyed by `(downstream_id, model)`.  A count
+    /// far above the real request rate for a key is the client-retry-loop
+    /// tell — the exact shape of the E-admission incidents where the gateway
+    /// kept answering 429/exhausted while the client hammered it.
+    retry_terminal: Arc<StdMutex<HashMap<(String, String), VecDeque<u64>>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
     fallback_stage_failures: Arc<StdMutex<HashMap<String, u8>>>,
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
@@ -1097,6 +1106,7 @@ impl AppState {
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
+            retry_terminal: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
@@ -1180,6 +1190,7 @@ impl AppState {
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
+            retry_terminal: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
@@ -1258,6 +1269,7 @@ impl AppState {
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
+            retry_terminal: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
@@ -2010,6 +2022,20 @@ impl AppState {
             return coordinator.route_health_snapshots(upstreams).await;
         }
         Ok(self.route_health.lock().await.upstream_snapshots(upstreams))
+    }
+
+    /// E5.4: cold per-route health detail (cooldown_until + last_failure_class
+    /// + streak) for the admin surface.  The Redis backend keeps route health
+    /// inside Lua and exposes only aggregate counts; per-route detail is a
+    /// local-backend-only view for now.
+    pub async fn route_health_detail_snapshots(&self) -> Vec<RouteHealthDetailDto> {
+        if let RuntimeCoordinationBackend::Redis(_) = &self.runtime_coordination {
+            return Vec::new();
+        }
+        self.route_health
+            .lock()
+            .await
+            .route_health_detail_snapshots()
     }
 
     pub fn runtime_capability_hints_snapshot(&self) -> RuntimeCapabilityHintSnapshot {
@@ -2878,6 +2904,9 @@ impl AppState {
                 last_event_at: now,
                 status: "routing".to_string(),
                 error_category: None,
+                // E5.2: entering the routing loop = still selecting a route.
+                phase: "selecting".to_string(),
+                queue_position: None,
             },
         );
     }
@@ -2898,6 +2927,42 @@ impl AppState {
             request.upstream_name = Some(upstream_name.to_string());
             request.last_event_at = now;
             request.status = "upstream".to_string();
+            // E5.2: a real upstream was chosen and the request is sent out.
+            request.phase = "dispatched".to_string();
+            request.queue_position = None;
+        }
+    }
+
+    /// E5.2: the request is parked in the C3 local-slot queue (local gate
+    /// full, `upstream_account_queue_enabled`).  `queue_position` is the
+    /// position in line as observed when the request joins (1-based best
+    /// effort).  Distinguishes "queued behind a real slot" from "still
+    /// choosing a route" — both previously looked like `upstream_id.is_none()`.
+    pub fn mark_active_gateway_request_queued(&self, request_id: &str, queue_position: usize) {
+        let now = unix_seconds();
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        if let Some(request) = active.get_mut(request_id) {
+            request.last_event_at = now;
+            request.phase = "queued_local".to_string();
+            request.queue_position = Some(queue_position.max(1));
+        }
+    }
+
+    /// E5.2: first semantic output has not arrived past the E6 warn threshold
+    /// — mark the request as stuck waiting for the first byte/token.  The
+    /// timeout itself is unchanged (E6 only adds visibility).
+    pub fn mark_active_gateway_request_awaiting_first_output(&self, request_id: &str) {
+        let now = unix_seconds();
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        if let Some(request) = active.get_mut(request_id) {
+            request.last_event_at = now;
+            request.phase = "awaiting_first_output".to_string();
         }
     }
 
@@ -2910,6 +2975,8 @@ impl AppState {
         if let Some(request) = active.get_mut(request_id) {
             request.last_event_at = now;
             request.status = "streaming".to_string();
+            request.phase = "streaming".to_string();
+            request.queue_position = None;
         }
     }
 
@@ -2930,7 +2997,73 @@ impl AppState {
             request.status = "error".to_string();
             request.error_category = Some(error_category.into());
             request.last_event_at = unix_seconds();
+            // E5.1: a terminal retryable-capacity error handed to the client
+            // is the retry-loop signal.  The categories are exactly the three
+            // incident fingerprints: routes exhausted, local gate saturated,
+            // and the upstream 429 family.  Keyed by (downstream_id, model).
+            match request.error_category.as_deref() {
+                Some(
+                    "upstream_routes_exhausted"
+                    | "gateway_concurrency_saturated"
+                    | "upstream_rate_limited",
+                ) => {
+                    self.record_retry_terminal(&request.downstream_id, &request.model);
+                }
+                _ => {}
+            }
         }
+    }
+
+    /// E5.1: record one retryable-capacity terminal error for
+    /// `(downstream_id, model)` inside the sliding window, pruning entries
+    /// older than [`RETRY_AMPLIFICATION_WINDOW_SECONDS`].
+    fn record_retry_terminal(&self, downstream_id: &str, model: &str) {
+        let now = unix_seconds();
+        let window = RETRY_AMPLIFICATION_WINDOW_SECONDS;
+        let mut counts = self
+            .retry_terminal
+            .lock()
+            .expect("retry terminal lock poisoned");
+        let bucket = counts
+            .entry((downstream_id.to_string(), model.to_string()))
+            .or_default();
+        let cutoff = now.saturating_sub(window);
+        while bucket.front().is_some_and(|t| *t <= cutoff) {
+            bucket.pop_front();
+        }
+        bucket.push_back(now);
+    }
+
+    /// E5.1: snapshot of the retry-amplification metric over
+    /// `window_seconds`, pruned and sorted by count descending.
+    pub fn retry_terminal_snapshot(&self, window_seconds: u64) -> Vec<RetryTerminalPoint> {
+        let now = unix_seconds();
+        let window = window_seconds.max(1);
+        let cutoff = now.saturating_sub(window);
+        let mut counts = self
+            .retry_terminal
+            .lock()
+            .expect("retry terminal lock poisoned");
+        let mut points = Vec::new();
+        for ((downstream_id, model), bucket) in counts.iter_mut() {
+            while bucket.front().is_some_and(|t| *t <= cutoff) {
+                bucket.pop_front();
+            }
+            if !bucket.is_empty() {
+                points.push(RetryTerminalPoint {
+                    downstream_id: downstream_id.clone(),
+                    model: model.clone(),
+                    count: bucket.len() as u64,
+                });
+            }
+        }
+        points.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.downstream_id.cmp(&b.downstream_id))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        points
     }
 
     pub fn active_gateway_requests(
@@ -2965,6 +3098,8 @@ impl AppState {
                 idle_seconds: now.saturating_sub(request.last_event_at),
                 status: request.status.clone(),
                 error_category: request.error_category.clone(),
+                phase: request.phase.clone(),
+                queue_position: request.queue_position,
             })
             .collect::<Vec<_>>();
         requests.sort_by_key(|request| std::cmp::Reverse(request.started_at));
@@ -3908,6 +4043,12 @@ impl AppState {
                     &account,
                     now_instant,
                 );
+                // E5.3: count the safety-net rejection so the admin snapshot
+                // can tell "the gate ever fired" from "the gate never fired".
+                *table
+                    .capacity_reject_total
+                    .entry(upstream.id.clone())
+                    .or_insert(0) += 1;
                 return Err(UpstreamAdmissionError::new(
                     UpstreamAdmissionRejectionReason::LocalConcurrency,
                     "upstream request concurrency capacity is full".into(),
@@ -4118,6 +4259,22 @@ impl AppState {
             .collect::<HashMap<String, u64>>();
 
         let mut runtime_state = self.upstream_runtime_state.lock().await;
+        // E5.3: capture the route-health cooldown-skip counters under one
+        // short lock *before* the runtime-state lock is held — the map
+        // closure below cannot await, and the lease-table lock must never be
+        // nested under the route-health lock.
+        let cooldown_skipped_totals = {
+            let route_health = self.route_health.lock().await;
+            upstream_windows
+                .keys()
+                .map(|upstream_id| {
+                    (
+                        upstream_id.clone(),
+                        route_health.cooldown_skipped_total(upstream_id),
+                    )
+                })
+                .collect::<HashMap<String, u64>>()
+        };
         let now = unix_seconds();
         Ok(runtime_state
             .iter_mut()
@@ -4158,12 +4315,25 @@ impl AppState {
                     .get(upstream_id)
                     .copied()
                     .unwrap_or(0);
+                // E5.3: process-local observables read before the lease-table
+                // lock is released; the route-health counter is read under its
+                // own lock afterwards (lock ordering: never nest route_health
+                // inside the lease-table lock — no code path takes the reverse).
+                let hold_p50_ms = table.upstream_hold_p50_ms(upstream_id);
+                let hold_p95_ms = table.upstream_hold_p95_ms(upstream_id);
+                let capacity_reject_total = table.capacity_reject_total(upstream_id);
+                let in_flight = table
+                    .account_lease_count_for_upstream(upstream_id)
+                    .min(u32::MAX as usize) as u32;
+                drop(table);
+                let route_cooldown_skipped_total = cooldown_skipped_totals
+                    .get(upstream_id)
+                    .copied()
+                    .unwrap_or(0);
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
-                        in_flight: table
-                            .account_lease_count_for_upstream(upstream_id)
-                            .min(u32::MAX as usize) as u32,
+                        in_flight,
                         minute_cost: quota_event_cost(&state.minute_events),
                         five_hour_cost: quota_event_cost(&state.five_hour_events),
                         cooldown_until: state.cooldown_until,
@@ -4174,6 +4344,10 @@ impl AppState {
                         queue_depth: self
                             .upstream_slot_waiter_count(upstream_id)
                             .min(u32::MAX as usize) as u32,
+                        hold_p50_ms,
+                        hold_p95_ms,
+                        capacity_reject_total,
+                        route_cooldown_skipped_total,
                     },
                 )
             })
@@ -4384,6 +4558,21 @@ impl AppState {
             .collect::<HashMap<String, u64>>();
 
         let mut runtime_state = self.upstream_runtime_state.lock().await;
+        // E5.3: see `upstream_runtime_snapshots` — the counter snapshot is
+        // taken here (before the lease table is accessed) so the map closure
+        // below needs no await and no lock nesting.
+        let cooldown_skipped_totals = {
+            let route_health = self.route_health.lock().await;
+            upstream_windows
+                .keys()
+                .map(|upstream_id| {
+                    (
+                        upstream_id.clone(),
+                        route_health.cooldown_skipped_total(upstream_id),
+                    )
+                })
+                .collect::<HashMap<String, u64>>()
+        };
         let now = unix_seconds();
 
         Ok(upstream_windows
@@ -4423,6 +4612,16 @@ impl AppState {
                     .get(&upstream_id)
                     .copied()
                     .unwrap_or(0);
+                // E5.3: process-local observables (hold samples, gate rejects)
+                // read from the lease table before its lock is dropped; the
+                // route-health skip counter comes from the pre-taken snapshot.
+                let hold_p50_ms = table.upstream_hold_p50_ms(&upstream_id);
+                let hold_p95_ms = table.upstream_hold_p95_ms(&upstream_id);
+                let capacity_reject_total = table.capacity_reject_total(&upstream_id);
+                let route_cooldown_skipped_total = cooldown_skipped_totals
+                    .get(&upstream_id)
+                    .copied()
+                    .unwrap_or(0);
 
                 let snapshot = UpstreamRuntimeSnapshotWithFeedback {
                     in_flight: table
@@ -4441,6 +4640,10 @@ impl AppState {
                     queue_depth: self
                         .upstream_slot_waiter_count(&upstream_id)
                         .min(u32::MAX as usize) as u32,
+                    hold_p50_ms,
+                    hold_p95_ms,
+                    capacity_reject_total,
+                    route_cooldown_skipped_total,
                 };
 
                 (upstream_id, snapshot)
@@ -6977,6 +7180,12 @@ pub struct UpstreamLeaseTable {
     /// Kept separate from `leaked_reclaimed_total` so an operator can tell the
     /// two reclaim modes apart.
     stale_reclaimed_total: HashMap<String, u64>,
+    /// E5.3: per-upstream cumulative count of local-gate rejections
+    /// (`LocalConcurrency` — the pre-dispatch slot gate said "full").  With
+    /// C3/E4 this is now the *snowplow safety net* firing (or the E4.2
+    /// skip-queue fast-fail), so a non-zero value is the tell that the
+    /// upstream's real concurrency was saturated at the gateway's own gate.
+    capacity_reject_total: HashMap<String, u64>,
 }
 
 impl UpstreamLeaseTable {
@@ -7163,6 +7372,57 @@ impl UpstreamLeaseTable {
         holds.sort_unstable();
         let idx = ((holds.len() as f64) * 0.95).ceil() as usize;
         Some(holds[idx.saturating_sub(1).min(holds.len() - 1)].as_secs())
+    }
+
+    /// E5.3: p50 observed hold duration for `upstream_id` across all its
+    /// accounts, in milliseconds (aggregates the per-account `hold_samples`).
+    /// `None` when fewer than two samples exist for the upstream overall.
+    fn upstream_hold_p50_ms(&self, upstream_id: &str) -> Option<u64> {
+        let mut holds = self
+            .hold_samples
+            .iter()
+            .filter(|(account, _)| account.upstream_id == upstream_id)
+            .flat_map(|(_, samples)| samples.iter().copied())
+            .collect::<Vec<_>>();
+        if holds.len() < 2 {
+            return None;
+        }
+        holds.sort_unstable();
+        let idx = ((holds.len() as f64) * 0.50).ceil() as usize;
+        Some(
+            holds[idx.saturating_sub(1).min(holds.len() - 1)]
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        )
+    }
+
+    /// E5.3: p95 observed hold duration for `upstream_id` across all its
+    /// accounts, in milliseconds (see [`Self::upstream_hold_p50_ms`]).
+    fn upstream_hold_p95_ms(&self, upstream_id: &str) -> Option<u64> {
+        let mut holds = self
+            .hold_samples
+            .iter()
+            .filter(|(account, _)| account.upstream_id == upstream_id)
+            .flat_map(|(_, samples)| samples.iter().copied())
+            .collect::<Vec<_>>();
+        if holds.len() < 2 {
+            return None;
+        }
+        holds.sort_unstable();
+        let idx = ((holds.len() as f64) * 0.95).ceil() as usize;
+        Some(
+            holds[idx.saturating_sub(1).min(holds.len() - 1)]
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        )
+    }
+
+    /// E5.3: cumulative local-gate rejections for `upstream_id`.
+    fn capacity_reject_total(&self, upstream_id: &str) -> u64 {
+        self.capacity_reject_total
+            .get(upstream_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// E3: the longest *already-held* duration among `account`'s live leases
@@ -7376,6 +7636,22 @@ pub struct UpstreamRuntimeSnapshot {
     /// it is meaningful on both backends; the queue itself is a per-process
     /// in-memory structure.
     pub queue_depth: u32,
+    /// E5.3: median observed lease hold duration across this upstream's
+    /// accounts, milliseconds (E3 samples: release − reserve).  `None` until
+    /// at least two samples exist — the honest "we don't know yet" (0 on the
+    /// Redis backend, which keeps leases in Lua).
+    pub hold_p50_ms: Option<u64>,
+    /// E5.3: p95 observed lease hold duration, milliseconds (see
+    /// `hold_p50_ms`).
+    pub hold_p95_ms: Option<u64>,
+    /// E5.3: cumulative local-gate (pre-dispatch slot) rejections for this
+    /// upstream.  A non-zero value means the E4 safety net actually fired.
+    /// Local backend only — the Redis backend enforces concurrency inside Lua.
+    pub capacity_reject_total: u64,
+    /// E5.3: cumulative count of E1 route/key cooldown skips (capacity-class
+    /// failure recorded as observation only) for this upstream.  Local
+    /// backend only (Redis route health lives in Lua).
+    pub route_cooldown_skipped_total: u64,
 }
 
 impl UpstreamRuntimeSnapshot {
@@ -7406,6 +7682,14 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub oldest_lease_age_seconds: u64,
     /// C5.1: see `UpstreamRuntimeSnapshot::queue_depth`.
     pub queue_depth: u32,
+    /// E5.3: see `UpstreamRuntimeSnapshot::hold_p50_ms`.
+    pub hold_p50_ms: Option<u64>,
+    /// E5.3: see `UpstreamRuntimeSnapshot::hold_p95_ms`.
+    pub hold_p95_ms: Option<u64>,
+    /// E5.3: see `UpstreamRuntimeSnapshot::capacity_reject_total`.
+    pub capacity_reject_total: u64,
+    /// E5.3: see `UpstreamRuntimeSnapshot::route_cooldown_skipped_total`.
+    pub route_cooldown_skipped_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -7418,6 +7702,23 @@ pub struct ActiveGatewayRequestStart {
     pub protocol: String,
     pub user_agent: Option<String>,
 }
+
+/// E5.1: one row of the retry-amplification metric — how many
+/// client-visible retryable-capacity terminal errors (`upstream_routes_exhausted` /
+/// `gateway_concurrency_saturated` / upstream 429) this `(downstream_id, model)`
+/// pair received inside the requested window.  A `count` far above the real
+/// request rate is the retry-loop tell.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetryTerminalPoint {
+    pub downstream_id: String,
+    pub model: String,
+    pub count: u64,
+}
+
+/// E5.1: default sliding-window length for the retry-amplification metric
+/// (seconds).  Five minutes matches a client's typical fast retry loop while
+/// staying cheap to keep in memory.
+pub const RETRY_AMPLIFICATION_WINDOW_SECONDS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ActiveGatewayRequestSnapshot {
@@ -7436,6 +7737,14 @@ pub struct ActiveGatewayRequestSnapshot {
     pub idle_seconds: u64,
     pub status: String,
     pub error_category: Option<String>,
+    /// E5.2: lifecycle phase — `selecting` / `queued_local` / `dispatched` /
+    /// `streaming` / `awaiting_first_output`.  `status` stays the coarse
+    /// routing/upstream/streaming/error label for backward compat; `phase`
+    /// is the fine-grained view that distinguishes "queued for a local slot"
+    /// from "still choosing a route".
+    pub phase: String,
+    /// E5.2: position in the C3 local-slot queue when `phase == queued_local`.
+    pub queue_position: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -7453,6 +7762,10 @@ struct ActiveGatewayRequest {
     last_event_at: u64,
     status: String,
     error_category: Option<String>,
+    /// E5.2: see `ActiveGatewayRequestSnapshot::phase`.
+    phase: String,
+    /// E5.2: see `ActiveGatewayRequestSnapshot::queue_position`.
+    queue_position: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

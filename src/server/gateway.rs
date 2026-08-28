@@ -866,6 +866,10 @@ async fn wait_for_local_slot_free(
     request_id: &str,
 ) -> Result<bool, GatewayError> {
     let queue_position = state.local_slot_waiter_count(account_key) + 1;
+    // E5.2: the request is now parked in the C3 local-slot queue — mark the
+    // active-request phase so the admin in-flight list can distinguish
+    // "waiting for a real slot" from "still choosing a route".
+    state.mark_active_gateway_request_queued(request_id, queue_position);
     if !state.try_enter_local_slot_wait(account_key, max_depth) {
         return Ok(false);
     }
@@ -2551,6 +2555,13 @@ pub fn build_router(state: AppState) -> Router {
             get(admin_troubleshooting_active_requests).route_layer(
                 axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
             ),
+        )
+        .route(
+            "/api/admin/retry-amplification",
+            get(admin_retry_amplification).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
         )
         // Portal API
         .route("/api/portal/login", post(portal_login))

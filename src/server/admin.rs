@@ -6,9 +6,10 @@ use crate::state::{
     DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig,
     DownstreamUsageSummary, EnrichedUsageLog, FreekeySyncError, FreekeySyncItem,
     GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
-    ModelQualificationEvidence, ModelQualificationLevel, ResolvedLogWindow, RouteHealthSnapshotDto,
-    RuntimeCoordinationError, RuntimeSettings, RuntimeSettingsUpdateError, SummaryRange,
-    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    ModelQualificationEvidence, ModelQualificationLevel, ResolvedLogWindow, RouteHealthDetailDto,
+    RouteHealthSnapshotDto, RuntimeCoordinationError, RuntimeSettings, RuntimeSettingsUpdateError,
+    SummaryRange, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog,
+    UsageLogQuery,
 };
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, Query, State};
@@ -577,6 +578,17 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         Ok(snapshots) => snapshots,
         Err(_) => return runtime_coordination_unavailable_admin_response(),
     };
+    // E5.4: per-route detail (cooldown_until + last_failure_class) so the
+    // admin page can show exactly which virtual route is cooled and by what.
+    let route_health_details = state.route_health_detail_snapshots().await;
+    let mut route_health_details_by_upstream: HashMap<String, Vec<RouteHealthDetailDto>> =
+        HashMap::new();
+    for detail in route_health_details {
+        route_health_details_by_upstream
+            .entry(detail.upstream_id.clone())
+            .or_default()
+            .push(detail);
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -588,6 +600,8 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         config: UpstreamConfig,
         runtime_state: Option<UpstreamRuntimeStateResponse>,
         route_health: RouteHealthSnapshotDto,
+        // E5.4: per-virtual-route health detail for this upstream.
+        route_health_details: Vec<RouteHealthDetailDto>,
     }
 
     #[derive(serde::Serialize)]
@@ -606,6 +620,12 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         five_hour_percentage: f64,
         cooldown_until: u64,
         cooldown_remaining: u64,
+        // E5.3: process-local hold-duration statistics, local-gate reject
+        // total and E1 cooldown-skip total.  None/0 on the Redis backend.
+        hold_p50_ms: Option<u64>,
+        hold_p95_ms: Option<u64>,
+        capacity_reject_total: u64,
+        route_cooldown_skipped_total: u64,
     }
 
     let mut upstreams_with_runtime = Vec::with_capacity(snapshot.upstreams.len());
@@ -638,6 +658,10 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
                 five_hour_percentage,
                 cooldown_until: runtime.cooldown_until,
                 cooldown_remaining: runtime.cooldown_remaining(now),
+                hold_p50_ms: runtime.hold_p50_ms,
+                hold_p95_ms: runtime.hold_p95_ms,
+                capacity_reject_total: runtime.capacity_reject_total,
+                route_cooldown_skipped_total: runtime.route_cooldown_skipped_total,
             }
         });
 
@@ -645,6 +669,9 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
             route_health: route_health_snapshots
                 .get(&config.id)
                 .cloned()
+                .unwrap_or_default(),
+            route_health_details: route_health_details_by_upstream
+                .remove(&config.id)
                 .unwrap_or_default(),
             config,
             runtime_state,

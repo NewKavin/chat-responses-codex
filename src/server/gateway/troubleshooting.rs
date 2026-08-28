@@ -4,9 +4,9 @@ use super::compatibility_semantics::{
 };
 use crate::capabilities::AgentClientProfile;
 use crate::keys::upstream_key_fingerprint;
-use crate::state::{unix_seconds, AppState};
+use crate::state::{unix_seconds, AppState, RETRY_AMPLIFICATION_WINDOW_SECONDS};
 use axum::body::{to_bytes, Body};
-use axum::extract::{Json, State};
+use axum::extract::{Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::BytesMut;
@@ -271,6 +271,30 @@ pub(super) async fn admin_troubleshooting_active_requests(
 ) -> Response {
     Json(json!({
         "active_requests": state.active_gateway_requests(None)
+    }))
+    .into_response()
+}
+
+/// E5.1: retry-amplification metric — per `(downstream_id, model)` count of
+/// client-visible retryable-capacity terminal errors inside the sliding
+/// window.  A count far above the real request rate for a key is the
+/// client-retry-loop tell that led to the admission incidents; without it the
+/// only way to find the problem was reading code.
+pub(super) async fn admin_retry_amplification(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let window_seconds = params
+        .get("window_seconds")
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(RETRY_AMPLIFICATION_WINDOW_SECONDS)
+        .clamp(60, 3600);
+    let points = state.retry_terminal_snapshot(window_seconds);
+    let total = points.iter().map(|point| point.count).sum::<u64>();
+    Json(json!({
+        "window_seconds": window_seconds,
+        "total": total,
+        "points": points,
     }))
     .into_response()
 }

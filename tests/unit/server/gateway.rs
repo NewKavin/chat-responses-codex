@@ -3966,3 +3966,106 @@ fn correction_for_response_keeps_three_guards() {
         None
     );
 }
+
+// ── E5.1 / E5.2: retry-amplification metric + active-request phase ─────────
+
+/// E5.1: client-visible retryable-capacity terminal errors are counted per
+/// (downstream_id, model) inside the sliding window; other terminal
+/// categories must not move the counter.
+#[tokio::test]
+async fn e51_retry_terminal_counts_capacity_errors_per_downstream_model() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let mut start = crate::state::ActiveGatewayRequestStart {
+        request_id: "req-1".into(),
+        downstream_id: "down-a".into(),
+        downstream_name: "down-a".into(),
+        endpoint: "/v1/responses".into(),
+        model: "glm-5.2".into(),
+        protocol: "Responses".into(),
+        user_agent: None,
+    };
+    // Three terminal retryable-capacity errors for the same pair.
+    for index in 0..3 {
+        start.request_id = format!("req-{}", index + 1);
+        state.start_active_gateway_request(start.clone());
+        state.fail_active_gateway_request(
+            &format!("req-{}", index + 1),
+            "upstream_routes_exhausted",
+        );
+        state.finish_active_gateway_request(&format!("req-{}", index + 1));
+    }
+    // A non-capacity terminal category must not count.
+    start.request_id = "req-capacity-other".into();
+    state.start_active_gateway_request(start.clone());
+    state.fail_active_gateway_request("req-capacity-other", "model_not_supported");
+    state.finish_active_gateway_request("req-capacity-other");
+
+    let points = state.retry_terminal_snapshot(crate::state::RETRY_AMPLIFICATION_WINDOW_SECONDS);
+    let point = points
+        .iter()
+        .find(|point| point.downstream_id == "down-a" && point.model == "glm-5.2")
+        .expect("the retry-amplification row must exist");
+    assert_eq!(point.count, 3);
+}
+
+/// E5.2: the active-request lifecycle exposes the five phases and the local
+/// queue position.
+#[tokio::test]
+async fn e52_active_request_phase_lifecycle_and_queue_position() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    state.start_active_gateway_request(crate::state::ActiveGatewayRequestStart {
+        request_id: "phase-req".into(),
+        downstream_id: "down-b".into(),
+        downstream_name: "down-b".into(),
+        endpoint: "/v1/responses".into(),
+        model: "deepseek-v4".into(),
+        protocol: "Responses".into(),
+        user_agent: None,
+    });
+
+    let find = || {
+        state
+            .active_gateway_requests(None)
+            .into_iter()
+            .find(|request| request.request_id == "phase-req")
+            .expect("request must be tracked")
+    };
+
+    assert_eq!(find().phase, "selecting");
+    assert!(find().queue_position.is_none());
+
+    state.mark_active_gateway_request_queued("phase-req", 3);
+    let queued = find();
+    assert_eq!(queued.phase, "queued_local");
+    assert_eq!(queued.queue_position, Some(3));
+
+    state.mark_active_gateway_request_upstream("phase-req", "up-1", "upstream one");
+    assert_eq!(find().phase, "dispatched");
+
+    state.touch_active_gateway_request("phase-req");
+    assert_eq!(find().phase, "streaming");
+
+    state.mark_active_gateway_request_awaiting_first_output("phase-req");
+    assert_eq!(find().phase, "awaiting_first_output");
+
+    state.finish_active_gateway_request("phase-req");
+    assert!(
+        state
+            .active_gateway_requests(None)
+            .into_iter()
+            .all(|request| request.request_id != "phase-req"),
+        "finished request must be removed from the in-flight list"
+    );
+}

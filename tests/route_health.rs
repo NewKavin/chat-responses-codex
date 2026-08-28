@@ -2489,3 +2489,83 @@ async fn concurrency_saturated_retry_after_is_exempt_from_the_local_floor() {
         "test is only meaningful if the local probe delay exceeds the hint, got {local_ms}ms"
     );
 }
+
+// ── E5.3 / E5.4: cooldown-skip accounting + per-route detail view ──────────
+
+#[test]
+fn e53_cooldown_skipped_total_tracks_e1_capacity_observations() {
+    // E1 default (capacity_failure_cooldown_enabled = false): a 429-family
+    // (RateLimited) failure is recorded as an observation only and counted in
+    // cooldown_skipped_total — the number of times the gateway absorbed
+    // capacity pressure instead of cooling the route.  Health-class failures
+    // must not move the counter.
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("e53-skip", "e53-skip-model");
+    assert_eq!(registry.cooldown_skipped_total("up-1"), 0);
+
+    registry.observe_route_failure(&route, RouteFailureClass::RateLimited, None, false);
+    assert_eq!(
+        registry.cooldown_skipped_total("up-1"),
+        1,
+        "a capacity-class observation counts as one skipped cooldown"
+    );
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    assert_eq!(
+        registry.cooldown_skipped_total("up-1"),
+        1,
+        "a health-class failure must not increment the skip counter"
+    );
+}
+
+#[test]
+fn e54_route_health_detail_exposes_health_class_cooldown() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("e54-health", "e54-health-model");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+
+    let details = registry.route_health_detail_snapshots();
+    let entry = details
+        .iter()
+        .find(|detail| detail.runtime_model_slug == "e54-health-model")
+        .expect("the route detail row must be present");
+    assert_eq!(entry.upstream_id, "up-1");
+    assert_eq!(
+        entry.last_failure_class.as_deref(),
+        Some("transient_server")
+    );
+    assert!(
+        entry.cooldown_until_unix.is_some(),
+        "a health-class failure must cool the route"
+    );
+    assert!(entry.cooldown_remaining_ms > 0);
+    assert!(entry.consecutive_failures > 0);
+    assert!(!entry.half_open);
+}
+
+#[test]
+fn e54_route_health_detail_shows_capacity_class_observation_only() {
+    // E1 default (switch off): RateLimited never cools a route — the detail
+    // row must expose the class (so the operator can see what happened) but
+    // no cooldown and no consecutive-failure advance.
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("e54-capacity", "e54-capacity-model");
+
+    registry.observe_route_failure(&route, RouteFailureClass::RateLimited, None, false);
+
+    let details = registry.route_health_detail_snapshots();
+    let entry = details
+        .iter()
+        .find(|detail| detail.runtime_model_slug == "e54-capacity-model")
+        .expect("the route detail row must be present");
+    assert_eq!(entry.last_failure_class.as_deref(), Some("rate_limited"));
+    assert!(
+        entry.cooldown_until_unix.is_none(),
+        "capacity-class failure must not cool (E1 default)"
+    );
+    assert_eq!(
+        entry.consecutive_failures, 0,
+        "no streak advance for capacity classes"
+    );
+}
