@@ -263,6 +263,87 @@
 
     <el-row :gutter="20" class="charts-grid">
       <el-col :xs="24">
+        <el-card shadow="hover" class="chart-card">
+          <template #header>
+            <div class="card-header card-header--trend">
+              <div>
+                <p class="card-eyebrow">LIVE // RETRY</p>
+                <h2>重试放大</h2>
+                <p>
+                  窗口内返回给客户端的容量类拒绝次数（429 / 路由耗尽）。客户端每被拒一次就会重试一次，
+                  所以这个数直接反映重试循环的规模；正常应接近 0。
+                </p>
+              </div>
+              <div class="active-requests-actions">
+                <el-radio-group v-model="retryWindowSeconds" size="small" @change="loadRetryAmplification">
+                  <el-radio-button
+                    v-for="option in RETRY_WINDOW_OPTIONS"
+                    :key="option.value"
+                    :label="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </el-radio-button>
+                </el-radio-group>
+                <el-button
+                  :icon="RefreshCw"
+                  :loading="retryLoading"
+                  size="small"
+                  circle
+                  aria-label="刷新重试放大"
+                  title="刷新重试放大"
+                  @click="loadRetryAmplification"
+                />
+              </div>
+            </div>
+          </template>
+
+          <div class="retry-headline" v-loading="retryLoading">
+            <div class="retry-figure">
+              <strong :class="`retry-figure__value retry-figure__value--${retryVerdict.type}`">
+                {{ retryTotal }}
+              </strong>
+              <span>次拒绝</span>
+            </div>
+            <div class="retry-verdict">
+              <el-tag :type="retryVerdict.type" effect="light" size="large">
+                {{ retryVerdict.label }}
+              </el-tag>
+              <p>{{ retryVerdict.hint }}</p>
+            </div>
+          </div>
+
+          <el-empty
+            v-if="!retryLoading && retryPoints.length === 0"
+            description="窗口内没有容量类拒绝"
+            :image-size="72"
+          />
+          <el-table v-else :data="retryPoints" stripe size="small" style="width: 100%">
+            <el-table-column label="下游" min-width="130" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.downstream_id }}</template>
+            </el-table-column>
+            <el-table-column label="模型" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="mono">{{ row.model }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="拒绝次数" min-width="180">
+              <template #default="{ row }">
+                <div class="retry-bar">
+                  <div class="retry-bar__track">
+                    <div class="retry-bar__fill" :style="{ width: retryBarWidth(row.count) }" />
+                  </div>
+                  <span class="retry-bar__count">{{ row.count }}</span>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="20" class="charts-grid">
+      <el-col :xs="24">
         <el-card shadow="hover" class="chart-card chart-card--trend">
           <template #header>
             <div class="card-header card-header--trend">
@@ -443,6 +524,7 @@ import SignalWave from '@/components/SignalWave.vue'
 import { adminApi } from '@/api/admin'
 import type {
   ActiveGatewayRequest,
+  RetryAmplificationPoint,
   DashboardAnalyticsRange,
   DashboardBreakdownItem,
   DashboardData,
@@ -1038,6 +1120,60 @@ const loadActiveRequests = async () => {
   }
 }
 
+const RETRY_WINDOW_OPTIONS = [
+  { label: '1 分钟', value: 60 },
+  { label: '5 分钟', value: 300 },
+  { label: '15 分钟', value: 900 },
+  { label: '60 分钟', value: 3600 }
+]
+
+const retryWindowSeconds = ref(300)
+const retryTotal = ref(0)
+const retryPoints = ref<RetryAmplificationPoint[]>([])
+const retryLoading = ref(false)
+
+/// 容量类拒绝在正常状态下应当接近 0：客户端每被拒一次就会重试一次，
+/// 所以这个计数直接反映"客户端在重试循环"的规模。阈值是经验值，
+/// 只用于染色，判断仍以趋势为准。
+const retryVerdict = computed(() => {
+  if (retryTotal.value === 0) {
+    return { label: '正常', type: 'success' as const, hint: '窗口内没有容量类拒绝，客户端没有在重试循环。' }
+  }
+  if (retryTotal.value < 10) {
+    return {
+      label: '关注',
+      type: 'warning' as const,
+      hint: '出现了少量容量类拒绝：偶发的上游并发打满属于正常，持续增长才需要处理。'
+    }
+  }
+  return {
+    label: '异常',
+    type: 'danger' as const,
+    hint: '容量类拒绝次数偏高，客户端很可能正在重试循环——检查上游并发上限与路由冷却。'
+  }
+})
+
+const retryMaxCount = computed(() =>
+  retryPoints.value.reduce((max, point) => Math.max(max, point.count), 0)
+)
+
+const retryBarWidth = (count: number) =>
+  retryMaxCount.value > 0 ? `${Math.max(4, (count / retryMaxCount.value) * 100)}%` : '0%'
+
+const loadRetryAmplification = async () => {
+  if (retryLoading.value) return
+  try {
+    retryLoading.value = true
+    const response = await adminApi.getRetryAmplification(retryWindowSeconds.value)
+    retryTotal.value = response.data.total ?? 0
+    retryPoints.value = [...(response.data.points ?? [])].sort((a, b) => b.count - a.count)
+  } catch {
+    // 保留上一次快照；仪表盘自身会报告加载失败。
+  } finally {
+    retryLoading.value = false
+  }
+}
+
 let activeRequestsTimer: ReturnType<typeof setInterval> | null = null
 
 const handleResize = () => {
@@ -1073,7 +1209,11 @@ onMounted(async () => {
   await initCharts()
   await loadDashboard()
   await loadActiveRequests()
-  activeRequestsTimer = setInterval(() => void loadActiveRequests(), 5_000)
+  await loadRetryAmplification()
+  activeRequestsTimer = setInterval(() => {
+    void loadActiveRequests()
+    void loadRetryAmplification()
+  }, 5_000)
   window.addEventListener('resize', handleResize)
 })
 
@@ -1087,6 +1227,80 @@ onUnmounted(() => {
 <style scoped>
 .dashboard-page {
   min-height: 100%;
+}
+
+.retry-headline {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 4px 0 16px;
+}
+
+.retry-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.retry-figure__value {
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.retry-figure__value--success {
+  color: var(--el-color-success);
+}
+
+.retry-figure__value--warning {
+  color: var(--el-color-warning);
+}
+
+.retry-figure__value--danger {
+  color: var(--el-color-danger);
+}
+
+.retry-verdict {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.retry-verdict p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+}
+
+.retry-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.retry-bar__track {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+  overflow: hidden;
+}
+
+.retry-bar__fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--el-color-danger);
+}
+
+.retry-bar__count {
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .active-requests-actions {

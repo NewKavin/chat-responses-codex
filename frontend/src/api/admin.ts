@@ -3,6 +3,7 @@ import type {
   Announcement,
   AnnouncementLevel,
   ActiveGatewayRequestsResponse,
+  RetryAmplificationResponse,
   CompatibilityMatrixRunRequest,
   CompatibilityMatrixRunResponse,
   CapabilityDiscoveryResponse,
@@ -414,6 +415,10 @@ export const adminApi = {
     adminHttp.post<CompatibilityMatrixRunResponse>('/admin/troubleshooting/matrix/run', data),
   getActiveTroubleshootingRequests: () =>
     adminHttp.get<ActiveGatewayRequestsResponse>('/admin/troubleshooting/active-requests'),
+  getRetryAmplification: (windowSeconds?: number) =>
+    adminHttp.get<RetryAmplificationResponse>('/admin/retry-amplification', {
+      params: windowSeconds ? { window_seconds: windowSeconds } : undefined,
+    }),
   exportCapabilities: () =>
     adminHttp.get<CapabilityExportResponse>('/admin/capabilities/export'),
   importCapabilities: (data: CapabilityConfigurationDocument) =>

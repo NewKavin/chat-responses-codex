@@ -839,6 +839,9 @@ const formatRouteFailureClasses = (health?: UpstreamConfig['route_health']) => {
   return entries.map(([key, count]) => `${failureClassLabels[key]} ${count}`).join('，')
 }
 
+const formatHoldMs = (ms: number) =>
+  ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+
 const formatRuntimeStateDetail = (row: UpstreamConfig) => {
   const rt = row.runtime_state
   if (!rt) return ''
@@ -848,6 +851,14 @@ const formatRuntimeStateDetail = (row: UpstreamConfig) => {
   if (rt.oldest_lease_age_seconds > 0) parts.push(`最旧租约 ${rt.oldest_lease_age_seconds}s`)
   if (rt.leaked_reclaimed_total > 0) parts.push(`累计泄漏回收 ${rt.leaked_reclaimed_total}`)
   if (rt.stale_reclaimed_total > 0) parts.push(`累计陈旧回收 ${rt.stale_reclaimed_total}`)
+  if (rt.hold_p50_ms != null && rt.hold_p50_ms > 0)
+    parts.push(`租约持有 p50 ${formatHoldMs(rt.hold_p50_ms)}`)
+  if (rt.hold_p95_ms != null && rt.hold_p95_ms > 0)
+    parts.push(`p95 ${formatHoldMs(rt.hold_p95_ms)}`)
+  if ((rt.capacity_reject_total ?? 0) > 0)
+    parts.push(`本地闸门拒绝 ${rt.capacity_reject_total}`)
+  if ((rt.route_cooldown_skipped_total ?? 0) > 0)
+    parts.push(`免冷却放行 ${rt.route_cooldown_skipped_total}`)
   return parts.join('，')
 }
 
