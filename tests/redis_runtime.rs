@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -824,6 +825,184 @@ async fn redis_upstream_lease_renewal_extends_lease_ttl() {
         0,
         "released Redis upstream lease must no longer count as in flight"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_gateway_heartbeat_adopts_hot_updated_lease_ttl() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel();
+    let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let release_rx = release_rx.clone();
+            async move {
+                let receiver = release_rx.lock().await.take();
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+                Json(json!({
+                "id": "chatcmpl-hot-updated-ttl",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model-a",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let mut config = redis_test_config();
+    config.upstream_local_lease_ttl_seconds = 120;
+    config.upstream_lease_stale_after_ms = 80_000;
+    config.upstream_response_header_timeout_seconds = 300;
+    config.upstream_concurrency_recovery_max_wait_ms = 30_000;
+    config.upstream_route_exhaustion_retry_max_wait_ms = 30_000;
+    let directory = tempdir().unwrap();
+    let state = AppState::load_from_path(directory.path().join("gateway.json"), config.clone())
+        .await
+        .unwrap();
+    let api_key = "hot-updated-ttl-account";
+    let upstream = UpstreamConfig {
+        id: "redis-hot-updated-ttl".into(),
+        name: "Redis hot-updated TTL".into(),
+        base_url: format!("http://{address}"),
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["model-a".into()],
+        max_concurrency: 1,
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    state.insert_upstream(upstream.clone()).await.unwrap();
+
+    let downstream_key = generate_downstream_key("redis-hot-updated-ttl");
+    let mut downstream = redis_test_downstream("redis-hot-updated-ttl-downstream");
+    downstream.hash = downstream_key.hash;
+    downstream.model_allowlist = vec!["model-a".into()];
+    downstream.rate_limit_enabled = false;
+    downstream.max_concurrency = 10;
+    state.insert_downstream(downstream).await.unwrap();
+
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "model-a",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let request_task = tokio::spawn(build_router(state.clone()).oneshot(request()));
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account = AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        upstream_key_fingerprint(&upstream.id, api_key),
+    );
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let account_lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let lease_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let members = redis_test_command(
+                &config,
+                &[
+                    "ZRANGE".into(),
+                    account_lease_key.clone(),
+                    "0".into(),
+                    "-1".into(),
+                ],
+            )
+            .await;
+            if let Some(lease_id) = members.split("\r\n").nth(2) {
+                if !lease_id.is_empty() {
+                    break lease_id.to_string();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the gateway request must reserve a Redis upstream lease");
+    let aggregate_lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
+
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let near_expiry_ms = seconds * 1_000 + micros / 1_000 + 1_000;
+    for key in [account_lease_key.clone(), aggregate_lease_key.clone()] {
+        redis_test_command(
+            &config,
+            &[
+                "ZADD".into(),
+                key,
+                near_expiry_ms.to_string(),
+                lease_id.clone(),
+            ],
+        )
+        .await;
+    }
+
+    let mut settings = state.runtime_settings().as_ref().clone();
+    settings.upstream_local_lease_ttl_seconds = 60;
+    settings.upstream_lease_stale_after_ms = 40_000;
+    state
+        .update_runtime_settings(0, settings)
+        .await
+        .expect("hot-updating the Redis lease TTL must succeed");
+
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    for key in [account_lease_key.clone(), aggregate_lease_key] {
+        let renewed_score = redis_bulk_u64(
+            &redis_test_command(&config, &["ZSCORE".into(), key, lease_id.clone()]).await,
+        );
+        assert!(
+            renewed_score >= now_ms + 45_000,
+            "a Redis heartbeat must renew immediately after a hot TTL update, got {renewed_score}"
+        );
+        assert!(
+            renewed_score <= now_ms + 75_000,
+            "the hot-updated Redis lease must use the new 60s TTL, got {renewed_score}"
+        );
+    }
+
+    release_tx.send(()).unwrap();
+    let response = request_task.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    upstream_server.abort();
 }
 
 #[tokio::test]

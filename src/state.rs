@@ -79,7 +79,7 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::fs;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use uuid::Uuid;
 
 const CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX: &str = "-fast-preview";
@@ -610,6 +610,7 @@ pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
     config_persist_lock: Arc<Mutex<()>>,
     runtime_settings: Arc<ArcSwap<RuntimeSettings>>,
+    runtime_settings_changes: watch::Sender<u64>,
     startup_runtime_settings: Arc<RuntimeSettings>,
     capability_snapshot: Arc<ArcSwap<CapabilityRuntimeSnapshot>>,
     capability_update_lock: Arc<Mutex<()>>,
@@ -1090,6 +1091,7 @@ impl AppState {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
             runtime_settings: Arc::new(ArcSwap::from_pointee(runtime_settings.clone())),
+            runtime_settings_changes: watch::channel(0).0,
             startup_runtime_settings: Arc::new(runtime_settings),
             capability_snapshot: Arc::new(ArcSwap::from_pointee(
                 CapabilityRuntimeSnapshot::default(),
@@ -1175,6 +1177,7 @@ impl AppState {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
             runtime_settings: Arc::new(ArcSwap::from_pointee(runtime_settings.clone())),
+            runtime_settings_changes: watch::channel(0).0,
             startup_runtime_settings: Arc::new(runtime_settings),
             capability_snapshot: Arc::new(ArcSwap::from_pointee(
                 CapabilityRuntimeSnapshot::default(),
@@ -1255,6 +1258,7 @@ impl AppState {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
             runtime_settings: Arc::new(ArcSwap::from_pointee(runtime_settings.clone())),
+            runtime_settings_changes: watch::channel(0).0,
             startup_runtime_settings: Arc::new(runtime_settings),
             capability_snapshot: Arc::new(ArcSwap::from_pointee(
                 CapabilityRuntimeSnapshot::default(),
@@ -3224,6 +3228,10 @@ impl AppState {
         self.runtime_settings.load_full()
     }
 
+    pub fn runtime_settings_change_receiver(&self) -> watch::Receiver<u64> {
+        self.runtime_settings_changes.subscribe()
+    }
+
     pub fn startup_runtime_settings(&self) -> &RuntimeSettings {
         &self.startup_runtime_settings
     }
@@ -3358,6 +3366,7 @@ impl AppState {
         );
         self.runtime_coordination.update_runtime_tuning(&settings);
         self.runtime_settings.store(Arc::new(settings));
+        let _ = self.runtime_settings_changes.send(revision);
         let response =
             self.runtime_settings_response_for(RuntimeSettingsSource::Persisted, document);
         tracing::info!(

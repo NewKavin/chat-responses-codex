@@ -3568,9 +3568,14 @@ impl UpstreamRequestReservation {
         };
         let state = guard.inner.state.clone();
         let lease = guard.inner.lease.clone();
-        let interval_secs = (state.config.upstream_local_lease_ttl_seconds / 3).max(1);
-        let interval = Duration::from_secs(interval_secs);
-        let handle = runtime.spawn(upstream_lease_heartbeat(state, lease, interval));
+        let runtime_settings_changes = state
+            .is_redis_runtime_backend()
+            .then(|| state.runtime_settings_change_receiver());
+        let handle = runtime.spawn(upstream_lease_heartbeat(
+            state,
+            lease,
+            runtime_settings_changes,
+        ));
         if let Ok(mut slot) = self.heartbeat.abort.try_lock() {
             if let Some(previous) = slot.replace(handle.abort_handle()) {
                 previous.abort();
@@ -3598,7 +3603,7 @@ impl UpstreamRequestReservation {
         let Some(guard) = self.guard.lock().await.clone() else {
             return;
         };
-        let interval_secs = (guard.inner.state.config.upstream_local_lease_ttl_seconds / 2).max(1);
+        let interval_secs = upstream_lease_ttl_seconds(&guard.inner.state) / 2;
         let interval_ms = interval_secs.saturating_mul(1_000);
         let now_ms = unix_millis();
         let last = self.last_renewed_at.load(Ordering::Relaxed);
@@ -3679,25 +3684,60 @@ impl Drop for UpstreamRequestReservation {
     }
 }
 
-/// C2.1: renews an upstream lease every `interval` (ttl/3) independent of any
+/// C2.1: renews an upstream lease every `ttl/3` independent of any
 /// chunk flow, so long unary requests and silent streams keep their lease
-/// alive.  Renewing a lease that was already released or reclaimed is a no-op
-/// success (`renew_upstream_request`), so a tick that races a release is
-/// harmless.  The task exits only when aborted by the reservation lifecycle.
+/// alive.  Redis runtime settings are hot-swappable: a settings update wakes
+/// the task and renews immediately before the next interval is calculated.
+/// That immediate renewal is needed in both directions: a decreased TTL must
+/// be adopted promptly, while an increased TTL must not skip a renewal that
+/// was due under the old, shorter TTL.  Renewing a lease that was already
+/// released or reclaimed is a no-op success (`renew_upstream_request`), so a
+/// tick that races a release is harmless.  The task exits only when aborted
+/// by the reservation lifecycle.
 async fn upstream_lease_heartbeat(
     state: AppState,
     lease: UpstreamRequestLease,
-    interval: Duration,
+    runtime_settings_changes: Option<watch::Receiver<u64>>,
 ) {
+    if let Some(mut runtime_settings_changes) = runtime_settings_changes {
+        loop {
+            let interval = Duration::from_secs((upstream_lease_ttl_seconds(&state) / 3).max(1));
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {
+                    renew_upstream_lease_from_heartbeat(&state, &lease).await;
+                }
+                changed = runtime_settings_changes.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    renew_upstream_lease_from_heartbeat(&state, &lease).await;
+                }
+            }
+        }
+    }
+
+    let interval = Duration::from_secs((state.config.upstream_local_lease_ttl_seconds / 3).max(1));
     loop {
         tokio::time::sleep(interval).await;
-        if let Err(error) = state.renew_upstream_request(&lease).await {
-            tracing::warn!(
-                upstream_id = %lease.upstream_id(),
-                error = %error,
-                "upstream lease heartbeat failed; relying on per-chunk renewal and the TTL backstop"
-            );
-        }
+        renew_upstream_lease_from_heartbeat(&state, &lease).await;
+    }
+}
+
+async fn renew_upstream_lease_from_heartbeat(state: &AppState, lease: &UpstreamRequestLease) {
+    if let Err(error) = state.renew_upstream_request(lease).await {
+        tracing::warn!(
+            upstream_id = %lease.upstream_id(),
+            error = %error,
+            "upstream lease heartbeat failed; relying on per-chunk renewal and the TTL backstop"
+        );
+    }
+}
+
+fn upstream_lease_ttl_seconds(state: &AppState) -> u64 {
+    if state.is_redis_runtime_backend() {
+        state.runtime_settings().upstream_local_lease_ttl_seconds
+    } else {
+        state.config.upstream_local_lease_ttl_seconds
     }
 }
 
