@@ -484,6 +484,7 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
         "3600".into(),
         "100".into(),
         "120000".into(),
+        "200000".into(),
     ];
     redis_test_command(&config, &upstream_args).await;
     let upstream_lease_score = redis_bulk_u64(
@@ -4691,7 +4692,6 @@ async fn redis_upstream_snapshot_reports_real_stale_and_oldest_lease_state() {
         .get(&upstream.id)
         .cloned()
         .expect("upstream snapshot must exist");
-    assert_eq!(snapshot.in_flight, 1);
     assert_eq!(
         snapshot.stale_lease_count, 1,
         "a lease heartbeated 250s ago must be counted as stale"
@@ -4702,12 +4702,98 @@ async fn redis_upstream_snapshot_reports_real_stale_and_oldest_lease_state() {
         snapshot.oldest_lease_age_seconds
     );
     assert_eq!(
+        snapshot.stale_reclaimed_total, 1,
+        "the snapshot must reclaim (and count) the stale lease in the same pass"
+    );
+    assert_eq!(
+        snapshot.in_flight, 0,
+        "the reclaimed stale lease must no longer count as in flight"
+    );
+    assert_eq!(
         snapshot.route_cooldown_skipped_total, None,
         "Redis backend must report cooldown skips as unsupported, not 0"
     );
     assert_eq!(snapshot.hold_p50_ms, None);
     assert_eq!(snapshot.hold_p95_ms, None);
     state.release_upstream_request(lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_stale_lease_is_reclaimed_before_ttl() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let mut upstream = redis_test_upstream("upstream-stale-reclaim");
+    upstream.max_concurrency = 1;
+    let fingerprint = "fingerprint-stale-reclaim";
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let account = AccountConcurrencyKey::new(upstream.id.clone(), fingerprint);
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let aggregate_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
+    let _held = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .unwrap();
+    let held_id = redis_test_command(
+        &config,
+        &["ZRANGE".into(), lease_key.clone(), "0".into(), "-1".into()],
+    )
+    .await
+    .split("\r\n")
+    .nth(2)
+    .expect("ZRANGE must return the reserved upstream lease id")
+    .to_string();
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    // Age the lease 250s (300s TTL, stale after 200s): still live for 50s,
+    // but already past the stale window.  Admission must reclaim it instead
+    // of waiting for the TTL.
+    for key in [lease_key.clone(), aggregate_key] {
+        redis_test_command(
+            &config,
+            &[
+                "ZADD".into(),
+                key,
+                (now_ms + 50_000).to_string(),
+                held_id.clone(),
+            ],
+        )
+        .await;
+    }
+
+    let replacement = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .expect("the stale lease must be reclaimed before the TTL expires");
+    let gone = redis_test_command(&config, &["ZSCORE".into(), lease_key, held_id]).await;
+    assert!(
+        gone.starts_with("$-1"),
+        "the stale lease must be removed from the ZSET"
+    );
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(snapshot.stale_reclaimed_total, 1);
+    assert_eq!(snapshot.in_flight, 1);
+    state.release_upstream_request(replacement).await.unwrap();
 }
 
 #[tokio::test]

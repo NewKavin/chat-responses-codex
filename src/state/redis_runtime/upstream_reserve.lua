@@ -9,6 +9,7 @@ local minute_limit = tonumber(ARGV[6])
 local request_window_seconds = tonumber(ARGV[7])
 local request_quota = tonumber(ARGV[8])
 local lease_duration_ms = tonumber(ARGV[9])
+local stale_after_ms = tonumber(ARGV[10])
 local retention_seconds = math.max(60, request_window_seconds)
 
 -- F1.4: expired leases are lazily pruned here; the removal is counted on the
@@ -19,6 +20,21 @@ if #expired_leases > 0 then
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
   redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms)
   redis.call('HINCRBY', KEYS[5], 'leaked_reclaimed', #expired_leases)
+end
+-- F1.5: reclaim leases whose last heartbeat is older than the stale window
+-- *before* their TTL expiry (score = expiry, so last heartbeat = score − TTL;
+-- stale means now < score < now + TTL − stale_after).  The expired sweep above
+-- already removed score <= now, so this range only touches live-but-stale
+-- leases.  Counted separately from leaked (TTL-expired) reclamations.
+local stale_lease_count = 0
+if stale_after_ms < lease_duration_ms then
+  local stale_cutoff = now_ms + lease_duration_ms - stale_after_ms
+  stale_lease_count = #redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. now_ms, stale_cutoff)
+  if stale_lease_count > 0 then
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], '(' .. now_ms, stale_cutoff)
+    redis.call('ZREMRANGEBYSCORE', KEYS[2], '(' .. now_ms, stale_cutoff)
+    redis.call('HINCRBY', KEYS[5], 'stale_reclaimed', stale_lease_count)
+  end
 end
 local expired_events = redis.call(
   'ZRANGEBYSCORE', KEYS[3], '-inf', now_ms - (retention_seconds * 1000)

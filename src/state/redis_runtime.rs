@@ -1299,6 +1299,7 @@ impl RedisRuntimeCoordinator {
         let cost_key = self.upstream_key(&upstream_identity, "event_costs");
         let counters_key = self.upstream_key(&upstream_identity, "counters");
         let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
+        let stale_after_ms = self.tuning_snapshot().upstream_lease_stale_after_ms;
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -1327,7 +1328,8 @@ impl RedisRuntimeCoordinator {
                         .arg(upstream.requests_per_minute)
                         .arg(upstream.request_quota_window_seconds())
                         .arg(upstream.request_quota_requests)
-                        .arg(lease_duration_ms);
+                        .arg(lease_duration_ms)
+                        .arg(stale_after_ms);
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
                         .await
                 }

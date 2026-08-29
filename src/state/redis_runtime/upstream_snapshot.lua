@@ -19,7 +19,10 @@ end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms - (retention_seconds * 1000))
 
 -- F1.4: stale leases are live (not yet expired) members whose last heartbeat
--- is older than `stale_after_ms`, i.e. score < now + ttl - stale_after.
+-- is older than `stale_after_ms`, i.e. score < now + ttl - stale_after.  The
+-- counts/age below are computed from the pre-reclamation member set (like the
+-- local backend's pre-sweep reporting), then the stale members are reclaimed
+-- right here and counted on the counters hash (F1.5).
 local stale_lease_count = 0
 if stale_after_ms < lease_duration_ms then
   stale_lease_count = redis.call(
@@ -34,6 +37,12 @@ if #oldest >= 2 then
     0,
     math.floor((now_ms + lease_duration_ms - oldest_score) / 1000)
   )
+end
+if stale_lease_count > 0 then
+  redis.call(
+    'ZREMRANGEBYSCORE', KEYS[1], '(' .. now_ms, now_ms + lease_duration_ms - stale_after_ms
+  )
+  redis.call('HINCRBY', KEYS[5], 'stale_reclaimed', stale_lease_count)
 end
 
 local function cost_since(start_ms)
