@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -156,10 +157,12 @@ impl RuntimeCoordinationBackend {
                 client,
                 manager: Arc::new(RwLock::new(manager)),
                 key_prefix,
-                lease_duration_ms: config
-                    .upstream_stream_max_duration_seconds
-                    .saturating_add(60)
-                    .saturating_mul(1_000),
+                lease_duration_ms: AtomicU64::new(
+                    config
+                        .upstream_local_lease_ttl_seconds
+                        .max(1)
+                        .saturating_mul(1_000),
+                ),
                 downstream_lease_duration_ms: config
                     .downstream_lease_ttl_seconds
                     .saturating_mul(1_000)
@@ -225,6 +228,7 @@ impl RuntimeCoordinationBackend {
     pub fn update_runtime_tuning(&self, settings: &super::runtime_settings::RuntimeSettings) {
         if let Self::Redis(coordinator) = self {
             coordinator.update_runtime_tuning(
+                settings.upstream_local_lease_ttl_seconds,
                 settings.upstream_concurrency_probe_delays_ms.clone(),
                 settings.upstream_concurrency_recovery_max_wait_ms,
                 settings.upstream_transient_route_cooldown_base_seconds,
@@ -244,7 +248,7 @@ pub struct RedisRuntimeCoordinator {
     client: redis::Client,
     manager: Arc<RwLock<ConnectionManager>>,
     key_prefix: Arc<str>,
-    lease_duration_ms: u64,
+    lease_duration_ms: AtomicU64,
     downstream_lease_duration_ms: u64,
     tuning: RwLock<RedisRuntimeTuning>,
 }
@@ -268,6 +272,7 @@ struct RedisRuntimeTuning {
 impl RedisRuntimeCoordinator {
     pub(super) fn update_runtime_tuning(
         &self,
+        upstream_local_lease_ttl_seconds: u64,
         concurrency_probe_delays_ms: Vec<u64>,
         recovery_max_wait_ms: u64,
         transient_route_cooldown_base_seconds: u64,
@@ -282,6 +287,12 @@ impl RedisRuntimeCoordinator {
         let max_seconds = transient_route_cooldown_max_seconds
             .max(base_seconds)
             .max(1);
+        self.lease_duration_ms.store(
+            upstream_local_lease_ttl_seconds
+                .max(1)
+                .saturating_mul(1_000),
+            Ordering::Relaxed,
+        );
         let mut tuning = self.tuning.write().expect("redis tuning lock poisoned");
         tuning.account_waiter_budget_ms = recovery_max_wait_ms.max(1);
         tuning.account_waiter_ttl_ms = tuning.account_waiter_budget_ms.saturating_add(60_000);
@@ -1281,6 +1292,7 @@ impl RedisRuntimeCoordinator {
         let aggregate_lease_key = self.upstream_key(&upstream_identity, "leases");
         let event_key = self.upstream_key(&upstream_identity, "events");
         let cost_key = self.upstream_key(&upstream_identity, "event_costs");
+        let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -1307,7 +1319,7 @@ impl RedisRuntimeCoordinator {
                         .arg(upstream.requests_per_minute)
                         .arg(upstream.request_quota_window_seconds())
                         .arg(upstream.request_quota_requests)
-                        .arg(self.lease_duration_ms);
+                        .arg(lease_duration_ms);
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
                         .await
                 }
@@ -1395,6 +1407,7 @@ impl RedisRuntimeCoordinator {
         let account_identity = account_identity(account);
         let account_lease_key =
             self.upstream_account_key(&upstream_identity, &account_identity, "leases");
+        let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         self.retry_coordination_once(|| {
             let mut connection = self.connection();
             let account_lease_key = account_lease_key.clone();
@@ -1405,7 +1418,7 @@ impl RedisRuntimeCoordinator {
                 invocation
                     .key(account_lease_key)
                     .arg(lease_id)
-                    .arg(self.lease_duration_ms);
+                    .arg(lease_duration_ms);
                 timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
                     .await
                     .map(|_| ())

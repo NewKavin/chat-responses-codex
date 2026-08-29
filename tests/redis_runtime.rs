@@ -4569,6 +4569,61 @@ async fn redis_downstream_lease_uses_short_ttl_not_upstream_stream_duration() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_lease_uses_local_ttl_not_stream_duration() {
+    let config = AppConfig {
+        upstream_local_lease_ttl_seconds: 300,
+        upstream_stream_max_duration_seconds: 86_400,
+        ..redis_test_config()
+    };
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("upstream-lease-ttl");
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let fingerprint = "fingerprint-upstream-ttl";
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .unwrap();
+    let account = AccountConcurrencyKey::new(upstream.id.clone(), fingerprint);
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let lease_id = redis_test_command(
+        &config,
+        &["ZRANGE".into(), lease_key.clone(), "0".into(), "0".into()],
+    )
+    .await
+    .split("\r\n")
+    .nth(2)
+    .expect("ZRANGE must return the reserved upstream lease id")
+    .to_string();
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: i64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: i64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    let score_ms: i64 = redis_test_command(&config, &["ZSCORE".into(), lease_key, lease_id])
+        .await
+        .split("\r\n")
+        .nth(1)
+        .expect("ZSCORE must return a bulk string")
+        .parse()
+        .expect("ZSCORE must return an integer");
+    let remaining_ms = score_ms - now_ms;
+    assert!(
+        (290_000..=320_000).contains(&remaining_ms),
+        "upstream lease must use local TTL (~300s), got {remaining_ms}ms"
+    );
+    state.release_upstream_request(lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_downstream_admission_reserves_request_and_lease_atomically() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
