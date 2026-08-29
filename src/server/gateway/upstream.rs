@@ -938,6 +938,10 @@ async fn send_hedge_stream_attempt(
             .client_for_url(&url)
             .post(url)
             .header(header::AUTHORIZATION, format!("Bearer {api_key}"))
+            // Streaming responses must stay uncompressed. A proxy that
+            // truncates a compressed SSE body turns an otherwise recoverable
+            // connection close into reqwest's opaque body decode error.
+            .header(header::ACCEPT_ENCODING, "identity")
             .json(&upstream_body)
             .send(),
     )
@@ -2024,12 +2028,18 @@ pub(super) async fn send_to_upstream(
             response_header_timeout_limit
         };
         route_attempts.record_physical_attempt(route_health_key.clone());
-        let send_future = state
+        let mut upstream_request = state
             .client_for_url(&url)
             .post(url.clone())
             .header(header::AUTHORIZATION, format!("Bearer {}", api_key))
-            .json(&upstream_body)
-            .send();
+            .json(&upstream_body);
+        if request_stream {
+            // Do not negotiate compressed SSE. If a proxy truncates a gzip/br
+            // stream, reqwest reports the decompressor failure as a generic
+            // body decode error instead of preserving the stream lifecycle.
+            upstream_request = upstream_request.header(header::ACCEPT_ENCODING, "identity");
+        }
+        let send_future = upstream_request.send();
 
         let response = match tokio::time::timeout(response_header_timeout, send_future).await {
             Ok(result) => result.map_err(|error| {

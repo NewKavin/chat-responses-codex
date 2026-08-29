@@ -856,16 +856,26 @@ fn slow_first_output_hedge_uses_the_next_upstream_account() {
 async fn slow_first_output_hedge_uses_the_next_upstream_account_impl() {
     let slow_hits = Arc::new(AtomicUsize::new(0));
     let fast_hits = Arc::new(AtomicUsize::new(0));
+    let accept_encodings = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let slow_hits_for_handler = slow_hits.clone();
     let fast_hits_for_handler = fast_hits.clone();
+    let accept_encodings_for_handler = accept_encodings.clone();
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post(move |request: Request<Body>| {
             let slow_hits = slow_hits_for_handler.clone();
             let fast_hits = fast_hits_for_handler.clone();
+            let accept_encodings = accept_encodings_for_handler.clone();
             async move {
+                accept_encodings.lock().unwrap().push(
+                    request
+                        .headers()
+                        .get(header::ACCEPT_ENCODING)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                );
                 let authorization = request
                     .headers()
                     .get(header::AUTHORIZATION)
@@ -1137,6 +1147,15 @@ async fn slow_first_output_hedge_uses_the_next_upstream_account_impl() {
     );
     assert_eq!(slow_hits.load(Ordering::SeqCst), 2);
     assert_eq!(fast_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        accept_encodings.lock().unwrap().as_slice(),
+        [
+            Some("identity".to_string()),
+            Some("identity".to_string()),
+            Some("identity".to_string())
+        ],
+        "both primary and hedge streaming sends must avoid compressed SSE"
+    );
     wait_for_upstream_in_flight(&fast_primary_state, "up-slow", 0).await;
     wait_for_upstream_in_flight(&fast_primary_state, "up-fast", 0).await;
 }
@@ -5433,6 +5452,90 @@ fn truncated_stream_test_state(
             ..AppConfig::default()
         },
     )
+}
+
+#[tokio::test]
+async fn streaming_upstream_request_disables_content_encoding_negotiation() {
+    let accept_encoding = Arc::new(Mutex::new(None::<String>));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accept_encoding_for_handler = accept_encoding.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let accept_encoding = accept_encoding_for_handler.clone();
+            async move {
+                *accept_encoding.lock().unwrap() = request
+                    .headers()
+                    .get(header::ACCEPT_ENCODING)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-identity\",\"object\":\"chat.completion.chunk\",",
+                        "\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,",
+                        "\"delta\":{\"content\":\"identity\"},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = truncated_stream_test_state(
+        tempdir.path().join("state.json"),
+        &downstream_key,
+        vec![UpstreamConfig {
+            id: "identity-upstream".into(),
+            name: "identity-upstream".into(),
+            base_url: format!("http://{address}"),
+            api_key: "identity-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["gpt-4".into()],
+            active: true,
+            ..Default::default()
+        }],
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("identity"));
+    assert_eq!(
+        accept_encoding.lock().unwrap().as_deref(),
+        Some("identity"),
+        "streaming requests must not opt into a compressed body that an intermediary can truncate"
+    );
 }
 
 #[tokio::test]
