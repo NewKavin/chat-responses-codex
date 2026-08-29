@@ -2621,8 +2621,11 @@ async fn redis_gateway_local_capacity_release_is_immediately_schedulable() {
 
     let mut config = redis_test_config();
     config.upstream_stream_max_duration_seconds = 86_400;
-    config.upstream_concurrency_recovery_max_wait_ms = 0;
-    config.upstream_route_exhaustion_retry_max_wait_ms = 0;
+    // Runtime settings require a positive recovery budget. Disable the
+    // route-exhaustion retry path explicitly instead of using an invalid zero
+    // budget, so the first request observes the held Redis slot immediately.
+    config.upstream_concurrency_recovery_max_wait_ms = 1;
+    config.upstream_route_exhaustion_retry_enabled = false;
     let (state_a, state_b, _directory) = redis_test_states(&config).await;
     let api_key = "capacity-release-account";
     let upstream = UpstreamConfig {
@@ -4272,7 +4275,11 @@ async fn redis_half_open_reserve_refreshes_route_index_ttls() {
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
 async fn redis_route_health_stale_finish_cannot_clear_a_newer_failure() {
-    let config = redis_test_config();
+    let mut config = redis_test_config();
+    // E1 defaults capacity failures to observation-only. This test needs a
+    // real RateLimited cooldown so it can verify a stale half-open success
+    // does not clear a newer failure generation.
+    config.upstream_capacity_failure_cooldown_enabled = true;
     let (first, second, _directory) = redis_test_states(&config).await;
     let key = redis_test_health_key("stale-health-upstream", "fingerprint-a");
     let route = redis_test_health_route("stale-health-upstream", "fingerprint-a", "model-a");
