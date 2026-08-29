@@ -3603,7 +3603,7 @@ impl UpstreamRequestReservation {
         let Some(guard) = self.guard.lock().await.clone() else {
             return;
         };
-        let interval_secs = upstream_lease_ttl_seconds(&guard.inner.state) / 2;
+        let interval_secs = (upstream_lease_ttl_seconds(&guard.inner.state) / 2).max(1);
         let interval_ms = interval_secs.saturating_mul(1_000);
         let now_ms = unix_millis();
         let last = self.last_renewed_at.load(Ordering::Relaxed);
