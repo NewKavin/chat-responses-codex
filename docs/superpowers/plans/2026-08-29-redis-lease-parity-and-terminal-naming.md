@@ -1,7 +1,7 @@
 # Redis 后端租约回收对齐 + 本地闸门终态命名统一
 
 - 日期：2026-08-29
-- 状态：待开发（交接给其他模型实现）
+- 状态：已实现；最终验证保留两个既有 Redis 基线失败，详见 §7.1
 - 部署形态（已确认）：内网为 **PostgreSQL + Redis + 本项目**，即 `RuntimeCoordinationBackend::Redis`。**这一点决定了本方案的全部优先级**——C1/C2 修的是本地后端，生产走的是 Redis。
 - 前序：C1–C7、E1–E7 已全部落地。本方案不推翻它们，是补它们在 Redis 路径上的缺口。
 
@@ -224,14 +224,14 @@ docker logs <网关容器> --since 2h 2>&1 \
 
 | 任务 | 内容 | commit | 结果 |
 | --- | --- | --- | --- |
-| F1.2 | 确认/接通 Redis 心跳续约 + Redis 侧测试（**先于 F1.1**） | `a2acb3f` | ✅ Redis 心跳调用链已确认接通；新增并实跑 `redis_upstream_lease_renewal_extends_lease_ttl`（1 passed） |
-| F1.1 | Redis 租约时长改用 `upstream_local_lease_ttl_seconds` | `b5999d0` | ✅ Redis 初始配置与运行时热更新均改用本地 lease TTL；`redis_upstream_lease_uses_local_ttl_not_stream_duration` 实跑通过（1 passed） |
+| F1.2 | 确认/接通 Redis 心跳续约 + Redis 侧测试（**先于 F1.1**） | `a2acb3f`, `09dc025a`, `78580386`, `cad9008e` | ✅ Redis 心跳调用链已确认接通；续约覆盖账号和聚合租约，且动态 TTL 热更新会立即唤醒心跳；`redis_upstream_lease_renewal_extends_lease_ttl` 与 `redis_gateway_heartbeat_adopts_hot_updated_lease_ttl` 当前实跑通过 |
+| F1.1 | Redis 租约时长改用 `upstream_local_lease_ttl_seconds` | `b5999d06`, `78580386`, `cad9008e` | ✅ Redis 初始配置与运行时热更新均改用本地 lease TTL；`redis_upstream_lease_uses_local_ttl_not_stream_duration` 当前实跑通过；心跳按热更新后的 TTL/3 调度并保留最小 1 秒下限 |
 | F1.3 | 释放失败回滚 `release_state` + 失败计数日志 | `b25626c` | ✅ 状态回滚由 `LeaseReleaseGuard` 保证（已有 `failed_redis_releases_can_be_retried_by_a_clone` 覆盖）；新增 `redis_upstream_release_failures` 累计计数并写入 warn 日志；实跑通过 |
-| F1.4 | Redis 快照上报真实值（或明确标记不支持，禁止继续 report 0） | `70ca854` | ✅ `stale_lease_count`/`oldest_lease_age_seconds` 从 ZSET 分值计算；`leaked_reclaimed_total`/`capacity_reject_total` 用 counters hash 真实计数；`route_cooldown_skipped_total` 改为 `Option`（Redis 上报 `null`，前端显示 —）；`hold_*` 保持 `None`。新增 2 个 Redis 集成测试实跑通过 |
+| F1.4 | Redis 快照上报真实值（或明确标记不支持，禁止继续 report 0） | `70ca854` | ✅ `stale_lease_count`/`oldest_lease_age_seconds` 从 ZSET 分值计算；`leaked_reclaimed_total`/`capacity_reject_total` 用 counters hash 真实计数；`route_cooldown_skipped_total` 改为 `Option`（Redis 上报 `null`，前端显示 —）；`hold_*` 保持 `None`。相关 Redis 集成测试当前通过 |
 | F1.5 | Redis 侧陈旧租约提前回收 | `1664024` | ✅ reserve/snapshot Lua 按 `stale_after` 提前回收并独立计入 `stale_reclaimed_total`；`redis_upstream_stale_lease_is_reclaimed_before_ttl` 实跑通过（1 passed） |
 | F2.1 | 本地闸门终态统一为 `gateway_concurrency_saturated` | `1a20515` | ✅ 聚合路径按 `physical_attempt_count == 0 && local_gate_rejected_count > 0` 判定（且尊重 `upstream_local_gate_distinct_error_code_enabled` 回滚开关），code/category 统一为 `gateway_concurrency_saturated`（429 不变）；更新 `fast_fail_switch_off_keeps_gateway_concurrency_code` 并新增混合测试 |
 | F2.2 | 混合失败的 `local_gate_rejected_count` / `upstream_attempted_count` | `1a20515` | ✅ 混合轮次保留 `upstream_routes_exhausted`，details 增加 `local_gate_rejected_count` 与 `upstream_attempted_count`；`mixed_local_gate_and_upstream_rejection_reports_composition` 实跑通过 |
-| F3.1 | 重试放大按类别记录 + API 返回 `category` | `ac51be4` | ✅ 按 `(downstream_id, model, category)` 独立计数；API `points` 返回 `category`；单测验证三类互不串台 |
+| F3.1 | 重试放大按类别记录 + API 返回 `category` | `ac51be4`, `fe00a29d` | ✅ 按 `(downstream_id, model, category)` 独立计数；API `points` 返回稳定的 `gateway_gate` / `routes_exhausted` / `upstream_429` 分类；单测验证三类互不串台 |
 | F3.2 | 前端卡片按类别分色 + 判读文案 | `ac51be4` | ✅ Dashboard 按网关闸门、路由耗尽、上游 429 分色并显示分类小计；`npm run type-check` 与 `npm test` 通过 |
 | F4 | 部署文档：Redis 与本地后端能力差异对照表 | `1d7bebe` | ✅ `DEPLOYMENT.md` 新增 Redis/本地能力差异表，并明确 `upstream_local_lease_ttl_seconds` 在 Redis 后端生效 |
 
@@ -241,7 +241,9 @@ docker logs <网关容器> --since 2h 2>&1 \
 | --- | --- | --- | --- |
 | fmt | `rtk proxy cargo fmt --check` | 0 | ✅ 通过 |
 | clippy | `rtk proxy cargo clippy --all-targets` | 0 | ✅ 通过 |
-| test | `rtk proxy cargo test` | 101 | ⚠️ 默认栈下既有 `troubleshooting::compatibility_matrix_does_not_queue_probes_or_mutate_runtime_state` 栈溢出；使用 `RUST_MIN_STACK=67108864` 重跑后全量通过（各套件均 0 failed） |
-| **redis** | `TEST_REDIS_URL=redis://127.0.0.1:6379 rtk proxy cargo test --test redis_runtime -- --ignored` | 101 | ⚠️ 实跑 91 passed / 2 failed / 10 ignored；失败为基线已存在的 `redis_gateway_local_capacity_release_is_immediately_schedulable` 与 `redis_route_health_stale_finish_cannot_clear_a_newer_failure`，F1 新增 Redis 用例通过 |
-| 前端类型 | `cd frontend && npm run type-check` | 0 | ✅ 通过 |
-| 前端测试 | `cd frontend && npm test` | 0 | ✅ 37 files / 271 tests 通过 |
+| check | `rtk proxy cargo check --all-targets` | 0 | ✅ 通过（最终动态 TTL 修正后复跑） |
+| test（默认栈） | `rtk proxy cargo test` | 101 | ⚠️ 既有 `troubleshooting::compatibility_matrix_does_not_queue_probes_or_mutate_runtime_state` 栈溢出；其余已完成套件通过。不是代码编译失败 |
+| test（64 MiB 栈） | `RUST_MIN_STACK=67108864 rtk proxy cargo test` | 0 | ✅ 62 个测试套件；1842 passed / 0 failed / 99 ignored |
+| **redis** | `TEST_REDIS_URL=redis://127.0.0.1:6380 rtk proxy cargo test --test redis_runtime -- --ignored` | 101 | ⚠️ 实跑 96 个用例：94 passed / 2 failed / 10 ignored。既有失败为 `redis_gateway_local_capacity_release_is_immediately_schedulable`（期望 429，实际 200）与 `redis_route_health_stale_finish_cannot_clear_a_newer_failure`（首次 reserve 未得到预期 `RateLimited` Cooling）；F1 新增/修改相关用例通过 |
+| 前端类型 | `rtk npm --prefix frontend run type-check` | 0 | ✅ 通过 |
+| 前端测试 | `rtk npm --prefix frontend test` | 0 | ✅ 37 files / 271 tests 通过 |
