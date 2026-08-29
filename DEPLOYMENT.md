@@ -212,13 +212,29 @@ Relevant settings (see `Runtime Settings Operations`):
 | `upstream_error_body_excerpt_enabled` | false | Append a bounded, sanitized excerpt of the upstream error body to client error messages (`body=\"…\"` in the terminal summary, `; upstream_body=\"…\"` on single-attempt errors). The excerpt passes a secret-shaped redactor (`sk-…` keys, `Bearer` tokens, JSON secret pairs) before it is exposed. **Only enable for intranet self-owned upstreams where you operate both sides; keep off for public / multi-tenant deployments.** |
 | `upstream_error_body_excerpt_max_chars` | 200 | Maximum excerpt length (50–2000); longer bodies are truncated with `…`. Only read when the excerpt switch is on. |
 | `upstream_continuation_pin_escape_enabled` | true | When the previously-successful continuation route is unavailable, allow the gateway to purge supplier-bound artifacts from the session history and re-run the full candidate pool, re-pinning the session to a working route. Off = the session can only wait for the original route to recover. |
-| `upstream_local_lease_ttl_seconds` | 3600 | Local-backend fallback TTL for upstream concurrency leases that were never released (reclaimed lazily, renewed for running streams). Lower than the longest stream duration would reclaim live slots; keep above `upstream_stream_max_duration_seconds`. Redis backend ignores this (its leases already carry a TTL). |
+| `upstream_local_lease_ttl_seconds` | 3600 | TTL for an upstream concurrency lease that was never released. Both local and Redis backends use it; running streams renew their lease. Keep it above the expected heartbeat outage window and long enough for the request watchdog to distinguish a live stream from a leak. |
 | `upstream_account_queue_enabled` | true | When a round fails purely because the local pre-dispatch concurrency gate is full (no upstream attempt was made), queue the request behind the free slot (C3) instead of rejecting + retrying. Off = immediate rejection (which then uses the C4 fast-fail / legacy code). |
 | `upstream_account_queue_max_depth` | 16 | Bound on how many requests may wait on one (upstream, key) local-concurrency queue at a time; overflow fast-fails. |
 | `upstream_account_queue_max_wait_ms` | 10000 | Deadline for a queued local-concurrency wait; expiry fast-fails with the C4.2 error code. |
 | `upstream_local_gate_max_wait_ms` | 3000 | Bounds the C4.1 fast-fail scenario: a round served entirely by local-gate rejections gives up immediately instead of burning the 30s ConcurrencySaturated budget. It realises as an immediate rejection, so a lowered value also lowers the worst-case client wait for a fully-saturated single-key upstream. |
 | `upstream_local_gate_fast_fail_enabled` | true | Master switch for C4.1. On: a round whose every candidate was rejected by the *local gate* (zero physical upstream attempts) fast-fails. Off: old behavior (falls into the ConcurrencySaturated retry budget). |
 | `upstream_local_gate_distinct_error_code_enabled` | true | C4.2: terminal code `gateway_concurrency_saturated` (HTTP still 429) so a gateway-gate fact is never misread as upstream rate limiting. Off: legacy `upstream_routes_exhausted` aggregation for local-gate rejections. |
+
+### Redis 后端与本地后端的能力差异
+
+生产环境使用 PostgreSQL + Redis 时，Redis 是运行时准入、租约和路由健康的共享协调器；PostgreSQL 仍保存配置和 usage log。两种后端的行为边界如下：
+
+| 能力 / 设置 | 本地后端 | Redis 后端 | 运维含义 |
+| --- | --- | --- | --- |
+| 上游租约 TTL | `upstream_local_lease_ttl_seconds` | 同一设置 | 修改该设置对生产 Redis 部署生效，不要用 `upstream_stream_max_duration_seconds` 推断租约回收时间 |
+| 运行中租约续约 | 进程内心跳 | Redis 心跳续约 | 长流只要网关仍在运行就不会因 TTL 被误回收 |
+| 陈旧租约提前回收 | 支持 | 支持，按 `upstream_lease_stale_after_ms` | 泄漏租约会早于 TTL 被回收，并计入 `stale_reclaimed_total` |
+| 租约持有 p50/p95 | 支持 | 不支持时返回 `null` | 管理界面显示 `—`，不能把缺失当成 0 |
+| 本地闸门拒绝累计 | 进程内计数 | Redis 计数器 | `capacity_reject_total` 可用于定位网关侧容量拒绝 |
+| 免冷却放行累计 | 进程内计数 | 当前后端不提供时返回 `null` | `route_cooldown_skipped_total` 显示 `—` 表示不支持 |
+| 多副本共享准入与路由健康 | 不共享，单实例 | 通过同一 Redis 和 `REDIS_KEY_PREFIX` 共享 | 每个部署使用独立 prefix；Redis 不可用时 fail closed |
+
+应用行为设置统一在 `Admin > Settings` 保存。尤其是 `upstream_local_lease_ttl_seconds`、`upstream_lease_stale_after_ms` 和心跳相关设置，修改后应结合上游运行时快照观察 `in_flight`、陈旧回收计数和租约年龄；不要仅依据单一路径的缺失统计判断“没有发生”。
 
 Recommended values for a single aggregated gateway deployment:
 
