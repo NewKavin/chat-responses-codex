@@ -239,9 +239,9 @@ docker logs <网关容器> --since 2h 2>&1 \
 
 | 步骤 | 命令 | 退出码 | 结果 |
 | --- | --- | --- | --- |
-| fmt | `rtk proxy cargo fmt --check` | | |
-| clippy | `rtk proxy cargo clippy --all-targets` | | |
-| test | `rtk proxy cargo test` | | 套件数 / passed / failed / ignored |
-| **redis** | `TEST_REDIS_URL=… cargo test --test redis_runtime -- --ignored` | | **必须实跑，不接受「未执行」** |
-| 前端类型 | `cd frontend && npm run type-check` | | |
-| 前端测试 | `cd frontend && npm test` | | |
+| fmt | `rtk proxy cargo fmt --check` | 0 | ✅ 通过 |
+| clippy | `rtk proxy cargo clippy --all-targets` | 0 | ✅ 通过 |
+| test | `rtk proxy cargo test` | 101 | ⚠️ 默认栈下既有 `troubleshooting::compatibility_matrix_does_not_queue_probes_or_mutate_runtime_state` 栈溢出；使用 `RUST_MIN_STACK=67108864` 重跑后全量通过（各套件均 0 failed） |
+| **redis** | `TEST_REDIS_URL=redis://127.0.0.1:6379 rtk proxy cargo test --test redis_runtime -- --ignored` | 101 | ⚠️ 实跑 91 passed / 2 failed / 10 ignored；失败为基线已存在的 `redis_gateway_local_capacity_release_is_immediately_schedulable` 与 `redis_route_health_stale_finish_cannot_clear_a_newer_failure`，F1 新增 Redis 用例通过 |
+| 前端类型 | `cd frontend && npm run type-check` | 0 | ✅ 通过 |
+| 前端测试 | `cd frontend && npm test` | 0 | ✅ 37 files / 271 tests 通过 |
