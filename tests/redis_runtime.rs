@@ -1948,6 +1948,11 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
         upstream_result.is_err(),
         "a retained upstream clone must retry Redis instead of returning false success"
     );
+    assert_eq!(
+        first.redis_upstream_release_failure_count(),
+        2,
+        "failed Redis upstream releases must be counted"
+    );
 
     fault.arm_outage(false);
     let (downstream_result, upstream_result) = tokio::join!(

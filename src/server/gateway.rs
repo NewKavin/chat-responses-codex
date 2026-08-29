@@ -3446,9 +3446,11 @@ impl UpstreamRequestGuardInner {
         Ok(Some(runtime.spawn(async move {
             let result = state.release_upstream_request(lease).await;
             if let Err(error) = &result {
-                tracing::error!(
+                let failure_count = state.redis_upstream_release_failure_count();
+                tracing::warn!(
                     upstream_id = %upstream_id,
                     error = %error,
+                    failure_count,
                     "failed to release upstream request lease"
                 );
             } else {

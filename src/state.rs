@@ -72,7 +72,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -632,6 +632,10 @@ pub struct AppState {
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_runtime: Arc<StdMutex<HashMap<DownstreamLeaseKey, DownstreamLeaseState>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
+    /// Number of Redis upstream lease releases that failed after being
+    /// spawned by a dropped gateway guard.  The release guard remains
+    /// `ACTIVE` in that case so a later clone can retry it.
+    redis_upstream_release_failures: Arc<AtomicU64>,
     /// E5.1: sliding-window count of client-visible *retryable-capacity*
     /// terminal errors (code/category `upstream_routes_exhausted`,
     /// `gateway_concurrency_saturated`, or the upstream 429
@@ -1106,6 +1110,7 @@ impl AppState {
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
+            redis_upstream_release_failures: Arc::new(AtomicU64::new(0)),
             retry_terminal: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
@@ -1190,6 +1195,7 @@ impl AppState {
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
+            redis_upstream_release_failures: Arc::new(AtomicU64::new(0)),
             retry_terminal: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
@@ -1269,6 +1275,7 @@ impl AppState {
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
+            redis_upstream_release_failures: Arc::new(AtomicU64::new(0)),
             retry_terminal: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
@@ -1694,6 +1701,19 @@ impl AppState {
             }
             RuntimeCoordinationBackend::Local => None,
         }
+    }
+
+    /// Record a failed Redis upstream lease release spawned from a dropped
+    /// gateway guard.  The guard's release state remains active for retry.
+    pub fn record_redis_upstream_release_failure(&self) -> u64 {
+        self.redis_upstream_release_failures
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
+
+    #[doc(hidden)]
+    pub fn redis_upstream_release_failure_count(&self) -> u64 {
+        self.redis_upstream_release_failures.load(Ordering::Relaxed)
     }
 
     pub fn client_for_url(&self, url: &str) -> Client {
@@ -4363,9 +4383,13 @@ impl AppState {
         };
         let result =
             if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-                coordinator
+                let result = coordinator
                     .release_upstream_lease(&lease.account, &lease.lease_id)
-                    .await
+                    .await;
+                if result.is_err() {
+                    self.record_redis_upstream_release_failure();
+                }
+                result
             } else {
                 // C1.2: local leases are removed synchronously from the
                 // `std::sync::Mutex`-protected lease table.  No runtime.spawn,
