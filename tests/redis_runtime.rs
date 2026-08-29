@@ -720,6 +720,80 @@ async fn redis_downstream_lease_renewal_extends_lease_ttl() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_lease_renewal_extends_lease_ttl() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("renewal-extends-upstream-lease");
+    let fingerprint = "fingerprint-upstream-renewal";
+    let account = AccountConcurrencyKey::new(upstream.id.clone(), fingerprint);
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .unwrap();
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let members = redis_test_command(
+        &config,
+        &["ZRANGE".into(), lease_key.clone(), "0".into(), "-1".into()],
+    )
+    .await;
+    let lease_id = members
+        .split("\r\n")
+        .nth(2)
+        .expect("ZRANGE must return the reserved upstream lease id")
+        .to_string();
+
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    redis_test_command(
+        &config,
+        &[
+            "ZADD".into(),
+            lease_key.clone(),
+            (now_ms + 1_000).to_string(),
+            lease_id.clone(),
+        ],
+    )
+    .await;
+
+    state
+        .renew_upstream_request(&lease)
+        .await
+        .expect("Redis upstream lease renewal must succeed");
+    let renewed_score =
+        redis_bulk_u64(&redis_test_command(&config, &["ZSCORE".into(), lease_key, lease_id]).await);
+    assert!(
+        renewed_score > now_ms + 60_000,
+        "renewal must push the Redis upstream lease into the future, got {renewed_score}"
+    );
+
+    state.release_upstream_request(lease).await.unwrap();
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .unwrap()
+            .in_flight,
+        0,
+        "released Redis upstream lease must no longer count as in flight"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_account_queue_grants_one_fifo_probe_across_instances() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
