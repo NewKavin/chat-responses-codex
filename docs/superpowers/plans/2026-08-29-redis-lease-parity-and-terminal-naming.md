@@ -229,8 +229,8 @@ docker logs <网关容器> --since 2h 2>&1 \
 | F1.3 | 释放失败回滚 `release_state` + 失败计数日志 | `b25626c` | ✅ 状态回滚由 `LeaseReleaseGuard` 保证（已有 `failed_redis_releases_can_be_retried_by_a_clone` 覆盖）；新增 `redis_upstream_release_failures` 累计计数并写入 warn 日志；实跑通过 |
 | F1.4 | Redis 快照上报真实值（或明确标记不支持，禁止继续 report 0） | `70ca854` | ✅ `stale_lease_count`/`oldest_lease_age_seconds` 从 ZSET 分值计算；`leaked_reclaimed_total`/`capacity_reject_total` 用 counters hash 真实计数；`route_cooldown_skipped_total` 改为 `Option`（Redis 上报 `null`，前端显示 —）；`hold_*` 保持 `None`。新增 2 个 Redis 集成测试实跑通过 |
 | F1.5 | Redis 侧陈旧租约提前回收 | `1664024` | ✅ reserve/snapshot Lua 按 `stale_after` 提前回收并独立计入 `stale_reclaimed_total`；`redis_upstream_stale_lease_is_reclaimed_before_ttl` 实跑通过（1 passed） |
-| F2.1 | 本地闸门终态统一为 `gateway_concurrency_saturated` | | |
-| F2.2 | 混合失败的 `local_gate_rejected_count` / `upstream_attempted_count` | | |
+| F2.1 | 本地闸门终态统一为 `gateway_concurrency_saturated` | `1a20515` | ✅ 聚合路径按 `physical_attempt_count == 0 && local_gate_rejected_count > 0` 判定（且尊重 `upstream_local_gate_distinct_error_code_enabled` 回滚开关），code/category 统一为 `gateway_concurrency_saturated`（429 不变）；更新 `fast_fail_switch_off_keeps_gateway_concurrency_code` 并新增混合测试 |
+| F2.2 | 混合失败的 `local_gate_rejected_count` / `upstream_attempted_count` | `1a20515` | ✅ 混合轮次保留 `upstream_routes_exhausted`，details 增加 `local_gate_rejected_count` 与 `upstream_attempted_count`；`mixed_local_gate_and_upstream_rejection_reports_composition` 实跑通过 |
 | F3.1 | 重试放大按类别记录 + API 返回 `category` | | |
 | F3.2 | 前端卡片按类别分色 + 判读文案 | | |
 | F4 | 部署文档：Redis 与本地后端能力差异对照表 | | |
