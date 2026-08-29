@@ -244,6 +244,6 @@ docker logs <网关容器> --since 2h 2>&1 \
 | check | `rtk proxy cargo check --all-targets` | 0 | ✅ 通过（最终动态 TTL 修正后复跑） |
 | test（默认栈） | `rtk proxy cargo test` | 101 | ⚠️ 既有 `troubleshooting::compatibility_matrix_does_not_queue_probes_or_mutate_runtime_state` 栈溢出；其余已完成套件通过。不是代码编译失败 |
 | test（64 MiB 栈） | `RUST_MIN_STACK=67108864 rtk proxy cargo test` | 0 | ✅ 62 个测试套件；1842 passed / 0 failed / 99 ignored |
-| **redis** | `TEST_REDIS_URL=redis://127.0.0.1:6380 rtk proxy cargo test --test redis_runtime -- --ignored` | 101 | ⚠️ 实跑 96 个用例：94 passed / 2 failed / 10 ignored。既有失败为 `redis_gateway_local_capacity_release_is_immediately_schedulable`（期望 429，实际 200）与 `redis_route_health_stale_finish_cannot_clear_a_newer_failure`（首次 reserve 未得到预期 `RateLimited` Cooling）；F1 新增/修改相关用例通过 |
+| **redis** | `TEST_REDIS_URL=redis://127.0.0.1:6379 rtk proxy cargo test --test redis_runtime -- --ignored` | 0 | ✅ 实跑 96 个用例：96 passed / 0 failed / 10 filtered out。`e2121d6` 将两条旧用例的 setup 对齐 E1 与运行时设置校验后的有效配置：容量释放用例显式禁用路由重试，陈旧 finish 用例显式开启容量失败冷却；两条均通过 |
 | 前端类型 | `rtk npm --prefix frontend run type-check` | 0 | ✅ 通过 |
 | 前端测试 | `rtk npm --prefix frontend test` | 0 | ✅ 37 files / 271 tests 通过 |
