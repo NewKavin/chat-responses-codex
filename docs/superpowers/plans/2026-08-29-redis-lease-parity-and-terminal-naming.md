@@ -231,7 +231,7 @@ docker logs <网关容器> --since 2h 2>&1 \
 | F1.5 | Redis 侧陈旧租约提前回收 | `1664024` | ✅ reserve/snapshot Lua 按 `stale_after` 提前回收并独立计入 `stale_reclaimed_total`；`redis_upstream_stale_lease_is_reclaimed_before_ttl` 实跑通过（1 passed） |
 | F2.1 | 本地闸门终态统一为 `gateway_concurrency_saturated` | `1a20515` | ✅ 聚合路径按 `physical_attempt_count == 0 && local_gate_rejected_count > 0` 判定（且尊重 `upstream_local_gate_distinct_error_code_enabled` 回滚开关），code/category 统一为 `gateway_concurrency_saturated`（429 不变）；更新 `fast_fail_switch_off_keeps_gateway_concurrency_code` 并新增混合测试 |
 | F2.2 | 混合失败的 `local_gate_rejected_count` / `upstream_attempted_count` | `1a20515` | ✅ 混合轮次保留 `upstream_routes_exhausted`，details 增加 `local_gate_rejected_count` 与 `upstream_attempted_count`；`mixed_local_gate_and_upstream_rejection_reports_composition` 实跑通过 |
-| F3.1 | 重试放大按类别记录 + API 返回 `category` | `ac51be4`, `fe00a29d` | ✅ 按 `(downstream_id, model, category)` 独立计数；API `points` 返回稳定的 `gateway_gate` / `routes_exhausted` / `upstream_429` 分类；单测验证三类互不串台 |
+| F3.1 | 重试放大按类别记录 + API 返回 `category` | `ac51be4`, `fe00a29d`, `24689a9` | ✅ 按 `(downstream_id, model, category)` 独立计数；API `points` 返回稳定的 `gateway_gate` / `routes_exhausted` / `upstream_429` 分类，并显式返回 `category_totals` 分类小计；单测验证三类互不串台及小计汇总 |
 | F3.2 | 前端卡片按类别分色 + 判读文案 | `ac51be4` | ✅ Dashboard 按网关闸门、路由耗尽、上游 429 分色并显示分类小计；`npm run type-check` 与 `npm test` 通过 |
 | F4 | 部署文档：Redis 与本地后端能力差异对照表 | `1d7bebe` | ✅ `DEPLOYMENT.md` 新增 Redis/本地能力差异表，并明确 `upstream_local_lease_ttl_seconds` 在 Redis 后端生效 |
 
