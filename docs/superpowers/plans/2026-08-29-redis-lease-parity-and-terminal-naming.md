@@ -227,8 +227,8 @@ docker logs <网关容器> --since 2h 2>&1 \
 | F1.2 | 确认/接通 Redis 心跳续约 + Redis 侧测试（**先于 F1.1**） | `a2acb3f` | ✅ Redis 心跳调用链已确认接通；新增并实跑 `redis_upstream_lease_renewal_extends_lease_ttl`（1 passed） |
 | F1.1 | Redis 租约时长改用 `upstream_local_lease_ttl_seconds` | `b5999d0` | ✅ Redis 初始配置与运行时热更新均改用本地 lease TTL；`redis_upstream_lease_uses_local_ttl_not_stream_duration` 实跑通过（1 passed） |
 | F1.3 | 释放失败回滚 `release_state` + 失败计数日志 | `b25626c` | ✅ 状态回滚由 `LeaseReleaseGuard` 保证（已有 `failed_redis_releases_can_be_retried_by_a_clone` 覆盖）；新增 `redis_upstream_release_failures` 累计计数并写入 warn 日志；实跑通过 |
-| F1.4 | Redis 快照上报真实值（或明确标记不支持，禁止继续 report 0） | | |
-| F1.5 | Redis 侧陈旧租约提前回收 | | |
+| F1.4 | Redis 快照上报真实值（或明确标记不支持，禁止继续 report 0） | `70ca854` | ✅ `stale_lease_count`/`oldest_lease_age_seconds` 从 ZSET 分值计算；`leaked_reclaimed_total`/`capacity_reject_total` 用 counters hash 真实计数；`route_cooldown_skipped_total` 改为 `Option`（Redis 上报 `null`，前端显示 —）；`hold_*` 保持 `None`。新增 2 个 Redis 集成测试实跑通过 |
+| F1.5 | Redis 侧陈旧租约提前回收 | `1664024` | ✅ reserve/snapshot Lua 按 `stale_after` 提前回收并独立计入 `stale_reclaimed_total`；`redis_upstream_stale_lease_is_reclaimed_before_ttl` 实跑通过（1 passed） |
 | F2.1 | 本地闸门终态统一为 `gateway_concurrency_saturated` | | |
 | F2.2 | 混合失败的 `local_gate_rejected_count` / `upstream_attempted_count` | | |
 | F3.1 | 重试放大按类别记录 + API 返回 `category` | | |
