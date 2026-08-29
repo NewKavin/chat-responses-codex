@@ -613,6 +613,7 @@ export interface RetryAmplificationPoint {
 export interface RetryAmplificationResponse {
   window_seconds: number
   total: number
+  category_totals: Record<string, number>
   points: RetryAmplificationPoint[]
 }
 

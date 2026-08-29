@@ -291,9 +291,14 @@ pub(super) async fn admin_retry_amplification(
         .clamp(60, 3600);
     let points = state.retry_terminal_snapshot(window_seconds);
     let total = points.iter().map(|point| point.count).sum::<u64>();
+    let mut category_totals = BTreeMap::<&str, u64>::new();
+    for point in &points {
+        *category_totals.entry(point.category.as_str()).or_default() += point.count;
+    }
     Json(json!({
         "window_seconds": window_seconds,
         "total": total,
+        "category_totals": category_totals,
         "points": points,
     }))
     .into_response()
@@ -4489,6 +4494,53 @@ mod tests {
             format!("/tmp/chat2responses-route-capture-{}.json", Uuid::new_v4()),
             config,
         )
+    }
+
+    #[tokio::test]
+    async fn retry_amplification_response_exposes_category_totals() {
+        let state = test_state();
+        let mut start = crate::state::ActiveGatewayRequestStart {
+            request_id: "retry-category-1".into(),
+            downstream_id: "downstream-a".into(),
+            downstream_name: "downstream-a".into(),
+            endpoint: "/v1/responses".into(),
+            model: "model-a".into(),
+            protocol: "Responses".into(),
+            user_agent: None,
+        };
+
+        for (request_id, model, error_category) in [
+            (
+                "retry-category-1",
+                "model-a",
+                "gateway_concurrency_saturated",
+            ),
+            (
+                "retry-category-2",
+                "model-b",
+                "gateway_concurrency_saturated",
+            ),
+            ("retry-category-3", "model-a", "upstream_routes_exhausted"),
+            ("retry-category-4", "model-a", "upstream_rate_limited"),
+        ] {
+            start.request_id = request_id.into();
+            start.model = model.into();
+            state.start_active_gateway_request(start.clone());
+            state.fail_active_gateway_request(request_id, error_category);
+            state.finish_active_gateway_request(request_id);
+        }
+
+        let response = admin_retry_amplification(State(state), Query(Default::default())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), DIAGNOSTIC_RESPONSE_BODY_LIMIT)
+            .await
+            .expect("retry-amplification response body");
+        let json: Value = serde_json::from_slice(&body).expect("JSON response");
+
+        assert_eq!(json["total"], 4);
+        assert_eq!(json["category_totals"]["gateway_gate"], 2);
+        assert_eq!(json["category_totals"]["routes_exhausted"], 1);
+        assert_eq!(json["category_totals"]["upstream_429"], 1);
     }
 
     #[test]
