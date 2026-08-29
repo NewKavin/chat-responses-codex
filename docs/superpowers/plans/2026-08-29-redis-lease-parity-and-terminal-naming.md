@@ -226,7 +226,7 @@ docker logs <网关容器> --since 2h 2>&1 \
 | --- | --- | --- | --- |
 | F1.2 | 确认/接通 Redis 心跳续约 + Redis 侧测试（**先于 F1.1**） | `a2acb3f` | ✅ Redis 心跳调用链已确认接通；新增并实跑 `redis_upstream_lease_renewal_extends_lease_ttl`（1 passed） |
 | F1.1 | Redis 租约时长改用 `upstream_local_lease_ttl_seconds` | `b5999d0` | ✅ Redis 初始配置与运行时热更新均改用本地 lease TTL；`redis_upstream_lease_uses_local_ttl_not_stream_duration` 实跑通过（1 passed） |
-| F1.3 | 释放失败回滚 `release_state` + 失败计数日志 | | |
+| F1.3 | 释放失败回滚 `release_state` + 失败计数日志 | `b25626c` | ✅ 状态回滚由 `LeaseReleaseGuard` 保证（已有 `failed_redis_releases_can_be_retried_by_a_clone` 覆盖）；新增 `redis_upstream_release_failures` 累计计数并写入 warn 日志；实跑通过 |
 | F1.4 | Redis 快照上报真实值（或明确标记不支持，禁止继续 report 0） | | |
 | F1.5 | Redis 侧陈旧租约提前回收 | | |
 | F2.1 | 本地闸门终态统一为 `gateway_concurrency_saturated` | | |
