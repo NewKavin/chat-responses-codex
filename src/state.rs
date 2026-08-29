@@ -636,10 +636,11 @@ pub struct AppState {
     /// spawned by a dropped gateway guard.  The release guard remains
     /// `ACTIVE` in that case so a later clone can retry it.
     redis_upstream_release_failures: Arc<AtomicU64>,
-    /// E5.1: sliding-window count of client-visible *retryable-capacity*
-    /// terminal errors (code/category `upstream_routes_exhausted`,
-    /// `gateway_concurrency_saturated`, or the upstream 429
-    /// `upstream_rate_limited`), keyed by `(downstream_id, model, category)`.
+    /// E5.1/F3: sliding-window count of client-visible *retryable-capacity*
+    /// terminal errors, keyed by `(downstream_id, model, category)`. The
+    /// metric category is `routes_exhausted`, `gateway_gate`, or
+    /// `upstream_429`; the request's original error code is retained outside
+    /// this metric.
     /// A count far above the real request rate for a key is the
     /// client-retry-loop tell — the exact shape of the E-admission incidents
     /// where the gateway kept answering 429/exhausted while the client
@@ -3020,24 +3021,17 @@ impl AppState {
             request.status = "error".to_string();
             request.error_category = Some(error_category.into());
             request.last_event_at = unix_seconds();
-            // E5.1: a terminal retryable-capacity error handed to the client
-            // is the retry-loop signal.  The categories are exactly the three
-            // incident fingerprints: routes exhausted, local gate saturated,
-            // and the upstream 429 family.  Keyed by (downstream_id, model).
-            match request.error_category.as_deref() {
-                Some(
-                    "upstream_routes_exhausted"
-                    | "gateway_concurrency_saturated"
-                    | "upstream_rate_limited",
-                ) => {
-                    let category = request
-                        .error_category
-                        .as_deref()
-                        .expect("matched above")
-                        .to_string();
-                    self.record_retry_terminal(&request.downstream_id, &request.model, &category);
-                }
-                _ => {}
+            // E5.1/F3: a terminal retryable-capacity error handed to the
+            // client is the retry-loop signal. Keep the request's original
+            // error code above, but normalize the metric into the three
+            // operator-facing sources so gateway and upstream rejections do
+            // not share a bucket.
+            if let Some(category) = request
+                .error_category
+                .as_deref()
+                .and_then(retry_terminal_metric_category)
+            {
+                self.record_retry_terminal(&request.downstream_id, &request.model, category);
             }
         }
     }
@@ -7751,10 +7745,8 @@ pub struct ActiveGatewayRequestStart {
 pub struct RetryTerminalPoint {
     pub downstream_id: String,
     pub model: String,
-    /// F3: the terminal category that produced these retryable-capacity
-    /// rejections — `upstream_routes_exhausted`, `gateway_concurrency_saturated`
-    /// or `upstream_rate_limited`.  Ops read this to tell where the throttle
-    /// sits (upstream routes vs the gateway's own gate vs upstream 429).
+    /// F3: the operator-facing source category — `gateway_gate`,
+    /// `routes_exhausted`, or `upstream_429`.
     pub category: String,
     pub count: u64,
 }
@@ -7763,6 +7755,18 @@ pub struct RetryTerminalPoint {
 /// (seconds).  Five minutes matches a client's typical fast retry loop while
 /// staying cheap to keep in memory.
 pub const RETRY_AMPLIFICATION_WINDOW_SECONDS: u64 = 300;
+
+/// Maps stable gateway error codes to the smaller set of operator-facing
+/// retry-amplification sources. The error code itself remains unchanged in
+/// active requests and usage logs.
+fn retry_terminal_metric_category(error_category: &str) -> Option<&'static str> {
+    match error_category {
+        "gateway_concurrency_saturated" => Some("gateway_gate"),
+        "upstream_routes_exhausted" => Some("routes_exhausted"),
+        "upstream_rate_limited" => Some("upstream_429"),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ActiveGatewayRequestSnapshot {

@@ -275,11 +275,11 @@ pub(super) async fn admin_troubleshooting_active_requests(
     .into_response()
 }
 
-/// E5.1: retry-amplification metric — per `(downstream_id, model)` count of
-/// client-visible retryable-capacity terminal errors inside the sliding
-/// window.  A count far above the real request rate for a key is the
-/// client-retry-loop tell that led to the admission incidents; without it the
-/// only way to find the problem was reading code.
+/// E5.1/F3: retry-amplification metric — per `(downstream_id, model, category)`
+/// count of client-visible retryable-capacity terminal errors inside the
+/// sliding window. Categories distinguish the gateway gate, route exhaustion,
+/// and upstream 429 sources. A count far above the real request rate for a
+/// key is the client-retry-loop tell that led to the admission incidents.
 pub(super) async fn admin_retry_amplification(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,

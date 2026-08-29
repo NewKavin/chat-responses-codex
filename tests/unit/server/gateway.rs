@@ -4005,12 +4005,12 @@ async fn e51_retry_terminal_counts_capacity_errors_per_downstream_model() {
     for index in 0..3 {
         start.request_id = format!("req-{}", index + 1);
         state.start_active_gateway_request(start.clone());
-        let category = [
+        let error_category = [
             "upstream_routes_exhausted",
             "gateway_concurrency_saturated",
             "upstream_rate_limited",
         ][index];
-        state.fail_active_gateway_request(&format!("req-{}", index + 1), category);
+        state.fail_active_gateway_request(&format!("req-{}", index + 1), error_category);
         state.finish_active_gateway_request(&format!("req-{}", index + 1));
     }
     // A non-capacity terminal category must not count.
@@ -4020,11 +4020,7 @@ async fn e51_retry_terminal_counts_capacity_errors_per_downstream_model() {
     state.finish_active_gateway_request("req-capacity-other");
 
     let points = state.retry_terminal_snapshot(crate::state::RETRY_AMPLIFICATION_WINDOW_SECONDS);
-    for category in [
-        "upstream_routes_exhausted",
-        "gateway_concurrency_saturated",
-        "upstream_rate_limited",
-    ] {
+    for category in ["routes_exhausted", "gateway_gate", "upstream_429"] {
         let point = points
             .iter()
             .find(|point| {

@@ -1154,9 +1154,9 @@ const retryPoints = ref<RetryAmplificationPoint[]>([])
 const retryLoading = ref(false)
 
 const retryCategories = [
-  { key: 'gateway_concurrency_saturated', label: '网关闸门', tone: 'danger', tagType: 'danger' as const },
-  { key: 'upstream_routes_exhausted', label: '路由耗尽', tone: 'warning', tagType: 'warning' as const },
-  { key: 'upstream_rate_limited', label: '上游 429', tone: 'info', tagType: 'info' as const }
+  { key: 'gateway_gate', label: '网关闸门', tone: 'danger', tagType: 'danger' as const },
+  { key: 'routes_exhausted', label: '路由耗尽', tone: 'warning', tagType: 'warning' as const },
+  { key: 'upstream_429', label: '上游 429', tone: 'info', tagType: 'info' as const }
 ] as const
 
 const retryCategoryMeta = (category: string) =>
