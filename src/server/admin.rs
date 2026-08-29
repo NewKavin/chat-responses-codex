@@ -625,7 +625,7 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         hold_p50_ms: Option<u64>,
         hold_p95_ms: Option<u64>,
         capacity_reject_total: u64,
-        route_cooldown_skipped_total: u64,
+        route_cooldown_skipped_total: Option<u64>,
     }
 
     let mut upstreams_with_runtime = Vec::with_capacity(snapshot.upstreams.len());

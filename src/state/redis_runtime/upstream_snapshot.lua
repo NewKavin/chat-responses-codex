@@ -3,6 +3,11 @@ local now_seconds = tonumber(time[1])
 local now_ms = (now_seconds * 1000) + math.floor(time[2] / 1000)
 local request_window_seconds = tonumber(ARGV[1])
 local retention_seconds = math.max(60, request_window_seconds)
+-- F1.4: current upstream lease TTL and stale-after window (both in ms).  The
+-- ZSET score is the lease expiry time, so `score - lease_duration_ms` is the
+-- last heartbeat time for a live lease.
+local lease_duration_ms = tonumber(ARGV[2])
+local stale_after_ms = tonumber(ARGV[3])
 
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
 local expired_events = redis.call(
@@ -12,6 +17,24 @@ if #expired_events > 0 then
   redis.call('HDEL', KEYS[3], unpack(expired_events))
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms - (retention_seconds * 1000))
+
+-- F1.4: stale leases are live (not yet expired) members whose last heartbeat
+-- is older than `stale_after_ms`, i.e. score < now + ttl - stale_after.
+local stale_lease_count = 0
+if stale_after_ms < lease_duration_ms then
+  stale_lease_count = redis.call(
+    'ZCOUNT', KEYS[1], '(' .. now_ms, now_ms + lease_duration_ms - stale_after_ms
+  )
+end
+local oldest_lease_age_seconds = 0
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+if #oldest >= 2 then
+  local oldest_score = tonumber(oldest[2])
+  oldest_lease_age_seconds = math.max(
+    0,
+    math.floor((now_ms + lease_duration_ms - oldest_score) / 1000)
+  )
+end
 
 local function cost_since(start_ms)
   local ids = redis.call('ZRANGEBYSCORE', KEYS[2], start_ms, '+inf')
@@ -34,5 +57,10 @@ return {
   tostring(cooldown_until),
   redis.call('HGET', KEYS[4], 'last_feedback_type') or '',
   redis.call('HGET', KEYS[4], 'last_retry_after_seconds') or '',
-  tostring(now_seconds)
+  tostring(now_seconds),
+  redis.call('HGET', KEYS[5], 'leaked_reclaimed') or '0',
+  redis.call('HGET', KEYS[5], 'stale_reclaimed') or '0',
+  redis.call('HGET', KEYS[5], 'capacity_reject') or '0',
+  tostring(stale_lease_count),
+  tostring(oldest_lease_age_seconds)
 }

@@ -11,8 +11,15 @@ local request_quota = tonumber(ARGV[8])
 local lease_duration_ms = tonumber(ARGV[9])
 local retention_seconds = math.max(60, request_window_seconds)
 
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms)
+-- F1.4: expired leases are lazily pruned here; the removal is counted on the
+-- per-upstream counters hash so the snapshot can report `leaked_reclaimed_total`
+-- instead of a hard-coded 0.
+local expired_leases = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if #expired_leases > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+  redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms)
+  redis.call('HINCRBY', KEYS[5], 'leaked_reclaimed', #expired_leases)
+end
 local expired_events = redis.call(
   'ZRANGEBYSCORE', KEYS[3], '-inf', now_ms - (retention_seconds * 1000)
 )
@@ -48,6 +55,9 @@ end
 -- saturated upstream rejects new work up front instead of relying solely
 -- on provider 429s and the reactive account-probe throttle.
 if redis.call('ZCARD', KEYS[1]) >= max_concurrency then
+  -- F1.4: the Redis admission gate is the backend's counterpart of the local
+  -- pre-dispatch gate; count its rejections so `capacity_reject_total` is real.
+  redis.call('HINCRBY', KEYS[5], 'capacity_reject', 1)
   return {'1', '1'}
 end
 

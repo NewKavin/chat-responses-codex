@@ -4346,10 +4346,12 @@ impl AppState {
                     .account_lease_count_for_upstream(upstream_id)
                     .min(u32::MAX as usize) as u32;
                 drop(table);
-                let route_cooldown_skipped_total = cooldown_skipped_totals
-                    .get(upstream_id)
-                    .copied()
-                    .unwrap_or(0);
+                let route_cooldown_skipped_total = Some(
+                    cooldown_skipped_totals
+                        .get(upstream_id)
+                        .copied()
+                        .unwrap_or(0),
+                );
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
@@ -4642,10 +4644,12 @@ impl AppState {
                 let hold_p50_ms = table.upstream_hold_p50_ms(&upstream_id);
                 let hold_p95_ms = table.upstream_hold_p95_ms(&upstream_id);
                 let capacity_reject_total = table.capacity_reject_total(&upstream_id);
-                let route_cooldown_skipped_total = cooldown_skipped_totals
-                    .get(&upstream_id)
-                    .copied()
-                    .unwrap_or(0);
+                let route_cooldown_skipped_total = Some(
+                    cooldown_skipped_totals
+                        .get(&upstream_id)
+                        .copied()
+                        .unwrap_or(0),
+                );
 
                 let snapshot = UpstreamRuntimeSnapshotWithFeedback {
                     in_flight: table
@@ -7633,27 +7637,23 @@ pub struct UpstreamRuntimeSnapshot {
     pub minute_cost: f64,
     pub five_hour_cost: f64,
     pub cooldown_until: u64,
-    /// Local backend only: expired leases reclaimed by lazy sweeps (P7).
-    /// Always 0 on the Redis backend (its Lua sweeps self-heal natively).
+    /// Expired leases reclaimed by lazy sweeps.  Local backend: process
+    /// lease table counter.  Redis: `upstream_reserve.lua` / snapshot sweeps
+    /// count removals on the per-upstream counters hash (F1.4).
     pub leaked_reclaimed_total: u64,
-    /// C2.3: local backend only: leases reclaimed by the *stale* sweep (no
-    /// heartbeat within `upstream_lease_stale_after_ms`) rather than by TTL
-    /// expiry.  Kept separate from `leaked_reclaimed_total` so an operator can
-    /// tell the two reclaim modes apart.  Always 0 on the Redis backend.
+    /// C2.3: leases reclaimed by the *stale* sweep (no heartbeat within
+    /// `upstream_lease_stale_after_ms`) rather than by TTL expiry.  Kept
+    /// separate from `leaked_reclaimed_total` so an operator can tell the two
+    /// reclaim modes apart.  Redis gets this from the counters hash (F1.5).
     pub stale_reclaimed_total: u64,
-    /// C5.1: local backend only: leases currently held for this upstream whose
-    /// last heartbeat is older than `upstream_lease_stale_after_ms` — i.e. how
-    /// many slots the stale sweep would reclaim *right now*.  A non-zero value
-    /// means slots are held by dead owners (leaked guards) rather than live
-    /// in-flight traffic.  Always 0 on the Redis backend (its Lua sweeps
-    /// self-heal on every reserve).
+    /// C5.1: leases currently held for this upstream whose last heartbeat is
+    /// older than `upstream_lease_stale_after_ms` — i.e. how many slots the
+    /// stale sweep would reclaim *right now*.  Redis computes it from ZSET
+    /// scores (score = expiry ⇒ last heartbeat = score − lease TTL, F1.4).
     pub stale_lease_count: u32,
-    /// C5.1: local backend only: age in seconds of the oldest currently-held
-    /// lease for this upstream (max `now - last_renewed_at`).  0 when no
-    /// leases are held.  Interpreting it together with
-    /// `upstream_lease_stale_after_ms` distinguishes "about to be swept"
-    /// (age > stale_after) from "recently heartbeated and healthy".  Always 0
-    /// on the Redis backend.
+    /// C5.1: age in seconds of the oldest currently-held lease for this
+    /// upstream (max `now - last_renewed_at`).  Redis derives it from the
+    /// smallest live ZSET score (F1.4).
     pub oldest_lease_age_seconds: u64,
     /// C5.1: how many requests are currently queued behind the local
     /// concurrency gate (C3) for this upstream's accounts.  Process-local, so
@@ -7662,20 +7662,21 @@ pub struct UpstreamRuntimeSnapshot {
     pub queue_depth: u32,
     /// E5.3: median observed lease hold duration across this upstream's
     /// accounts, milliseconds (E3 samples: release − reserve).  `None` until
-    /// at least two samples exist — the honest "we don't know yet" (0 on the
-    /// Redis backend, which keeps leases in Lua).
+    /// at least two samples exist.  The Redis backend keeps leases in Lua and
+    /// never samples holds, so it honestly reports `None`.
     pub hold_p50_ms: Option<u64>,
     /// E5.3: p95 observed lease hold duration, milliseconds (see
     /// `hold_p50_ms`).
     pub hold_p95_ms: Option<u64>,
     /// E5.3: cumulative local-gate (pre-dispatch slot) rejections for this
     /// upstream.  A non-zero value means the E4 safety net actually fired.
-    /// Local backend only — the Redis backend enforces concurrency inside Lua.
+    /// Redis counts Lua admission-gate rejections on the counters hash (F1.4).
     pub capacity_reject_total: u64,
     /// E5.3: cumulative count of E1 route/key cooldown skips (capacity-class
-    /// failure recorded as observation only) for this upstream.  Local
-    /// backend only (Redis route health lives in Lua).
-    pub route_cooldown_skipped_total: u64,
+    /// failure recorded as observation only) for this upstream.  `Some` on
+    /// the local backend; the Redis backend does not count skips and reports
+    /// `None` so the dashboard shows "—" instead of a misleading 0.
+    pub route_cooldown_skipped_total: Option<u64>,
 }
 
 impl UpstreamRuntimeSnapshot {
@@ -7713,7 +7714,7 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     /// E5.3: see `UpstreamRuntimeSnapshot::capacity_reject_total`.
     pub capacity_reject_total: u64,
     /// E5.3: see `UpstreamRuntimeSnapshot::route_cooldown_skipped_total`.
-    pub route_cooldown_skipped_total: u64,
+    pub route_cooldown_skipped_total: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

@@ -417,6 +417,7 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     );
     let upstream_event_key = format!("{}:replay:upstream-events", config.redis_key_prefix);
     let upstream_cost_key = format!("{}:replay:upstream-costs", config.redis_key_prefix);
+    let upstream_counters_key = format!("{}:replay:upstream-counters", config.redis_key_prefix);
 
     let downstream_args = vec![
         "EVAL".into(),
@@ -468,11 +469,12 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let upstream_args = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/upstream_reserve.lua").into(),
-        "4".into(),
+        "5".into(),
         upstream_lease_key.clone(),
         upstream_aggregate_lease_key,
         upstream_event_key.clone(),
         upstream_cost_key.clone(),
+        upstream_counters_key,
         "upstream-event-id".into(),
         "upstream-lease-id".into(),
         "2.5".into(),
@@ -4625,6 +4627,170 @@ async fn redis_upstream_lease_uses_local_ttl_not_stream_duration() {
         "upstream lease must use local TTL (~300s), got {remaining_ms}ms"
     );
     state.release_upstream_request(lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_snapshot_reports_real_stale_and_oldest_lease_state() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("upstream-snapshot-stale");
+    let fingerprint = "fingerprint-snapshot-stale";
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let lease = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .unwrap();
+    let account = AccountConcurrencyKey::new(upstream.id.clone(), fingerprint);
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let lease_id = redis_test_command(
+        &config,
+        &["ZRANGE".into(), lease_key.clone(), "0".into(), "0".into()],
+    )
+    .await
+    .split("\r\n")
+    .nth(2)
+    .expect("ZRANGE must return the reserved upstream lease id")
+    .to_string();
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    let aggregate_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
+    // Simulate a lease whose last heartbeat was 250s ago with a 300s TTL:
+    // expiry is now + 50s (still live), last renewal 250s > stale_after 200s.
+    for key in [lease_key, aggregate_key] {
+        redis_test_command(
+            &config,
+            &[
+                "ZADD".into(),
+                key,
+                (now_ms + 50_000).to_string(),
+                lease_id.clone(),
+            ],
+        )
+        .await;
+    }
+
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(snapshot.in_flight, 1);
+    assert_eq!(
+        snapshot.stale_lease_count, 1,
+        "a lease heartbeated 250s ago must be counted as stale"
+    );
+    assert!(
+        (250..=251).contains(&snapshot.oldest_lease_age_seconds),
+        "oldest lease age must reflect the 250s heartbeat gap, got {}",
+        snapshot.oldest_lease_age_seconds
+    );
+    assert_eq!(
+        snapshot.route_cooldown_skipped_total, None,
+        "Redis backend must report cooldown skips as unsupported, not 0"
+    );
+    assert_eq!(snapshot.hold_p50_ms, None);
+    assert_eq!(snapshot.hold_p95_ms, None);
+    state.release_upstream_request(lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_snapshot_counts_capacity_rejections_and_leaked_reclaims() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let mut upstream = redis_test_upstream("upstream-snapshot-counters");
+    upstream.max_concurrency = 1;
+    let fingerprint = "fingerprint-snapshot-counters";
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let account = AccountConcurrencyKey::new(upstream.id.clone(), fingerprint);
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let aggregate_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
+
+    let first = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .unwrap();
+    let rejection = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .expect_err("the second request must be rejected by the Redis gate");
+    assert!(!rejection.is_runtime_coordination_unavailable());
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(
+        snapshot.capacity_reject_total, 1,
+        "the Lua admission-gate rejection must be counted"
+    );
+    state.release_upstream_request(first).await.unwrap();
+
+    // Park an expired ghost lease in the account + aggregate ZSETs; the next
+    // admission must lazily prune it and count it as a leaked reclaim.
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    for key in [lease_key.clone(), aggregate_key] {
+        redis_test_command(
+            &config,
+            &[
+                "ZADD".into(),
+                key,
+                (now_ms - 1_000).to_string(),
+                "ghost-lease".into(),
+            ],
+        )
+        .await;
+    }
+    let replacement = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .expect("the expired ghost lease must be pruned before admission");
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(
+        snapshot.leaked_reclaimed_total, 1,
+        "the expired ghost lease must be counted as a leaked reclaim"
+    );
+    state.release_upstream_request(replacement).await.unwrap();
 }
 
 #[tokio::test]

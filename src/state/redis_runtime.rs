@@ -202,6 +202,7 @@ impl RuntimeCoordinationBackend {
                     ),
                     capacity_failure_cooldown_enabled: config
                         .upstream_capacity_failure_cooldown_enabled,
+                    upstream_lease_stale_after_ms: config.upstream_lease_stale_after_ms.max(1),
                 }),
             });
             coordinator.ping().await?;
@@ -229,6 +230,7 @@ impl RuntimeCoordinationBackend {
         if let Self::Redis(coordinator) = self {
             coordinator.update_runtime_tuning(
                 settings.upstream_local_lease_ttl_seconds,
+                settings.upstream_lease_stale_after_ms,
                 settings.upstream_concurrency_probe_delays_ms.clone(),
                 settings.upstream_concurrency_recovery_max_wait_ms,
                 settings.upstream_transient_route_cooldown_base_seconds,
@@ -267,12 +269,14 @@ struct RedisRuntimeTuning {
     transient_route_cooldown_max_step: u32,
     credentials_first_strike: Duration,
     capacity_failure_cooldown_enabled: bool,
+    upstream_lease_stale_after_ms: u64,
 }
 
 impl RedisRuntimeCoordinator {
     pub(super) fn update_runtime_tuning(
         &self,
         upstream_local_lease_ttl_seconds: u64,
+        upstream_lease_stale_after_ms: u64,
         concurrency_probe_delays_ms: Vec<u64>,
         recovery_max_wait_ms: u64,
         transient_route_cooldown_base_seconds: u64,
@@ -308,6 +312,7 @@ impl RedisRuntimeCoordinator {
         tuning.credentials_first_strike =
             Duration::from_secs(credentials_first_strike_seconds.max(1));
         tuning.capacity_failure_cooldown_enabled = capacity_failure_cooldown_enabled;
+        tuning.upstream_lease_stale_after_ms = upstream_lease_stale_after_ms.max(1);
     }
 
     fn tuning_snapshot(&self) -> RedisRuntimeTuning {
@@ -1292,6 +1297,7 @@ impl RedisRuntimeCoordinator {
         let aggregate_lease_key = self.upstream_key(&upstream_identity, "leases");
         let event_key = self.upstream_key(&upstream_identity, "events");
         let cost_key = self.upstream_key(&upstream_identity, "event_costs");
+        let counters_key = self.upstream_key(&upstream_identity, "counters");
         let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         let result = self
             .retry_coordination_once(|| {
@@ -1300,6 +1306,7 @@ impl RedisRuntimeCoordinator {
                 let aggregate_lease_key = aggregate_lease_key.clone();
                 let event_key = event_key.clone();
                 let cost_key = cost_key.clone();
+                let counters_key = counters_key.clone();
                 let event_id = event_id.to_string();
                 let lease_id = lease_id.to_string();
                 async move {
@@ -1311,6 +1318,7 @@ impl RedisRuntimeCoordinator {
                         .key(aggregate_lease_key)
                         .key(event_key)
                         .key(cost_key)
+                        .key(counters_key)
                         .arg(event_id)
                         .arg(lease_id)
                         .arg(request_cost.to_string())
@@ -1351,12 +1359,17 @@ impl RedisRuntimeCoordinator {
         let mut connection = self.connection();
         let script = redis::Script::new(include_str!("redis_runtime/upstream_snapshot.lua"));
         let mut invocation = script.prepare_invoke();
+        let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
+        let stale_after_ms = self.tuning_snapshot().upstream_lease_stale_after_ms;
         invocation
             .key(self.upstream_key(&identity, "leases"))
             .key(self.upstream_key(&identity, "events"))
             .key(self.upstream_key(&identity, "event_costs"))
             .key(self.upstream_key(&identity, "cooldown"))
-            .arg(upstream.request_quota_window_seconds());
+            .key(self.upstream_key(&identity, "counters"))
+            .arg(upstream.request_quota_window_seconds())
+            .arg(lease_duration_ms)
+            .arg(stale_after_ms);
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
         if result.is_err() {
@@ -3282,7 +3295,7 @@ fn parse_downstream_runtime_counts(
 fn parse_upstream_snapshot(
     result: Vec<String>,
 ) -> Result<UpstreamRuntimeSnapshot, RuntimeCoordinationError> {
-    if result.len() < 4 {
+    if result.len() < 12 {
         return Err(RuntimeCoordinationError);
     }
     let in_flight = result[0]
@@ -3297,6 +3310,21 @@ fn parse_upstream_snapshot(
     let cooldown_until = result[3]
         .parse::<u64>()
         .map_err(|_| RuntimeCoordinationError)?;
+    let leaked_reclaimed_total = result[7]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let stale_reclaimed_total = result[8]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let capacity_reject_total = result[9]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let stale_lease_count = result[10]
+        .parse::<u32>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let oldest_lease_age_seconds = result[11]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
     if !minute_cost.is_finite()
         || minute_cost < 0.0
         || !five_hour_cost.is_finite()
@@ -3309,31 +3337,34 @@ fn parse_upstream_snapshot(
         minute_cost,
         five_hour_cost,
         cooldown_until,
-        leaked_reclaimed_total: 0,
-        stale_reclaimed_total: 0,
-        // C5.1: the Redis backend self-heals leases in its Lua sweeps, so
-        // there is no per-lease stale/age accounting to surface; the C3
-        // slot-queue depth is a per-process in-memory structure reported by
-        // the local snapshot builder (this parser runs inside the Redis
+        leaked_reclaimed_total,
+        stale_reclaimed_total,
+        // F1.4: computed from the aggregate ZSET scores inside the snapshot
+        // script (score = expiry ⇒ last heartbeat = score − lease TTL).
+        stale_lease_count,
+        oldest_lease_age_seconds,
+        // C3 slot-queue depth is a per-process in-memory structure reported
+        // by the local snapshot builder (this parser runs inside the Redis
         // coordinator where the process-local queue is not visible).
-        stale_lease_count: 0,
-        oldest_lease_age_seconds: 0,
         queue_depth: 0,
-        // E5.3: hold samples live in the process-local lease table (E3) and
-        // the local-gate rejection happens in Lua on Redis, so these
-        // observables are local-backend-only (0/None here, mirroring the
-        // C5 leak-reclaim counters above).
+        // E5.3: hold samples live in the process-local lease table (E3).
+        // The Redis backend keeps leases in Lua and has no per-request hold
+        // sample; these observables are honestly `None` instead of 0.
         hold_p50_ms: None,
         hold_p95_ms: None,
-        capacity_reject_total: 0,
-        route_cooldown_skipped_total: 0,
+        // F1.4: real count of Lua admission-gate rejections for this upstream.
+        capacity_reject_total,
+        // E1 cooldown skips are a process-local route-health concept; the
+        // Redis backend does not count them, so report `None` (前端显示 —)
+        // instead of a misleading 0.
+        route_cooldown_skipped_total: None,
     })
 }
 
 fn parse_upstream_snapshot_with_feedback(
     result: Vec<String>,
 ) -> Result<UpstreamRuntimeSnapshotWithFeedback, RuntimeCoordinationError> {
-    if result.len() < 7 {
+    if result.len() < 12 {
         return Err(RuntimeCoordinationError);
     }
     let snapshot = parse_upstream_snapshot(result.clone())?;
@@ -3358,15 +3389,15 @@ fn parse_upstream_snapshot_with_feedback(
         cooldown_remaining: snapshot.cooldown_until.saturating_sub(now),
         last_feedback_type,
         last_retry_after_seconds,
-        leaked_reclaimed_total: 0,
-        stale_reclaimed_total: 0,
-        stale_lease_count: 0,
-        oldest_lease_age_seconds: 0,
+        leaked_reclaimed_total: snapshot.leaked_reclaimed_total,
+        stale_reclaimed_total: snapshot.stale_reclaimed_total,
+        stale_lease_count: snapshot.stale_lease_count,
+        oldest_lease_age_seconds: snapshot.oldest_lease_age_seconds,
         queue_depth: 0,
-        hold_p50_ms: None,
-        hold_p95_ms: None,
-        capacity_reject_total: 0,
-        route_cooldown_skipped_total: 0,
+        hold_p50_ms: snapshot.hold_p50_ms,
+        hold_p95_ms: snapshot.hold_p95_ms,
+        capacity_reject_total: snapshot.capacity_reject_total,
+        route_cooldown_skipped_total: snapshot.route_cooldown_skipped_total,
     })
 }
 

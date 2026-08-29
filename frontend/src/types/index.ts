@@ -142,7 +142,7 @@ export interface UpstreamRuntimeState {
   /** 本地并发闸门拒绝累计次数。 */
   capacity_reject_total?: number
   /** E1 生效次数：容量类失败本应冷却、实际跳过冷却的累计次数。 */
-  route_cooldown_skipped_total?: number
+  route_cooldown_skipped_total?: number | null
   minute_cost: number
   minute_limit: number
   minute_percentage: number
