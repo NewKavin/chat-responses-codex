@@ -813,8 +813,9 @@ fn record_cooled_route_attempt(
     upstream_status: Option<u16>,
     upstream_error_code: Option<String>,
     half_open_busy: bool,
+    local_gate_rejected: bool,
 ) {
-    route_attempts.record_cooled(AttemptFailure {
+    let failure = AttemptFailure {
         route_id: anonymous_route_id(
             &upstream.id,
             key_fingerprint,
@@ -829,7 +830,12 @@ fn record_cooled_route_attempt(
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),
         half_open_busy,
-    });
+    };
+    if local_gate_rejected {
+        route_attempts.record_cooled_local_gate(failure);
+    } else {
+        route_attempts.record_cooled(failure);
+    }
 }
 
 /// Failure classes whose identical repetition across different routes of
@@ -6941,6 +6947,7 @@ async fn process_gateway_request_inner(
                                     upstream_status,
                                     None,
                                     false,
+                                    false,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
                                     "all eligible upstream routes are temporarily unavailable"
@@ -7005,6 +7012,7 @@ async fn process_gateway_request_inner(
                                     upstream_status,
                                     None,
                                     true,
+                                    false,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
                                     "all eligible upstream routes are temporarily unavailable"
@@ -7068,6 +7076,7 @@ async fn process_gateway_request_inner(
                                     None,
                                     None,
                                     false,
+                                    true,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream account is waiting for recovery".into(),
@@ -7157,6 +7166,7 @@ async fn process_gateway_request_inner(
                                     None,
                                     None,
                                     false,
+                                    true,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream request concurrency capacity is full".into(),
@@ -9002,6 +9012,7 @@ async fn process_gateway_request_inner(
                     .saturating_add(account_recovery.waited()),
                 live_recovery,
                 request_route_attempts.physical_attempt_count(),
+                runtime_settings.upstream_local_gate_distinct_error_code_enabled,
                 request_route_attempts.give_up_reason(),
                 request_route_attempts.last_resort_probe_granted(),
                 upstream_retry_after_cap,
@@ -9028,6 +9039,7 @@ async fn process_gateway_request_inner(
                     .saturating_add(account_recovery.waited()),
                 live_recovery,
                 request_route_attempts.physical_attempt_count(),
+                runtime_settings.upstream_local_gate_distinct_error_code_enabled,
                 request_route_attempts.give_up_reason(),
                 request_route_attempts.last_resort_probe_granted(),
                 upstream_retry_after_cap,

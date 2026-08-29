@@ -250,12 +250,15 @@ async fn local_gate_fast_fail_with_distinct_code_and_zero_attempts() {
     );
 }
 
-/// Rollback hatch: with `upstream_local_gate_fast_fail_enabled = false` the
-/// request falls back to the pre-C4 burn path (bounded here by a short
-/// exhaustion budget) and the terminal error stays the legacy aggregated
-/// `upstream_routes_exhausted` — never the distinct local-gate code.
+/// F2.1: with `upstream_local_gate_fast_fail_enabled = false` the request
+/// falls back to the pre-C4 burn path (bounded here by a short exhaustion
+/// budget).  The aggregated terminal must STILL use the distinct local-gate
+/// code `gateway_concurrency_saturated` whenever the whole round was refused
+/// by the gateway's own gate (zero physical upstream attempts) — the old
+/// behavior of relabeling that same root cause as `upstream_routes_exhausted`
+/// is exactly the "two names for one root cause" confusion F2 fixes.
 #[tokio::test]
-async fn fast_fail_switch_off_restores_legacy_code() {
+async fn fast_fail_switch_off_keeps_gateway_concurrency_code() {
     let (base_url, hits) = holding_upstream(1, 1_500).await;
     let (app, state, downstream_key) = fast_fail_harness(base_url, 1, |config| AppConfig {
         upstream_local_gate_fast_fail_enabled: false,
@@ -290,17 +293,174 @@ async fn fast_fail_switch_off_restores_legacy_code() {
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{payload}");
     assert_eq!(
-        payload["error"]["code"], "upstream_routes_exhausted",
-        "fast-fail off must fall back to the legacy aggregated code: {payload}"
-    );
-    assert_ne!(
         payload["error"]["code"], "gateway_concurrency_saturated",
-        "the distinct code must NOT appear when the fast-fail switch is off: {payload}"
+        "fast-fail off must keep the distinct local-gate code: {payload}"
+    );
+    assert_eq!(
+        payload["error"]["category"], "gateway_concurrency_saturated",
+        "the category must match the code: {payload}"
+    );
+    assert_eq!(payload["error"]["type"], "rate_limit_error", "{payload}");
+    assert_eq!(
+        payload["error"]["details"]["local_gate_rejected_count"], 1,
+        "the round must record the single local-gate rejection: {payload}"
+    );
+    assert_eq!(
+        payload["error"]["details"]["upstream_attempted_count"], 0,
+        "zero physical upstream attempts must be visible: {payload}"
+    );
+    assert_eq!(
+        payload["error"]["details"]["physical_attempt_count"], 0,
+        "{payload}"
     );
     assert_eq!(
         hits.load(Ordering::SeqCst),
         1,
         "the rejected request must never reach the upstream"
+    );
+}
+
+/// F2.2: when the round is *mixed* — the gateway's local gate rejects one
+/// candidate (zero physical attempts) while another candidate really reached
+/// the upstream and came back rate-limited — the terminal keeps the
+/// `upstream_routes_exhausted` name (there WAS a real upstream attempt) but
+/// the details must expose the composition via `local_gate_rejected_count`
+/// and `upstream_attempted_count`, so ops can see the gateway's own gate
+/// contributed to the 429.
+#[tokio::test]
+async fn mixed_local_gate_and_upstream_rejection_reports_composition() {
+    let (gate_base_url, gate_hits) = holding_upstream(1, 1_500).await;
+    let rate_base_url = rate_limited_upstream().await;
+    let downstream_key = generate_downstream_key("c4-mixed");
+    let tempdir = tempdir().unwrap();
+    let upstreams = vec![
+        UpstreamConfig {
+            id: "gate-upstream".into(),
+            name: "gate-upstream".into(),
+            base_url: gate_base_url,
+            api_key: "upstream-secret-gate".into(),
+            api_keys: vec![],
+            api_key_models: vec![],
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![MODEL.into()],
+            max_concurrency: 1,
+            active: true,
+            ..Default::default()
+        },
+        UpstreamConfig {
+            id: "rate-upstream".into(),
+            name: "rate-upstream".into(),
+            base_url: rate_base_url,
+            api_key: "upstream-secret-rate".into(),
+            api_keys: vec![],
+            api_key_models: vec![],
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![MODEL.into()],
+            max_concurrency: 4,
+            active: true,
+            ..Default::default()
+        },
+    ];
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(upstreams),
+            downstreams: Arc::new(vec![DownstreamConfig {
+                id: "down-mixed".into(),
+                name: "c4-mixed-client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![MODEL.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+                model_concurrency_groups: vec![],
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            // Keep the round count small and deterministic; the fast-fail
+            // path must NOT trigger because the rate-limited upstream is a
+            // physically-attemptable candidate (not every candidate was
+            // refused by the local gate).
+            upstream_local_gate_fast_fail_enabled: true,
+            upstream_route_exhaustion_retry_max_wait_ms: 200,
+            upstream_route_exhaustion_retry_max_rounds: 2,
+            upstream_hedge_enabled: false,
+            automatic_capability_probes_enabled: false,
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+
+    let holder = tokio::spawn({
+        let app = app.clone();
+        let downstream_key = downstream_key.plaintext.clone();
+        async move { app.oneshot(chat_request(&downstream_key)).await.unwrap() }
+    });
+    wait_for_upstream_in_flight(&state, "gate-upstream", 1).await;
+
+    let response = app
+        .clone()
+        .oneshot(chat_request(&downstream_key.plaintext))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    let _ = holder.await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "upstream_routes_exhausted",
+        "mixed rounds must keep the exhausted name (a real attempt happened): {payload}"
+    );
+    assert_eq!(
+        payload["error"]["category"], "upstream_routes_exhausted",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["error"]["details"]["local_gate_rejected_count"], 1,
+        "the local-gate rejection must be visible in the composition: {payload}"
+    );
+    assert!(
+        payload["error"]["details"]["upstream_attempted_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "the real upstream attempt must be visible in the composition: {payload}"
+    );
+    assert!(
+        payload["error"]["details"]["physical_attempt_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "{payload}"
+    );
+    assert_eq!(
+        gate_hits.load(Ordering::SeqCst),
+        1,
+        "only the holder may reach the gate upstream"
     );
 }
 

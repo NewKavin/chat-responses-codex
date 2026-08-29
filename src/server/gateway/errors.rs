@@ -153,6 +153,7 @@ pub(super) fn terminal_route_failure_error(
     waited: Duration,
     live_recovery: Option<RouteRecovery>,
     physical_attempt_count: usize,
+    local_gate_distinct_code_enabled: bool,
     give_up_reason: Option<GiveUpReason>,
     last_resort_probe_attempted: bool,
     retry_after_cap: Duration,
@@ -263,6 +264,22 @@ pub(super) fn terminal_route_failure_error(
     if let Some(excerpt) = ledger.upstream_error_body_excerpt() {
         details.insert("upstream_error_body_excerpt".to_string(), json!(excerpt));
     }
+    // F2: the terminal composition — how many candidates the gateway's own
+    // local pre-dispatch gate rejected (zero physical attempts) versus how
+    // many physical upstream attempts actually happened.  Ops use these to
+    // tell "the gateway refused the request itself" from "upstream routes
+    // are exhausted", which the bare `code` alone cannot convey in mixed
+    // rounds.
+    let local_gate_rejected_count = ledger.local_gate_rejected_count();
+    let upstream_attempted_count = physical_attempt_count;
+    details.insert(
+        "local_gate_rejected_count".to_string(),
+        json!(local_gate_rejected_count),
+    );
+    details.insert(
+        "upstream_attempted_count".to_string(),
+        json!(upstream_attempted_count),
+    );
 
     let (status, message, error_type, code, retry_after_seconds) = match terminal {
         TerminalFailure::Temporary { retry_after } => {
@@ -317,11 +334,26 @@ pub(super) fn terminal_route_failure_error(
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, "upstream_error")
             };
+            // F2.1: a terminal whose only failures are the gateway's own
+            // local-gate rejections (zero physical upstream attempts) must
+            // keep the distinct `gateway_concurrency_saturated` name through
+            // the aggregation path — not just the C4 fast-fail path.  Mixed
+            // rounds (any real upstream attempt alongside gate rejections)
+            // keep `upstream_routes_exhausted` with the composition counts
+            // above.
+            let terminal_code = if local_gate_distinct_code_enabled
+                && local_gate_rejected_count > 0
+                && upstream_attempted_count == 0
+            {
+                "gateway_concurrency_saturated"
+            } else {
+                "upstream_routes_exhausted"
+            };
             (
                 status,
                 message,
                 error_type,
-                "upstream_routes_exhausted",
+                terminal_code,
                 Some(retry_after_seconds),
             )
         }

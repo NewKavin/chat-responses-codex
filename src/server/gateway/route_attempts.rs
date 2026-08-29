@@ -209,6 +209,11 @@ fn representative_failure(
 pub(super) struct AttemptLedger {
     failures: Vec<AttemptFailure>,
     cooled_candidates: Vec<AttemptFailure>,
+    /// F2: candidates rejected by the gateway's own local pre-dispatch gate
+    /// (zero physical upstream attempts).  Kept separate from `cooled_candidates`
+    /// so the aggregated terminal can tell "the gateway gate refused" from
+    /// "upstream routes are exhausted".
+    local_gate_rejected_count: usize,
 }
 
 #[derive(Default)]
@@ -382,6 +387,11 @@ impl RequestRouteAttempts {
 
     pub fn record_cooled(&self, failure: AttemptFailure) {
         self.ledger().record_cooled(failure);
+    }
+
+    /// F2: record a local-gate (pre-dispatch) rejection candidate.
+    pub fn record_cooled_local_gate(&self, failure: AttemptFailure) {
+        self.ledger().record_cooled_local_gate(failure);
     }
 
     /// Whether the given route already recorded a transient-family failure
@@ -662,6 +672,21 @@ impl AttemptLedger {
         } else {
             self.cooled_candidates.push(failure);
         }
+    }
+
+    /// F2: like `record_cooled`, but for a rejection by the gateway's own
+    /// local pre-dispatch gate (C4) rather than a route-level cooldown.
+    /// The count feeds `local_gate_rejected_count()` used by the aggregate
+    /// terminal naming decision.
+    pub fn record_cooled_local_gate(&mut self, failure: AttemptFailure) {
+        self.record_cooled(failure);
+        self.local_gate_rejected_count += 1;
+    }
+
+    /// F2: how many candidates this request lost to the gateway's own local
+    /// pre-dispatch gate (no physical upstream attempt was made for them).
+    pub fn local_gate_rejected_count(&self) -> usize {
+        self.local_gate_rejected_count
     }
 
     pub fn is_empty(&self) -> bool {
