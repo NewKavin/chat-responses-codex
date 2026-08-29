@@ -4000,14 +4000,17 @@ async fn e51_retry_terminal_counts_capacity_errors_per_downstream_model() {
         protocol: "Responses".into(),
         user_agent: None,
     };
-    // Three terminal retryable-capacity errors for the same pair.
+    // Three terminal retryable-capacity errors for the same pair — one per
+    // F3 category, so the snapshot must split them into separate rows.
     for index in 0..3 {
         start.request_id = format!("req-{}", index + 1);
         state.start_active_gateway_request(start.clone());
-        state.fail_active_gateway_request(
-            &format!("req-{}", index + 1),
+        let category = [
             "upstream_routes_exhausted",
-        );
+            "gateway_concurrency_saturated",
+            "upstream_rate_limited",
+        ][index];
+        state.fail_active_gateway_request(&format!("req-{}", index + 1), category);
         state.finish_active_gateway_request(&format!("req-{}", index + 1));
     }
     // A non-capacity terminal category must not count.
@@ -4017,11 +4020,27 @@ async fn e51_retry_terminal_counts_capacity_errors_per_downstream_model() {
     state.finish_active_gateway_request("req-capacity-other");
 
     let points = state.retry_terminal_snapshot(crate::state::RETRY_AMPLIFICATION_WINDOW_SECONDS);
-    let point = points
-        .iter()
-        .find(|point| point.downstream_id == "down-a" && point.model == "glm-5.2")
-        .expect("the retry-amplification row must exist");
-    assert_eq!(point.count, 3);
+    for category in [
+        "upstream_routes_exhausted",
+        "gateway_concurrency_saturated",
+        "upstream_rate_limited",
+    ] {
+        let point = points
+            .iter()
+            .find(|point| {
+                point.downstream_id == "down-a"
+                    && point.model == "glm-5.2"
+                    && point.category == category
+            })
+            .unwrap_or_else(|| {
+                panic!("a retry-amplification row must exist for category {category}: {points:?}")
+            });
+        assert_eq!(
+            point.count, 1,
+            "category {category} must be counted separately"
+        );
+    }
+    assert_eq!(points.len(), 3, "one row per category, got: {points:?}");
 }
 
 /// E5.2: the active-request lifecycle exposes the five phases and the local

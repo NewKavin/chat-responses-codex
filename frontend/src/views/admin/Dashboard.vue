@@ -270,8 +270,8 @@
                 <p class="card-eyebrow">LIVE // RETRY</p>
                 <h2>重试放大</h2>
                 <p>
-                  窗口内返回给客户端的容量类拒绝次数（429 / 路由耗尽）。客户端每被拒一次就会重试一次，
-                  所以这个数直接反映重试循环的规模；正常应接近 0。
+                  按来源拆分窗口内的可重试终态：网关闸门、路由耗尽和上游 429。
+                  上游 429 是供应商的限流信号；网关类别偏高则需要检查本地容量与租约。
                 </p>
               </div>
               <div class="active-requests-actions">
@@ -303,7 +303,7 @@
               <strong :class="`retry-figure__value retry-figure__value--${retryVerdict.type}`">
                 {{ retryTotal }}
               </strong>
-              <span>次拒绝</span>
+              <span>次可重试终态</span>
             </div>
             <div class="retry-verdict">
               <el-tag :type="retryVerdict.type" effect="light" size="large">
@@ -311,11 +311,21 @@
               </el-tag>
               <p>{{ retryVerdict.hint }}</p>
             </div>
+            <div class="retry-category-summary">
+              <span
+                v-for="category in retryCategories"
+                :key="category.key"
+                class="retry-category-summary__item"
+                :class="`retry-category-summary__item--${category.tone}`"
+              >
+                <i />{{ category.label }} {{ retryCategoryTotals[category.key] }}
+              </span>
+            </div>
           </div>
 
           <el-empty
             v-if="!retryLoading && retryPoints.length === 0"
-            description="窗口内没有容量类拒绝"
+            description="窗口内没有可重试终态"
             :image-size="72"
           />
           <el-table v-else :data="retryPoints" stripe size="small" style="width: 100%">
@@ -327,11 +337,22 @@
                 <span class="mono">{{ row.model }}</span>
               </template>
             </el-table-column>
+            <el-table-column label="来源" min-width="150">
+              <template #default="{ row }">
+                <el-tag size="small" effect="light" :type="retryCategoryMeta(row.category).tagType">
+                  {{ retryCategoryMeta(row.category).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="拒绝次数" min-width="180">
               <template #default="{ row }">
                 <div class="retry-bar">
                   <div class="retry-bar__track">
-                    <div class="retry-bar__fill" :style="{ width: retryBarWidth(row.count) }" />
+                    <div
+                      class="retry-bar__fill"
+                      :class="`retry-bar__fill--${retryCategoryMeta(row.category).tone}`"
+                      :style="{ width: retryBarWidth(row.count) }"
+                    />
                   </div>
                   <span class="retry-bar__count">{{ row.count }}</span>
                 </div>
@@ -1132,24 +1153,45 @@ const retryTotal = ref(0)
 const retryPoints = ref<RetryAmplificationPoint[]>([])
 const retryLoading = ref(false)
 
-/// 容量类拒绝在正常状态下应当接近 0：客户端每被拒一次就会重试一次，
-/// 所以这个计数直接反映"客户端在重试循环"的规模。阈值是经验值，
-/// 只用于染色，判断仍以趋势为准。
+const retryCategories = [
+  { key: 'gateway_concurrency_saturated', label: '网关闸门', tone: 'danger', tagType: 'danger' as const },
+  { key: 'upstream_routes_exhausted', label: '路由耗尽', tone: 'warning', tagType: 'warning' as const },
+  { key: 'upstream_rate_limited', label: '上游 429', tone: 'info', tagType: 'info' as const }
+] as const
+
+const retryCategoryMeta = (category: string) =>
+  retryCategories.find(item => item.key === category) ?? {
+    key: category,
+    label: category,
+    tone: 'neutral',
+    tagType: 'info' as const
+  }
+
+const retryCategoryTotals = computed<Record<string, number>>(() => {
+  const totals: Record<string, number> = {}
+  for (const point of retryPoints.value) {
+    totals[point.category] = (totals[point.category] ?? 0) + point.count
+  }
+  return totals
+})
+
+/// The headline is an overall retry-loop signal; the category totals below
+/// identify whether the source is the gateway or the upstream.
 const retryVerdict = computed(() => {
   if (retryTotal.value === 0) {
-    return { label: '正常', type: 'success' as const, hint: '窗口内没有容量类拒绝，客户端没有在重试循环。' }
+    return { label: '正常', type: 'success' as const, hint: '窗口内没有可重试终态。' }
   }
   if (retryTotal.value < 10) {
     return {
       label: '关注',
       type: 'warning' as const,
-      hint: '出现了少量容量类拒绝：偶发的上游并发打满属于正常，持续增长才需要处理。'
+      hint: '有少量可重试终态；结合来源判断是供应商限流还是网关容量不足。'
     }
   }
   return {
     label: '异常',
     type: 'danger' as const,
-    hint: '容量类拒绝次数偏高，客户端很可能正在重试循环——检查上游并发上限与路由冷却。'
+    hint: '可重试终态次数偏高，客户端可能正在重试循环；优先处理网关闸门类，再核对上游 429。'
   }
 })
 
@@ -1276,6 +1318,38 @@ onUnmounted(() => {
   color: var(--el-text-color-regular);
 }
 
+.retry-category-summary {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+}
+
+.retry-category-summary__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.retry-category-summary__item i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-info);
+}
+
+.retry-category-summary__item--danger i,
+.retry-bar__fill--danger { background: var(--el-color-danger); }
+
+.retry-category-summary__item--warning i,
+.retry-bar__fill--warning { background: var(--el-color-warning); }
+
+.retry-category-summary__item--info i,
+.retry-bar__fill--info { background: var(--el-color-info); }
+
 .retry-bar {
   display: flex;
   align-items: center;
@@ -1293,7 +1367,7 @@ onUnmounted(() => {
 .retry-bar__fill {
   height: 100%;
   border-radius: 4px;
-  background: var(--el-color-danger);
+  background: var(--el-color-info);
 }
 
 .retry-bar__count {

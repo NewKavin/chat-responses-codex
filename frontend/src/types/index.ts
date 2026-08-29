@@ -606,6 +606,7 @@ export interface ActiveGatewayRequest {
 export interface RetryAmplificationPoint {
   downstream_id: string
   model: string
+  category: string
   count: number
 }
 

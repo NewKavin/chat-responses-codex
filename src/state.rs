@@ -639,11 +639,14 @@ pub struct AppState {
     /// E5.1: sliding-window count of client-visible *retryable-capacity*
     /// terminal errors (code/category `upstream_routes_exhausted`,
     /// `gateway_concurrency_saturated`, or the upstream 429
-    /// `upstream_rate_limited`), keyed by `(downstream_id, model)`.  A count
-    /// far above the real request rate for a key is the client-retry-loop
-    /// tell — the exact shape of the E-admission incidents where the gateway
-    /// kept answering 429/exhausted while the client hammered it.
-    retry_terminal: Arc<StdMutex<HashMap<(String, String), VecDeque<u64>>>>,
+    /// `upstream_rate_limited`), keyed by `(downstream_id, model, category)`.
+    /// A count far above the real request rate for a key is the
+    /// client-retry-loop tell — the exact shape of the E-admission incidents
+    /// where the gateway kept answering 429/exhausted while the client
+    /// hammered it.  F3: the category in the key lets ops tell "the gateway's
+    /// own gate refused" from "the upstream throttled" without re-deriving
+    /// it from timestamps.
+    retry_terminal: Arc<StdMutex<HashMap<(String, String, String), VecDeque<u64>>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
     fallback_stage_failures: Arc<StdMutex<HashMap<String, u8>>>,
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
@@ -3027,7 +3030,12 @@ impl AppState {
                     | "gateway_concurrency_saturated"
                     | "upstream_rate_limited",
                 ) => {
-                    self.record_retry_terminal(&request.downstream_id, &request.model);
+                    let category = request
+                        .error_category
+                        .as_deref()
+                        .expect("matched above")
+                        .to_string();
+                    self.record_retry_terminal(&request.downstream_id, &request.model, &category);
                 }
                 _ => {}
             }
@@ -3037,7 +3045,7 @@ impl AppState {
     /// E5.1: record one retryable-capacity terminal error for
     /// `(downstream_id, model)` inside the sliding window, pruning entries
     /// older than [`RETRY_AMPLIFICATION_WINDOW_SECONDS`].
-    fn record_retry_terminal(&self, downstream_id: &str, model: &str) {
+    fn record_retry_terminal(&self, downstream_id: &str, model: &str, category: &str) {
         let now = unix_seconds();
         let window = RETRY_AMPLIFICATION_WINDOW_SECONDS;
         let mut counts = self
@@ -3045,7 +3053,11 @@ impl AppState {
             .lock()
             .expect("retry terminal lock poisoned");
         let bucket = counts
-            .entry((downstream_id.to_string(), model.to_string()))
+            .entry((
+                downstream_id.to_string(),
+                model.to_string(),
+                category.to_string(),
+            ))
             .or_default();
         let cutoff = now.saturating_sub(window);
         while bucket.front().is_some_and(|t| *t <= cutoff) {
@@ -3065,7 +3077,7 @@ impl AppState {
             .lock()
             .expect("retry terminal lock poisoned");
         let mut points = Vec::new();
-        for ((downstream_id, model), bucket) in counts.iter_mut() {
+        for ((downstream_id, model, category), bucket) in counts.iter_mut() {
             while bucket.front().is_some_and(|t| *t <= cutoff) {
                 bucket.pop_front();
             }
@@ -3073,6 +3085,7 @@ impl AppState {
                 points.push(RetryTerminalPoint {
                     downstream_id: downstream_id.clone(),
                     model: model.clone(),
+                    category: category.clone(),
                     count: bucket.len() as u64,
                 });
             }
@@ -3080,6 +3093,7 @@ impl AppState {
         points.sort_by(|a, b| {
             b.count
                 .cmp(&a.count)
+                .then_with(|| a.category.cmp(&b.category))
                 .then_with(|| a.downstream_id.cmp(&b.downstream_id))
                 .then_with(|| a.model.cmp(&b.model))
         });
@@ -7737,6 +7751,11 @@ pub struct ActiveGatewayRequestStart {
 pub struct RetryTerminalPoint {
     pub downstream_id: String,
     pub model: String,
+    /// F3: the terminal category that produced these retryable-capacity
+    /// rejections — `upstream_routes_exhausted`, `gateway_concurrency_saturated`
+    /// or `upstream_rate_limited`.  Ops read this to tell where the throttle
+    /// sits (upstream routes vs the gateway's own gate vs upstream 429).
+    pub category: String,
     pub count: u64,
 }
 
