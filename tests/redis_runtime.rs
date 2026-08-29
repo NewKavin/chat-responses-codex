@@ -418,6 +418,10 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let upstream_event_key = format!("{}:replay:upstream-events", config.redis_key_prefix);
     let upstream_cost_key = format!("{}:replay:upstream-costs", config.redis_key_prefix);
     let upstream_counters_key = format!("{}:replay:upstream-counters", config.redis_key_prefix);
+    let upstream_reclaim_markers_key = format!(
+        "{}:replay:upstream-reclaim-markers",
+        config.redis_key_prefix
+    );
 
     let downstream_args = vec![
         "EVAL".into(),
@@ -469,12 +473,13 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let upstream_args = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/upstream_reserve.lua").into(),
-        "5".into(),
+        "6".into(),
         upstream_lease_key.clone(),
         upstream_aggregate_lease_key,
         upstream_event_key.clone(),
         upstream_cost_key.clone(),
         upstream_counters_key,
+        upstream_reclaim_markers_key,
         "upstream-event-id".into(),
         "upstream-lease-id".into(),
         "2.5".into(),
@@ -743,6 +748,10 @@ async fn redis_upstream_lease_renewal_extends_lease_ttl() {
         "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
         config.redis_key_prefix
     );
+    let aggregate_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
     let members = redis_test_command(
         &config,
         &["ZRANGE".into(), lease_key.clone(), "0".into(), "-1".into()],
@@ -769,16 +778,38 @@ async fn redis_upstream_lease_renewal_extends_lease_ttl() {
         ],
     )
     .await;
+    redis_test_command(
+        &config,
+        &[
+            "ZADD".into(),
+            aggregate_key.clone(),
+            (now_ms + 1_000).to_string(),
+            lease_id.clone(),
+        ],
+    )
+    .await;
 
     state
         .renew_upstream_request(&lease)
         .await
         .expect("Redis upstream lease renewal must succeed");
-    let renewed_score =
-        redis_bulk_u64(&redis_test_command(&config, &["ZSCORE".into(), lease_key, lease_id]).await);
+    let renewed_score = redis_bulk_u64(
+        &redis_test_command(&config, &["ZSCORE".into(), lease_key, lease_id.clone()]).await,
+    );
     assert!(
         renewed_score > now_ms + 60_000,
         "renewal must push the Redis upstream lease into the future, got {renewed_score}"
+    );
+    let aggregate_renewed_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["ZSCORE".into(), aggregate_key.clone(), lease_id.clone()],
+        )
+        .await,
+    );
+    assert!(
+        aggregate_renewed_score > now_ms + 60_000,
+        "renewal must push the aggregate Redis upstream lease into the future, got {aggregate_renewed_score}"
     );
 
     state.release_upstream_request(lease).await.unwrap();
@@ -4877,6 +4908,150 @@ async fn redis_upstream_snapshot_counts_capacity_rejections_and_leaked_reclaims(
         "the expired ghost lease must be counted as a leaked reclaim"
     );
     state.release_upstream_request(replacement).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_snapshot_counts_expired_aggregate_reclaims() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("upstream-snapshot-expired-reclaim");
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let aggregate_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1_000 + micros / 1_000;
+    redis_test_command(
+        &config,
+        &[
+            "ZADD".into(),
+            aggregate_key.clone(),
+            (now_ms - 1_000).to_string(),
+            "snapshot-expired-lease".into(),
+        ],
+    )
+    .await;
+
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(snapshot.in_flight, 0);
+    assert_eq!(
+        snapshot.leaked_reclaimed_total, 1,
+        "snapshot expiry sweep must count the reclaimed aggregate lease"
+    );
+    assert!(
+        redis_test_command(
+            &config,
+            &[
+                "ZSCORE".into(),
+                aggregate_key,
+                "snapshot-expired-lease".into(),
+            ],
+        )
+        .await
+        .starts_with("$-1"),
+        "snapshot expiry sweep must remove the expired aggregate lease"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_reclaiming_one_lease_in_snapshot_and_admission_counts_once() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let mut upstream = redis_test_upstream("upstream-reclaim-count-idempotence");
+    upstream.max_concurrency = 1;
+    let fingerprint = "fingerprint-reclaim-count-idempotence";
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let account = AccountConcurrencyKey::new(upstream.id.clone(), fingerprint);
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream.id.as_bytes()));
+    let account_identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    let account_lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:leases",
+        config.redis_key_prefix
+    );
+    let aggregate_lease_key = format!(
+        "{}:v1:upstream:{{{upstream_identity}}}:leases",
+        config.redis_key_prefix
+    );
+
+    let held = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .unwrap();
+    let lease_id = redis_test_command(
+        &config,
+        &[
+            "ZRANGE".into(),
+            account_lease_key.clone(),
+            "0".into(),
+            "0".into(),
+        ],
+    )
+    .await
+    .split("\r\n")
+    .nth(2)
+    .expect("ZRANGE must return the reserved upstream lease id")
+    .to_string();
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: u64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: u64 = time_parts[4].parse().expect("TIME micros");
+    let expired_at_ms = seconds * 1_000 + micros / 1_000 - 1_000;
+    for key in [account_lease_key, aggregate_lease_key] {
+        redis_test_command(
+            &config,
+            &[
+                "ZADD".into(),
+                key,
+                expired_at_ms.to_string(),
+                lease_id.clone(),
+            ],
+        )
+        .await;
+    }
+
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(snapshot.leaked_reclaimed_total, 1);
+
+    let replacement = state
+        .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+        .await
+        .expect("the expired account lease must be reclaimed before admission");
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .cloned()
+        .expect("upstream snapshot must exist");
+    assert_eq!(
+        snapshot.leaked_reclaimed_total, 1,
+        "the same lease must not be counted again when its account ZSET is swept"
+    );
+
+    state.release_upstream_request(replacement).await.unwrap();
+    drop(held);
 }
 
 #[tokio::test]

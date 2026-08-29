@@ -1298,6 +1298,7 @@ impl RedisRuntimeCoordinator {
         let event_key = self.upstream_key(&upstream_identity, "events");
         let cost_key = self.upstream_key(&upstream_identity, "event_costs");
         let counters_key = self.upstream_key(&upstream_identity, "counters");
+        let reclaim_markers_key = self.upstream_key(&upstream_identity, "reclaim_markers");
         let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         let stale_after_ms = self.tuning_snapshot().upstream_lease_stale_after_ms;
         let result = self
@@ -1308,6 +1309,7 @@ impl RedisRuntimeCoordinator {
                 let event_key = event_key.clone();
                 let cost_key = cost_key.clone();
                 let counters_key = counters_key.clone();
+                let reclaim_markers_key = reclaim_markers_key.clone();
                 let event_id = event_id.to_string();
                 let lease_id = lease_id.to_string();
                 async move {
@@ -1320,6 +1322,7 @@ impl RedisRuntimeCoordinator {
                         .key(event_key)
                         .key(cost_key)
                         .key(counters_key)
+                        .key(reclaim_markers_key)
                         .arg(event_id)
                         .arg(lease_id)
                         .arg(request_cost.to_string())
@@ -1363,12 +1366,14 @@ impl RedisRuntimeCoordinator {
         let mut invocation = script.prepare_invoke();
         let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         let stale_after_ms = self.tuning_snapshot().upstream_lease_stale_after_ms;
+        let reclaim_markers_key = self.upstream_key(&identity, "reclaim_markers");
         invocation
             .key(self.upstream_key(&identity, "leases"))
             .key(self.upstream_key(&identity, "events"))
             .key(self.upstream_key(&identity, "event_costs"))
             .key(self.upstream_key(&identity, "cooldown"))
             .key(self.upstream_key(&identity, "counters"))
+            .key(reclaim_markers_key)
             .arg(upstream.request_quota_window_seconds())
             .arg(lease_duration_ms)
             .arg(stale_after_ms);
@@ -1422,16 +1427,19 @@ impl RedisRuntimeCoordinator {
         let account_identity = account_identity(account);
         let account_lease_key =
             self.upstream_account_key(&upstream_identity, &account_identity, "leases");
+        let aggregate_lease_key = self.upstream_key(&upstream_identity, "leases");
         let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         self.retry_coordination_once(|| {
             let mut connection = self.connection();
             let account_lease_key = account_lease_key.clone();
+            let aggregate_lease_key = aggregate_lease_key.clone();
             let lease_id = lease_id.to_string();
             async move {
                 let script = redis::Script::new(include_str!("redis_runtime/lease_renew.lua"));
                 let mut invocation = script.prepare_invoke();
                 invocation
                     .key(account_lease_key)
+                    .key(aggregate_lease_key)
                     .arg(lease_id)
                     .arg(lease_duration_ms);
                 timeout_coordination(invocation.invoke_async::<i64>(&mut connection))

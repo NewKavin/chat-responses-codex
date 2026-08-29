@@ -11,6 +11,16 @@ local request_quota = tonumber(ARGV[8])
 local lease_duration_ms = tonumber(ARGV[9])
 local stale_after_ms = tonumber(ARGV[10])
 local retention_seconds = math.max(60, request_window_seconds)
+local function count_new_reclaims(lease_ids)
+  if #lease_ids == 0 then
+    return 0
+  end
+  local new_reclaims = redis.call('SADD', KEYS[6], unpack(lease_ids))
+  -- Keep the deduplication set only for the period in which the two lease
+  -- indexes can disagree after a lazy sweep.  It is not a lease registry.
+  redis.call('PEXPIRE', KEYS[6], math.max(lease_duration_ms + 60000, retention_seconds * 1000 + 60000))
+  return new_reclaims
+end
 
 -- F1.4: expired leases are lazily pruned here; the removal is counted on the
 -- per-upstream counters hash so the snapshot can report `leaked_reclaimed_total`
@@ -19,7 +29,10 @@ local expired_leases = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms)
 if #expired_leases > 0 then
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
   redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms)
-  redis.call('HINCRBY', KEYS[5], 'leaked_reclaimed', #expired_leases)
+  local new_reclaims = count_new_reclaims(expired_leases)
+  if new_reclaims > 0 then
+    redis.call('HINCRBY', KEYS[5], 'leaked_reclaimed', new_reclaims)
+  end
 end
 -- F1.5: reclaim leases whose last heartbeat is older than the stale window
 -- *before* their TTL expiry (score = expiry, so last heartbeat = score − TTL;
@@ -31,9 +44,15 @@ if stale_after_ms < lease_duration_ms then
   local stale_cutoff = now_ms + lease_duration_ms - stale_after_ms
   stale_lease_count = #redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. now_ms, stale_cutoff)
   if stale_lease_count > 0 then
+    local stale_leases = redis.call(
+      'ZRANGEBYSCORE', KEYS[1], '(' .. now_ms, stale_cutoff
+    )
     redis.call('ZREMRANGEBYSCORE', KEYS[1], '(' .. now_ms, stale_cutoff)
     redis.call('ZREMRANGEBYSCORE', KEYS[2], '(' .. now_ms, stale_cutoff)
-    redis.call('HINCRBY', KEYS[5], 'stale_reclaimed', stale_lease_count)
+    local new_reclaims = count_new_reclaims(stale_leases)
+    if new_reclaims > 0 then
+      redis.call('HINCRBY', KEYS[5], 'stale_reclaimed', new_reclaims)
+    end
   end
 end
 local expired_events = redis.call(

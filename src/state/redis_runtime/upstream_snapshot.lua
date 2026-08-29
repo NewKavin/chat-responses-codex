@@ -8,8 +8,28 @@ local retention_seconds = math.max(60, request_window_seconds)
 -- last heartbeat time for a live lease.
 local lease_duration_ms = tonumber(ARGV[2])
 local stale_after_ms = tonumber(ARGV[3])
+local function count_new_reclaims(lease_ids)
+  if #lease_ids == 0 then
+    return 0
+  end
+  local new_reclaims = redis.call('SADD', KEYS[6], unpack(lease_ids))
+  -- Keep the deduplication set only for the period in which the two lease
+  -- indexes can disagree after a lazy sweep.  It is not a lease registry.
+  redis.call('PEXPIRE', KEYS[6], math.max(lease_duration_ms + 60000, retention_seconds * 1000 + 60000))
+  return new_reclaims
+end
 
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+-- F1.4: an expired aggregate lease can be removed by a snapshot even when no
+-- new admission follows. Count that lazy reclaim so the diagnostic counter is
+-- not dependent on another request arriving after the leak.
+local expired_leases = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if #expired_leases > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+  local new_reclaims = count_new_reclaims(expired_leases)
+  if new_reclaims > 0 then
+    redis.call('HINCRBY', KEYS[5], 'leaked_reclaimed', new_reclaims)
+  end
+end
 local expired_events = redis.call(
   'ZRANGEBYSCORE', KEYS[2], '-inf', now_ms - (retention_seconds * 1000)
 )
@@ -39,10 +59,16 @@ if #oldest >= 2 then
   )
 end
 if stale_lease_count > 0 then
+  local stale_leases = redis.call(
+    'ZRANGEBYSCORE', KEYS[1], '(' .. now_ms, now_ms + lease_duration_ms - stale_after_ms
+  )
   redis.call(
     'ZREMRANGEBYSCORE', KEYS[1], '(' .. now_ms, now_ms + lease_duration_ms - stale_after_ms
   )
-  redis.call('HINCRBY', KEYS[5], 'stale_reclaimed', stale_lease_count)
+  local new_reclaims = count_new_reclaims(stale_leases)
+  if new_reclaims > 0 then
+    redis.call('HINCRBY', KEYS[5], 'stale_reclaimed', new_reclaims)
+  end
 end
 
 local function cost_since(start_ms)
