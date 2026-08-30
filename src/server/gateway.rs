@@ -3061,8 +3061,15 @@ async fn chat_completions(
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if is_stream {
-        return dispatch_streaming_request(state, headers, body, EndpointKind::ChatCompletions)
-            .await;
+        // G0: Box::pin the ~54KB streaming future instead of inlining it into
+        // this handler frame (see translated_stream_state_* guard test).
+        return Box::pin(dispatch_streaming_request(
+            state,
+            headers,
+            body,
+            EndpointKind::ChatCompletions,
+        ))
+        .await;
     }
     match process_gateway_request(state, headers, body, EndpointKind::ChatCompletions).await {
         Ok(result) => dispatch_success(result),
@@ -3083,7 +3090,15 @@ async fn responses(
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if is_stream {
-        return dispatch_streaming_request(state, headers, body, EndpointKind::Responses).await;
+        // G0: Box::pin the ~54KB streaming future instead of inlining it into
+        // this handler frame (see translated_stream_state_* guard test).
+        return Box::pin(dispatch_streaming_request(
+            state,
+            headers,
+            body,
+            EndpointKind::Responses,
+        ))
+        .await;
     }
     match process_gateway_request(state, headers, body, EndpointKind::Responses).await {
         Ok(result) => dispatch_success(result),
@@ -3112,7 +3127,7 @@ async fn claude_messages(
     // E4: the Anthropic exit carries the same gateway request id as every
     // other client-visible error/success response.
     let request_id = Uuid::new_v4().to_string();
-    match process_gateway_request_inner(
+    match Box::pin(process_gateway_request_inner(
         state,
         headers,
         chat_payload,
@@ -3122,7 +3137,7 @@ async fn claude_messages(
         None,
         Some(request_id.clone()),
         None,
-    )
+    ))
     .await
     {
         Ok(result) => dispatch_claude_success(result, claude_stream).await,
@@ -5156,8 +5171,15 @@ async fn process_gateway_request(
     endpoint: EndpointKind,
 ) -> Result<DispatchResult, GatewayError> {
     let runtime_settings = state.runtime_settings();
-    process_gateway_request_with_runtime_settings(state, headers, body, endpoint, runtime_settings)
-        .await
+    // G0: Box the ~51.6KB nested awaitee so this wrapper future stays small.
+    Box::pin(process_gateway_request_with_runtime_settings(
+        state,
+        headers,
+        body,
+        endpoint,
+        runtime_settings,
+    ))
+    .await
 }
 
 async fn process_gateway_request_with_runtime_settings(
@@ -5170,7 +5192,8 @@ async fn process_gateway_request_with_runtime_settings(
     // E4: generate the gateway request id up front so error exits (and the
     // success response header) carry the same id the usage log stores under.
     let request_id = Uuid::new_v4().to_string();
-    process_gateway_request_inner(
+    // G0: Box the ~50KB inner future instead of inlining it (stack regression).
+    Box::pin(process_gateway_request_inner(
         state,
         headers,
         body,
@@ -5180,7 +5203,7 @@ async fn process_gateway_request_with_runtime_settings(
         None,
         Some(request_id.clone()),
         None,
-    )
+    ))
     .await
     .map_err(|error| error.with_request_id(Some(request_id)))
 }
@@ -5196,7 +5219,8 @@ async fn process_gateway_request_with_pre_header_cancellation(
     cancellation: PreHeaderStreamCancellation,
     first_semantic_deadline: stream_commit::FirstSemanticDeadline,
 ) -> Result<DispatchResult, GatewayError> {
-    process_gateway_request_inner(
+    // G0: Box the ~50KB inner future instead of inlining it (stack regression).
+    Box::pin(process_gateway_request_inner(
         state,
         headers,
         body,
@@ -5206,7 +5230,7 @@ async fn process_gateway_request_with_pre_header_cancellation(
         Some(cancellation),
         Some(request_id.clone()),
         Some(first_semantic_deadline),
-    )
+    ))
     .await
     .map_err(|error| error.with_request_id(Some(request_id)))
 }

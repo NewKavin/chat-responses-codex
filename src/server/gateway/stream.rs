@@ -330,13 +330,14 @@ pub(super) async fn dispatch_streaming_request(
 ) -> Response {
     let runtime_settings = state.runtime_settings();
     if troubleshooting_route_capture_requested(&state, &headers) {
-        return match process_gateway_request_with_runtime_settings(
+        // G0: Box the ~51.6KB future instead of inlining it (stack regression).
+        return match Box::pin(process_gateway_request_with_runtime_settings(
             state,
             headers,
             body,
             endpoint,
             runtime_settings,
-        )
+        ))
         .await
         {
             Ok(result) => dispatch_success(result),
@@ -3152,5 +3153,40 @@ mod prefetch_classifier_tests {
         ));
         assert!(!tracker.semantic_output_observed());
         assert!(tracker.can_replay());
+    }
+}
+
+#[cfg(test)]
+mod stack_usage_tests {
+    use super::*;
+
+    #[test]
+    fn stream_states_stay_small_enough_for_test_threads() {
+        // G0 regression guard. `compatibility_matrix_does_not_queue_probes_*`
+        // historically overflowed the default 2 MiB test-thread stack because
+        // the gateway's nested async frames held ~50KB awaitees inline
+        // (`responses` -> `dispatch_streaming_request` ->
+        // `process_gateway_request_with_runtime_settings` ->
+        // `process_gateway_request_inner`). Those boundaries are now
+        // `Box::pin`-ed so only pointers live in the parent frames, and the
+        // two stream states below ride inside `try_unfold` streams that are
+        // themselves `Box::pin`-ed into the response body.
+        //
+        // If a future change grows these states past the bound, box the new
+        // field or the awaitee again - do NOT bump this number, and do NOT
+        // paper over the failure by raising RUST_MIN_STACK.
+        let translated = std::mem::size_of::<TranslatedStreamState>();
+        let proxied = std::mem::size_of::<ProxiedStreamState>();
+        eprintln!(
+            "G0 size guard: TranslatedStreamState={translated}B ProxiedStreamState={proxied}B"
+        );
+        assert!(
+            translated <= 6144,
+            "TranslatedStreamState grew to {translated}B; box large fields instead of raising test stack"
+        );
+        assert!(
+            proxied <= 6144,
+            "ProxiedStreamState grew to {proxied}B; box large fields instead of raising test stack"
+        );
     }
 }

@@ -29,4 +29,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
+      # G0.2 suite-count guard: a mid-run abort (e.g. SIGABRT stack overflow)
+      # still prints "test result: ok" for every suite completed before the
+      # crash, which looks like a green run. Count the suites and fail when
+      # the expected count is not reached.
+      - name: cargo test (full suite, abort guard)
+        run: |
+          set -o pipefail
+          cargo test --all > /tmp/cargo-test.log 2>&1
+          rc=$?
+          echo "cargo_test_rc=$rc"
+          SUITES=$(grep -cE '^test result:' /tmp/cargo-test.log || true)
+          echo "suite_count=$SUITES"
+          if [ "$rc" -ne 0 ]; then
+            tail -n 60 /tmp/cargo-test.log
+            exit "$rc"
+          fi
+          if [ "$SUITES" -lt 62 ]; then
+            echo "::error::suite_count=$SUITES < 62: cargo test aborted mid-way (looks green but is a failure)"
+            tail -n 60 /tmp/cargo-test.log
+            exit 1
+          fi
+          echo "suite_count_ok=$SUITES"
