@@ -73,6 +73,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_local_gate_fast_fail_enabled: true,
   upstream_local_gate_distinct_error_code_enabled: true,
   stream_decode_error_code_split_enabled: true,
+  stream_max_skipped_bad_frames: 8,
   downstream_lease_ttl_seconds: 120,
   upstream_concurrency_recovery_max_wait_ms: 30_000,
   upstream_concurrency_recovery_max_rounds: 5,
@@ -151,6 +152,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_local_gate_fast_fail_enabled',
   'upstream_local_gate_distinct_error_code_enabled',
   'stream_decode_error_code_split_enabled',
+  'stream_max_skipped_bad_frames',
   'downstream_lease_ttl_seconds',
   'upstream_concurrency_recovery_max_wait_ms',
   'upstream_concurrency_recovery_max_rounds',
@@ -178,10 +180,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(75)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(75)
+    expect(runtimeSettingFields).toHaveLength(76)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(76)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(62)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(63)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

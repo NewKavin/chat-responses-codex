@@ -790,6 +790,8 @@ pub(super) fn proxied_stream_body(
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
     // G2: transport decode failures get a distinct code when split is on.
     split_decode_code: bool,
+    // G3: bad-frame skip budget after usable output was delivered.
+    max_skipped_bad_frames: u64,
 ) -> Result<Body, GatewayError> {
     let canonicalizer = (endpoint == EndpointKind::ChatCompletions).then(|| {
         ChatStreamCanonicalizer::new(
@@ -820,6 +822,9 @@ pub(super) fn proxied_stream_body(
         bytes_consumed: 0,
         frames_received: 0,
         split_decode_code,
+        max_skipped_bad_frames,
+        sse_bad_frames_skipped: 0,
+        first_skipped_bad_frame: None,
         usage_log_flushed: false,
         first_output_warned: false,
         commit_tracker,
@@ -1057,6 +1062,10 @@ struct ProxiedStreamState {
     frames_received: u64,
     // G2: transport/SSE decode failures use distinct error codes when on.
     split_decode_code: bool,
+    // G3: bad-frame skip accounting once usable output was delivered.
+    max_skipped_bad_frames: u64,
+    sse_bad_frames_skipped: u64,
+    first_skipped_bad_frame: Option<String>,
     usage_log_flushed: bool,
     // E6: one-shot warn when the first semantic output stalls past
     // `upstream_first_output_warn_after_seconds` (visibility only).
@@ -1251,8 +1260,39 @@ impl ProxiedStreamState {
             }) {
                 Ok(event) => event,
                 Err(error) => {
-                    self.buffer.drain(..consumed);
-                    return Err(error);
+                    if !self.usable_output_exposed()
+                        && !self.commit_tracker.semantic_output_observed()
+                    {
+                        // No usable output delivered yet: a clean failure keeps
+                        // client retry meaningful (pre-G3 behavior).
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                    // G3: usable output was already delivered; skip this one
+                    // bad frame instead of killing the whole stream. Drop it
+                    // entirely - the downstream client cannot parse it either.
+                    self.sse_bad_frames_skipped += 1;
+                    if self.first_skipped_bad_frame.is_none() {
+                        self.first_skipped_bad_frame = Some(
+                            String::from_utf8_lossy(payload.as_bytes())
+                                .chars()
+                                .take(64)
+                                .collect(),
+                        );
+                    }
+                    if self.sse_bad_frames_skipped > self.max_skipped_bad_frames {
+                        tracing::warn!(
+                            request_id = %self.body_read_diagnostic_context.request_id,
+                            upstream_id = %self.body_read_diagnostic_context.upstream_id,
+                            sse_bad_frames_skipped = self.sse_bad_frames_skipped,
+                            first_skipped_bad_frame = self.first_skipped_bad_frame,
+                            max_skipped_bad_frames = self.max_skipped_bad_frames,
+                            "upstream stream skipped too many bad SSE frames after usable output; terminating"
+                        );
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                    continue;
                 }
             };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
@@ -1391,6 +1431,15 @@ impl ProxiedStreamState {
     fn finish_stream(&mut self, end: StreamEnd) -> Result<(), GatewayError> {
         if self.finished {
             return Ok(());
+        }
+        if self.sse_bad_frames_skipped > 0 {
+            tracing::warn!(
+                request_id = %self.body_read_diagnostic_context.request_id,
+                upstream_id = %self.body_read_diagnostic_context.upstream_id,
+                sse_bad_frames_skipped = self.sse_bad_frames_skipped,
+                first_skipped_bad_frame = self.first_skipped_bad_frame,
+                "upstream stream finished with skipped bad SSE frames (G3)"
+            );
         }
 
         if self.canonicalizer.is_none()
@@ -1654,6 +1703,8 @@ pub(super) fn translated_stream_body(
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
     // G2: transport decode failures get a distinct code when split is on.
     split_decode_code: bool,
+    // G3: bad-frame skip budget after usable output was delivered.
+    max_skipped_bad_frames: u64,
     tool_call_merge_strict: bool,
 ) -> Result<Body, GatewayError> {
     let tool_registry = response_history_context
@@ -1704,6 +1755,9 @@ pub(super) fn translated_stream_body(
         bytes_consumed: 0,
         frames_received: 0,
         split_decode_code,
+        max_skipped_bad_frames,
+        sse_bad_frames_skipped: 0,
+        first_skipped_bad_frame: None,
         usage_log_flushed: false,
         first_output_warned: false,
         commit_tracker,
@@ -1934,6 +1988,10 @@ struct TranslatedStreamState {
     frames_received: u64,
     // G2: transport/SSE decode failures use distinct error codes when on.
     split_decode_code: bool,
+    // G3: bad-frame skip accounting once usable output was delivered.
+    max_skipped_bad_frames: u64,
+    sse_bad_frames_skipped: u64,
+    first_skipped_bad_frame: Option<String>,
     next_responses_sequence_number: u64,
     finished: bool,
     semantic_terminal_emitted: bool,
@@ -2147,8 +2205,39 @@ impl TranslatedStreamState {
             }) {
                 Ok(event) => event,
                 Err(error) => {
-                    self.buffer.drain(..consumed);
-                    return Err(error);
+                    if !self.usable_output_exposed()
+                        && !self.commit_tracker.semantic_output_observed()
+                    {
+                        // No usable output delivered yet: a clean failure keeps
+                        // client retry meaningful (pre-G3 behavior).
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                    // G3: usable output was already delivered; skip this one
+                    // bad frame instead of killing the whole stream. Drop it
+                    // entirely - the downstream client cannot parse it either.
+                    self.sse_bad_frames_skipped += 1;
+                    if self.first_skipped_bad_frame.is_none() {
+                        self.first_skipped_bad_frame = Some(
+                            String::from_utf8_lossy(payload.as_bytes())
+                                .chars()
+                                .take(64)
+                                .collect(),
+                        );
+                    }
+                    if self.sse_bad_frames_skipped > self.max_skipped_bad_frames {
+                        tracing::warn!(
+                            request_id = %self.body_read_diagnostic_context.request_id,
+                            upstream_id = %self.body_read_diagnostic_context.upstream_id,
+                            sse_bad_frames_skipped = self.sse_bad_frames_skipped,
+                            first_skipped_bad_frame = self.first_skipped_bad_frame,
+                            max_skipped_bad_frames = self.max_skipped_bad_frames,
+                            "upstream stream skipped too many bad SSE frames after usable output; terminating"
+                        );
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                    continue;
                 }
             };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
@@ -2221,6 +2310,15 @@ impl TranslatedStreamState {
     fn finish_stream(&mut self, end: StreamEnd) -> Result<(), GatewayError> {
         if self.finished {
             return Ok(());
+        }
+        if self.sse_bad_frames_skipped > 0 {
+            tracing::warn!(
+                request_id = %self.body_read_diagnostic_context.request_id,
+                upstream_id = %self.body_read_diagnostic_context.upstream_id,
+                sse_bad_frames_skipped = self.sse_bad_frames_skipped,
+                first_skipped_bad_frame = self.first_skipped_bad_frame,
+                "upstream stream finished with skipped bad SSE frames (G3)"
+            );
         }
 
         if let Some(mut canonicalizer) = self.canonicalizer.take() {

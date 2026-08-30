@@ -590,6 +590,17 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '开启后传输层与 SSE 解析的解码失败返回不同错误码（transport / sse_parse），关闭回落为统一旧码。'
   },
   {
+    key: 'stream_max_skipped_bad_frames',
+    group: 'http',
+    label: '坏帧跳过上限',
+    apply: 'immediate',
+    control: 'number',
+    integer: true,
+    min: 0,
+    max: 1_000,
+    description: '已有可用输出后，流最多跳过多少个坏帧再报错（默认 8）。0 表示首个坏帧即失败。'
+  },
+  {
     key: 'upstream_local_gate_distinct_error_code_enabled',
     group: 'concurrency',
     label: '闸门独立错误码',

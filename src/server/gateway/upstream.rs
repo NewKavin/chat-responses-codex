@@ -2634,6 +2634,7 @@ pub(super) async fn send_to_upstream(
                     commit_tracker,
                     first_semantic_deadline,
                     runtime_settings.stream_decode_error_code_split_enabled,
+                    runtime_settings.stream_max_skipped_bad_frames,
                 )?
             } else {
                 translated_stream_body(
@@ -2648,6 +2649,7 @@ pub(super) async fn send_to_upstream(
                     commit_tracker,
                     first_semantic_deadline,
                     runtime_settings.stream_decode_error_code_split_enabled,
+                    runtime_settings.stream_max_skipped_bad_frames,
                     runtime_settings.tool_call_merge_strict,
                 )?
             }

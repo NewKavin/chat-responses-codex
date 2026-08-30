@@ -355,6 +355,11 @@ pub const DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED: bool = true;
 /// `stream_upstream_sse_parse_error`) instead of the shared legacy
 /// `stream_upstream_body_decode_error`.  HTTP status stays 502 either way.
 pub const DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED: bool = true;
+/// G3: how many unparseable frames a stream may skip once usable output has
+/// already been delivered before the gateway gives up and terminates the
+/// stream with an error.  Zero restores the pre-G3 "first bad frame fails"
+/// behavior.
+pub const DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES: u64 = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -510,6 +515,9 @@ pub struct AppConfig {
     /// (default on).  Turning it off restores the legacy shared code.
     #[serde(default = "default_stream_decode_error_code_split_enabled")]
     pub stream_decode_error_code_split_enabled: bool,
+    /// G3: bad-frame skip budget after usable output was delivered.
+    #[serde(default = "default_stream_max_skipped_bad_frames")]
+    pub stream_max_skipped_bad_frames: u64,
 
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
@@ -642,8 +650,8 @@ impl Default for AppConfig {
             upstream_local_gate_fast_fail_enabled: DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
             upstream_local_gate_distinct_error_code_enabled:
                 DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
-            stream_decode_error_code_split_enabled:
-                DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
+            stream_decode_error_code_split_enabled: DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
+            stream_max_skipped_bad_frames: DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
             upstream_continuation_pin_escape_enabled:
                 DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
@@ -1586,6 +1594,10 @@ pub fn default_upstream_local_gate_distinct_error_code_enabled() -> bool {
 
 pub fn default_stream_decode_error_code_split_enabled() -> bool {
     DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED
+}
+
+pub fn default_stream_max_skipped_bad_frames() -> u64 {
+    DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

@@ -5854,6 +5854,189 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
     );
 }
 
+async fn sse_bad_frame_stream_state(raw_upstream_frames: &'static str) -> (AppState, String) {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            (StatusCode::OK, headers, raw_upstream_frames)
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+
+                model_concurrency_groups: vec![],
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    (state, downstream_key.plaintext)
+}
+
+#[tokio::test]
+async fn sse_bad_frame_after_usable_output_is_skipped_and_stream_completes() {
+    // G3: once usable output was delivered, one malformed frame must not kill
+    // the stream. The frame is dropped (not forwarded) and the stream closes
+    // normally at [DONE].
+    let (state, plaintext) = sse_bad_frame_stream_state(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"kept ",
+        "output\"},\"finish_reason\":null}]}\n\n",
+        "data: {not-json}\n\n",
+        "data: [DONE]\n\n"
+    ))
+    .await;
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Authorization", format!("Bearer {plaintext}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("stream should complete normally");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("kept output"), "{body}");
+    assert!(body.contains("data: [DONE]"), "{body}");
+    assert!(
+        !body.contains("stream_upstream_sse_parse_error"),
+        "bad frame after usable output must be skipped, not surfaced: {body}"
+    );
+    assert!(!body.contains("{not-json}"), "{body}");
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(
+        snapshot.usage_logs[0].error_category, None,
+        "skipped bad frames must not taint the usage log: {:?}",
+        snapshot.usage_logs[0]
+    );
+}
+
+#[tokio::test]
+async fn sse_bad_frames_beyond_budget_after_usable_output_terminate_with_error() {
+    // G3: with usable output already delivered, skipping is bounded by
+    // stream_max_skipped_bad_frames (default 8). A stream that has run off the
+    // rails entirely must still terminate with an error instead of being
+    // propped up as "success".
+    let mut frames =
+        String::from("data: {\"choices\":[{\"delta\":{\"content\":\"kept output\"}}]}\n\n");
+    for _ in 0..12 {
+        frames.push_str("data: {not-json}\n\n");
+    }
+    let frames: &'static str = Box::leak(frames.into_boxed_str());
+    let (state, plaintext) = sse_bad_frame_stream_state(frames).await;
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Authorization", format!("Bearer {plaintext}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("over-budget stream must terminate with a structured error");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("kept output"), "{body}");
+    assert!(body.contains("stream_upstream_sse_parse_error"), "{body}");
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_upstream_sse_parse_error")
+    );
+}
+
 #[tokio::test]
 async fn claude_stream_preserves_structured_gateway_stream_error() {
     let tempdir = tempdir().unwrap();
