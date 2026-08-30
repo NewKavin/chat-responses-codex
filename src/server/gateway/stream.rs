@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::TranslatorDiagnostics;
+use crate::upstream_feedback::sanitize_upstream_body_excerpt;
 
 /// Build a pre-connect SSE stream that sends keepalive frames to the downstream
 /// client while `process_gateway_request` runs in the background. This eliminates
@@ -802,6 +803,8 @@ pub(super) fn proxied_stream_body(
         finished: false,
         semantic_terminal_emitted: false,
         usable_output_seen: false,
+        bytes_consumed: 0,
+        frames_received: 0,
         usage_log_flushed: false,
         first_output_warned: false,
         commit_tracker,
@@ -1030,6 +1033,9 @@ struct ProxiedStreamState {
     finished: bool,
     semantic_terminal_emitted: bool,
     usable_output_seen: bool,
+    // G1: byte offset / frame sequence counters for SSE decode diagnostics.
+    bytes_consumed: usize,
+    frames_received: u64,
     usage_log_flushed: bool,
     // E6: one-shot warn when the first semantic output stalls past
     // `upstream_first_output_warn_after_seconds` (visibility only).
@@ -1112,6 +1118,27 @@ impl ProxiedStreamState {
         }
     }
 
+    fn sse_excerpt_settings(&self) -> (bool, usize) {
+        match self.log_context.as_ref() {
+            Some(context) => {
+                let runtime = context.state.runtime_settings();
+                (
+                    runtime.upstream_error_body_excerpt_enabled,
+                    runtime.upstream_error_body_excerpt_max_chars as usize,
+                )
+            }
+            None => (false, 0),
+        }
+    }
+
+    fn usable_output_exposed(&self) -> bool {
+        self.usable_output_seen
+    }
+
+    fn semantic_terminal_observed(&self) -> bool {
+        self.semantic_terminal_emitted || self.commit_tracker.terminal_observed()
+    }
+
     fn drain_usage_from_buffer(&mut self) -> Result<(), GatewayError> {
         // Advance a cursor as frames are consumed and drain the buffer once at
         // the end, instead of front-draining per frame. Front-draining memmoves
@@ -1119,6 +1146,13 @@ impl ProxiedStreamState {
         // frames costs O(N^2); a single trailing drain makes it O(remainder).
         let mut consumed = 0usize;
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer[consumed..]) {
+            // G1: frame-local diagnostics. `frame_offset` is the byte offset of
+            // this frame in the upstream body, `frame_seq` its ordinal.
+            let frame_offset = self.bytes_consumed;
+            let frame_seq = self.frames_received;
+            self.bytes_consumed += frame.len() + delimiter_len;
+            self.frames_received += 1;
+            let (excerpt_enabled, excerpt_max_chars) = self.sse_excerpt_settings();
             if let Some(error) = named_upstream_sse_failure(&frame) {
                 self.buffer.drain(..consumed);
                 return Err(protocol_error_to_gateway_with_usage_diagnostics(
@@ -1127,24 +1161,35 @@ impl ProxiedStreamState {
                     self.log_context.as_ref(),
                 ));
             }
-            let payload =
-                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error()) {
-                    Ok(Some(payload)) => payload,
-                    Ok(None) => {
-                        if self.rewrite_responses_events
-                            || (self.canonicalizer.is_some() && is_sse_comment_frame(&frame))
-                        {
-                            self.pending
-                                .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
-                        }
-                        consumed += frame.len() + delimiter_len;
-                        continue;
+            let payload = match parse_sse_data_payload(&frame).map_err(|_| {
+                upstream_sse_decode_error(SseDecodeDiagnostics {
+                    context: &self.body_read_diagnostic_context,
+                    reason: "invalid_utf8",
+                    frame_seq,
+                    stream_offset: frame_offset,
+                    payload: &frame,
+                    usable_output_exposed: self.usable_output_exposed(),
+                    semantic_terminal_observed: self.semantic_terminal_observed(),
+                    excerpt_enabled,
+                    excerpt_max_chars,
+                })
+            }) {
+                Ok(Some(payload)) => payload,
+                Ok(None) => {
+                    if self.rewrite_responses_events
+                        || (self.canonicalizer.is_some() && is_sse_comment_frame(&frame))
+                    {
+                        self.pending
+                            .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
                     }
-                    Err(error) => {
-                        self.buffer.drain(..consumed);
-                        return Err(error);
-                    }
-                };
+                    consumed += frame.len() + delimiter_len;
+                    continue;
+                }
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
 
             consumed += frame.len() + delimiter_len;
 
@@ -1168,14 +1213,25 @@ impl ProxiedStreamState {
                 break;
             }
 
-            let mut event: Value =
-                match serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error()) {
-                    Ok(event) => event,
-                    Err(error) => {
-                        self.buffer.drain(..consumed);
-                        return Err(error);
-                    }
-                };
+            let mut event: Value = match serde_json::from_str(&payload).map_err(|_| {
+                upstream_sse_decode_error(SseDecodeDiagnostics {
+                    context: &self.body_read_diagnostic_context,
+                    reason: "invalid_json",
+                    frame_seq,
+                    stream_offset: frame_offset,
+                    payload: payload.as_bytes(),
+                    usable_output_exposed: self.usable_output_exposed(),
+                    semantic_terminal_observed: self.semantic_terminal_observed(),
+                    excerpt_enabled,
+                    excerpt_max_chars,
+                })
+            }) {
+                Ok(event) => event,
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
                 let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
@@ -1257,9 +1313,21 @@ impl ProxiedStreamState {
                     self.pending.push_back(serialize_sse_data(&event));
                 } else if self.rewrite_responses_events {
                     let frame = if responses_usage_normalized || responses_id_rewritten {
-                        match rewrite_sse_data_payload(&frame, delimiter_len, &event)
-                            .map_err(|_| upstream_sse_decode_error())
-                        {
+                        match rewrite_sse_data_payload(&frame, delimiter_len, &event).map_err(
+                            |_| {
+                                upstream_sse_decode_error(SseDecodeDiagnostics {
+                                    context: &self.body_read_diagnostic_context,
+                                    reason: "invalid_json",
+                                    frame_seq,
+                                    stream_offset: frame_offset,
+                                    payload: &frame,
+                                    usable_output_exposed: self.usable_output_exposed(),
+                                    semantic_terminal_observed: self.semantic_terminal_observed(),
+                                    excerpt_enabled,
+                                    excerpt_max_chars,
+                                })
+                            },
+                        ) {
                             Ok(frame) => frame,
                             Err(error) => {
                                 self.buffer.drain(..consumed);
@@ -1603,6 +1671,8 @@ pub(super) fn translated_stream_body(
         semantic_terminal_emitted: false,
         usable_output_observed: false,
         usable_output_delivered: false,
+        bytes_consumed: 0,
+        frames_received: 0,
         usage_log_flushed: false,
         first_output_warned: false,
         commit_tracker,
@@ -1824,6 +1894,9 @@ struct TranslatedStreamState {
     response_history_context: Option<ResponseHistoryContext>,
     response_history_stored: bool,
     endpoint: EndpointKind,
+    // G1: byte offset / frame sequence counters for SSE decode diagnostics.
+    bytes_consumed: usize,
+    frames_received: u64,
     next_responses_sequence_number: u64,
     finished: bool,
     semantic_terminal_emitted: bool,
@@ -1929,12 +2002,40 @@ impl TranslatedStreamState {
         });
     }
 
+    fn sse_excerpt_settings(&self) -> (bool, usize) {
+        match self.log_context.as_ref() {
+            Some(context) => {
+                let runtime = context.state.runtime_settings();
+                (
+                    runtime.upstream_error_body_excerpt_enabled,
+                    runtime.upstream_error_body_excerpt_max_chars as usize,
+                )
+            }
+            None => (false, 0),
+        }
+    }
+
+    fn usable_output_exposed(&self) -> bool {
+        self.usable_output_delivered
+    }
+
+    fn semantic_terminal_observed(&self) -> bool {
+        self.semantic_terminal_emitted || self.commit_tracker.terminal_observed()
+    }
+
     fn drain_buffer(&mut self) -> Result<(), GatewayError> {
         // Cursor-based consumption: see drain_usage_from_buffer for rationale.
         // Front-draining per frame is O(N^2) when frames coalesce in one poll;
         // a single trailing drain is O(remainder).
         let mut consumed = 0usize;
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer[consumed..]) {
+            // G1: frame-local diagnostics. `frame_offset` is the byte offset of
+            // this frame in the upstream body, `frame_seq` its ordinal.
+            let frame_offset = self.bytes_consumed;
+            let frame_seq = self.frames_received;
+            self.bytes_consumed += frame.len() + delimiter_len;
+            self.frames_received += 1;
+            let (excerpt_enabled, excerpt_max_chars) = self.sse_excerpt_settings();
             if let Some(error) = named_upstream_sse_failure(&frame) {
                 let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
@@ -1944,24 +2045,35 @@ impl TranslatedStreamState {
                 self.buffer.drain(..consumed);
                 return Err(err);
             }
-            let payload =
-                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error()) {
-                    Ok(Some(payload)) => payload,
-                    Ok(None) => {
-                        if is_sse_comment_frame(&frame) {
-                            self.pending.push_back(TranslatedPendingFrame {
-                                bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
-                                usable_output: false,
-                            });
-                        }
-                        consumed += frame.len() + delimiter_len;
-                        continue;
+            let payload = match parse_sse_data_payload(&frame).map_err(|_| {
+                upstream_sse_decode_error(SseDecodeDiagnostics {
+                    context: &self.body_read_diagnostic_context,
+                    reason: "invalid_utf8",
+                    frame_seq,
+                    stream_offset: frame_offset,
+                    payload: &frame,
+                    usable_output_exposed: self.usable_output_exposed(),
+                    semantic_terminal_observed: self.semantic_terminal_observed(),
+                    excerpt_enabled,
+                    excerpt_max_chars,
+                })
+            }) {
+                Ok(Some(payload)) => payload,
+                Ok(None) => {
+                    if is_sse_comment_frame(&frame) {
+                        self.pending.push_back(TranslatedPendingFrame {
+                            bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
+                            usable_output: false,
+                        });
                     }
-                    Err(error) => {
-                        self.buffer.drain(..consumed);
-                        return Err(error);
-                    }
-                };
+                    consumed += frame.len() + delimiter_len;
+                    continue;
+                }
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
 
             consumed += frame.len() + delimiter_len;
 
@@ -1981,14 +2093,25 @@ impl TranslatedStreamState {
                 break;
             }
 
-            let event: Value =
-                match serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error()) {
-                    Ok(event) => event,
-                    Err(error) => {
-                        self.buffer.drain(..consumed);
-                        return Err(error);
-                    }
-                };
+            let event: Value = match serde_json::from_str(&payload).map_err(|_| {
+                upstream_sse_decode_error(SseDecodeDiagnostics {
+                    context: &self.body_read_diagnostic_context,
+                    reason: "invalid_json",
+                    frame_seq,
+                    stream_offset: frame_offset,
+                    payload: payload.as_bytes(),
+                    usable_output_exposed: self.usable_output_exposed(),
+                    semantic_terminal_observed: self.semantic_terminal_observed(),
+                    excerpt_enabled,
+                    excerpt_max_chars,
+                })
+            }) {
+                Ok(event) => event,
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
                 let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
@@ -2278,11 +2401,72 @@ impl Drop for TranslatedStreamState {
     }
 }
 
-fn upstream_sse_decode_error() -> GatewayError {
-    stream_gateway_error(
+/// G1: decode-failure diagnostics gathered at the frame site.  The excerpt
+/// is always sanitized before it is logged or surfaced, and only reaches
+/// `error.details` when `upstream_error_body_excerpt_enabled` is on (the
+/// intranet-only, both-ends-owned convention).
+struct SseDecodeDiagnostics<'a> {
+    context: &'a StreamBodyReadDiagnosticContext,
+    reason: &'static str,
+    frame_seq: u64,
+    stream_offset: usize,
+    payload: &'a [u8],
+    usable_output_exposed: bool,
+    semantic_terminal_observed: bool,
+    excerpt_enabled: bool,
+    excerpt_max_chars: usize,
+}
+
+fn upstream_sse_decode_error(diag: SseDecodeDiagnostics<'_>) -> GatewayError {
+    let raw_excerpt = String::from_utf8_lossy(diag.payload).into_owned();
+    let raw_len = raw_excerpt.len();
+    let excerpt = sanitize_upstream_body_excerpt(&raw_excerpt, diag.excerpt_max_chars.max(1));
+    let excerpt_ref = excerpt.as_deref();
+
+    // Same field vocabulary as the transport-layer `log_stream_body_read_diagnostic`
+    // so both decode sources are retrievable with one query.
+    tracing::warn!(
+        request_id = %diag.context.request_id,
+        upstream_id = %diag.context.upstream_id,
+        route_id = %diag.context.route_id,
+        upstream_protocol = ?diag.context.upstream_protocol,
+        endpoint = %diag.context.endpoint,
+        stream_stage = "sse_parse",
+        error_category = "stream_upstream_body_decode_error",
+        decode_reason = diag.reason,
+        frame_seq = diag.frame_seq,
+        stream_offset = diag.stream_offset,
+        payload_len = raw_len,
+        payload_excerpt = excerpt_ref,
+        usable_output_exposed = diag.usable_output_exposed,
+        semantic_terminal_observed = diag.semantic_terminal_observed,
+        elapsed_ms = diag.context.started.elapsed().as_millis() as u64,
+        routing_round = diag.context.route_attempts.routing_round(),
+        physical_attempt_count = diag.context.route_attempts.physical_attempt_count(),
+        "upstream SSE decode failed"
+    );
+
+    let mut details = Map::from_iter([
+        ("scope".to_string(), json!("upstream")),
+        ("decode_reason".to_string(), json!(diag.reason)),
+        ("frame_seq".to_string(), json!(diag.frame_seq)),
+        ("stream_offset".to_string(), json!(diag.stream_offset)),
+        ("payload_len".to_string(), json!(raw_len)),
+    ]);
+    if diag.excerpt_enabled {
+        if let Some(excerpt) = excerpt {
+            details.insert("payload_excerpt".to_string(), json!(excerpt));
+        }
+    }
+
+    GatewayError::classified(
         StatusCode::BAD_GATEWAY,
         "failed to decode upstream SSE event",
+        "upstream_error",
         "stream_upstream_body_decode_error",
+        "stream_upstream_body_decode_error",
+        None,
+        Some(Value::Object(details)),
     )
 }
 
@@ -3021,6 +3205,116 @@ mod diagnostic_tests {
                 "mismatch for input {buf:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sse_decode_diagnostic_tests {
+    use super::*;
+
+    fn decode_context() -> StreamBodyReadDiagnosticContext {
+        let route_attempts = RequestRouteAttempts::default();
+        route_attempts.record_physical_send();
+        StreamBodyReadDiagnosticContext {
+            request_id: "sse-decode-marker".into(),
+            upstream_id: "sse-decode-upstream".into(),
+            route_id: "route-anonymous-marker".into(),
+            upstream_protocol: UpstreamProtocol::ChatCompletions,
+            endpoint: "/v1/responses".into(),
+            started: Instant::now(),
+            route_attempts,
+            first_token_latency: FirstTokenLatency::default(),
+        }
+    }
+
+    fn decode_error(
+        reason: &'static str,
+        payload: &[u8],
+        excerpt_enabled: bool,
+        excerpt_max: usize,
+    ) -> GatewayError {
+        let context = decode_context();
+        upstream_sse_decode_error(SseDecodeDiagnostics {
+            context: &context,
+            reason,
+            frame_seq: 3,
+            stream_offset: 42,
+            payload,
+            usable_output_exposed: false,
+            semantic_terminal_observed: false,
+            excerpt_enabled,
+            excerpt_max_chars: excerpt_max,
+        })
+    }
+
+    #[test]
+    fn sse_decode_error_distinguishes_invalid_utf8_from_invalid_json() {
+        let utf8_error = decode_error("invalid_utf8", b"data: \xff\xfe", false, 256);
+        let json_error = decode_error("invalid_json", b"{not-json}", false, 256);
+
+        assert_eq!(
+            utf8_error.error_category(),
+            "stream_upstream_body_decode_error"
+        );
+        assert_eq!(
+            json_error.error_category(),
+            "stream_upstream_body_decode_error"
+        );
+        assert_eq!(
+            utf8_error.safe_details().get("decode_reason"),
+            Some(&json!("invalid_utf8"))
+        );
+        assert_eq!(
+            json_error.safe_details().get("decode_reason"),
+            Some(&json!("invalid_json"))
+        );
+        assert_eq!(utf8_error.safe_details().get("frame_seq"), Some(&json!(3)));
+        assert_eq!(
+            utf8_error.safe_details().get("stream_offset"),
+            Some(&json!(42))
+        );
+        assert!(utf8_error.safe_details().get("payload_len").is_some());
+    }
+
+    #[test]
+    fn sse_decode_error_excerpt_is_bounded_and_gated_by_the_switch() {
+        let long_payload = format!("data: {{not-json {}}}", "x".repeat(4000));
+
+        // Switch off: no excerpt in the client-visible details at all.
+        let off = decode_error("invalid_json", long_payload.as_bytes(), false, 256);
+        let details = off.safe_details();
+        assert!(details.get("payload_excerpt").is_none());
+        assert!(details.get("payload_len").is_some());
+
+        // Switch on: excerpt present, sanitized, bounded to max_chars + ellipsis.
+        let on = decode_error("invalid_json", long_payload.as_bytes(), true, 256);
+        let details = on.safe_details();
+        let excerpt = details
+            .get("payload_excerpt")
+            .and_then(Value::as_str)
+            .expect("excerpt must be present when the switch is on");
+        assert!(
+            excerpt.chars().count() <= 257,
+            "excerpt must stay within max_chars (+ellipsis), got {}",
+            excerpt.chars().count()
+        );
+        assert!(
+            excerpt.ends_with('\u{2026}'),
+            "truncated excerpt must carry a trailing ellipsis: {excerpt}"
+        );
+        assert!(!excerpt.contains("4000"));
+
+        // Secret-shaped material is redacted before anything is exposed.
+        let secret = decode_error("invalid_json", b"data: {sk-abcdef123456}", true, 256);
+        let secret_details = secret.safe_details();
+        let secret_excerpt = secret_details
+            .get("payload_excerpt")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            !secret_excerpt.contains("sk-abcdef"),
+            "secret leaked into excerpt: {secret_excerpt}"
+        );
     }
 }
 
