@@ -5707,8 +5707,8 @@ async fn truncated_chunked_body_after_usable_output_is_not_retried() {
         .find("partial-before-truncation")
         .expect("first usable output must be preserved");
     let error_position = body
-        .find("stream_upstream_body_decode_error")
-        .expect("body read failure must be typed");
+        .find("stream_upstream_transport_decode_error")
+        .expect("body read failure must be typed as a transport decode error");
     assert!(output_position < error_position, "{body}");
     assert!(!body.contains("unexpected-replay"), "{body}");
     assert_eq!(first_hits.load(Ordering::SeqCst), 1);
@@ -5722,7 +5722,7 @@ async fn truncated_chunked_body_after_usable_output_is_not_retried() {
     );
     assert_eq!(
         snapshot.usage_logs[0].error_category.as_deref(),
-        Some("stream_upstream_body_decode_error")
+        Some("stream_upstream_transport_decode_error")
     );
 }
 
@@ -5828,7 +5828,8 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
         .await
         .expect("decode failure should be returned as a structured SSE error");
     let body = String::from_utf8_lossy(&body);
-    assert!(body.contains("\"category\":\"stream_upstream_body_decode_error\""));
+    assert!(body.contains("\"category\":\"stream_upstream_sse_parse_error\""));
+    assert!(body.contains("\"code\":\"stream_upstream_sse_parse_error\""));
     assert!(body.contains("data: [DONE]"));
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -5849,7 +5850,7 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
     assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
     assert_eq!(
         log.error_category.as_deref(),
-        Some("stream_upstream_body_decode_error")
+        Some("stream_upstream_sse_parse_error")
     );
 }
 
@@ -5955,15 +5956,12 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
     let body = String::from_utf8_lossy(&body);
     assert!(body.contains("event: error"));
     assert!(body.contains("\"type\":\"error\""));
-    assert!(body.contains("\"category\":\"stream_upstream_body_decode_error\""));
-    assert!(body.contains("\"code\":\"stream_upstream_body_decode_error\""));
+    assert!(body.contains("\"category\":\"stream_upstream_sse_parse_error\""));
+    assert!(body.contains("\"code\":\"stream_upstream_sse_parse_error\""));
     assert!(body.contains(
-        "\"message\":\"[stream_upstream_body_decode_error] failed to decode upstream SSE event"
+        "\"message\":\"[stream_upstream_sse_parse_error] failed to decode upstream SSE event"
     ));
-    assert_eq!(
-        body.matches("[stream_upstream_body_decode_error]").count(),
-        1
-    );
+    assert_eq!(body.matches("[stream_upstream_sse_parse_error]").count(), 1);
     assert!(!body.contains("event: message_start"));
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -5984,7 +5982,7 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
     assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
     assert_eq!(
         log.error_category.as_deref(),
-        Some("stream_upstream_body_decode_error")
+        Some("stream_upstream_sse_parse_error")
     );
 }
 

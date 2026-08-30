@@ -350,6 +350,11 @@ pub const DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED: bool = true;
 /// rate-limited us".  HTTP status stays 429 either way.  Off restores the
 /// legacy aggregated error (`upstream_routes_exhausted` / `rate_limit_error`).
 pub const DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED: bool = true;
+/// G2: whether transport-layer and SSE-parse decode failures return two
+/// distinct codes (`stream_upstream_transport_decode_error` /
+/// `stream_upstream_sse_parse_error`) instead of the shared legacy
+/// `stream_upstream_body_decode_error`.  HTTP status stays 502 either way.
+pub const DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED: bool = true;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -501,6 +506,10 @@ pub struct AppConfig {
     pub upstream_local_gate_fast_fail_enabled: bool,
     #[serde(default = "default_upstream_local_gate_distinct_error_code_enabled")]
     pub upstream_local_gate_distinct_error_code_enabled: bool,
+    /// G2: split the two decode-failure sources into distinct error codes
+    /// (default on).  Turning it off restores the legacy shared code.
+    #[serde(default = "default_stream_decode_error_code_split_enabled")]
+    pub stream_decode_error_code_split_enabled: bool,
 
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
@@ -633,6 +642,8 @@ impl Default for AppConfig {
             upstream_local_gate_fast_fail_enabled: DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
             upstream_local_gate_distinct_error_code_enabled:
                 DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
+            stream_decode_error_code_split_enabled:
+                DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
             upstream_continuation_pin_escape_enabled:
                 DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
@@ -1571,6 +1582,10 @@ pub fn default_upstream_local_gate_fast_fail_enabled() -> bool {
 
 pub fn default_upstream_local_gate_distinct_error_code_enabled() -> bool {
     DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED
+}
+
+pub fn default_stream_decode_error_code_split_enabled() -> bool {
+    DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED
 }
 
 pub fn default_model_context_output_reserve() -> u32 {

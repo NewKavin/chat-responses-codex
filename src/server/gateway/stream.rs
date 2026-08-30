@@ -500,6 +500,8 @@ pub(super) async fn aggregate_upstream_sse_response(
     protocol: UpstreamProtocol,
     stream_timeouts: StreamTimeouts,
     diagnostic_context: &StreamDiagnosticContext,
+    // G2: transport decode failures get a distinct code when split is on.
+    split_decode_code: bool,
 ) -> Result<Value, GatewayError> {
     let mut aggregator = StreamResponseAggregator::new(protocol);
     let mut reader = UpstreamStreamReader::new(response, stream_timeouts);
@@ -529,8 +531,12 @@ pub(super) async fn aggregate_upstream_sse_response(
             }
             StreamReadOutcome::Chunk(Err(error)) => {
                 let message = error.to_string();
-                let (status, category) =
-                    classify_upstream_stream_error(&message, error.is_timeout(), error.is_decode());
+                let (status, category) = classify_upstream_stream_error(
+                    &message,
+                    error.is_timeout(),
+                    error.is_decode(),
+                    split_decode_code,
+                );
                 return Err(stream_gateway_error(status, message, category));
             }
             StreamReadOutcome::Heartbeat => {}
@@ -565,6 +571,8 @@ pub(super) async fn prefetch_first_usable_output(
     endpoint: EndpointKind,
     commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
+    // G2: see aggregate_upstream_sse_response.
+    split_decode_code: bool,
 ) -> Result<UpstreamStreamReader, GatewayError> {
     let mut classifier = FirstUsableOutputClassifier::new(protocol);
     // E6: one-shot warn while prefetching the first semantic output.
@@ -637,8 +645,12 @@ pub(super) async fn prefetch_first_usable_output(
             }
             StreamReadOutcome::Chunk(Err(error)) => {
                 let message = error.to_string();
-                let (status, category) =
-                    classify_upstream_stream_error(&message, error.is_timeout(), error.is_decode());
+                let (status, category) = classify_upstream_stream_error(
+                    &message,
+                    error.is_timeout(),
+                    error.is_decode(),
+                    split_decode_code,
+                );
                 log_stream_body_read_diagnostic(
                     diagnostic_context,
                     "prefetch",
@@ -776,6 +788,8 @@ pub(super) fn proxied_stream_body(
     response_history_context: Option<ResponseHistoryContext>,
     commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
+    // G2: transport decode failures get a distinct code when split is on.
+    split_decode_code: bool,
 ) -> Result<Body, GatewayError> {
     let canonicalizer = (endpoint == EndpointKind::ChatCompletions).then(|| {
         ChatStreamCanonicalizer::new(
@@ -805,6 +819,7 @@ pub(super) fn proxied_stream_body(
         usable_output_seen: false,
         bytes_consumed: 0,
         frames_received: 0,
+        split_decode_code,
         usage_log_flushed: false,
         first_output_warned: false,
         commit_tracker,
@@ -944,8 +959,12 @@ pub(super) fn proxied_stream_body(
                     let error_message = error.to_string();
                     let is_timeout = error.is_timeout();
                     let is_decode = error.is_decode();
-                    let (status, error_category) =
-                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+                    let (status, error_category) = classify_upstream_stream_error(
+                        &error_message,
+                        is_timeout,
+                        is_decode,
+                        state.split_decode_code,
+                    );
                     log_stream_body_read_diagnostic(
                         &state.body_read_diagnostic_context,
                         "proxied",
@@ -1036,6 +1055,8 @@ struct ProxiedStreamState {
     // G1: byte offset / frame sequence counters for SSE decode diagnostics.
     bytes_consumed: usize,
     frames_received: u64,
+    // G2: transport/SSE decode failures use distinct error codes when on.
+    split_decode_code: bool,
     usage_log_flushed: bool,
     // E6: one-shot warn when the first semantic output stalls past
     // `upstream_first_output_warn_after_seconds` (visibility only).
@@ -1165,6 +1186,7 @@ impl ProxiedStreamState {
                 upstream_sse_decode_error(SseDecodeDiagnostics {
                     context: &self.body_read_diagnostic_context,
                     reason: "invalid_utf8",
+                    split_decode_code: self.split_decode_code,
                     frame_seq,
                     stream_offset: frame_offset,
                     payload: &frame,
@@ -1217,6 +1239,7 @@ impl ProxiedStreamState {
                 upstream_sse_decode_error(SseDecodeDiagnostics {
                     context: &self.body_read_diagnostic_context,
                     reason: "invalid_json",
+                    split_decode_code: self.split_decode_code,
                     frame_seq,
                     stream_offset: frame_offset,
                     payload: payload.as_bytes(),
@@ -1318,6 +1341,7 @@ impl ProxiedStreamState {
                                 upstream_sse_decode_error(SseDecodeDiagnostics {
                                     context: &self.body_read_diagnostic_context,
                                     reason: "invalid_json",
+                                    split_decode_code: self.split_decode_code,
                                     frame_seq,
                                     stream_offset: frame_offset,
                                     payload: &frame,
@@ -1525,8 +1549,12 @@ impl ProxiedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        let (status, error_category) =
-            classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+        let (status, error_category) = classify_upstream_stream_error(
+            &error_message,
+            is_timeout,
+            is_decode,
+            self.split_decode_code,
+        );
         finalize_stream_error(
             completion_context,
             log_context,
@@ -1624,6 +1652,8 @@ pub(super) fn translated_stream_body(
     response_history_context: Option<ResponseHistoryContext>,
     commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
+    // G2: transport decode failures get a distinct code when split is on.
+    split_decode_code: bool,
     tool_call_merge_strict: bool,
 ) -> Result<Body, GatewayError> {
     let tool_registry = response_history_context
@@ -1673,6 +1703,7 @@ pub(super) fn translated_stream_body(
         usable_output_delivered: false,
         bytes_consumed: 0,
         frames_received: 0,
+        split_decode_code,
         usage_log_flushed: false,
         first_output_warned: false,
         commit_tracker,
@@ -1811,8 +1842,12 @@ pub(super) fn translated_stream_body(
                     let error_message = error.to_string();
                     let is_timeout = error.is_timeout();
                     let is_decode = error.is_decode();
-                    let (status, error_category) =
-                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+                    let (status, error_category) = classify_upstream_stream_error(
+                        &error_message,
+                        is_timeout,
+                        is_decode,
+                        state.split_decode_code,
+                    );
                     log_stream_body_read_diagnostic(
                         &state.body_read_diagnostic_context,
                         "translated",
@@ -1897,6 +1932,8 @@ struct TranslatedStreamState {
     // G1: byte offset / frame sequence counters for SSE decode diagnostics.
     bytes_consumed: usize,
     frames_received: u64,
+    // G2: transport/SSE decode failures use distinct error codes when on.
+    split_decode_code: bool,
     next_responses_sequence_number: u64,
     finished: bool,
     semantic_terminal_emitted: bool,
@@ -2049,6 +2086,7 @@ impl TranslatedStreamState {
                 upstream_sse_decode_error(SseDecodeDiagnostics {
                     context: &self.body_read_diagnostic_context,
                     reason: "invalid_utf8",
+                    split_decode_code: self.split_decode_code,
                     frame_seq,
                     stream_offset: frame_offset,
                     payload: &frame,
@@ -2097,6 +2135,7 @@ impl TranslatedStreamState {
                 upstream_sse_decode_error(SseDecodeDiagnostics {
                     context: &self.body_read_diagnostic_context,
                     reason: "invalid_json",
+                    split_decode_code: self.split_decode_code,
                     frame_seq,
                     stream_offset: frame_offset,
                     payload: payload.as_bytes(),
@@ -2356,8 +2395,12 @@ impl TranslatedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        let (status, error_category) =
-            classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+        let (status, error_category) = classify_upstream_stream_error(
+            &error_message,
+            is_timeout,
+            is_decode,
+            self.split_decode_code,
+        );
         finalize_stream_error(
             completion_context,
             log_context,
@@ -2408,6 +2451,7 @@ impl Drop for TranslatedStreamState {
 struct SseDecodeDiagnostics<'a> {
     context: &'a StreamBodyReadDiagnosticContext,
     reason: &'static str,
+    split_decode_code: bool,
     frame_seq: u64,
     stream_offset: usize,
     payload: &'a [u8],
@@ -2423,6 +2467,14 @@ fn upstream_sse_decode_error(diag: SseDecodeDiagnostics<'_>) -> GatewayError {
     let excerpt = sanitize_upstream_body_excerpt(&raw_excerpt, diag.excerpt_max_chars.max(1));
     let excerpt_ref = excerpt.as_deref();
 
+    // G2: SSE-parse failures get their own code so they can no longer be
+    // confused with transport-layer decode failures.
+    let error_code = if diag.split_decode_code {
+        "stream_upstream_sse_parse_error"
+    } else {
+        "stream_upstream_body_decode_error"
+    };
+
     // Same field vocabulary as the transport-layer `log_stream_body_read_diagnostic`
     // so both decode sources are retrievable with one query.
     tracing::warn!(
@@ -2432,7 +2484,7 @@ fn upstream_sse_decode_error(diag: SseDecodeDiagnostics<'_>) -> GatewayError {
         upstream_protocol = ?diag.context.upstream_protocol,
         endpoint = %diag.context.endpoint,
         stream_stage = "sse_parse",
-        error_category = "stream_upstream_body_decode_error",
+        error_category = error_code,
         decode_reason = diag.reason,
         frame_seq = diag.frame_seq,
         stream_offset = diag.stream_offset,
@@ -2463,8 +2515,8 @@ fn upstream_sse_decode_error(diag: SseDecodeDiagnostics<'_>) -> GatewayError {
         StatusCode::BAD_GATEWAY,
         "failed to decode upstream SSE event",
         "upstream_error",
-        "stream_upstream_body_decode_error",
-        "stream_upstream_body_decode_error",
+        error_code,
+        error_code,
         None,
         Some(Value::Object(details)),
     )
@@ -3237,6 +3289,7 @@ mod sse_decode_diagnostic_tests {
         upstream_sse_decode_error(SseDecodeDiagnostics {
             context: &context,
             reason,
+            split_decode_code: true,
             frame_seq: 3,
             stream_offset: 42,
             payload,
@@ -3254,11 +3307,11 @@ mod sse_decode_diagnostic_tests {
 
         assert_eq!(
             utf8_error.error_category(),
-            "stream_upstream_body_decode_error"
+            "stream_upstream_sse_parse_error"
         );
         assert_eq!(
             json_error.error_category(),
-            "stream_upstream_body_decode_error"
+            "stream_upstream_sse_parse_error"
         );
         assert_eq!(
             utf8_error.safe_details().get("decode_reason"),
@@ -3274,6 +3327,27 @@ mod sse_decode_diagnostic_tests {
             Some(&json!(42))
         );
         assert!(utf8_error.safe_details().get("payload_len").is_some());
+    }
+
+    #[test]
+    fn sse_decode_error_split_off_falls_back_to_the_legacy_code() {
+        // G2: with the split disabled, SSE-parse failures keep the legacy
+        // shared code so clients matching the old code keep working.
+        let context = decode_context();
+        let legacy = upstream_sse_decode_error(SseDecodeDiagnostics {
+            context: &context,
+            reason: "invalid_json",
+            split_decode_code: false,
+            frame_seq: 1,
+            stream_offset: 0,
+            payload: b"{not-json}",
+            usable_output_exposed: false,
+            semantic_terminal_observed: false,
+            excerpt_enabled: false,
+            excerpt_max_chars: 0,
+        });
+        assert_eq!(legacy.error_code(), "stream_upstream_body_decode_error");
+        assert_eq!(legacy.error_category(), "stream_upstream_body_decode_error");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use super::types::{
     default_upstream_first_output_warn_after_seconds, default_upstream_lease_stale_after_ms,
     default_upstream_local_gate_distinct_error_code_enabled,
     default_upstream_local_gate_fast_fail_enabled, default_upstream_local_gate_max_wait_ms,
+    default_stream_decode_error_code_split_enabled,
     default_upstream_local_lease_ttl_seconds, default_upstream_max_concurrency,
     default_upstream_retry_after_cap_seconds, default_upstream_retry_after_cooldown_cap_seconds,
     default_upstream_route_exhaustion_alignment_truncated_enabled,
@@ -79,6 +80,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_local_gate_max_wait_ms",
     "upstream_local_gate_fast_fail_enabled",
     "upstream_local_gate_distinct_error_code_enabled",
+    "stream_decode_error_code_split_enabled",
     "upstream_continuation_pin_escape_enabled",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
@@ -183,6 +185,8 @@ pub struct RuntimeSettings {
     pub upstream_local_gate_fast_fail_enabled: bool,
     #[serde(default = "default_upstream_local_gate_distinct_error_code_enabled")]
     pub upstream_local_gate_distinct_error_code_enabled: bool,
+    #[serde(default = "default_stream_decode_error_code_split_enabled")]
+    pub stream_decode_error_code_split_enabled: bool,
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
@@ -367,6 +371,8 @@ impl RuntimeSettings {
             upstream_local_gate_fast_fail_enabled: config.upstream_local_gate_fast_fail_enabled,
             upstream_local_gate_distinct_error_code_enabled: config
                 .upstream_local_gate_distinct_error_code_enabled,
+            stream_decode_error_code_split_enabled: config
+                .stream_decode_error_code_split_enabled,
             upstream_continuation_pin_escape_enabled: config
                 .upstream_continuation_pin_escape_enabled,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
@@ -478,6 +484,8 @@ impl RuntimeSettings {
         config.upstream_local_gate_fast_fail_enabled = self.upstream_local_gate_fast_fail_enabled;
         config.upstream_local_gate_distinct_error_code_enabled =
             self.upstream_local_gate_distinct_error_code_enabled;
+        config.stream_decode_error_code_split_enabled =
+            self.stream_decode_error_code_split_enabled;
         config.upstream_continuation_pin_escape_enabled =
             self.upstream_continuation_pin_escape_enabled;
         config.upstream_route_exhaustion_retry_enabled =

@@ -977,6 +977,9 @@ async fn send_hedge_stream_attempt(
         endpoint,
         commit_tracker,
         first_semantic_deadline,
+        state
+            .runtime_settings()
+            .stream_decode_error_code_split_enabled,
     )
     .await?;
     Ok(HedgeStreamReady {
@@ -1024,6 +1027,7 @@ async fn prefetch_stream_with_hedges(
             endpoint,
             commit_tracker.clone(),
             first_semantic_deadline,
+            runtime_settings.stream_decode_error_code_split_enabled,
         )
         .await?;
         return Ok(PrefetchedStreamWinner::Reader(Box::new(HedgeStreamReady {
@@ -1037,6 +1041,9 @@ async fn prefetch_stream_with_hedges(
         futures_util::future::BoxFuture<'static, (u32, Result<HedgeWinnerReady, GatewayError>)>;
     let mut attempts = futures_stream::FuturesUnordered::<HedgeFuture>::new();
     let primary_commit_tracker = commit_tracker.clone();
+    // Copy the bool before boxing the future: the boxed future must be
+    // 'static and cannot borrow `runtime_settings` across the await.
+    let split_decode_code = runtime_settings.stream_decode_error_code_split_enabled;
     attempts.push(
         async move {
             (
@@ -1048,6 +1055,7 @@ async fn prefetch_stream_with_hedges(
                     endpoint,
                     primary_commit_tracker,
                     first_semantic_deadline,
+                    split_decode_code,
                 )
                 .await
                 .map(|reader| {
@@ -2393,6 +2401,7 @@ pub(super) async fn send_to_upstream(
             upstream_protocol,
             StreamTimeouts::from_sources(&state.config, runtime_settings.as_ref()),
             &diagnostic_context,
+            runtime_settings.stream_decode_error_code_split_enabled,
         )
         .await?;
         let body = match (endpoint, upstream_protocol) {
@@ -2624,6 +2633,7 @@ pub(super) async fn send_to_upstream(
                     response_history_context,
                     commit_tracker,
                     first_semantic_deadline,
+                    runtime_settings.stream_decode_error_code_split_enabled,
                 )?
             } else {
                 translated_stream_body(
@@ -2637,6 +2647,7 @@ pub(super) async fn send_to_upstream(
                     response_history_context,
                     commit_tracker,
                     first_semantic_deadline,
+                    runtime_settings.stream_decode_error_code_split_enabled,
                     runtime_settings.tool_call_merge_strict,
                 )?
             }

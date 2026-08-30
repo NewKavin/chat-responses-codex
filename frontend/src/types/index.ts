@@ -976,6 +976,7 @@ export interface RuntimeSettings {
   upstream_local_gate_max_wait_ms: number
   upstream_local_gate_fast_fail_enabled: boolean
   upstream_local_gate_distinct_error_code_enabled: boolean
+  stream_decode_error_code_split_enabled: boolean
   default_upstream_max_concurrency: number
   downstream_lease_ttl_seconds: number
   upstream_concurrency_recovery_max_wait_ms: number

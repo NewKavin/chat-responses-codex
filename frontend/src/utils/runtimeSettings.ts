@@ -582,6 +582,14 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '闸门满且无排队空间时快速失败，不占用轮间重试预算。'
   },
   {
+    key: 'stream_decode_error_code_split_enabled',
+    group: 'observability',
+    label: '解码错误拆分码',
+    apply: 'immediate',
+    control: 'switch',
+    description: '开启后传输层与 SSE 解析的解码失败返回不同错误码（transport / sse_parse），关闭回落为统一旧码。'
+  },
+  {
     key: 'upstream_local_gate_distinct_error_code_enabled',
     group: 'concurrency',
     label: '闸门独立错误码',

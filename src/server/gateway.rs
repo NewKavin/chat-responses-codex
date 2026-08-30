@@ -4833,12 +4833,22 @@ fn classify_upstream_stream_error(
     error_message: &str,
     is_timeout: bool,
     is_decode: bool,
+    // G2: when the split is enabled, the transport-layer decode failure gets
+    // its own code so it can no longer be confused with an SSE parse failure.
+    split_decode_code: bool,
 ) -> (StatusCode, &'static str) {
     let normalized = error_message.to_ascii_lowercase();
     if is_timeout || normalized.contains("timed out") || normalized.contains("timeout") {
         (StatusCode::GATEWAY_TIMEOUT, "stream_upstream_timeout")
     } else if is_decode || normalized.contains("error decoding response body") {
-        (StatusCode::BAD_GATEWAY, "stream_upstream_body_decode_error")
+        (
+            StatusCode::BAD_GATEWAY,
+            if split_decode_code {
+                "stream_upstream_transport_decode_error"
+            } else {
+                "stream_upstream_body_decode_error"
+            },
+        )
     } else {
         (StatusCode::BAD_GATEWAY, "stream_upstream_read_error")
     }

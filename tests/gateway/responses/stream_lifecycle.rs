@@ -837,8 +837,8 @@ async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() 
         .find("translated-before-truncation")
         .expect("translated output must be preserved");
     let error_position = body
-        .find("stream_upstream_body_decode_error")
-        .expect("translated stream must expose the stable body-decode category");
+        .find("stream_upstream_transport_decode_error")
+        .expect("translated stream must expose the transport decode category");
     assert!(output_position < error_position, "{body}");
     assert!(body.contains("event: response.failed"), "{body}");
     // Single terminal event only (2026-08-22): no redundant top-level error event.
@@ -855,7 +855,7 @@ async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() 
     );
     assert_eq!(
         snapshot.usage_logs[0].error_category.as_deref(),
-        Some("stream_upstream_body_decode_error")
+        Some("stream_upstream_transport_decode_error")
     );
 }
 

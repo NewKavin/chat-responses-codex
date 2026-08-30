@@ -4197,6 +4197,8 @@ fn trusted_diagnostic_error_category(category: &str) -> bool {
             | "stream_processing_error"
             | "stream_upstream_body_decode_error"
             | "stream_upstream_read_error"
+            | "stream_upstream_sse_parse_error"
+            | "stream_upstream_transport_decode_error"
             | "stream_upstream_timeout"
             | "upstream_auth_error"
             | "upstream_concurrency_full"

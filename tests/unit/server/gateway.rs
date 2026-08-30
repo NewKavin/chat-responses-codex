@@ -3403,8 +3403,20 @@ fn client_disconnected_during_partial_output_is_categorized() {
 
 #[test]
 fn upstream_stream_read_error_is_bad_gateway() {
-    let (status, category) =
-        classify_upstream_stream_error("error decoding response body: unexpected eof", false, true);
+    let (status, category) = classify_upstream_stream_error(
+        "error decoding response body: unexpected eof",
+        false,
+        true,
+        true,
+    );
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(category, "stream_upstream_transport_decode_error");
+    let (status, category) = classify_upstream_stream_error(
+        "error decoding response body: unexpected eof",
+        false,
+        true,
+        false,
+    );
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(category, "stream_upstream_body_decode_error");
 }
@@ -3415,6 +3427,7 @@ fn upstream_stream_timeout_is_gateway_timeout() {
         "request timed out while reading upstream response",
         true,
         false,
+        true,
     );
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(category, "stream_upstream_timeout");
