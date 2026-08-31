@@ -1526,6 +1526,10 @@ struct AccountCapacityHarness {
     rejection_retry_after_seconds: Arc<AtomicU64>,
     accepted_delay_ms: Arc<AtomicU64>,
     max_recovery_probes: Arc<AtomicUsize>,
+    started_recovery_probes: Arc<AtomicUsize>,
+    recovery_probe_started: Arc<tokio::sync::Notify>,
+    finished_recovery_probes: Arc<AtomicUsize>,
+    recovery_probe_finished: Arc<tokio::sync::Notify>,
     accepted_request_order: Arc<Mutex<Vec<String>>>,
     directory: tempfile::TempDir,
 }
@@ -1540,6 +1544,10 @@ impl AccountCapacityHarness {
         let rejection_retry_after_seconds = Arc::new(AtomicU64::new(0));
         let active_recovery_probes = Arc::new(AtomicUsize::new(0));
         let max_recovery_probes = Arc::new(AtomicUsize::new(0));
+        let started_recovery_probes = Arc::new(AtomicUsize::new(0));
+        let recovery_probe_started = Arc::new(tokio::sync::Notify::new());
+        let finished_recovery_probes = Arc::new(AtomicUsize::new(0));
+        let recovery_probe_finished = Arc::new(tokio::sync::Notify::new());
         let accepted_delay_ms = Arc::new(AtomicU64::new(50));
         let accepted_request_order = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1558,6 +1566,10 @@ impl AccountCapacityHarness {
                 let max_recovery_probes = max_recovery_probes.clone();
                 let accepted_delay_ms = accepted_delay_ms.clone();
                 let accepted_request_order = accepted_request_order.clone();
+                let started_recovery_probes = started_recovery_probes.clone();
+                let recovery_probe_started = recovery_probe_started.clone();
+                let finished_recovery_probes = finished_recovery_probes.clone();
+                let recovery_probe_finished = recovery_probe_finished.clone();
                 move |body: String| {
                     let rejected_requests = rejected_requests.clone();
                     let hold_rejection_responses = hold_rejection_responses.clone();
@@ -1569,6 +1581,10 @@ impl AccountCapacityHarness {
                     let max_recovery_probes = max_recovery_probes.clone();
                     let accepted_delay_ms = accepted_delay_ms.clone();
                     let accepted_request_order = accepted_request_order.clone();
+                    let started_recovery_probes = started_recovery_probes.clone();
+                    let recovery_probe_started = recovery_probe_started.clone();
+                    let finished_recovery_probes = finished_recovery_probes.clone();
+                    let recovery_probe_finished = recovery_probe_finished.clone();
                     async move {
                         let request: Value = serde_json::from_str(&body).unwrap();
                         let request_id = request["messages"][0]["content"]
@@ -1615,12 +1631,16 @@ impl AccountCapacityHarness {
 
                         let active = active_recovery_probes.fetch_add(1, Ordering::SeqCst) + 1;
                         max_recovery_probes.fetch_max(active, Ordering::SeqCst);
+                        started_recovery_probes.fetch_add(1, Ordering::SeqCst);
+                        recovery_probe_started.notify_waiters();
                         accepted_request_order.lock().unwrap().push(request_id);
                         tokio::time::sleep(Duration::from_millis(
                             accepted_delay_ms.load(Ordering::SeqCst),
                         ))
                         .await;
                         active_recovery_probes.fetch_sub(1, Ordering::SeqCst);
+                        finished_recovery_probes.fetch_add(1, Ordering::SeqCst);
+                        recovery_probe_finished.notify_waiters();
                         (
                             StatusCode::OK,
                             HeaderMap::new(),
@@ -1656,6 +1676,10 @@ impl AccountCapacityHarness {
             rejection_retry_after_seconds,
             accepted_delay_ms,
             max_recovery_probes,
+            started_recovery_probes,
+            recovery_probe_started,
+            finished_recovery_probes,
+            recovery_probe_finished,
             accepted_request_order,
             directory: tempdir().unwrap(),
         }
@@ -1682,6 +1706,46 @@ impl AccountCapacityHarness {
         })
         .await
         .expect("expected concurrency rejection request did not reach the upstream");
+    }
+
+    async fn wait_for_probe_started(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = self.recovery_probe_started.notified();
+                if self.started_recovery_probes.load(Ordering::SeqCst) >= expected {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected {expected} recovery probe(s) to start; started={}, max={}",
+                self.started_recovery_probes.load(Ordering::SeqCst),
+                self.max_recovery_probes(),
+            )
+        });
+    }
+
+    async fn wait_for_probe_finished(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = self.recovery_probe_finished.notified();
+                if self.finished_recovery_probes.load(Ordering::SeqCst) >= expected {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected {expected} recovery probe(s) to finish; finished={}, started={}",
+                self.finished_recovery_probes.load(Ordering::SeqCst),
+                self.started_recovery_probes.load(Ordering::SeqCst),
+            )
+        });
     }
 
     fn release_held_rejection_response(&self) {
