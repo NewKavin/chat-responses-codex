@@ -216,6 +216,12 @@
                 >
                   排队 {{ row.runtime_state?.queue_depth }}
                 </el-tag>
+                <span
+                  v-if="row.runtime_state?.queue_depth_supported === false"
+                  class="muted"
+                >
+                  排队：本后端不支持
+                </span>
                 <el-tag
                   v-if="(row.runtime_state?.stale_lease_count ?? 0) > 0"
                   size="small"
@@ -847,6 +853,9 @@ const formatRuntimeStateDetail = (row: UpstreamConfig) => {
   if (!rt) return ''
   const parts: string[] = [`在途 ${rt.in_flight}`]
   if (rt.queue_depth > 0) parts.push(`排队 ${rt.queue_depth}`)
+  // G6: 后端明确声明无法观测时，显式渲染「不支持」而不是静默隐藏，
+  // 否则运维会把“看不到”误读成“没发生/没有排队”。
+  if (rt.queue_depth_supported === false) parts.push('排队深度：本后端不支持')
   if (rt.stale_lease_count > 0) parts.push(`陈旧租约 ${rt.stale_lease_count}`)
   if (rt.oldest_lease_age_seconds > 0) parts.push(`最旧租约 ${rt.oldest_lease_age_seconds}s`)
   if (rt.leaked_reclaimed_total > 0) parts.push(`累计泄漏回收 ${rt.leaked_reclaimed_total}`)
@@ -855,10 +864,18 @@ const formatRuntimeStateDetail = (row: UpstreamConfig) => {
     parts.push(`租约持有 p50 ${formatHoldMs(rt.hold_p50_ms)}`)
   if (rt.hold_p95_ms != null && rt.hold_p95_ms > 0)
     parts.push(`p95 ${formatHoldMs(rt.hold_p95_ms)}`)
+  if (rt.hold_supported === false) parts.push('租约持有 p50/p95：本后端不支持')
   if ((rt.capacity_reject_total ?? 0) > 0)
     parts.push(`本地闸门拒绝 ${rt.capacity_reject_total}`)
-  if ((rt.route_cooldown_skipped_total ?? 0) > 0)
+  if (rt.route_cooldown_skipped_total != null && rt.route_cooldown_skipped_total > 0)
     parts.push(`免冷却放行 ${rt.route_cooldown_skipped_total}`)
+  if (rt.route_cooldown_skipped_total == null) parts.push('免冷却放行：本后端不支持')
+  if ((rt.sse_bad_frame_skipped_total ?? 0) > 0)
+    parts.push(`坏帧跳过 ${rt.sse_bad_frame_skipped_total}`)
+  if ((rt.sse_parse_error_total ?? 0) > 0)
+    parts.push(`SSE 解析失败 ${rt.sse_parse_error_total}`)
+  if ((rt.transport_decode_error_total ?? 0) > 0)
+    parts.push(`传输解码失败 ${rt.transport_decode_error_total}`)
   return parts.join('，')
 }
 

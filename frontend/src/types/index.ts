@@ -136,13 +136,23 @@ export interface UpstreamRuntimeState {
   queue_depth: number
   leaked_reclaimed_total: number
   stale_reclaimed_total: number
-  /** E5.3: 租约持有时长统计与容量类计数。Redis 后端为 null/0。 */
+  /** E5.3: 租约持有时长统计。后端不测量时（Redis）为 null，见 hold_supported。 */
   hold_p50_ms?: number | null
   hold_p95_ms?: number | null
+  /** G6: 后端是否测量租约持有时长。false 时 hold_p50/p95 恒为 null。 */
+  hold_supported?: boolean
+  /** G6: 后端是否能观测进程内排队深度。false 时 queue_depth 恒为 0。 */
+  queue_depth_supported?: boolean
   /** 本地并发闸门拒绝累计次数。 */
   capacity_reject_total?: number
   /** E1 生效次数：容量类失败本应冷却、实际跳过冷却的累计次数。 */
   route_cooldown_skipped_total?: number | null
+  /** G4: 坏帧跳过累计次数。 */
+  sse_bad_frame_skipped_total?: number
+  /** G4: SSE 解析失败累计次数。 */
+  sse_parse_error_total?: number
+  /** G4: 传输层解码失败累计次数。 */
+  transport_decode_error_total?: number
   minute_cost: number
   minute_limit: number
   minute_percentage: number

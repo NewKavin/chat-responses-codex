@@ -188,6 +188,22 @@ describe('admin ui structure', () => {
     expect(page).toContain('凭证失败')
   })
 
+  it('renders backend-unsupported runtime diagnostics explicitly instead of hiding them', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    // G6: null 后端字段不能被静默隐藏成“没有发生”。Redis 后端
+    // hold_p50/p95 为 null、queue_depth 恒 0，必须显式标注不支持。
+    expect(page).toContain('租约持有 p50/p95：本后端不支持')
+    expect(page).toContain('排队深度：本后端不支持')
+    expect(page).toContain('免冷却放行：本后端不支持')
+    expect(page).toContain('排队：本后端不支持')
+    expect(page).toContain("rt.hold_supported === false")
+    expect(page).toContain("rt.queue_depth_supported === false")
+    expect(page).toContain("rt.route_cooldown_skipped_total == null")
+    // 支持的后端仍按真实值渲染，不被“不支持”分支吞掉。
+    expect(page).toContain('租约持有 p50 ${formatHoldMs(rt.hold_p50_ms)}')
+  })
+
   it('supports editable visible column preferences on upstream and downstream lists', () => {
     const upstream = source('views/admin/Upstreams.vue')
     const downstream = source('views/admin/Downstreams.vue')
