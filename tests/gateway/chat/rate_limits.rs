@@ -1021,6 +1021,7 @@ async fn account_recovery_budget_cancels_slow_probe_headers() {
         harness.accepted_request_order(),
         ["slow-probe-headers".to_string()]
     );
+    harness.wait_for_probe_finished(1).await;
 }
 
 #[tokio::test]
@@ -1571,6 +1572,20 @@ fn route_retry_request(downstream_key: &GeneratedDownstreamKey) -> Request<Body>
         .unwrap()
 }
 
+struct RecoveryProbeLifecycleGuard {
+    active_recovery_probes: Arc<AtomicUsize>,
+    finished_recovery_probes: Arc<AtomicUsize>,
+    recovery_probe_finished: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for RecoveryProbeLifecycleGuard {
+    fn drop(&mut self) {
+        self.active_recovery_probes.fetch_sub(1, Ordering::SeqCst);
+        self.finished_recovery_probes.fetch_add(1, Ordering::SeqCst);
+        self.recovery_probe_finished.notify_waiters();
+    }
+}
+
 struct AccountCapacityHarness {
     base_url: String,
     downstream_key: GeneratedDownstreamKey,
@@ -1700,6 +1715,13 @@ impl AccountCapacityHarness {
                         max_recovery_probes.fetch_max(active, Ordering::SeqCst);
                         started_recovery_probes.fetch_add(1, Ordering::SeqCst);
                         recovery_probe_started.notify_waiters();
+                        // Keep lifecycle accounting correct when the upstream
+                        // handler future is cancelled before it returns.
+                        let _probe_lifecycle = RecoveryProbeLifecycleGuard {
+                            active_recovery_probes,
+                            finished_recovery_probes,
+                            recovery_probe_finished,
+                        };
                         accepted_request_order.lock().unwrap().push(request_id);
                         if hold_accepted_responses.load(Ordering::SeqCst)
                             && accepted_response_hold_claimed
@@ -1720,9 +1742,6 @@ impl AccountCapacityHarness {
                             accepted_delay_ms.load(Ordering::SeqCst),
                         ))
                         .await;
-                        active_recovery_probes.fetch_sub(1, Ordering::SeqCst);
-                        finished_recovery_probes.fetch_add(1, Ordering::SeqCst);
-                        recovery_probe_finished.notify_waiters();
                         (
                             StatusCode::OK,
                             HeaderMap::new(),
