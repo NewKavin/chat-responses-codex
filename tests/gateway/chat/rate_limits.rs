@@ -881,9 +881,10 @@ async fn one_key_shares_fifo_recovery_across_models() {
 async fn cancelled_account_waiter_does_not_block_the_next_request() {
     let harness = AccountCapacityHarness::start().await;
     harness.reject_next_concurrency_requests(2);
-    harness.set_accepted_delay(Duration::from_millis(250));
-    let app = harness
-        .gateway(AppConfig {
+    harness.hold_rejection_responses_after_first();
+    harness.hold_accepted_response_after_first();
+    let (state, app) = harness
+        .gateway_with_state(AppConfig {
             upstream_hedge_enabled: false,
             upstream_concurrency_recovery_max_wait_ms: 5_000,
             upstream_concurrency_recovery_max_rounds: 16,
@@ -891,33 +892,84 @@ async fn cancelled_account_waiter_does_not_block_the_next_request() {
             ..AppConfig::default()
         })
         .await;
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        upstream_model_key_fingerprint(&upstream, "glm-5.1"),
+    );
 
+    // The rejection handler holds responses after the first one. This barrier
+    // proves request-1 has registered its account waiter before request-2's
+    // held rejection response is released and can register its own waiter.
     let first = tokio::spawn(
         app.clone()
             .oneshot(harness.chat_request("glm-5.1", "request-1")),
     );
-    tokio::time::sleep(Duration::from_millis(1)).await;
+    harness.wait_for_rejection_arrivals(1).await;
     let second = tokio::spawn(
         app.clone()
             .oneshot(harness.chat_request("glm-5.2", "request-2")),
     );
-
-    tokio::time::timeout(Duration::from_secs(2), async {
+    harness.wait_for_rejection_arrivals(2).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if harness.rejected_requests.load(Ordering::SeqCst) == 0
-                && harness.accepted_request_order().len() == 1
+            if state
+                .account_concurrency_registry()
+                .snapshot(&account, tokio::time::Instant::now())
+                .waiters
+                == 1
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("one recovery probe should start while the second request waits");
+    .expect("request-1 must register its waiter before the held rejection is released");
+
+    // Release request-2's held rejection only after request-1 owns the head of
+    // the queue. The accepted-response gate then keeps request-1's probe in
+    // flight without a wall-clock assumption.
+    harness.release_held_rejection_response();
+    harness.wait_for_probe_started(1).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state
+                .account_concurrency_registry()
+                .snapshot(&account, tokio::time::Instant::now());
+            if snapshot.waiters == 1 && snapshot.probe_in_flight {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("request-2 must register behind request-1's in-flight probe");
+
     second.abort();
     assert!(second.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state
+                .account_concurrency_registry()
+                .snapshot(&account, tokio::time::Instant::now());
+            if snapshot.waiters == 0 && snapshot.probe_in_flight {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("aborting request-2 must remove its account waiter before request-3 starts");
 
-    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    harness.release_held_accepted_response();
+    harness.wait_for_probe_finished(1).await;
+    let first = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("request-1 must finish after the accepted probe is released")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
     let third = tokio::time::timeout(
         Duration::from_secs(1),
         app.oneshot(harness.chat_request("glm-5.2", "request-3")),
@@ -1525,6 +1577,8 @@ struct AccountCapacityHarness {
     release_held_rejection: Arc<tokio::sync::Notify>,
     rejection_retry_after_seconds: Arc<AtomicU64>,
     accepted_delay_ms: Arc<AtomicU64>,
+    hold_accepted_responses: Arc<AtomicBool>,
+    release_held_accepted_response: Arc<tokio::sync::Notify>,
     max_recovery_probes: Arc<AtomicUsize>,
     started_recovery_probes: Arc<AtomicUsize>,
     recovery_probe_started: Arc<tokio::sync::Notify>,
@@ -1542,6 +1596,9 @@ impl AccountCapacityHarness {
         let all_rejections_arrived = Arc::new(tokio::sync::Notify::new());
         let release_held_rejection = Arc::new(tokio::sync::Notify::new());
         let rejection_retry_after_seconds = Arc::new(AtomicU64::new(0));
+        let hold_accepted_responses = Arc::new(AtomicBool::new(false));
+        let accepted_response_hold_claimed = Arc::new(AtomicBool::new(false));
+        let release_held_accepted_response = Arc::new(tokio::sync::Notify::new());
         let active_recovery_probes = Arc::new(AtomicUsize::new(0));
         let max_recovery_probes = Arc::new(AtomicUsize::new(0));
         let started_recovery_probes = Arc::new(AtomicUsize::new(0));
@@ -1562,6 +1619,9 @@ impl AccountCapacityHarness {
                 let all_rejections_arrived = all_rejections_arrived.clone();
                 let release_held_rejection = release_held_rejection.clone();
                 let rejection_retry_after_seconds = rejection_retry_after_seconds.clone();
+                let hold_accepted_responses = hold_accepted_responses.clone();
+                let accepted_response_hold_claimed = accepted_response_hold_claimed.clone();
+                let release_held_accepted_response = release_held_accepted_response.clone();
                 let active_recovery_probes = active_recovery_probes.clone();
                 let max_recovery_probes = max_recovery_probes.clone();
                 let accepted_delay_ms = accepted_delay_ms.clone();
@@ -1577,6 +1637,9 @@ impl AccountCapacityHarness {
                     let all_rejections_arrived = all_rejections_arrived.clone();
                     let release_held_rejection = release_held_rejection.clone();
                     let rejection_retry_after_seconds = rejection_retry_after_seconds.clone();
+                    let hold_accepted_responses = hold_accepted_responses.clone();
+                    let accepted_response_hold_claimed = accepted_response_hold_claimed.clone();
+                    let release_held_accepted_response = release_held_accepted_response.clone();
                     let active_recovery_probes = active_recovery_probes.clone();
                     let max_recovery_probes = max_recovery_probes.clone();
                     let accepted_delay_ms = accepted_delay_ms.clone();
@@ -1634,6 +1697,18 @@ impl AccountCapacityHarness {
                         started_recovery_probes.fetch_add(1, Ordering::SeqCst);
                         recovery_probe_started.notify_waiters();
                         accepted_request_order.lock().unwrap().push(request_id);
+                        if hold_accepted_responses.load(Ordering::SeqCst)
+                            && accepted_response_hold_claimed
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                        {
+                            release_held_accepted_response.notified().await;
+                        }
                         tokio::time::sleep(Duration::from_millis(
                             accepted_delay_ms.load(Ordering::SeqCst),
                         ))
@@ -1675,6 +1750,8 @@ impl AccountCapacityHarness {
             release_held_rejection,
             rejection_retry_after_seconds,
             accepted_delay_ms,
+            hold_accepted_responses,
+            release_held_accepted_response,
             max_recovery_probes,
             started_recovery_probes,
             recovery_probe_started,
@@ -1692,6 +1769,10 @@ impl AccountCapacityHarness {
 
     fn hold_rejection_responses_after_first(&self) {
         self.hold_rejection_responses.store(true, Ordering::SeqCst);
+    }
+
+    fn hold_accepted_response_after_first(&self) {
+        self.hold_accepted_responses.store(true, Ordering::SeqCst);
     }
 
     async fn wait_for_rejection_arrivals(&self, expected: usize) {
@@ -1750,6 +1831,10 @@ impl AccountCapacityHarness {
 
     fn release_held_rejection_response(&self) {
         self.release_held_rejection.notify_one();
+    }
+
+    fn release_held_accepted_response(&self) {
+        self.release_held_accepted_response.notify_one();
     }
 
     fn set_accepted_delay(&self, delay: Duration) {
