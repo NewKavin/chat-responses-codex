@@ -391,6 +391,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
+ "flate2",
  "futures-util",
  "gateway-core",
  "hmac 0.12.1",

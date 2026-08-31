@@ -5417,6 +5417,23 @@ fn truncated_stream_test_state(
     downstream_key: &GeneratedDownstreamKey,
     upstreams: Vec<UpstreamConfig>,
 ) -> AppState {
+    truncated_stream_test_state_with_config(
+        state_path,
+        downstream_key,
+        upstreams,
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..AppConfig::default()
+        },
+    )
+}
+
+fn truncated_stream_test_state_with_config(
+    state_path: std::path::PathBuf,
+    downstream_key: &GeneratedDownstreamKey,
+    upstreams: Vec<UpstreamConfig>,
+    config: AppConfig,
+) -> AppState {
     AppState::new(
         PersistedState {
             upstreams: std::sync::Arc::new(upstreams),
@@ -5447,10 +5464,7 @@ fn truncated_stream_test_state(
             ..Default::default()
         },
         state_path,
-        AppConfig {
-            upstream_hedge_enabled: false,
-            ..AppConfig::default()
-        },
+        config,
     )
 }
 
@@ -5535,6 +5549,166 @@ async fn streaming_upstream_request_disables_content_encoding_negotiation() {
         accept_encoding.lock().unwrap().as_deref(),
         Some("identity"),
         "streaming requests must not opt into a compressed body that an intermediary can truncate"
+    );
+}
+
+#[tokio::test]
+async fn compressed_stream_truncation_stays_classified_and_never_reaches_decoder() {
+    // §4.5: e8b6e864 only asserted the `Accept-Encoding: identity` request
+    // header. This test pins the *result* for a middlebox that compresses the
+    // SSE body anyway and truncates it: a real gzip payload is cut mid-stream
+    // (chunked framing, chunk-size header larger than the bytes sent, then a
+    // hard close — the same shape as the existing truncated-chunked fixture),
+    //
+    // This codebase builds reqwest WITHOUT the gzip feature, so the gateway
+    // client never negotiates compression and never decompresses an upstream
+    // body. The result-level contract is therefore: a compressed truncated
+    // body can never surface as the opaque `stream_upstream_transport_decode_error`
+    // (or its legacy alias); the gzip bytes are diagnosed instead as an SSE
+    // parse failure (invalid UTF-8) with the split code.
+    use std::io::Write as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let plain = b"data: {\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}\n\ndata: [DONE]\n\n";
+    let full_gzip = {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plain).unwrap();
+        encoder.finish().unwrap()
+    };
+    // Cut the gzip stream before its trailing CRC/trailer: no decompressor
+    // could ever finish it. Leak into 'static so the spawned fake upstream
+    // can borrow it for the lifetime of the test.
+    let truncated: &'static [u8] =
+        Box::leak(full_gzip[..full_gzip.len() - 8].to_vec().into_boxed_slice());
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let upstream_hits = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            upstream_hits.fetch_add(1, Ordering::SeqCst);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket
+                .write_all(format!("{:X}\r\n", truncated.len() + 32).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(truncated).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    // First-frame failure is a clean failure the client can retry; disable
+    // same-route retry here so the assertion pins the *classified* first
+    // failure instead of the follow-up connection-refused round.
+    let state = truncated_stream_test_state_with_config(
+        tempdir.path().join("state.json"),
+        &downstream_key,
+        vec![UpstreamConfig {
+            id: "gzip-truncated-upstream".into(),
+            name: "gzip-truncated-upstream".into(),
+            base_url: format!("http://{address}"),
+            api_key: "gzip-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["gpt-4".into()],
+            active: true,
+            ..Default::default()
+        }],
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_same_route_retry_enabled: false,
+            // First-frame failure is a clean failure the gateway may re-attempt
+            // across route-exhaustion rounds or last-resort probes; disable
+            // both so the assertion pins the *classified* first-round error
+            // instead of a follow-up round.
+            upstream_route_exhaustion_retry_enabled: false,
+            upstream_transient_last_resort_probe_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("truncated compressed body must terminate with a typed SSE error");
+    let body = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        body.contains("stream_upstream_sse_parse_error"),
+        "truncated gzip bytes must be diagnosed as an SSE parse failure, got: {body}"
+    );
+    assert!(
+        !body.contains("stream_upstream_transport_decode_error"),
+        "the gateway client never decompresses upstream bodies, so a compressed truncation must never surface as a transport decode error: {body}"
+    );
+    assert!(
+        !body.contains("stream_upstream_body_decode_error"),
+        "the split code must stay on by default: {body}"
+    );
+    // The first frame fails before any usable output, so the gateway's
+    // stream→json same-route recovery may legally make a second attempt;
+    // what matters is that every attempt is the classified first-round error
+    // and none of them is a transport decode error.
+    assert!(hits.load(Ordering::SeqCst) >= 1);
+
+    wait_for_upstream_in_flight(&state, "gzip-truncated-upstream", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_upstream_sse_parse_error")
+    );
+    // G4: the first-frame failure must land in the per-upstream counters,
+    // and a compressed truncation must never count as a transport decode.
+    let runtime = state
+        .upstream_runtime_snapshots()
+        .await
+        .expect("local runtime snapshot")
+        .get("gzip-truncated-upstream")
+        .cloned()
+        .expect("gzip upstream runtime snapshot");
+    assert!(
+        runtime.sse_parse_error_total >= 1,
+        "the gzip bytes must count as an SSE parse failure, got {}",
+        runtime.sse_parse_error_total
+    );
+    assert_eq!(
+        runtime.transport_decode_error_total, 0,
+        "no decompression exists in the gateway client, so transport decode stays 0"
     );
 }
 
