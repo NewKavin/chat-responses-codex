@@ -977,6 +977,9 @@ pub(super) fn proxied_stream_body(
                         state.usable_output_seen,
                         state.semantic_terminal_emitted,
                     );
+                    if is_decode {
+                        state.record_stream_counter(StreamDecodeCounter::TransportDecodeError);
+                    }
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
                         .await;
@@ -1161,6 +1164,17 @@ impl ProxiedStreamState {
         }
     }
 
+    /// G4: best-effort per-upstream stream-decode counter write.
+    fn record_stream_counter(&self, counter: StreamDecodeCounter) {
+        if let Some(context) = self.log_context.as_ref() {
+            context.state.record_upstream_stream_counter(
+                &self.body_read_diagnostic_context.upstream_id,
+                counter,
+                1,
+            );
+        }
+    }
+
     fn usable_output_exposed(&self) -> bool {
         self.usable_output_seen
     }
@@ -1217,6 +1231,10 @@ impl ProxiedStreamState {
                     continue;
                 }
                 Err(error) => {
+                    // G4: invalid-UTF-8 frames are SSE parse failures too —
+                    // they must land in `sse_parse_error_total` like
+                    // invalid-JSON frames do.
+                    self.record_stream_counter(StreamDecodeCounter::SseParseError);
                     self.buffer.drain(..consumed);
                     return Err(error);
                 }
@@ -1260,6 +1278,7 @@ impl ProxiedStreamState {
             }) {
                 Ok(event) => event,
                 Err(error) => {
+                    self.record_stream_counter(StreamDecodeCounter::SseParseError);
                     if !self.usable_output_exposed()
                         && !self.commit_tracker.semantic_output_observed()
                     {
@@ -1272,6 +1291,7 @@ impl ProxiedStreamState {
                     // bad frame instead of killing the whole stream. Drop it
                     // entirely - the downstream client cannot parse it either.
                     self.sse_bad_frames_skipped += 1;
+                    self.record_stream_counter(StreamDecodeCounter::SseBadFrameSkipped);
                     if self.first_skipped_bad_frame.is_none() {
                         self.first_skipped_bad_frame = Some(
                             String::from_utf8_lossy(payload.as_bytes())
@@ -1909,6 +1929,9 @@ pub(super) fn translated_stream_body(
                         state.usable_output_delivered,
                         state.semantic_terminal_emitted,
                     );
+                    if is_decode {
+                        state.record_stream_counter(StreamDecodeCounter::TransportDecodeError);
+                    }
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
                         .await;
@@ -2110,6 +2133,17 @@ impl TranslatedStreamState {
         }
     }
 
+    /// G4: best-effort per-upstream stream-decode counter write.
+    fn record_stream_counter(&self, counter: StreamDecodeCounter) {
+        if let Some(context) = self.log_context.as_ref() {
+            context.state.record_upstream_stream_counter(
+                &self.body_read_diagnostic_context.upstream_id,
+                counter,
+                1,
+            );
+        }
+    }
+
     fn usable_output_exposed(&self) -> bool {
         self.usable_output_delivered
     }
@@ -2166,6 +2200,10 @@ impl TranslatedStreamState {
                     continue;
                 }
                 Err(error) => {
+                    // G4: invalid-UTF-8 frames are SSE parse failures too —
+                    // they must land in `sse_parse_error_total` like
+                    // invalid-JSON frames do.
+                    self.record_stream_counter(StreamDecodeCounter::SseParseError);
                     self.buffer.drain(..consumed);
                     return Err(error);
                 }
@@ -2205,6 +2243,7 @@ impl TranslatedStreamState {
             }) {
                 Ok(event) => event,
                 Err(error) => {
+                    self.record_stream_counter(StreamDecodeCounter::SseParseError);
                     if !self.usable_output_exposed()
                         && !self.commit_tracker.semantic_output_observed()
                     {
@@ -2217,6 +2256,7 @@ impl TranslatedStreamState {
                     // bad frame instead of killing the whole stream. Drop it
                     // entirely - the downstream client cannot parse it either.
                     self.sse_bad_frames_skipped += 1;
+                    self.record_stream_counter(StreamDecodeCounter::SseBadFrameSkipped);
                     if self.first_skipped_bad_frame.is_none() {
                         self.first_skipped_bad_frame = Some(
                             String::from_utf8_lossy(payload.as_bytes())

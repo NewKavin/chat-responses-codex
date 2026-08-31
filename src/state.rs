@@ -2995,6 +2995,51 @@ impl AppState {
         }
     }
 
+    /// G4: record a per-upstream stream-decode counter on whichever runtime
+    /// coordination backend is active.  Local backend updates the in-memory
+    /// lease table synchronously; Redis backend fires-and-forgets an HINCRBY
+    /// on the per-upstream counters hash.  Errors are logged and never
+    /// propagated — a missed counter must not break a stream.
+    pub fn record_upstream_stream_counter(
+        &self,
+        upstream_id: &str,
+        counter: StreamDecodeCounter,
+        delta: u64,
+    ) {
+        if delta == 0 {
+            return;
+        }
+        match &self.runtime_coordination {
+            RuntimeCoordinationBackend::Redis(coordinator) => {
+                let coordinator = coordinator.clone();
+                let upstream_id = upstream_id.to_string();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Err(error) = coordinator
+                            .record_upstream_stream_counter(&upstream_id, counter, delta)
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %error,
+                                upstream_id = %upstream_id,
+                                "failed to record upstream stream counter on Redis"
+                            );
+                        }
+                    });
+                }
+            }
+            RuntimeCoordinationBackend::Local => {
+                let mut table = self
+                    .upstream_lease_table
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for _ in 0..delta {
+                    table.record_stream_counter(upstream_id, counter);
+                }
+            }
+        }
+    }
+
     pub fn touch_active_gateway_request(&self, request_id: &str) {
         let now = unix_seconds();
         let mut active = self
@@ -4360,6 +4405,9 @@ impl AppState {
                 let hold_p50_ms = table.upstream_hold_p50_ms(upstream_id);
                 let hold_p95_ms = table.upstream_hold_p95_ms(upstream_id);
                 let capacity_reject_total = table.capacity_reject_total(upstream_id);
+                let sse_bad_frame_skipped_total = table.sse_bad_frame_skipped_total(upstream_id);
+                let sse_parse_error_total = table.sse_parse_error_total(upstream_id);
+                let transport_decode_error_total = table.transport_decode_error_total(upstream_id);
                 let in_flight = table
                     .account_lease_count_for_upstream(upstream_id)
                     .min(u32::MAX as usize) as u32;
@@ -4388,6 +4436,11 @@ impl AppState {
                         hold_p95_ms,
                         capacity_reject_total,
                         route_cooldown_skipped_total,
+                        sse_bad_frame_skipped_total,
+                        sse_parse_error_total,
+                        transport_decode_error_total,
+                        hold_supported: true,
+                        queue_depth_supported: true,
                     },
                 )
             })
@@ -4662,6 +4715,9 @@ impl AppState {
                 let hold_p50_ms = table.upstream_hold_p50_ms(&upstream_id);
                 let hold_p95_ms = table.upstream_hold_p95_ms(&upstream_id);
                 let capacity_reject_total = table.capacity_reject_total(&upstream_id);
+                let sse_bad_frame_skipped_total = table.sse_bad_frame_skipped_total(&upstream_id);
+                let sse_parse_error_total = table.sse_parse_error_total(&upstream_id);
+                let transport_decode_error_total = table.transport_decode_error_total(&upstream_id);
                 let route_cooldown_skipped_total = Some(
                     cooldown_skipped_totals
                         .get(&upstream_id)
@@ -4690,6 +4746,11 @@ impl AppState {
                     hold_p95_ms,
                     capacity_reject_total,
                     route_cooldown_skipped_total,
+                    sse_bad_frame_skipped_total,
+                    sse_parse_error_total,
+                    transport_decode_error_total,
+                    hold_supported: true,
+                    queue_depth_supported: true,
                 };
 
                 (upstream_id, snapshot)
@@ -7207,6 +7268,24 @@ impl UpstreamLeaseRecord {
 ///
 /// Lock discipline: every critical section on this table is purely synchronous
 /// and never spans an `await`.  Callers that also need `UpstreamRuntimeState`
+/// G4: per-upstream stream-decode counter kinds recorded on both backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamDecodeCounter {
+    SseBadFrameSkipped,
+    SseParseError,
+    TransportDecodeError,
+}
+
+impl StreamDecodeCounter {
+    pub fn redis_field(self) -> &'static str {
+        match self {
+            Self::SseBadFrameSkipped => "sse_bad_frame_skipped",
+            Self::SseParseError => "sse_parse_error",
+            Self::TransportDecodeError => "transport_decode_error",
+        }
+    }
+}
+
 /// must acquire the Tokio runtime-state lock first and this lock second, never
 /// the reverse.
 #[derive(Debug, Default)]
@@ -7232,6 +7311,13 @@ pub struct UpstreamLeaseTable {
     /// skip-queue fast-fail), so a non-zero value is the tell that the
     /// upstream's real concurrency was saturated at the gateway's own gate.
     capacity_reject_total: HashMap<String, u64>,
+    /// G4: per-upstream cumulative SSE bad-frame skips (G3).  Process-local
+    /// on the local backend; on Redis the counters hash holds the value.
+    sse_bad_frame_skipped_total: HashMap<String, u64>,
+    /// G4: per-upstream cumulative SSE parse failures (G1/G2).
+    sse_parse_error_total: HashMap<String, u64>,
+    /// G4: per-upstream cumulative transport-layer decode failures (G2).
+    transport_decode_error_total: HashMap<String, u64>,
 }
 
 impl UpstreamLeaseTable {
@@ -7471,6 +7557,40 @@ impl UpstreamLeaseTable {
             .unwrap_or(0)
     }
 
+    /// G4: record a stream-decode counter increment for `upstream_id`.
+    fn record_stream_counter(&mut self, upstream_id: &str, counter: StreamDecodeCounter) {
+        let map = match counter {
+            StreamDecodeCounter::SseBadFrameSkipped => &mut self.sse_bad_frame_skipped_total,
+            StreamDecodeCounter::SseParseError => &mut self.sse_parse_error_total,
+            StreamDecodeCounter::TransportDecodeError => &mut self.transport_decode_error_total,
+        };
+        *map.entry(upstream_id.to_string()).or_insert(0) += 1;
+    }
+
+    /// G4: cumulative SSE bad-frame skips for `upstream_id`.
+    fn sse_bad_frame_skipped_total(&self, upstream_id: &str) -> u64 {
+        self.sse_bad_frame_skipped_total
+            .get(upstream_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// G4: cumulative SSE parse errors for `upstream_id`.
+    fn sse_parse_error_total(&self, upstream_id: &str) -> u64 {
+        self.sse_parse_error_total
+            .get(upstream_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// G4: cumulative transport-layer decode errors for `upstream_id`.
+    fn transport_decode_error_total(&self, upstream_id: &str) -> u64 {
+        self.transport_decode_error_total
+            .get(upstream_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// E3: the longest *already-held* duration among `account`'s live leases
     /// (now − `reserved_at`).  This is the portion of the expected service
     /// time already consumed by the oldest occupant — the best available
@@ -7691,10 +7811,27 @@ pub struct UpstreamRuntimeSnapshot {
     /// Redis counts Lua admission-gate rejections on the counters hash (F1.4).
     pub capacity_reject_total: u64,
     /// E5.3: cumulative count of E1 route/key cooldown skips (capacity-class
-    /// failure recorded as observation only) for this upstream.  `Some` on
-    /// the local backend; the Redis backend does not count skips and reports
-    /// `None` so the dashboard shows "—" instead of a misleading 0.
+    /// failure recorded as observation only) for this upstream.  The local
+    /// backend counts from the process-local route-health registry; the Redis
+    /// backend mirrors the same count on its counters hash (G4.2), so both
+    /// report real values.  `None` is only a transient read failure signal.
     pub route_cooldown_skipped_total: Option<u64>,
+    /// G4: cumulative SSE bad-frame skips (G3) for this upstream.
+    pub sse_bad_frame_skipped_total: u64,
+    /// G4: cumulative SSE parse failures (G1/G2) for this upstream.
+    pub sse_parse_error_total: u64,
+    /// G4: cumulative transport-layer decode failures (G2) for this upstream.
+    pub transport_decode_error_total: u64,
+    /// G6: whether this backend measures lease hold durations.  `true` on the
+    /// local backend; the Redis backend keeps leases in Lua and has no hold
+    /// samples, so it reports `false` (hold fields are `None`).  The admin
+    /// page must render that state explicitly instead of silently hiding it.
+    pub hold_supported: bool,
+    /// G6: whether the reported `queue_depth` is real.  `true` on the local
+    /// backend where the waiter queue is process-local; the Redis backend
+    /// cannot see the per-process queue and would otherwise report a
+    /// misleading 0, so it reports `false`.
+    pub queue_depth_supported: bool,
 }
 
 impl UpstreamRuntimeSnapshot {
@@ -7733,6 +7870,16 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub capacity_reject_total: u64,
     /// E5.3: see `UpstreamRuntimeSnapshot::route_cooldown_skipped_total`.
     pub route_cooldown_skipped_total: Option<u64>,
+    /// G4: see `UpstreamRuntimeSnapshot::sse_bad_frame_skipped_total`.
+    pub sse_bad_frame_skipped_total: u64,
+    /// G4: see `UpstreamRuntimeSnapshot::sse_parse_error_total`.
+    pub sse_parse_error_total: u64,
+    /// G4: see `UpstreamRuntimeSnapshot::transport_decode_error_total`.
+    pub transport_decode_error_total: u64,
+    /// G6: see `UpstreamRuntimeSnapshot::hold_supported`.
+    pub hold_supported: bool,
+    /// G6: see `UpstreamRuntimeSnapshot::queue_depth_supported`.
+    pub queue_depth_supported: bool,
 }
 
 #[derive(Debug, Clone)]

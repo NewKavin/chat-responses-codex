@@ -22,7 +22,7 @@ use crate::state::{
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, DownstreamModelEntry,
     GlobalContextProfile, KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit,
     RouteOutcome, RouteRecovery, RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings,
-    StreamDiagnostics, UpstreamConfig, UpstreamRequestLease, UsageLog,
+    StreamDecodeCounter, StreamDiagnostics, UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};

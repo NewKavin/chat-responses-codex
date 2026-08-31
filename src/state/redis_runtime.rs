@@ -11,8 +11,8 @@ use super::{
     DownstreamAdmissionRejection, DownstreamConfig, DownstreamRuntimeCounts, HealthStateSnapshot,
     KeyHealthKey, LegacyRouteHealthRepairReport, ProbeDecision, RouteAvailability,
     RouteFailureClass, RouteHealthKey, RouteHealthSnapshotDto, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, UpstreamAdmissionError, UpstreamConfig, UpstreamRuntimeSnapshot,
-    UpstreamRuntimeSnapshotWithFeedback, ROUTE_HEALTH_GLOBAL_CAPACITY,
+    RouteSetAggregateKey, StreamDecodeCounter, UpstreamAdmissionError, UpstreamConfig,
+    UpstreamRuntimeSnapshot, UpstreamRuntimeSnapshotWithFeedback, ROUTE_HEALTH_GLOBAL_CAPACITY,
     ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 use crate::capabilities::WireProtocol;
@@ -1468,6 +1468,63 @@ impl RedisRuntimeCoordinator {
             .await
     }
 
+    /// G4: HINCRBY a per-upstream stream-decode counter on the counters hash.
+    /// Callers treat this as best-effort observability.
+    pub(super) async fn record_upstream_stream_counter(
+        &self,
+        upstream_id: &str,
+        counter: StreamDecodeCounter,
+        delta: u64,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let identity = stable_identity(upstream_id);
+        let counters_key = self.upstream_key(&identity, "counters");
+        let field = counter.redis_field();
+        self.retry_coordination_once(|| {
+            let mut connection = self.connection();
+            let counters_key = counters_key.clone();
+            async move {
+                timeout_coordination(async {
+                    redis::cmd("HINCRBY")
+                        .arg(&counters_key)
+                        .arg(field)
+                        .arg(delta)
+                        .query_async::<i64>(&mut connection)
+                        .await
+                })
+                .await
+                .map(|_| ())
+            }
+        })
+        .await
+    }
+
+    /// G4.2: HINCRBY the per-upstream E1 route-cooldown-skip counter, the
+    /// Redis mirror of the local backend's `cooldown_skipped_total`.
+    pub(super) async fn record_route_cooldown_skipped(
+        &self,
+        upstream_id: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let identity = stable_identity(upstream_id);
+        let counters_key = self.upstream_key(&identity, "counters");
+        self.retry_coordination_once(|| {
+            let mut connection = self.connection();
+            let counters_key = counters_key.clone();
+            async move {
+                timeout_coordination(async {
+                    redis::cmd("HINCRBY")
+                        .arg(&counters_key)
+                        .arg("route_cooldown_skipped")
+                        .arg(1)
+                        .query_async::<i64>(&mut connection)
+                        .await
+                })
+                .await
+                .map(|_| ())
+            }
+        })
+        .await
+    }
+
     /// C5.2: force-release every upstream concurrency lease for `upstream_id`
     /// on the Redis backend: the per-account lease ZSETs
     /// (`...:account:<account_identity>:leases`, where the admission gate
@@ -1832,6 +1889,11 @@ impl RedisRuntimeCoordinator {
         let capacity_observation_only =
             is_capacity_class(class) && !self.tuning_snapshot().capacity_failure_cooldown_enabled;
         if capacity_observation_only {
+            // G4.2: mirror the local backend's cooldown_skipped_total so the
+            // E1 "capacity failure did not cool the route" count is real on
+            // Redis too.  Best-effort: an observation must not fail because
+            // the counter write did.
+            let _ = self.record_route_cooldown_skipped(&route.upstream_id).await;
             return self
                 .observe_health_state(
                     &self.route_health_state_key(route),
@@ -1915,6 +1977,8 @@ impl RedisRuntimeCoordinator {
                 | crate::state::RouteFailureClass::KeyQuota
         ) && !self.tuning_snapshot().capacity_failure_cooldown_enabled
         {
+            // G4.2: see the route-path comment above.
+            let _ = self.record_route_cooldown_skipped(&key.upstream_id).await;
             return self
                 .observe_health_state(
                     &self.key_health_state_key(key),
@@ -3305,7 +3369,7 @@ fn parse_downstream_runtime_counts(
 fn parse_upstream_snapshot(
     result: Vec<String>,
 ) -> Result<UpstreamRuntimeSnapshot, RuntimeCoordinationError> {
-    if result.len() < 12 {
+    if result.len() < 16 {
         return Err(RuntimeCoordinationError);
     }
     let in_flight = result[0]
@@ -3335,6 +3399,16 @@ fn parse_upstream_snapshot(
     let oldest_lease_age_seconds = result[11]
         .parse::<u64>()
         .map_err(|_| RuntimeCoordinationError)?;
+    let sse_bad_frame_skipped_total = result[12]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let sse_parse_error_total = result[13]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let transport_decode_error_total = result[14]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let route_cooldown_skipped_total = result[15].parse::<u64>().ok();
     if !minute_cost.is_finite()
         || minute_cost < 0.0
         || !five_hour_cost.is_finite()
@@ -3364,17 +3438,25 @@ fn parse_upstream_snapshot(
         hold_p95_ms: None,
         // F1.4: real count of Lua admission-gate rejections for this upstream.
         capacity_reject_total,
-        // E1 cooldown skips are a process-local route-health concept; the
-        // Redis backend does not count them, so report `None` (前端显示 —)
-        // instead of a misleading 0.
-        route_cooldown_skipped_total: None,
+        // G4.2: real count of E1 route/key cooldown skips on Redis,
+        // written by `record_route_cooldown_skipped` at the
+        // observation-only capacity-failure path.
+        route_cooldown_skipped_total,
+        sse_bad_frame_skipped_total,
+        sse_parse_error_total,
+        transport_decode_error_total,
+        // G6: Redis keeps leases in Lua and never samples holds, and the
+        // C3 waiter queue is process-local; both flags stay false here so
+        // the admin page renders "本后端不支持" instead of hiding the gap.
+        hold_supported: false,
+        queue_depth_supported: false,
     })
 }
 
 fn parse_upstream_snapshot_with_feedback(
     result: Vec<String>,
 ) -> Result<UpstreamRuntimeSnapshotWithFeedback, RuntimeCoordinationError> {
-    if result.len() < 12 {
+    if result.len() < 16 {
         return Err(RuntimeCoordinationError);
     }
     let snapshot = parse_upstream_snapshot(result.clone())?;
@@ -3408,6 +3490,11 @@ fn parse_upstream_snapshot_with_feedback(
         hold_p95_ms: snapshot.hold_p95_ms,
         capacity_reject_total: snapshot.capacity_reject_total,
         route_cooldown_skipped_total: snapshot.route_cooldown_skipped_total,
+        sse_bad_frame_skipped_total: snapshot.sse_bad_frame_skipped_total,
+        sse_parse_error_total: snapshot.sse_parse_error_total,
+        transport_decode_error_total: snapshot.transport_decode_error_total,
+        hold_supported: snapshot.hold_supported,
+        queue_depth_supported: snapshot.queue_depth_supported,
     })
 }
 

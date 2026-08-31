@@ -97,5 +97,9 @@ return {
   redis.call('HGET', KEYS[5], 'stale_reclaimed') or '0',
   redis.call('HGET', KEYS[5], 'capacity_reject') or '0',
   tostring(stale_lease_count),
-  tostring(oldest_lease_age_seconds)
+  tostring(oldest_lease_age_seconds),
+  redis.call('HGET', KEYS[5], 'sse_bad_frame_skipped') or '0',
+  redis.call('HGET', KEYS[5], 'sse_parse_error') or '0',
+  redis.call('HGET', KEYS[5], 'transport_decode_error') or '0',
+  redis.call('HGET', KEYS[5], 'route_cooldown_skipped') or '0'
 }

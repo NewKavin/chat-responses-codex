@@ -620,12 +620,23 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         five_hour_percentage: f64,
         cooldown_until: u64,
         cooldown_remaining: u64,
-        // E5.3: process-local hold-duration statistics, local-gate reject
-        // total and E1 cooldown-skip total.  None/0 on the Redis backend.
+        // E5.3: process-local hold-duration statistics and E1
+        // cooldown-skip total.  Holds are None only when the backend does not
+        // measure them (see `hold_supported`); the cooldown-skip count is
+        // real on both backends (G4.2).
         hold_p50_ms: Option<u64>,
         hold_p95_ms: Option<u64>,
         capacity_reject_total: u64,
         route_cooldown_skipped_total: Option<u64>,
+        // G6: the admin page must render "本后端不支持" for these instead of
+        // silently hiding the gap: hold_supported=false ⇒ holds are None,
+        // queue_depth_supported=false ⇒ queue_depth is a placeholder 0.
+        hold_supported: bool,
+        queue_depth_supported: bool,
+        // G4: SSE/transport decode counters (real values on both backends).
+        sse_bad_frame_skipped_total: u64,
+        sse_parse_error_total: u64,
+        transport_decode_error_total: u64,
     }
 
     let mut upstreams_with_runtime = Vec::with_capacity(snapshot.upstreams.len());
@@ -662,6 +673,11 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
                 hold_p95_ms: runtime.hold_p95_ms,
                 capacity_reject_total: runtime.capacity_reject_total,
                 route_cooldown_skipped_total: runtime.route_cooldown_skipped_total,
+                sse_bad_frame_skipped_total: runtime.sse_bad_frame_skipped_total,
+                sse_parse_error_total: runtime.sse_parse_error_total,
+                transport_decode_error_total: runtime.transport_decode_error_total,
+                hold_supported: runtime.hold_supported,
+                queue_depth_supported: runtime.queue_depth_supported,
             }
         });
 

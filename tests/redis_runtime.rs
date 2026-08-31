@@ -4927,11 +4927,17 @@ async fn redis_upstream_snapshot_reports_real_stale_and_oldest_lease_state() {
         "the reclaimed stale lease must no longer count as in flight"
     );
     assert_eq!(
-        snapshot.route_cooldown_skipped_total, None,
-        "Redis backend must report cooldown skips as unsupported, not 0"
+        snapshot.route_cooldown_skipped_total,
+        Some(0),
+        "G4.2: Redis backend must report a real cooldown-skip count (0 before any observation)"
     );
     assert_eq!(snapshot.hold_p50_ms, None);
     assert_eq!(snapshot.hold_p95_ms, None);
+    // G6: the Redis backend cannot measure holds or the process-local
+    // waiter queue; the flags must say so explicitly (admin page renders
+    // "本后端不支持" from them instead of hiding the gap).
+    assert!(!snapshot.hold_supported);
+    assert!(!snapshot.queue_depth_supported);
     state.release_upstream_request(lease).await.unwrap();
 }
 
