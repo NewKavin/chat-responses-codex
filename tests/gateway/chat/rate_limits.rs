@@ -733,6 +733,8 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
                     hits.fetch_add(1, Ordering::SeqCst);
                     let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                     max_in_flight.fetch_max(active, Ordering::SeqCst);
+                    // Keep the mock response in flight so overlapping
+                    // requests can exercise the single-probe invariant.
                     tokio::time::sleep(Duration::from_millis(150)).await;
                     in_flight.fetch_sub(1, Ordering::SeqCst);
                     axum::Json(json!({
@@ -793,6 +795,8 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
         .expect("route health observation");
     let upstream = state.snapshot().await.upstreams[0].clone();
     install_non_stream_profile(&state, &upstream).await;
+    // Advance past the configured 100ms probe delay before starting requests;
+    // this is the behavior under test, not a task-ordering barrier.
     tokio::time::sleep(Duration::from_millis(120)).await;
 
     let app = build_router(state);
@@ -1709,6 +1713,9 @@ impl AccountCapacityHarness {
                         {
                             release_held_accepted_response.notified().await;
                         }
+                        // The slow-probe test uses this delay to keep the
+                        // upstream response headers unavailable until the
+                        // account recovery budget cancels the attempt.
                         tokio::time::sleep(Duration::from_millis(
                             accepted_delay_ms.load(Ordering::SeqCst),
                         ))
@@ -3052,7 +3059,8 @@ async fn route_retry_last_resort_probe_interval_blocks_second_request_then_repro
         false
     );
 
-    // After the interval elapses a fresh probe is granted again.
+    // After the real one-second probe interval elapses, a fresh probe is
+    // granted again; this sleep advances that behavior under test.
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     let before = hits.load(Ordering::SeqCst);
     let payload = send_request(&app, &downstream_key).await;
