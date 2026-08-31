@@ -205,14 +205,14 @@ grep -E "^test result:" /tmp/verify.log | awk '{p+=$4; f+=$6; n++} END {printf "
 | G2.2 | `stream_decode_error_code_split_enabled` 开关 + 旧码分类兼容 | 405a7506 | ✅ |
 | G3.1 | 已有可用输出时跳过坏帧、流正常收尾 | 1cde26a3 | ✅ |
 | G3.2 | `stream_max_skipped_bad_frames` 上限 + warn + 不透传 | 1cde26a3 | ✅ |
-| G4.1 | 三个 SSE 计数接入快照与管理端 | 待提交 | ✅ `record_upstream_stream_counter`（本地同步 / Redis HINCRBY）+ 快照三字段 + admin 透传 + `formatRuntimeStateDetail` 渲染；补上 invalid_utf8 计数缺口；gzip 测试实测 `sse_parse_error_total >= 1` |
-| G4.2 | **Redis 侧补齐 `route_cooldown_skipped_total` 真值** | 待提交 | ✅ Lua 第 16 元素返回 counters hash 真值，`parse_upstream_snapshot` 解析 `Some(x)`，测试 `Some(0)` 前观察为真值 |
-| G6.1 | `hold_p50/p95` 补真值或前端显式「本后端不支持」 | 待提交 | ✅ 选「显式渲染」路径：快照新增 `hold_supported`/`queue_depth_supported`（Redis 为 false），前端 tooltip 与列内渲染「本后端不支持」，Redis 集成测试断言两标志为 false |
-| G6.2 | 全量核查 Option 化诊断字段，消除"null → 不显示 → 误判" | 待提交 | ✅ 核查结论：Option 字段只剩 hold_p50/p95 与 route_cooldown_skipped_total；后者两后端皆真值（仅短暂读失败为 null，前端显示「本后端不支持」）；其余诊断字段均非 Option。前端 spec 测试锁定渲染契约 |
-| G7 | 标注已作废的 stream_max_duration 缓解建议 + 文档分工 | 待提交 | ✅ `2026-08-29-…` §6 就地删除线标注 + 指向新口径；DEPLOYMENT 能力差异表补「两个时长设置的分工」节 |
-| G8 | 7 份方案文档纳入版本管理（独立 docs 提交） | 待提交 | ⏳ 单独 `docs(plans)` 提交 |
-| G5 | 部署文档：SSE 解码失败排查指南 | 待提交 | ✅ DEPLOYMENT 新增「SSE 解码失败怎么排查 (G5)」：两错误码来源/日志/排查步骤 + excerpt 边界 + 无 gzip 特性注记 |
-| — | 补 `e8b6e864` 缺的 gzip 截断结果测试（§4.5） | 待提交 | ✅ `compressed_stream_truncation_stays_classified_and_never_reaches_decoder`：真 gzip 截断假上游，断言 sse_parse_error 而非 transport_decode_error、计数器一致；期间发现并修正同测试文件的既有 fixture 参数缺失 |
+| G4.1 | 三个 SSE 计数接入快照与管理端 | `984e5b3` | ✅ `record_upstream_stream_counter`（本地同步 / Redis HINCRBY）+ 快照三字段 + admin 透传 + `formatRuntimeStateDetail` 渲染；补上 invalid_utf8 计数缺口；gzip 测试实测 `sse_parse_error_total >= 1` |
+| G4.2 | **Redis 侧补齐 `route_cooldown_skipped_total` 真值** | `984e5b3` | ✅ Lua 第 16 元素返回 counters hash 真值，`parse_upstream_snapshot` 解析 `Some(x)`，测试 `Some(0)` 前观察为真值 |
+| G6.1 | `hold_p50/p95` 补真值或前端显式「本后端不支持」 | `984e5b3`, `1ff5e8b` | ✅ 选「显式渲染」路径：快照新增 `hold_supported`/`queue_depth_supported`（Redis 为 false），前端 tooltip 与列内渲染「本后端不支持」，Redis 集成测试断言两标志为 false |
+| G6.2 | 全量核查 Option 化诊断字段，消除"null → 不显示 → 误判" | `1ff5e8b` | ✅ 核查结论：Option 字段只剩 hold_p50/p95 与 route_cooldown_skipped_total；后者两后端皆真值（仅短暂读失败为 null，前端显示「本后端不支持」）；其余诊断字段均非 Option。前端 spec 测试锁定渲染契约 |
+| G7 | 标注已作废的 stream_max_duration 缓解建议 + 文档分工 | `ee44e26` | ✅ `2026-08-29-…` §6 就地删除线标注 + 指向新口径；DEPLOYMENT 能力差异表补「两个时长设置的分工」节 |
+| G8 | 7 份方案文档纳入版本管理（独立 docs 提交） | `c1d1661` | ✅ 独立 `docs(plans)` 提交，不与代码混排 |
+| G5 | 部署文档：SSE 解码失败排查指南 | `ee44e26` | ✅ DEPLOYMENT 新增「SSE 解码失败怎么排查 (G5)」：两错误码来源/日志/排查步骤 + excerpt 边界 + 无 gzip 特性注记 |
+| — | 补 `e8b6e864` 缺的 gzip 截断结果测试（§4.5） | `4b54f52` | ✅ `compressed_stream_truncation_stays_classified_and_never_reaches_decoder`：真 gzip 截断假上游，断言 sse_parse_error 而非 transport_decode_error、计数器一致；配套把 `truncated_stream_test_state` 参数化以便关闭网关内重试 |
 
 ### 6.1 验证结果回填
 
