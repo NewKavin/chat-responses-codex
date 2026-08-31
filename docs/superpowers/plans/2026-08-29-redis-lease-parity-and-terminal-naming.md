@@ -216,7 +216,9 @@ docker logs <网关容器> --since 2h 2>&1 \
 - 出现 `gateway_concurrency_saturated` 或 `upstream_routes_exhausted` ⇒ 网关侧在拦，结合 (1) 看是不是租约泄漏堆积；
 - (2) 里 `upstream_local_lease_ttl_seconds` 是 300 但 (1) 的分值是小时级 ⇒ **直接坐实 §2.1**。
 
-**临时缓解（不改代码）**：把 `upstream_stream_max_duration_seconds` 调小（例如 3600），泄漏租约的滞留时间会从小时级降到 1 小时。这是治标——它同时会限制单条流的最长存活，**如果你有超过该时长的长推理请求会被截断**，调之前先确认业务上可接受。
+**临时缓解（不改代码）**：~~把 `upstream_stream_max_duration_seconds` 调小（例如 3600），泄漏租约的滞留时间会从小时级降到 1 小时。这是治标——它同时会限制单条流的最长存活，如果你有超过该时长的长推理请求会被截断，调之前先确认业务上可接受。~~
+
+> **⚠️ 作废（G7，2026-08-30 标注）**：F1.1 之后这条建议已失效。租约时长改由 `upstream_local_lease_ttl_seconds` 决定，`upstream_stream_max_duration_seconds` 已回归其本来的职责（单条流的最长存活，消费点 `src/server/gateway.rs` stream max-duration 判定）。**调小它不再压缩泄漏租约的滞留时间**，只会截断长流。现场要压缩租约滞留时间应调小 `upstream_local_lease_ttl_seconds`（并参考本文 §6 判读 2），两者的分工详见 `DEPLOYMENT.md`「Runtime Settings Operations」。
 
 ## 7. 任务回填表
 

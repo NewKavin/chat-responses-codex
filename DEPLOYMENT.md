@@ -226,15 +226,25 @@ Relevant settings (see `Runtime Settings Operations`):
 
 | 能力 / 设置 | 本地后端 | Redis 后端 | 运维含义 |
 | --- | --- | --- | --- |
-| 上游租约 TTL | `upstream_local_lease_ttl_seconds` | 同一设置 | 修改该设置对生产 Redis 部署生效，不要用 `upstream_stream_max_duration_seconds` 推断租约回收时间 |
+| 上游租约 TTL | `upstream_local_lease_ttl_seconds` | 同一设置 | 修改该设置对生产 Redis 部署生效。**它是泄漏租约滞留时间的唯一决定项**——要压缩滞留时间就调它，不要调 `upstream_stream_max_duration_seconds`（后者只决定单条流最长存活，见下方分工） |
 | 运行中租约续约 | 进程内心跳 | Redis 心跳续约 | 长流只要网关仍在运行就不会因 TTL 被误回收 |
 | 陈旧租约提前回收 | 支持 | 支持，按 `upstream_lease_stale_after_ms` | 泄漏租约会早于 TTL 被回收，并计入 `stale_reclaimed_total` |
-| 租约持有 p50/p95 | 支持 | 不支持时返回 `null` | 管理界面显示 `—`，不能把缺失当成 0 |
+| 租约持有 p50/p95 | 支持 | 不采样，返回 `null` | 管理界面显式渲染「本后端不支持」，不会把缺失当成 0 |
+| 排队深度 | 进程内真实值 | 观测不到，返回 0 并标记 `queue_depth_supported=false` | 管理界面显式渲染「排队：本后端不支持」 |
 | 本地闸门拒绝累计 | 进程内计数 | Redis 计数器 | `capacity_reject_total` 可用于定位网关侧容量拒绝 |
-| 免冷却放行累计 | 进程内计数 | 当前后端不提供时返回 `null` | `route_cooldown_skipped_total` 显示 `—` 表示不支持 |
+| 免冷却放行累计 | 进程内计数 | Redis 计数器（同一计数） | `route_cooldown_skipped_total` 两种后端都是真实值 |
 | 多副本共享准入与路由健康 | 不共享，单实例 | 通过同一 Redis 和 `REDIS_KEY_PREFIX` 共享 | 每个部署使用独立 prefix；Redis 不可用时 fail closed |
 
 应用行为设置统一在 `Admin > Settings` 保存。尤其是 `upstream_local_lease_ttl_seconds`、`upstream_lease_stale_after_ms` 和心跳相关设置，修改后应结合上游运行时快照观察 `in_flight`、陈旧回收计数和租约年龄；不要仅依据单一路径的缺失统计判断“没有发生”。
+
+**两个时长设置的分工（G7）**：
+
+| 设置 | 职责 | 消费点 |
+| --- | --- | --- |
+| `upstream_stream_max_duration_seconds`（默认 86400） | 单条上游流的最长存活，超时判定 `stream_max_duration`；**与租约回收无关** | 流读取循环（`src/server/gateway.rs` 的 stream max-duration 判定） |
+| `upstream_local_lease_ttl_seconds`（默认 3600） | 上游并发租约的 TTL：既是运行中续约的租期，也是**泄漏租约的滞留上限** | Redis 租约 ZSET 分值 / 本地租约表 |
+
+> 历史遗留纠正：F1.1 之前 `upstream_stream_max_duration_seconds` 曾兼任 Redis 租约时长，旧文档给过“调小它可以压缩泄漏租约滞留时间”的缓解建议——**该建议已作废**。压缩滞留时间应调小 `upstream_local_lease_ttl_seconds`（同时要大于预期的续约中断窗口，见上方默认值行）。
 
 Recommended values for a single aggregated gateway deployment:
 
@@ -833,6 +843,44 @@ request id (`request_id=…` in each structured log line), including the
 `error_message` in the admin usage log (Admin > Logs) stores the same
 client-facing message, so the code and upstream name are searchable there
 without touching the runtime log.
+
+### SSE 解码失败怎么排查 (G5)
+
+流式响应在网关内有两层解码，失败来源不同、错误码不同、日志不同。看到一个
+`stream_*` 错误时，先用 `error.code` 区分来源，再按下面的表定位：
+
+| error.code | 来源 | 日志 | 含义 |
+|-----------|------|------|------|
+| `stream_upstream_sse_parse_error` | SSE 帧解析层 | `upstream SSE decode failed`（`stream_stage=sse_parse`） | 上游发来的帧不是合法 UTF-8（`decode_reason=invalid_utf8`）或 `data:` 载荷不是合法 JSON（`invalid_json`）。典型成因：上游在流里插入错误文本、聚合网关截断 JSON、非标准哨兵值、或中间代理对 body 做了压缩/截断（压缩字节在网关里就是非法 UTF-8）。 |
+| `stream_upstream_transport_decode_error` | 传输层 | `upstream stream body read failed`（`stream_stage=proxied/translated/prefetch`） | reqwest 报告 body 解码失败（`error decoding response body`）。 |
+| `stream_upstream_read_error` | 传输层 | 同上 | body 读取失败但不是解码失败（连接中断、EOF 等）。 |
+
+排查步骤：
+
+1. 从客户端错误里取 `request_id`，在运行时日志（`LOG_PATH`）里 grep 它。
+2. SSE 解析失败看 `decode_reason`、`frame_seq`、`stream_offset`、`payload_len`
+   —— 它们指出是第几帧、从流的哪个字节偏移开始坏掉；`payload_excerpt`
+   只有在 `upstream_error_body_excerpt_enabled` 打开时才进日志与客户端
+   `details`。
+3. 传输层失败看 `usable_output_exposed` / `semantic_terminal_observed`：
+   这两个字段告诉你坏帧发生时客户端已经拿到了多少内容。
+4. 按条数收敛后看管理端上游页的 G4 计数：`sse_bad_frame_skipped_total`、
+   `sse_parse_error_total`、`transport_decode_error_total`。
+
+`upstream_error_body_excerpt_enabled` 的适用边界：
+
+- **只在两端都归你运维的内网自有上游上打开**；它会把上游错误 body 的
+  有界摘录（默认 200 字符，`upstream_error_body_excerpt_max_chars`）放进
+  日志与客户端错误 `details`。摘录经过脱敏（密钥、`Bearer` token、JSON
+  密钥对），但上游 body 可能携带用户数据——**公网 / 多租户部署保持关闭**。
+- 开关关闭时摘录不进日志、不进客户端响应；错误码、`decode_reason` 等
+  结构字段不受影响。
+
+> 注：本项目构建 reqwest 未启用 gzip 特性，网关客户端从不协商也不会
+> 解压上游 body；因此压缩流截断在本网关表现为 `sse_parse_error`
+> （gzip 字节即非法 UTF-8），而不是 `transport_decode_error`。
+> `stream_decode_error_code_split_enabled` 关掉后两个新码都回落为
+> `stream_upstream_body_decode_error`（回滚开关，默认开）。
 
 ## Operational Notes
 
