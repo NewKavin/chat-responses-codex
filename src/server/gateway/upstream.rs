@@ -2242,16 +2242,10 @@ pub(super) async fn send_to_upstream(
                 upstream_body_top_level_field_count = diagnostics.top_level_field_count,
                 upstream_body_message_count = ?diagnostics.message_count,
                 upstream_body_tool_count = ?diagnostics.tool_count,
-                upstream_body_has_stream = diagnostics.has_stream,
-                upstream_body_has_reasoning_effort = diagnostics.has_reasoning_effort,
-                upstream_body_has_max_output_tokens = diagnostics.has_max_output_tokens,
-                upstream_body_has_max_tokens = diagnostics.has_max_tokens,
-                upstream_body_has_max_completion_tokens = diagnostics.has_max_completion_tokens,
-                upstream_body_has_usage = diagnostics.has_usage,
-                upstream_body_has_input_tokens = diagnostics.has_input_tokens,
-                upstream_body_has_output_tokens = diagnostics.has_output_tokens,
-                upstream_body_has_prompt_tokens = diagnostics.has_prompt_tokens,
-                upstream_body_has_completion_tokens = diagnostics.has_completion_tokens,
+                // One list of the probed keys that were present, instead of ten
+                // `..._has_x = false` pairs.  Same facts, and the payload shape
+                // is readable at a glance; values stay withheld either way.
+                upstream_body_fields = %diagnostics.present_fields(),
                 // T4.2: the sanitized upstream message excerpt (e.g. a Python
                 // `extra data` error) is surfaced only when the operator has
                 // enabled `upstream_error_body_excerpt_enabled`; it stays

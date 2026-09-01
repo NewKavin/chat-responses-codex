@@ -1331,6 +1331,38 @@ pub(super) fn safe_upstream_body_diagnostics(body: &Value) -> SafeUpstreamBodyDi
     }
 }
 
+impl SafeUpstreamBodyDiagnostics {
+    /// The probed keys the body actually carried, as one comma-separated list.
+    ///
+    /// Each `has_*` flag answers the same question — "was this key present?" —
+    /// so logging ten of them spends ten `key=false` pairs to say nothing.
+    /// Naming only what is present carries the same information in one field
+    /// and reads faster.  The probed set is fixed, so an absent name still
+    /// means "not sent".  Field *names* only: values stay withheld, since the
+    /// point of these diagnostics is to describe a payload without echoing it.
+    pub(super) fn present_fields(&self) -> String {
+        let present: Vec<&str> = [
+            ("stream", self.has_stream),
+            ("reasoning_effort", self.has_reasoning_effort),
+            ("max_output_tokens", self.has_max_output_tokens),
+            ("max_tokens", self.has_max_tokens),
+            ("max_completion_tokens", self.has_max_completion_tokens),
+            ("usage", self.has_usage),
+            ("input_tokens", self.has_input_tokens),
+            ("output_tokens", self.has_output_tokens),
+            ("prompt_tokens", self.has_prompt_tokens),
+            ("completion_tokens", self.has_completion_tokens),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect::<Vec<_>>();
+        if present.is_empty() {
+            return "-".to_string();
+        }
+        present.join(",")
+    }
+}
+
 /// Truncate a string to at most `max_chars` Unicode characters, appending an
 /// ellipsis if truncation occurred. Keeps log lines and downstream error
 /// messages bounded when a misbehaving upstream echoes oversized content.
@@ -1431,5 +1463,32 @@ mod upstream_client_message_tests {
             message,
             "upstream server error (status 502, code=model-not-found:gpt-4)"
         );
+    }
+}
+
+#[cfg(test)]
+mod safe_upstream_body_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn present_fields_names_only_the_keys_the_body_carried() {
+        let diagnostics = safe_upstream_body_diagnostics(&json!({
+            "model": "glm-5.2",
+            "stream": true,
+            "max_tokens": 256,
+            "usage": {"input_tokens": 1},
+        }));
+        // Names, not a checklist: the ten `has_*` flags all answer the same
+        // question, so the log should say what was there and stay silent about
+        // what was not.  Probed order is fixed so the output is comparable
+        // across requests.
+        assert_eq!(diagnostics.present_fields(), "stream,max_tokens,usage");
+    }
+    #[test]
+    fn present_fields_marks_an_empty_probe_set_explicitly() {
+        let diagnostics = safe_upstream_body_diagnostics(&json!({"model": "glm-5.2"}));
+        // An empty string would read as a missing value in a log line; "-" says
+        // "probed, none present" without ambiguity.
+        assert_eq!(diagnostics.present_fields(), "-");
     }
 }
