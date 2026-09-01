@@ -579,6 +579,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     min: 1,
     max: 100,
     step: 0.1,
+    integer: false,
     description: '自适应预算的放大系数：预算 = clamp(观测 p95 持有时长 × 此系数, 等待下限, 预算上限)。默认 1.5。'
   },
   {
