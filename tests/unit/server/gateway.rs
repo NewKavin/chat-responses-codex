@@ -254,14 +254,41 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
 }
 
 #[test]
-fn client_error_message_adds_the_matching_prefix_once() {
+fn client_facing_message_carries_no_bracketed_code_prefix() {
+    // The machine-readable code lives in `error.code` / `error.category`; the
+    // message is for humans.  A `[code] ` prefix duplicated that data into the
+    // prose and pushed the useful part (which upstream, what status, how long
+    // to wait) past the start of the line.
     assert_eq!(
-        client_error_message("gateway_code", "plain message"),
-        "[gateway_code] plain message"
+        client_error_message(
+            "upstream_routes_exhausted",
+            "rate limited by upstream (1 route, upstream HTTP 429); please try again in 5s"
+        ),
+        "rate limited by upstream (1 route, upstream HTTP 429); please try again in 5s"
+    );
+    // Idempotent for an already-prefixed message: a message that reaches this
+    // helper carrying a legacy prefix must come out clean, not double-stripped
+    // or re-prefixed.
+    assert_eq!(
+        client_error_message(
+            "upstream_routes_exhausted",
+            "[upstream_routes_exhausted] rate limited by upstream (1 route)"
+        ),
+        "rate limited by upstream (1 route)"
+    );
+}
+
+#[test]
+fn client_error_message_strips_only_its_own_code_prefix() {
+    // A prefix belonging to a *different* code is left alone: it is part of
+    // the message a caller composed, not this helper's decoration.
+    assert_eq!(
+        client_error_message("gateway_code", "[other_code] plain message"),
+        "[other_code] plain message"
     );
     assert_eq!(
-        client_error_message("gateway_code", "[gateway_code] plain message"),
-        "[gateway_code] plain message"
+        client_error_message("gateway_code", "plain message"),
+        "plain message"
     );
 }
 

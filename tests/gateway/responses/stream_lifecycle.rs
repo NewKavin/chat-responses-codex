@@ -666,15 +666,13 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
         "Responses failure must not emit a duplicate error event: {body}"
     );
     assert!(body.contains("\"code\":\"upstream_stream_error_event\""));
-    assert!(body.contains(
-        "\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure; request_id="
-    ));
+    assert!(body.contains("\"message\":\"upstream SSE stream reported failure; request_id="));
     assert!(body.contains("\"category\":\"upstream_stream_error_event\""));
     assert!(body.contains("\"retry_after_seconds\":null"));
     assert_eq!(
         body.matches("[upstream_stream_error_event]").count(),
-        1,
-        "single Responses error carrier should contain one stable prefix: {body}"
+        0,
+        "the code belongs to `code`/`category`, not the message prose: {body}"
     );
     assert!(body.contains("\"delta\":\"one\""));
     assert!(!body.contains("\"param\":null"));

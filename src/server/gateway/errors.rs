@@ -137,13 +137,17 @@ pub(super) fn details_with_request_id(details: Value, request_id: Option<&str>) 
     }
 }
 
+/// Client-facing message text, with any legacy `[code] ` prefix removed.
+///
+/// The machine-readable identifier is carried by `error.code` and
+/// `error.category`; repeating it in the prose only pushed the part a caller
+/// acts on -- which upstream, what status, how long to wait -- past the start
+/// of the line.  Stripping is kept (rather than simply not prefixing) because
+/// some messages are composed upstream of this helper and may already carry
+/// the old prefix.
 pub(super) fn client_error_message(code: &str, message: &str) -> String {
     let prefix = format!("[{code}] ");
-    if message.starts_with(&prefix) {
-        message.to_owned()
-    } else {
-        format!("{prefix}{message}")
-    }
+    message.strip_prefix(&prefix).unwrap_or(message).to_owned()
 }
 
 #[allow(clippy::too_many_arguments)] // terminal hint assembly; cap added by T4

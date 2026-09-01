@@ -724,7 +724,9 @@ impl RuntimeSettings {
                 "must be at least 100 ms",
             ));
         }
-        if !self.upstream_account_queue_adaptive_budget_factor.is_finite()
+        if !self
+            .upstream_account_queue_adaptive_budget_factor
+            .is_finite()
             || self.upstream_account_queue_adaptive_budget_factor < 1.0
         {
             return Err(invalid(

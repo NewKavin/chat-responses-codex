@@ -423,6 +423,10 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
         "{}:replay:upstream-reclaim-markers",
         config.redis_key_prefix
     );
+    // E5.3: `upstream_reserve.lua` records the reserve instant under a seventh
+    // key so `lease_release.lua` can measure the real hold duration.
+    let upstream_reserved_at_key =
+        format!("{}:replay:upstream-reserved-at", config.redis_key_prefix);
 
     let downstream_args = vec![
         "EVAL".into(),
@@ -474,13 +478,14 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let upstream_args = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/upstream_reserve.lua").into(),
-        "6".into(),
+        "7".into(),
         upstream_lease_key.clone(),
         upstream_aggregate_lease_key,
         upstream_event_key.clone(),
         upstream_cost_key.clone(),
         upstream_counters_key,
         upstream_reclaim_markers_key,
+        upstream_reserved_at_key,
         "upstream-event-id".into(),
         "upstream-lease-id".into(),
         "2.5".into(),
@@ -5950,4 +5955,74 @@ async fn redis_local_slot_queue_waits_for_a_redis_slot_to_free() {
     );
 
     upstream_server.abort();
+}
+
+/// The adaptive C3 queue budget must be derived from holds observed on the
+/// *active* coordination backend.  `local_slot_queue_plan` read the
+/// process-local `upstream_lease_table` unconditionally, but the Redis backend
+/// keeps every lease in Lua and returns early from the reserve/release path, so
+/// that table stays empty for the whole life of the process.  With no samples
+/// the plan fell back to the static floor on every call, which made
+/// `upstream_account_queue_adaptive_budget_factor` and `..._ceiling_ms` dead
+/// settings on any Redis deployment: an operator could enable the adaptive
+/// budget, see the setting accepted, and get no behaviour change at all.
+///
+/// The holds run through the real reserve/release path against a live Redis so
+/// the percentiles come from genuine lease accounting.  Real time is used
+/// rather than a paused clock: the reserve script reads Redis `TIME`, which a
+/// paused Tokio clock does not move.
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_adaptive_queue_budget_scales_with_observed_hold() {
+    let config = AppConfig {
+        // Floor 1s with a 1.5 factor and a 60s ceiling, so a p95 above ~667ms
+        // is enough to lift the budget off the floor.
+        upstream_account_queue_max_wait_ms: 1_000,
+        upstream_account_queue_adaptive_budget_factor: 1.5,
+        upstream_account_queue_adaptive_budget_ceiling_ms: 60_000,
+        upstream_account_queue_skip_when_doomed_enabled: false,
+        upstream_local_lease_ttl_seconds: 3_600,
+        upstream_lease_stale_after_ms: 86_400_000,
+        ..redis_test_config()
+    };
+    let directory = tempdir().unwrap();
+    let state = AppState::load_from_path(directory.path().join("state.json"), config)
+        .await
+        .unwrap();
+    let upstream = redis_test_upstream("redis-adaptive-budget");
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let fingerprint = "fingerprint-redis-adaptive";
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        fingerprint.to_string(),
+    );
+
+    // Fewer than two samples ⇒ the static floor, on either backend.
+    assert_eq!(
+        state.local_slot_queue_plan(&account).await,
+        (1_000, false),
+        "with no hold samples the plan must fall back to the static floor"
+    );
+
+    // Four holds of ~2s each ⇒ p95 ≈ 2s ⇒ budget ≈ 2000 × 1.5 = 3000ms, well
+    // clear of the 1s floor.  Sleeps are real, so assert on a band rather than
+    // an exact millisecond value.
+    for _ in 0..4 {
+        let lease = state
+            .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+            .await
+            .expect("the single slot must be free between sequential holds");
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        state
+            .release_upstream_request(lease)
+            .await
+            .expect("release must record the hold sample");
+    }
+
+    let (budget, _) = state.local_slot_queue_plan(&account).await;
+    assert!(
+        (2_400..=4_500).contains(&budget),
+        "p95 hold of ~2s must lift the budget to ~3000ms (p95 × 1.5), got {budget}ms; \
+         a value of exactly the 1000ms floor means the Redis backend recorded no holds"
+    );
 }

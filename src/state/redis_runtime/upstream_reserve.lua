@@ -110,6 +110,11 @@ end
 
 redis.call('ZADD', KEYS[1], now_ms + lease_duration_ms, lease_id)
 redis.call('PEXPIRE', KEYS[1], lease_duration_ms + 60000)
+-- E5.3 hold sampling: KEYS[1]'s score is the lease *expiry* and heartbeats
+-- rewrite it, so the reserve instant cannot be recovered from it.  Record it
+-- separately so `lease_release.lua` can measure the real hold duration.
+redis.call('ZADD', KEYS[7], now_ms, lease_id)
+redis.call('PEXPIRE', KEYS[7], lease_duration_ms + 60000)
 redis.call('ZADD', KEYS[2], now_ms + lease_duration_ms, lease_id)
 redis.call('PEXPIRE', KEYS[2], lease_duration_ms + 60000)
 redis.call('ZADD', KEYS[3], now_ms, event_id)

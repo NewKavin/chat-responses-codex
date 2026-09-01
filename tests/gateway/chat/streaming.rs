@@ -6315,10 +6315,8 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
     assert!(body.contains("\"type\":\"error\""));
     assert!(body.contains("\"category\":\"stream_upstream_sse_parse_error\""));
     assert!(body.contains("\"code\":\"stream_upstream_sse_parse_error\""));
-    assert!(body.contains(
-        "\"message\":\"[stream_upstream_sse_parse_error] failed to decode upstream SSE event"
-    ));
-    assert_eq!(body.matches("[stream_upstream_sse_parse_error]").count(), 1);
+    assert!(body.contains("\"message\":\"failed to decode upstream SSE event"));
+    assert_eq!(body.matches("[stream_upstream_sse_parse_error]").count(), 0);
     assert!(!body.contains("event: message_start"));
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;

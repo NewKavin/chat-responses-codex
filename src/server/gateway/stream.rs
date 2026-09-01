@@ -2946,7 +2946,7 @@ mod diagnostic_tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn raw_chat_sse_error_message_adds_the_matching_prefix_once() {
+    fn raw_chat_sse_error_message_carries_no_code_prefix() {
         let error = GatewayError::classified(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "request processing channel closed",
@@ -2959,10 +2959,10 @@ mod diagnostic_tests {
         let frame = sse_error_frame_for_endpoint(EndpointKind::ChatCompletions, &error, 0);
         let frame = std::str::from_utf8(&frame).expect("Chat SSE frame");
 
-        assert!(frame.contains(
-            "\"message\":\"[stream_processing_error] request processing channel closed\""
-        ));
-        assert_eq!(frame.matches("[stream_processing_error]").count(), 1);
+        assert!(frame.contains("\"message\":\"request processing channel closed\""));
+        // The identifier belongs to `code`, not the prose.
+        assert_eq!(frame.matches("[stream_processing_error]").count(), 0);
+        assert!(frame.contains("\"code\":\"stream_processing_error\""));
     }
 
     #[test]
@@ -2981,7 +2981,7 @@ mod diagnostic_tests {
             let frame = std::str::from_utf8(&frame).expect("frame must be UTF-8");
             assert!(
                 frame.contains(
-                    "\"message\":\"[gateway_daily_token_quota_exceeded] downstream daily token quota exceeded; please try again in 3600s\""
+                    "\"message\":\"downstream daily token quota exceeded; please try again in 3600s\""
                 ),
                 "unexpected frame: {frame}"
             );
@@ -3065,9 +3065,7 @@ mod diagnostic_tests {
         assert!(text.contains("\"status\":\"failed\""));
         assert!(text.contains("\"error\":"));
         assert!(text.contains("\"code\":\"stream_processing_error\""));
-        assert!(text.contains(
-            "\"message\":\"[stream_processing_error] request processing channel closed\""
-        ));
+        assert!(text.contains("\"message\":\"request processing channel closed\""));
 
         // Must NOT emit a redundant top-level error event: Responses clients
         // (codex) render both events, which surfaced as a duplicate error

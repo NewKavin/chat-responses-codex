@@ -158,8 +158,8 @@ pub use types::{
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
     DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
@@ -1463,32 +1463,81 @@ impl AppState {
     /// deployment behind one contended account wants to wait for a slot rather
     /// than be rejected locally without the upstream ever being asked, so it
     /// turns the skip off; the default keeps the E4.2 fast-fail.
-    pub fn local_slot_queue_plan(&self, account: &AccountConcurrencyKey) -> (u64, bool) {
+    /// E5.3: observed hold percentiles (p50, p95) in milliseconds, read from
+    /// whichever backend actually accounts the leases.
+    ///
+    /// The Redis backend returns early from reserve/release and keeps every
+    /// lease in Lua, so the process-local `upstream_lease_table` is empty for
+    /// the life of the process.  Reading it unconditionally made the adaptive
+    /// budget below fall back to the static floor on every Redis deployment.
+    ///
+    /// A Redis coordination failure degrades to `None` (static floor) rather
+    /// than propagating: the queue budget is an optimisation, and failing a
+    /// request that the reserve path would have admitted is worse than waiting
+    /// the floor.
+    async fn account_hold_percentiles_ms(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Option<(u64, u64)> {
+        match &self.runtime_coordination {
+            RuntimeCoordinationBackend::Redis(coordinator) => {
+                match coordinator.account_hold_percentiles(account).await {
+                    Ok(percentiles) => percentiles,
+                    Err(_) => {
+                        tracing::debug!(
+                            upstream_id = %account.upstream_id,
+                            "hold percentiles unavailable: Redis coordination failed; \
+                             the adaptive queue budget falls back to the static floor (E5.3)"
+                        );
+                        None
+                    }
+                }
+            }
+            RuntimeCoordinationBackend::Local => {
+                let table = self
+                    .upstream_lease_table
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // The local table stores whole seconds; scale to the
+                // millisecond unit both callers below expect.
+                let p95 = table.hold_p95_seconds(account)?.saturating_mul(1_000);
+                let p50 = table
+                    .hold_p50_seconds(account)
+                    .unwrap_or(0)
+                    .saturating_mul(1_000);
+                Some((p50, p95))
+            }
+        }
+    }
+
+    pub async fn local_slot_queue_plan(&self, account: &AccountConcurrencyKey) -> (u64, bool) {
         // Read the live runtime settings, not the static startup config: the
         // non-adaptive branch in the gateway uses the runtime value, so reading
         // `self.config` here made a hot-reloaded floor silently ineffective on
         // the adaptive path.
         let settings = self.runtime_settings();
-        let table = self
-            .upstream_lease_table
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let floor_ms = settings.upstream_account_queue_max_wait_ms.max(1);
         // Validation keeps the ceiling at or above the floor, but clamp
         // defensively so a stale or hand-edited value can never panic here.
         let ceiling_ms = settings
             .upstream_account_queue_adaptive_budget_ceiling_ms
             .max(floor_ms);
-        let Some(p95_seconds) = table.hold_p95_seconds(account) else {
+        let Some((p50_ms, p95_ms)) = self.account_hold_percentiles_ms(account).await else {
             return (floor_ms, false);
         };
-        let p50_seconds = table.hold_p50_seconds(account).unwrap_or(0);
-        let p95_ms = p95_seconds.saturating_mul(1_000);
-        let scaled = (p95_ms as f64 * settings.upstream_account_queue_adaptive_budget_factor) as u64;
+        let scaled =
+            (p95_ms as f64 * settings.upstream_account_queue_adaptive_budget_factor) as u64;
         let budget = scaled.clamp(floor_ms, ceiling_ms);
+        // Compared in milliseconds on both sides.  The previous form compared
+        // whole seconds against `floor_ms.div_ceil(1000)` -- also consistent,
+        // but it rounded the floor *up* to the next second, so a 1500ms floor
+        // was treated as 2000ms and a 2s median did not trigger the skip.
+        // Comparing in milliseconds removes that rounding; the only behaviour
+        // change is for floors that are not whole seconds, where the skip now
+        // fires at the configured floor rather than the rounded-up one.
         let should_skip = settings.upstream_account_queue_skip_when_doomed_enabled
-            && p50_seconds > 0
-            && p50_seconds > floor_ms.div_ceil(1000);
+            && p50_ms > 0
+            && p50_ms > floor_ms;
         (budget, should_skip)
     }
 

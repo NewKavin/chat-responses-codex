@@ -92,8 +92,8 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
     let message = payload["error"]["message"]
         .as_str()
         .expect("gateway error message");
-    assert!(message.starts_with("[gateway_model_not_allowed] model not allowed"));
-    assert_eq!(message.matches("[gateway_model_not_allowed]").count(), 1);
+    assert!(message.starts_with("model not allowed"));
+    assert_eq!(message.matches("[gateway_model_not_allowed]").count(), 0);
 
     let snapshot = state.snapshot().await;
     assert_eq!(
@@ -142,8 +142,11 @@ async fn malformed_chat_json_returns_openai_error_envelope() {
     let message = payload["error"]["message"]
         .as_str()
         .expect("OpenAI error message");
-    assert!(message.starts_with("[gateway_invalid_request] "));
-    assert_eq!(message.matches("[gateway_invalid_request]").count(), 1);
+    assert!(
+        !message.starts_with('['),
+        "unexpected code prefix: {message}"
+    );
+    assert_eq!(message.matches("[gateway_invalid_request]").count(), 0);
 }
 
 #[tokio::test]
@@ -874,9 +877,7 @@ async fn downstream_daily_cost_quota_error_uses_cost_code_and_message() {
     );
     let message = payload["error"]["message"].as_str().unwrap();
     assert!(
-        message.starts_with(
-            "[gateway_daily_cost_quota_exceeded] downstream daily cost quota exceeded"
-        ),
+        message.starts_with("downstream daily cost quota exceeded"),
         "quota message must keep its stable prefix: {message}"
     );
     assert!(

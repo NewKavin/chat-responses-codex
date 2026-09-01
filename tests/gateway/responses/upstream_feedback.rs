@@ -174,8 +174,11 @@ async fn committed_concurrency_exhaustion_is_a_typed_responses_failure() {
     let error = &failed["response"]["error"];
     assert_eq!(error["code"], "upstream_routes_exhausted");
     let message = error["message"].as_str().expect("Responses error message");
-    assert!(message.starts_with("[upstream_routes_exhausted] "));
-    assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 1);
+    assert!(
+        !message.starts_with('['),
+        "unexpected code prefix: {message}"
+    );
+    assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 0);
     assert!(
         !body.contains("event: error"),
         "Responses failure must not emit a duplicate error event: {body}"

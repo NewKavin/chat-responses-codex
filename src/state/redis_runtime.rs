@@ -32,6 +32,13 @@ const REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const ROUTE_HEALTH_MIN_TTL_SECONDS: u64 = 2 * 60 * 60;
 const ROUTE_HEALTH_TTL_GRACE_SECONDS: u64 = 60;
 const ROUTE_HEALTH_FAILURE_STREAK_RESET_MS: u64 = 10 * 60 * 1_000;
+/// E5.3: bounded hold-sample reservoir per account, mirroring the local lease
+/// table's `LEASE_HOLD_SAMPLE_SIZE` so both backends compute their percentiles
+/// over the same window width.
+const HOLD_SAMPLE_CAP: u64 = 32;
+/// Samples outlive a quiet period long enough to survive a lull between
+/// requests, but not so long that a percentile reflects yesterday's latency.
+const HOLD_SAMPLE_TTL_SECONDS: u64 = 15 * 60;
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("runtime coordination unavailable")]
@@ -1299,6 +1306,10 @@ impl RedisRuntimeCoordinator {
         let cost_key = self.upstream_key(&upstream_identity, "event_costs");
         let counters_key = self.upstream_key(&upstream_identity, "counters");
         let reclaim_markers_key = self.upstream_key(&upstream_identity, "reclaim_markers");
+        // E5.3: reserve instants and the hold-sample reservoir are per account,
+        // matching the local lease table's per-account `hold_samples`.
+        let reserved_at_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "reserved_at");
         let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
         let stale_after_ms = self.tuning_snapshot().upstream_lease_stale_after_ms;
         let result = self
@@ -1310,6 +1321,7 @@ impl RedisRuntimeCoordinator {
                 let cost_key = cost_key.clone();
                 let counters_key = counters_key.clone();
                 let reclaim_markers_key = reclaim_markers_key.clone();
+                let reserved_at_key = reserved_at_key.clone();
                 let event_id = event_id.to_string();
                 let lease_id = lease_id.to_string();
                 async move {
@@ -1323,6 +1335,7 @@ impl RedisRuntimeCoordinator {
                         .key(cost_key)
                         .key(counters_key)
                         .key(reclaim_markers_key)
+                        .key(reserved_at_key)
                         .arg(event_id)
                         .arg(lease_id)
                         .arg(request_cost.to_string())
@@ -1395,24 +1408,90 @@ impl RedisRuntimeCoordinator {
         let account_lease_key =
             self.upstream_account_key(&upstream_identity, &account_identity, "leases");
         let aggregate_lease_key = self.upstream_key(&upstream_identity, "leases");
+        let reserved_at_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "reserved_at");
+        let hold_samples_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "hold_samples");
         self.retry_coordination_once(|| {
             let mut connection = self.connection();
             let account_lease_key = account_lease_key.clone();
             let aggregate_lease_key = aggregate_lease_key.clone();
+            let reserved_at_key = reserved_at_key.clone();
+            let hold_samples_key = hold_samples_key.clone();
             let lease_id = lease_id.to_string();
             async move {
-                let script = redis::Script::new(include_str!("redis_runtime/lease_release.lua"));
+                let script =
+                    redis::Script::new(include_str!("redis_runtime/upstream_lease_release.lua"));
                 let mut invocation = script.prepare_invoke();
                 invocation
                     .key(account_lease_key)
                     .key(aggregate_lease_key)
-                    .arg(lease_id);
+                    .key(reserved_at_key)
+                    .key(hold_samples_key)
+                    .arg(lease_id)
+                    .arg(HOLD_SAMPLE_CAP)
+                    .arg(HOLD_SAMPLE_TTL_SECONDS);
                 timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
                     .await
                     .map(|_| ())
             }
         })
         .await
+    }
+
+    /// E5.3: observed hold percentiles (p50, p95) in milliseconds for one
+    /// account, read from the reservoir `lease_release.lua` fills.
+    ///
+    /// The local backend keeps its samples in the in-process lease table, which
+    /// the Redis path never writes -- so the adaptive C3 queue budget saw no
+    /// samples at all under Redis and silently fell back to the static floor,
+    /// making the adaptive settings inert on every Redis deployment.
+    ///
+    /// `None` when fewer than two samples exist, matching
+    /// `LocalLeaseTable::hold_p50_seconds` / `hold_p95_seconds`: a single
+    /// sample has no central tendency worth trusting.  A coordination failure
+    /// is an error, never a silent `None`, so the caller can tell "no data yet"
+    /// apart from "Redis is unreachable".
+    pub(super) async fn account_hold_percentiles(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<Option<(u64, u64)>, RuntimeCoordinationError> {
+        let upstream_identity = stable_identity(&account.upstream_id);
+        let account_identity = account_identity(account);
+        let hold_samples_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "hold_samples");
+        let holds = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let hold_samples_key = hold_samples_key.clone();
+                async move {
+                    // Scores are the hold durations and the set is score-ordered,
+                    // so this returns the samples already sorted.
+                    timeout_coordination(
+                        redis::cmd("ZRANGE")
+                            .arg(&hold_samples_key)
+                            .arg(0)
+                            .arg(-1)
+                            .arg("WITHSCORES")
+                            .query_async::<Vec<(String, f64)>>(&mut connection),
+                    )
+                    .await
+                }
+            })
+            .await?;
+        if holds.len() < 2 {
+            return Ok(None);
+        }
+        let sorted = holds
+            .iter()
+            .map(|(_, score)| score.max(0.0) as u64)
+            .collect::<Vec<_>>();
+        let p50 = sorted[sorted.len() / 2];
+        // Same index arithmetic as the local table so the two backends agree on
+        // which sample the p95 is.
+        let index = ((sorted.len() as f64) * 0.95).ceil() as usize;
+        let p95 = sorted[index.saturating_sub(1).min(sorted.len() - 1)];
+        Ok(Some((p50, p95)))
     }
 
     /// E4.4: live + stale lease counts for one account, read straight from the
@@ -1445,9 +1524,8 @@ impl RedisRuntimeCoordinator {
                 let mut connection = self.connection();
                 let account_lease_key = account_lease_key.clone();
                 async move {
-                    let script = redis::Script::new(include_str!(
-                        "redis_runtime/account_lease_count.lua"
-                    ));
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/account_lease_count.lua"));
                     let mut invocation = script.prepare_invoke();
                     invocation
                         .key(account_lease_key)
@@ -1460,8 +1538,11 @@ impl RedisRuntimeCoordinator {
             .await?;
         match result.as_slice() {
             [live, stale] => Ok((
-                live.parse::<usize>().map_err(|_| RuntimeCoordinationError)?,
-                stale.parse::<usize>().map_err(|_| RuntimeCoordinationError)?,
+                live.parse::<usize>()
+                    .map_err(|_| RuntimeCoordinationError)?,
+                stale
+                    .parse::<usize>()
+                    .map_err(|_| RuntimeCoordinationError)?,
             )),
             _ => Err(RuntimeCoordinationError),
         }

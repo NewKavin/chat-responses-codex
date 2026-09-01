@@ -1057,8 +1057,8 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
         let message = payload["error"]["message"]
             .as_str()
             .expect("OpenAI terminal error message");
-        assert!(message.starts_with("[upstream_routes_exhausted] "));
-        assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 1);
+        assert!(!message.starts_with('['), "unexpected code prefix: {message}");
+        assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 0);
         assert_eq!(payload["error"]["details"]["attempt_count"], 2);
         assert_eq!(payload["error"]["details"]["physical_attempt_count"], 2);
         let aggregate = chat_responses_codex::state::RouteSetAggregateKey {

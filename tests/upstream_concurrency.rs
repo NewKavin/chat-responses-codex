@@ -452,7 +452,7 @@ async fn adaptive_queue_budget_scales_with_observed_hold_in_milliseconds() {
     );
 
     // Fewer than two samples ⇒ fall back to the static floor, no skip.
-    let (budget, skip) = state.local_slot_queue_plan(&account);
+    let (budget, skip) = state.local_slot_queue_plan(&account).await;
     assert_eq!(
         (budget, skip),
         (10_000, false),
@@ -472,7 +472,7 @@ async fn adaptive_queue_budget_scales_with_observed_hold_in_milliseconds() {
             .expect("release must record the hold sample");
     }
 
-    let (budget, skip) = state.local_slot_queue_plan(&account);
+    let (budget, skip) = state.local_slot_queue_plan(&account).await;
     // p95 = 30s → 30_000ms × 1.5 = 45_000ms, inside [10_000, 60_000].
     // Pre-E4.3 this was `30 × 1.5 = 45` clamped up to the 10_000 floor.
     assert_eq!(
@@ -493,7 +493,7 @@ async fn adaptive_queue_budget_scales_with_observed_hold_in_milliseconds() {
         .update_runtime_settings(0, settings)
         .await
         .expect("runtime settings update must apply");
-    let (budget, skip) = state.local_slot_queue_plan(&account);
+    let (budget, skip) = state.local_slot_queue_plan(&account).await;
     assert_eq!(
         budget, 45_000,
         "the budget is independent of the skip switch"
@@ -540,7 +540,7 @@ async fn hot_reloaded_wait_floor_moves_the_adaptive_budget() {
     // No samples yet: the plan returns the configured floor verbatim, which is
     // the cheapest observation of which config source it read.
     assert_eq!(
-        state.local_slot_queue_plan(&account),
+        state.local_slot_queue_plan(&account).await,
         (10_000, false),
         "the plan must start from the configured floor"
     );
@@ -554,7 +554,7 @@ async fn hot_reloaded_wait_floor_moves_the_adaptive_budget() {
         .expect("raising the wait floor must be accepted");
 
     assert_eq!(
-        state.local_slot_queue_plan(&account),
+        state.local_slot_queue_plan(&account).await,
         (45_000, false),
         "the hot-reloaded floor must take effect on the adaptive path (pre-E4.3 this stayed 10_000)"
     );
@@ -569,7 +569,7 @@ async fn hot_reloaded_wait_floor_moves_the_adaptive_budget() {
         advance(Duration::from_secs(2)).await;
         state.release_upstream_request(lease).await.unwrap();
     }
-    let (budget, skip) = state.local_slot_queue_plan(&account);
+    let (budget, skip) = state.local_slot_queue_plan(&account).await;
     assert_eq!(
         budget, 45_000,
         "a p95-derived budget below the hot-reloaded floor must clamp up to it"

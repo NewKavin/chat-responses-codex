@@ -8816,7 +8816,7 @@ async fn process_gateway_request_inner(
                     // waiting silently is pointless; fast-fail now").
                     let (queue_budget_ms, skip_queue) =
                         if runtime_settings.upstream_account_queue_adaptive_budget_enabled {
-                            state.local_slot_queue_plan(account_key)
+                            state.local_slot_queue_plan(account_key).await
                         } else {
                             (runtime_settings.upstream_account_queue_max_wait_ms, false)
                         };
