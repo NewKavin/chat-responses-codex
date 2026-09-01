@@ -552,7 +552,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     unit: '毫秒',
     min: 100,
     max: MAX_SAFE_INTEGER,
-    description: '排队请求等待槽位的最大时长。开启自适应预算（E4.2）后此项是下限：实际预算 = clamp(观测 p95 持有时长 × 1.5, 此项, 60s)。'
+    description: '排队请求等待槽位的最大时长。开启自适应预算后此项是下限：实际预算 = clamp(观测 p95 持有时长 × 预算系数, 此项, 预算上限)，系数与上限均可单独配置。'
   },
   {
     key: 'upstream_account_queue_adaptive_budget_enabled',
@@ -560,7 +560,37 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     label: '排队预算自适应',
     apply: 'immediate',
     control: 'switch',
-    description: '用租约持有时长观测（p95×1.5）动态计算排队预算；当 p50 持有时长已超过预算时直接快速失败、不白等（避免「注定失败的 10 秒静默」）。关闭则回到固定静态等待。'
+    description: '用租约持有时长观测（p95 × 预算系数）动态计算排队预算，替代固定静态等待。关闭则回到固定静态等待。'
+  },
+  {
+    key: 'upstream_account_queue_skip_when_doomed_enabled',
+    group: 'concurrency',
+    label: '注定失败时跳过排队',
+    apply: 'immediate',
+    control: 'switch',
+    description: '开启时，若中位（p50）持有时长已超过等待下限，则判定「等待注定失败」，直接快速失败而不排队（不会向上游发请求）。慢模型 + 单账号争抢的部署应关闭此项：宁可排队等槽位，也不要被网关本地直接拒绝。'
+  },
+  {
+    key: 'upstream_account_queue_adaptive_budget_factor',
+    group: 'concurrency',
+    label: '排队预算系数',
+    apply: 'immediate',
+    control: 'number',
+    min: 1,
+    max: 100,
+    step: 0.1,
+    description: '自适应预算的放大系数：预算 = clamp(观测 p95 持有时长 × 此系数, 等待下限, 预算上限)。默认 1.5。'
+  },
+  {
+    key: 'upstream_account_queue_adaptive_budget_ceiling_ms',
+    group: 'concurrency',
+    label: '排队预算上限',
+    apply: 'immediate',
+    control: 'number',
+    unit: '毫秒',
+    min: 100,
+    max: MAX_SAFE_INTEGER,
+    description: '自适应排队预算的硬上限，必须不小于「排队最大等待」下限。内网慢模型通常需要显著高于默认 60s。'
   },
   {
     key: 'upstream_local_gate_max_wait_ms',

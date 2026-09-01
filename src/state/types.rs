@@ -331,6 +331,21 @@ pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS: u64 = 10_000;
 /// local-gate overflow waits the full static `upstream_account_queue_max_wait_ms`.
 pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED: bool = true;
 
+/// E4.3: whether the adaptive budget is also allowed to *skip* the queue when
+/// the median hold already outlasts the operator's static wait floor.  On
+/// (default) keeps the E4.2 behavior: `p50_hold > floor` fast-fails locally
+/// instead of waiting.  Off makes the overflow always queue, which is what a
+/// slow-model deployment behind a contended account wants - being rejected
+/// locally is strictly worse than waiting for a slot that will free.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED: bool = true;
+/// E4.3: multiplier applied to the observed p95 hold when deriving the
+/// adaptive queue budget.  Was a hard-coded 1.5.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR: f64 = 1.5;
+/// E4.3: ceiling (ms) on the adaptive queue budget.  Was a hard-coded 60s.
+/// Slow internal models legitimately need a higher ceiling than a hosted
+/// upstream, so operators must be able to raise it without a rebuild.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS: u64 = 60_000;
+
 /// C4.1: total wait budget (ms) a purely-local pre-dispatch concurrency
 /// rejection is allowed to burn before the gateway fast-fails.  Substitutes
 /// `upstream_concurrency_recovery_max_wait_ms` (default 30s) for rounds served
@@ -505,6 +520,12 @@ pub struct AppConfig {
     pub upstream_account_queue_max_wait_ms: u64,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
+    #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
+    pub upstream_account_queue_skip_when_doomed_enabled: bool,
+    #[serde(default = "default_upstream_account_queue_adaptive_budget_factor")]
+    pub upstream_account_queue_adaptive_budget_factor: f64,
+    #[serde(default = "default_upstream_account_queue_adaptive_budget_ceiling_ms")]
+    pub upstream_account_queue_adaptive_budget_ceiling_ms: u64,
     #[serde(default = "default_upstream_local_gate_max_wait_ms")]
     pub upstream_local_gate_max_wait_ms: u64,
     #[serde(default = "default_upstream_local_gate_fast_fail_enabled")]
@@ -646,6 +667,12 @@ impl Default for AppConfig {
             upstream_account_queue_max_wait_ms: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
             upstream_account_queue_adaptive_budget_enabled:
                 DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
+            upstream_account_queue_skip_when_doomed_enabled:
+                DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
+            upstream_account_queue_adaptive_budget_factor:
+                DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR,
+            upstream_account_queue_adaptive_budget_ceiling_ms:
+                DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
             upstream_local_gate_max_wait_ms: DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
             upstream_local_gate_fast_fail_enabled: DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
             upstream_local_gate_distinct_error_code_enabled:
@@ -1578,6 +1605,18 @@ pub fn default_upstream_account_queue_max_wait_ms() -> u64 {
 
 pub fn default_upstream_account_queue_adaptive_budget_enabled() -> bool {
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED
+}
+
+pub fn default_upstream_account_queue_skip_when_doomed_enabled() -> bool {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED
+}
+
+pub fn default_upstream_account_queue_adaptive_budget_factor() -> f64 {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR
+}
+
+pub fn default_upstream_account_queue_adaptive_budget_ceiling_ms() -> u64 {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS
 }
 
 pub fn default_upstream_local_gate_max_wait_ms() -> u64 {

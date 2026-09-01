@@ -3,8 +3,11 @@ use super::types::{
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_stream_decode_error_code_split_enabled, default_stream_max_skipped_bad_frames,
     default_tool_arguments_strict, default_tool_call_merge_strict,
-    default_upstream_account_queue_adaptive_budget_enabled, default_upstream_account_queue_enabled,
+    default_upstream_account_queue_adaptive_budget_ceiling_ms,
+    default_upstream_account_queue_adaptive_budget_enabled,
+    default_upstream_account_queue_adaptive_budget_factor, default_upstream_account_queue_enabled,
     default_upstream_account_queue_max_depth, default_upstream_account_queue_max_wait_ms,
+    default_upstream_account_queue_skip_when_doomed_enabled,
     default_upstream_capacity_failure_cooldown_enabled,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_same_host_transient_enabled,
@@ -77,6 +80,9 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_account_queue_max_depth",
     "upstream_account_queue_max_wait_ms",
     "upstream_account_queue_adaptive_budget_enabled",
+    "upstream_account_queue_skip_when_doomed_enabled",
+    "upstream_account_queue_adaptive_budget_factor",
+    "upstream_account_queue_adaptive_budget_ceiling_ms",
     "upstream_local_gate_max_wait_ms",
     "upstream_local_gate_fast_fail_enabled",
     "upstream_local_gate_distinct_error_code_enabled",
@@ -180,6 +186,12 @@ pub struct RuntimeSettings {
     pub upstream_account_queue_max_wait_ms: u64,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
+    #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
+    pub upstream_account_queue_skip_when_doomed_enabled: bool,
+    #[serde(default = "default_upstream_account_queue_adaptive_budget_factor")]
+    pub upstream_account_queue_adaptive_budget_factor: f64,
+    #[serde(default = "default_upstream_account_queue_adaptive_budget_ceiling_ms")]
+    pub upstream_account_queue_adaptive_budget_ceiling_ms: u64,
     #[serde(default = "default_upstream_local_gate_max_wait_ms")]
     pub upstream_local_gate_max_wait_ms: u64,
     #[serde(default = "default_upstream_local_gate_fast_fail_enabled")]
@@ -370,6 +382,12 @@ impl RuntimeSettings {
             upstream_account_queue_max_wait_ms: config.upstream_account_queue_max_wait_ms,
             upstream_account_queue_adaptive_budget_enabled: config
                 .upstream_account_queue_adaptive_budget_enabled,
+            upstream_account_queue_skip_when_doomed_enabled: config
+                .upstream_account_queue_skip_when_doomed_enabled,
+            upstream_account_queue_adaptive_budget_factor: config
+                .upstream_account_queue_adaptive_budget_factor,
+            upstream_account_queue_adaptive_budget_ceiling_ms: config
+                .upstream_account_queue_adaptive_budget_ceiling_ms,
             upstream_local_gate_max_wait_ms: config.upstream_local_gate_max_wait_ms,
             upstream_local_gate_fast_fail_enabled: config.upstream_local_gate_fast_fail_enabled,
             upstream_local_gate_distinct_error_code_enabled: config
@@ -483,6 +501,12 @@ impl RuntimeSettings {
         config.upstream_account_queue_max_wait_ms = self.upstream_account_queue_max_wait_ms;
         config.upstream_account_queue_adaptive_budget_enabled =
             self.upstream_account_queue_adaptive_budget_enabled;
+        config.upstream_account_queue_skip_when_doomed_enabled =
+            self.upstream_account_queue_skip_when_doomed_enabled;
+        config.upstream_account_queue_adaptive_budget_factor =
+            self.upstream_account_queue_adaptive_budget_factor;
+        config.upstream_account_queue_adaptive_budget_ceiling_ms =
+            self.upstream_account_queue_adaptive_budget_ceiling_ms;
         config.upstream_local_gate_max_wait_ms = self.upstream_local_gate_max_wait_ms;
         config.upstream_local_gate_fast_fail_enabled = self.upstream_local_gate_fast_fail_enabled;
         config.upstream_local_gate_distinct_error_code_enabled =
@@ -698,6 +722,24 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_account_queue_max_wait_ms",
                 "must be at least 100 ms",
+            ));
+        }
+        if !self.upstream_account_queue_adaptive_budget_factor.is_finite()
+            || self.upstream_account_queue_adaptive_budget_factor < 1.0
+        {
+            return Err(invalid(
+                "upstream_account_queue_adaptive_budget_factor",
+                "must be a finite number greater than or equal to 1.0",
+            ));
+        }
+        // The budget is clamped into [floor, ceiling]; an inverted range would
+        // panic in `u64::clamp`, so reject it here with a clear message.
+        if self.upstream_account_queue_adaptive_budget_ceiling_ms
+            < self.upstream_account_queue_max_wait_ms
+        {
+            return Err(invalid(
+                "upstream_account_queue_adaptive_budget_ceiling_ms",
+                "must be greater than or equal to upstream_account_queue_max_wait_ms",
             ));
         }
         if self.upstream_local_gate_max_wait_ms < 100 {

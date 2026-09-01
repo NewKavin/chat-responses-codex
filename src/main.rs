@@ -8,8 +8,11 @@ use chat_responses_codex::state::{
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED, DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
     DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
     DEFAULT_UPSTREAM_COMMON_MODE_SAME_HOST_TRANSIENT_ENABLED,
@@ -161,6 +164,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED",
         DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
     );
+    let upstream_account_queue_skip_when_doomed_enabled = env_bool(
+        "UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
+    );
+    let upstream_account_queue_adaptive_budget_factor = env_f64(
+        "UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR,
+    )
+    .max(1.0);
+    // The budget is clamped into [floor, ceiling]; keep the ceiling at or above
+    // the floor so `u64::clamp` can never see an inverted range.
+    let upstream_account_queue_adaptive_budget_ceiling_ms = env_u64(
+        "UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
+    )
+    .max(upstream_account_queue_max_wait_ms);
     let upstream_local_gate_max_wait_ms = env_u64(
         "UPSTREAM_LOCAL_GATE_MAX_WAIT_MS",
         DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
@@ -328,6 +347,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_account_queue_max_depth,
         upstream_account_queue_max_wait_ms,
         upstream_account_queue_adaptive_budget_enabled,
+        upstream_account_queue_skip_when_doomed_enabled,
+        upstream_account_queue_adaptive_budget_factor,
+        upstream_account_queue_adaptive_budget_ceiling_ms,
         upstream_local_gate_max_wait_ms,
         upstream_local_gate_fast_fail_enabled,
         upstream_local_gate_distinct_error_code_enabled,

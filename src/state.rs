@@ -155,7 +155,10 @@ pub use types::{
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
     DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED, DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
@@ -1406,33 +1409,58 @@ impl AppState {
     /// the evidence says a slot can free within the wait budget.  Returns the
     /// effective queue budget in ms and whether the queue is worth entering:
     ///
-    /// * budget = `clamp(p95_hold × ADAPTIVE_QUEUE_BUDGET_FACTOR,
-    ///   floor = upstream_account_queue_max_wait_ms,
-    ///   ceiling = ADAPTIVE_QUEUE_BUDGET_CEILING_MS)`; falls back to the
-    ///   static floor when fewer than two hold samples exist.
-    /// * `should_skip` = the *static* `upstream_account_queue_max_wait_ms`
-    ///   floor is the only meaningful yardstick for "waiting is doomed":
-    ///   comparing `p50_hold` against the p95-derived budget can never fire
-    ///   (`budget ≥ p95 ≥ p50`), so the median observed hold outlasting the
-    ///   operator's configured wait limit is the signal that the queue's
-    ///   promise ("wait a little and a slot frees") is broken — the median
-    ///   request takes longer than the whole wait.  Skipping straight to the
-    ///   fast-fail removes the "10s silent wait for a doomed request" (E4's
-    ///   §2.4 fix) and cheaply hands the retry loop back to the client.
+    /// * budget = `clamp(p95_hold_ms × factor, floor, ceiling)` where the floor
+    ///   is `upstream_account_queue_max_wait_ms` and both the factor and the
+    ///   ceiling are operator-tunable
+    ///   (`upstream_account_queue_adaptive_budget_factor` /
+    ///   `..._ceiling_ms`); falls back to the floor when fewer than two hold
+    ///   samples exist.
+    /// * `should_skip` = the median observed hold outlasts the operator's
+    ///   configured wait floor, i.e. the queue's promise ("wait a little and a
+    ///   slot frees") is broken because the median request takes longer than
+    ///   the whole wait.  Skipping straight to the fast-fail removes the "10s
+    ///   silent wait for a doomed request" (E4's §2.4 fix) and cheaply hands
+    ///   the retry loop back to the client.
+    ///
+    /// E4.3 fixes a unit bug here: `hold_p*_seconds` return whole **seconds**
+    /// but the budget is in **milliseconds**, so the pre-E4.3 code compared
+    /// `p95_seconds × 1.5` against a ms floor/ceiling.  The scaled value could
+    /// only clear a 10s floor at a p95 hold above 6666 s (≈1.85 h), so the
+    /// budget was pinned to the floor and the adaptive path was dead code —
+    /// the slower the model, the more useless it got.  Percentiles are now
+    /// converted to ms before they take part in the budget.
+    ///
+    /// E4.3 also makes the skip itself switchable
+    /// (`upstream_account_queue_skip_when_doomed_enabled`).  A slow-model
+    /// deployment behind one contended account wants to wait for a slot rather
+    /// than be rejected locally without the upstream ever being asked, so it
+    /// turns the skip off; the default keeps the E4.2 fast-fail.
     pub fn local_slot_queue_plan(&self, account: &AccountConcurrencyKey) -> (u64, bool) {
-        let config = &self.config;
+        // Read the live runtime settings, not the static startup config: the
+        // non-adaptive branch in the gateway uses the runtime value, so reading
+        // `self.config` here made a hot-reloaded floor silently ineffective on
+        // the adaptive path.
+        let settings = self.runtime_settings();
         let table = self
             .upstream_lease_table
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let floor_ms = config.upstream_account_queue_max_wait_ms.max(1);
-        let Some(p95) = table.hold_p95_seconds(account) else {
+        let floor_ms = settings.upstream_account_queue_max_wait_ms.max(1);
+        // Validation keeps the ceiling at or above the floor, but clamp
+        // defensively so a stale or hand-edited value can never panic here.
+        let ceiling_ms = settings
+            .upstream_account_queue_adaptive_budget_ceiling_ms
+            .max(floor_ms);
+        let Some(p95_seconds) = table.hold_p95_seconds(account) else {
             return (floor_ms, false);
         };
-        let p50 = table.hold_p50_seconds(account).unwrap_or(0);
-        let scaled = (p95 as f64 * ADAPTIVE_QUEUE_BUDGET_FACTOR) as u64;
-        let budget = scaled.clamp(floor_ms, ADAPTIVE_QUEUE_BUDGET_CEILING_MS);
-        let should_skip = p50 > 0 && p50 > floor_ms.div_ceil(1000);
+        let p50_seconds = table.hold_p50_seconds(account).unwrap_or(0);
+        let p95_ms = p95_seconds.saturating_mul(1_000);
+        let scaled = (p95_ms as f64 * settings.upstream_account_queue_adaptive_budget_factor) as u64;
+        let budget = scaled.clamp(floor_ms, ceiling_ms);
+        let should_skip = settings.upstream_account_queue_skip_when_doomed_enabled
+            && p50_seconds > 0
+            && p50_seconds > floor_ms.div_ceil(1000);
         (budget, should_skip)
     }
 
@@ -7211,16 +7239,6 @@ pub enum UpstreamLeaseKind {
 /// instead of drifting toward a stale epoch.  Driven by the C1/C2 lease
 /// release path: every successful local release appends its hold duration.
 const LEASE_HOLD_SAMPLE_SIZE: usize = 32;
-
-/// E4.2: the C3 local-slot queue budget is `p95_hold × this factor`, so the
-/// wait covers ~all observed service times (p95) with a small margin, instead
-/// of the flat pre-E4 static budget.
-const ADAPTIVE_QUEUE_BUDGET_FACTOR: f64 = 1.5;
-/// E4.2: hard ceiling on the adaptive queue budget.  The evidence-based
-/// budget never goes to minutes-long silent waits even for pathological p95 —
-/// a duration that long is better served by an honest fast-fail (E4 §3.4:
-/// do not turn a doomed wait into minutes of silence).
-const ADAPTIVE_QUEUE_BUDGET_CEILING_MS: u64 = 60_000;
 
 /// C1.1: A single upstream account lease record.  Replaces the bare
 /// `expires_at` `Instant` that used to sit in `UpstreamRuntimeState`:

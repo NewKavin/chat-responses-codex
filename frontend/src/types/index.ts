@@ -983,6 +983,9 @@ export interface RuntimeSettings {
   upstream_account_queue_max_depth: number
   upstream_account_queue_max_wait_ms: number
   upstream_account_queue_adaptive_budget_enabled: boolean
+  upstream_account_queue_skip_when_doomed_enabled: boolean
+  upstream_account_queue_adaptive_budget_factor: number
+  upstream_account_queue_adaptive_budget_ceiling_ms: number
   upstream_local_gate_max_wait_ms: number
   upstream_local_gate_fast_fail_enabled: boolean
   upstream_local_gate_distinct_error_code_enabled: boolean
