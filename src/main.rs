@@ -12,6 +12,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
     DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
     DEFAULT_UPSTREAM_COMMON_MODE_BREAKER_THRESHOLD,
@@ -160,6 +161,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
     )
     .max(100);
+    // The queue polls the backend that enforces the cap, so the floor keeps a
+    // misconfigured interval from turning each waiter into a Redis hot loop and
+    // the ceiling keeps the queue from timing out before it ever looks.
+    let upstream_account_queue_poll_interval_ms = env_u64(
+        "UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS",
+        DEFAULT_UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS,
+    )
+    .clamp(10, upstream_account_queue_max_wait_ms);
     let upstream_account_queue_adaptive_budget_enabled = env_bool(
         "UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED",
         DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
@@ -346,6 +355,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_account_queue_enabled,
         upstream_account_queue_max_depth,
         upstream_account_queue_max_wait_ms,
+        upstream_account_queue_poll_interval_ms,
         upstream_account_queue_adaptive_budget_enabled,
         upstream_account_queue_skip_when_doomed_enabled,
         upstream_account_queue_adaptive_budget_factor,

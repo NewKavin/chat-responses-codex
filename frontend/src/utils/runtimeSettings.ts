@@ -555,6 +555,18 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '排队请求等待槽位的最大时长。开启自适应预算后此项是下限：实际预算 = clamp(观测 p95 持有时长 × 预算系数, 此项, 预算上限)，系数与上限均可单独配置。'
   },
   {
+    key: 'upstream_account_queue_poll_interval_ms',
+    group: 'concurrency',
+    label: '排队轮询间隔',
+    apply: 'immediate',
+    control: 'number',
+    unit: '毫秒',
+    min: 10,
+    max: MAX_SAFE_INTEGER,
+    description:
+      '排队请求检查槽位是否释放的间隔。队列查询的是真正执行并发上限的后端：启用 Redis 时每个等待者每次轮询都是一次 Redis 往返，调大可用队列响应速度换取更低的 Redis 压力。不得超过排队最大等待。'
+  },
+  {
     key: 'upstream_account_queue_adaptive_budget_enabled',
     group: 'concurrency',
     label: '排队预算自适应',
@@ -922,6 +934,14 @@ export const validateRuntimeSettings = (
     settings.upstream_stream_idle_timeout_seconds
   ) {
     errors.upstream_stream_keepalive_interval_seconds = '必须短于流式空闲超时'
+  }
+  // An interval longer than the whole wait budget would let the queue time out
+  // before it ever polled, silently disabling it (mirrors the backend).
+  if (
+    settings.upstream_account_queue_poll_interval_ms >
+    settings.upstream_account_queue_max_wait_ms
+  ) {
+    errors.upstream_account_queue_poll_interval_ms = '不能超过排队最大等待'
   }
   // C2.x: stale-after must be >= 2x the local lease heartbeat interval (ttl/3),
   // otherwise a healthy-but-silent long request gets its lease reclaimed

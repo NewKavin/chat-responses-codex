@@ -843,8 +843,6 @@ fn record_cooled_route_attempt(
 /// by the whole pool (B2 common-mode breaker).  `RequestRejected` keeps the
 /// request-shape semantics; transient classes get the shared-gateway-outage
 /// treatment (one delayed replay round before a request-level 502).
-const LOCAL_SLOT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
 /// C3: bounded wait for a free local pre-dispatch concurrency slot on
 /// `account_key`.  The upstream account's `max_concurrency` is a hard ceiling
 /// on real slots, so overflow is *served by waiting* rather than by raising
@@ -881,7 +879,13 @@ async fn wait_for_local_slot_free(
     }
     let started = tokio::time::Instant::now();
     let deadline = started + Duration::from_millis(max_wait_ms);
-    let stale_after = Duration::from_millis(state.runtime_settings().upstream_lease_stale_after_ms);
+    let settings = state.runtime_settings();
+    let stale_after = Duration::from_millis(settings.upstream_lease_stale_after_ms);
+    // The census runs against the enforcing backend, so this cadence is real
+    // backend load under Redis: one round-trip per waiter per tick.  Operators
+    // trade queue responsiveness for that traffic via the setting.
+    let poll_interval =
+        Duration::from_millis(settings.upstream_account_queue_poll_interval_ms.max(1));
     let capacity = upstream.max_concurrency.max(1) as usize;
     let mut census_unavailable = false;
     let freed = loop {
@@ -906,7 +910,7 @@ async fn wait_for_local_slot_free(
         if now >= deadline {
             break false;
         }
-        let sleep_for = LOCAL_SLOT_POLL_INTERVAL.min(deadline.saturating_duration_since(now));
+        let sleep_for = poll_interval.min(deadline.saturating_duration_since(now));
         tokio::time::sleep(sleep_for).await;
     };
     state.leave_local_slot_wait(account_key);

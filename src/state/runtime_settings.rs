@@ -7,6 +7,7 @@ use super::types::{
     default_upstream_account_queue_adaptive_budget_enabled,
     default_upstream_account_queue_adaptive_budget_factor, default_upstream_account_queue_enabled,
     default_upstream_account_queue_max_depth, default_upstream_account_queue_max_wait_ms,
+    default_upstream_account_queue_poll_interval_ms,
     default_upstream_account_queue_skip_when_doomed_enabled,
     default_upstream_capacity_failure_cooldown_enabled,
     default_upstream_common_mode_breaker_threshold,
@@ -79,6 +80,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_account_queue_enabled",
     "upstream_account_queue_max_depth",
     "upstream_account_queue_max_wait_ms",
+    "upstream_account_queue_poll_interval_ms",
     "upstream_account_queue_adaptive_budget_enabled",
     "upstream_account_queue_skip_when_doomed_enabled",
     "upstream_account_queue_adaptive_budget_factor",
@@ -184,6 +186,8 @@ pub struct RuntimeSettings {
     pub upstream_account_queue_max_depth: usize,
     #[serde(default = "default_upstream_account_queue_max_wait_ms")]
     pub upstream_account_queue_max_wait_ms: u64,
+    #[serde(default = "default_upstream_account_queue_poll_interval_ms")]
+    pub upstream_account_queue_poll_interval_ms: u64,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
@@ -380,6 +384,8 @@ impl RuntimeSettings {
             upstream_account_queue_enabled: config.upstream_account_queue_enabled,
             upstream_account_queue_max_depth: config.upstream_account_queue_max_depth,
             upstream_account_queue_max_wait_ms: config.upstream_account_queue_max_wait_ms,
+            upstream_account_queue_poll_interval_ms: config
+                .upstream_account_queue_poll_interval_ms,
             upstream_account_queue_adaptive_budget_enabled: config
                 .upstream_account_queue_adaptive_budget_enabled,
             upstream_account_queue_skip_when_doomed_enabled: config
@@ -499,6 +505,8 @@ impl RuntimeSettings {
         config.upstream_account_queue_enabled = self.upstream_account_queue_enabled;
         config.upstream_account_queue_max_depth = self.upstream_account_queue_max_depth;
         config.upstream_account_queue_max_wait_ms = self.upstream_account_queue_max_wait_ms;
+        config.upstream_account_queue_poll_interval_ms =
+            self.upstream_account_queue_poll_interval_ms;
         config.upstream_account_queue_adaptive_budget_enabled =
             self.upstream_account_queue_adaptive_budget_enabled;
         config.upstream_account_queue_skip_when_doomed_enabled =
@@ -722,6 +730,22 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_account_queue_max_wait_ms",
                 "must be at least 100 ms",
+            ));
+        }
+        // Floor: the queue polls the enforcing backend, so a tiny interval
+        // turns one waiter into a Redis hot loop.  Ceiling: an interval longer
+        // than the whole wait budget would let the queue time out before it
+        // ever looked, silently disabling it.
+        if self.upstream_account_queue_poll_interval_ms < 10 {
+            return Err(invalid(
+                "upstream_account_queue_poll_interval_ms",
+                "must be at least 10 ms",
+            ));
+        }
+        if self.upstream_account_queue_poll_interval_ms > self.upstream_account_queue_max_wait_ms {
+            return Err(invalid(
+                "upstream_account_queue_poll_interval_ms",
+                "must be less than or equal to upstream_account_queue_max_wait_ms",
             ));
         }
         if !self

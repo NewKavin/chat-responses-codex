@@ -68,6 +68,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_account_queue_enabled: true,
   upstream_account_queue_max_depth: 16,
   upstream_account_queue_max_wait_ms: 10_000,
+  upstream_account_queue_poll_interval_ms: 100,
   upstream_account_queue_adaptive_budget_enabled: true,
   upstream_account_queue_skip_when_doomed_enabled: true,
   upstream_account_queue_adaptive_budget_factor: 1.5,
@@ -150,6 +151,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_account_queue_enabled',
   'upstream_account_queue_max_depth',
   'upstream_account_queue_max_wait_ms',
+  'upstream_account_queue_poll_interval_ms',
   'upstream_account_queue_adaptive_budget_enabled',
   'upstream_account_queue_skip_when_doomed_enabled',
   'upstream_account_queue_adaptive_budget_factor',
@@ -186,10 +188,10 @@ describe('runtime settings catalog', () => {
       'logs',
       'observability'
     ])
-    expect(runtimeSettingFields).toHaveLength(79)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(79)
+    expect(runtimeSettingFields).toHaveLength(80)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(80)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(66)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(67)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
@@ -224,6 +226,7 @@ describe('runtime settings helpers', () => {
     invalid.upstream_lease_stale_after_ms = 500
     invalid.upstream_account_queue_max_depth = 0
     invalid.upstream_account_queue_max_wait_ms = 50
+    invalid.upstream_account_queue_poll_interval_ms = 5
     invalid.upstream_local_gate_max_wait_ms = 61_000
 
     const errors = validateRuntimeSettings(invalid)
@@ -240,7 +243,24 @@ describe('runtime settings helpers', () => {
     expect(errors.upstream_lease_stale_after_ms).toBeTruthy()
     expect(errors.upstream_account_queue_max_depth).toBeTruthy()
     expect(errors.upstream_account_queue_max_wait_ms).toBeTruthy()
+    expect(errors.upstream_account_queue_poll_interval_ms).toBeTruthy()
     expect(errors.upstream_local_gate_max_wait_ms).toBeTruthy()
+  })
+
+  it('rejects a queue poll interval longer than the queue wait budget', () => {
+    // The queue would time out before it ever polled, silently disabling it.
+    const settings = validSettings()
+    settings.upstream_account_queue_max_wait_ms = 1_000
+    settings.upstream_account_queue_poll_interval_ms = 2_000
+
+    expect(
+      validateRuntimeSettings(settings).upstream_account_queue_poll_interval_ms
+    ).toBeTruthy()
+
+    settings.upstream_account_queue_poll_interval_ms = 1_000
+    expect(
+      validateRuntimeSettings(settings).upstream_account_queue_poll_interval_ms
+    ).toBeFalsy()
   })
 
   it('tracks dirty state and restart-only differences without sharing arrays', () => {

@@ -323,6 +323,13 @@ pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH: usize = 16;
 /// them before the gateway serves the fast-fail error.
 pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS: u64 = 10_000;
 
+/// C3 queue poll cadence.  The queue polls the backend that enforces the cap,
+/// so under Redis each waiter costs one census round-trip per tick and the
+/// cadence is real Redis load.  100ms keeps a freed slot visible quickly (it
+/// matches `AccountRecoverySession`); raise it to trade queue responsiveness
+/// for Redis traffic when many accounts queue at once.
+pub const DEFAULT_UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS: u64 = 100;
+
 /// E4.2: whether the C3 local-slot queue budget is adaptive (per §3.5:
 /// `clamp(p95_hold × factor, floor = upstream_account_queue_max_wait_ms,
 /// ceiling)`) and skips the queue entirely when the median hold already
@@ -518,6 +525,8 @@ pub struct AppConfig {
     pub upstream_account_queue_max_depth: usize,
     #[serde(default = "default_upstream_account_queue_max_wait_ms")]
     pub upstream_account_queue_max_wait_ms: u64,
+    #[serde(default = "default_upstream_account_queue_poll_interval_ms")]
+    pub upstream_account_queue_poll_interval_ms: u64,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
@@ -665,6 +674,8 @@ impl Default for AppConfig {
             upstream_account_queue_enabled: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
             upstream_account_queue_max_depth: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH,
             upstream_account_queue_max_wait_ms: DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
+            upstream_account_queue_poll_interval_ms:
+                DEFAULT_UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS,
             upstream_account_queue_adaptive_budget_enabled:
                 DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
             upstream_account_queue_skip_when_doomed_enabled:
@@ -1601,6 +1612,10 @@ pub fn default_upstream_account_queue_max_depth() -> usize {
 
 pub fn default_upstream_account_queue_max_wait_ms() -> u64 {
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS
+}
+
+pub fn default_upstream_account_queue_poll_interval_ms() -> u64 {
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS
 }
 
 pub fn default_upstream_account_queue_adaptive_budget_enabled() -> bool {

@@ -982,6 +982,7 @@ export interface RuntimeSettings {
   upstream_account_queue_enabled: boolean
   upstream_account_queue_max_depth: number
   upstream_account_queue_max_wait_ms: number
+  upstream_account_queue_poll_interval_ms: number
   upstream_account_queue_adaptive_budget_enabled: boolean
   upstream_account_queue_skip_when_doomed_enabled: boolean
   upstream_account_queue_adaptive_budget_factor: number

@@ -6026,3 +6026,135 @@ async fn redis_adaptive_queue_budget_scales_with_observed_hold() {
          a value of exactly the 1000ms floor means the Redis backend recorded no holds"
     );
 }
+
+/// The C3 queue polls the enforcing backend, so on a Redis deployment its
+/// cadence is real Redis load: every waiter issues one census per tick, and
+/// the interval was hard-coded at 100ms.  With many accounts queueing at once
+/// an operator had no way to trade queue responsiveness for Redis traffic.
+///
+/// `upstream_account_queue_poll_interval_ms` must actually drive the sleep.
+/// The cadence is observed through the request's own latency: the held slot is
+/// released at ~500ms while the queue ticks every 2500ms, so a correct
+/// implementation sleeps through the release and completes on its next tick,
+/// while the hard-coded 100ms cadence completes in ~600ms.
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_queue_poll_interval_setting_drives_the_census_cadence() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            Json(json!({
+                "id": "chatcmpl-poll-interval",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model-a",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let mut config = redis_test_config();
+    config.upstream_stream_max_duration_seconds = 86_400;
+    config.upstream_route_exhaustion_retry_enabled = true;
+    config.upstream_concurrency_recovery_max_wait_ms = 1;
+    config.upstream_concurrency_recovery_max_rounds = 1;
+    config.upstream_account_queue_enabled = true;
+    config.upstream_account_queue_max_wait_ms = 10_000;
+    config.upstream_account_queue_max_depth = 16;
+    config.upstream_account_queue_adaptive_budget_enabled = false;
+    config.upstream_account_queue_skip_when_doomed_enabled = false;
+    // The setting under test: a slow cadence, well clear of the old 100ms.
+    config.upstream_account_queue_poll_interval_ms = 2_500;
+    let (state_a, state_b, _directory) = redis_test_states(&config).await;
+
+    let api_key = "queue-poll-interval-account";
+    let upstream = UpstreamConfig {
+        id: "redis-queue-poll-interval".into(),
+        name: "Redis queue poll interval".into(),
+        base_url: format!("http://{address}"),
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["model-a".into()],
+        max_concurrency: 1,
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    state_b.insert_upstream(upstream.clone()).await.unwrap();
+
+    let downstream_key = generate_downstream_key("redis-queue-poll");
+    let mut downstream = redis_test_downstream("redis-queue-poll-downstream");
+    downstream.hash = downstream_key.hash;
+    downstream.model_allowlist = vec!["model-a".into()];
+    downstream.rate_limit_enabled = false;
+    downstream.max_concurrency = 10;
+    state_b.insert_downstream(downstream).await.unwrap();
+
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+    let held = state_a
+        .try_reserve_upstream_account_request(&upstream, &key_fingerprint, "model-a")
+        .await
+        .unwrap();
+
+    let releaser = tokio::spawn(async move {
+        // Long enough that the request is certainly parked in the queue when
+        // the slot frees, even when the whole suite runs in parallel.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        state_a.release_upstream_request(held).await.unwrap();
+    });
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "model": "model-a",
+                "messages": [{"role": "user", "content": "hello"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let response = build_router(state_b.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    releaser.await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a slower poll must still let the queue serve the request"
+    );
+    // The slot frees at ~1.5s but the waiter only looks once per tick, so the
+    // configured 2.5s cadence is what decides when the request completes: it
+    // sleeps through the release and notices on its next tick, at ~2.5-4s.  The
+    // old hard-coded 100ms cadence finished ~100ms after the release, at ~1.6s,
+    // so the floor below cannot hold it.  Latency is measured per-request
+    // rather than by counting Redis commands: `INFO commandstats` is
+    // server-wide, and the other tests in this suite share the Redis.
+    assert!(
+        elapsed >= Duration::from_millis(2_200),
+        "the poll interval setting must drive the queue's cadence; the request \
+         finished in {elapsed:?}, which is the hard-coded 100ms rate rather \
+         than the configured 2.5s tick"
+    );
+
+    upstream_server.abort();
+}
