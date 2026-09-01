@@ -60,6 +60,65 @@ async fn holding_upstream(hold_count: usize, hold_ms: u64) -> (String, Arc<Atomi
     (format!("http://{address}"), hits)
 }
 
+/// Upstream that records which api key served each request, so a test can prove
+/// the gateway moved to a *sibling* account instead of queueing behind the full
+/// one.  The first `hold_count` requests are held for `hold_ms`.
+async fn key_recording_upstream(
+    hold_count: usize,
+    hold_ms: u64,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let seen = seen.clone();
+            let hits = hits.clone();
+            move |request: Request<Body>| {
+                let seen = seen.clone();
+                let hits = hits.clone();
+                async move {
+                    let key = request
+                        .headers()
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(|value| value.trim_start_matches("Bearer ").to_string())
+                        .unwrap_or_default();
+                    seen.lock().unwrap().push(key);
+                    let hit = hits.fetch_add(1, Ordering::SeqCst);
+                    if hit < hold_count {
+                        tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+                    }
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        json!({
+                            "id": "chatcmpl-sibling",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": MODEL,
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "ok"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                        })
+                        .to_string(),
+                    )
+                        .into_response()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+    (format!("http://{address}"), seen)
+}
+
 /// Upstream that answers every request with a real 429 (`Retry-After: 5`).
 async fn rate_limited_upstream() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -792,5 +851,112 @@ async fn adaptive_budget_skips_queue_when_median_hold_exceeds_floor() {
         hits.load(Ordering::SeqCst),
         8,
         "the skipped-queue request must never reach the upstream (first 8 hits are the two pinning phases)"
+    );
+}
+
+/// L4 (scenario 2, the 7-account shape): saturating one account must fall back
+/// to a *sibling* account rather than parking behind the full one.  The local
+/// slot gate is only reached once every candidate account is locally full -
+/// `src/server/gateway.rs` gates it on `round_ledger.is_pure_concurrency
+/// _exhaustion()` precisely so the multi-key case keeps this fallback.  This is
+/// a verification test: it must pass on the code as shipped, with no behaviour
+/// change.
+#[tokio::test]
+async fn saturated_account_falls_back_to_a_sibling_account() {
+    // Hold the first request so key-a's single slot stays occupied while the
+    // second request routes.
+    let (base_url, seen) = key_recording_upstream(1, 1_500).await;
+    let downstream_key = generate_downstream_key("c4-sibling");
+    let tempdir = tempdir().unwrap();
+    // Two keys on one upstream = two accounts, each with max_concurrency 1.
+    let upstreams = vec![UpstreamConfig {
+        id: "sib-upstream".into(),
+        name: "sib-upstream".into(),
+        base_url,
+        api_key: "key-a".into(),
+        api_keys: vec!["key-a".into(), "key-b".into()],
+        api_key_models: vec![],
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec![MODEL.into()],
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    }];
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(upstreams),
+            downstreams: Arc::new(vec![DownstreamConfig {
+                id: "down-sib".into(),
+                name: "sib-client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![MODEL.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+                model_concurrency_groups: vec![],
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            automatic_capability_probes_enabled: false,
+            upstream_transient_last_resort_probe_enabled: false,
+            upstream_account_queue_enabled: true,
+            upstream_local_lease_ttl_seconds: 300,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+    let key = downstream_key.plaintext;
+
+    // Request 1 occupies one account and is held at the upstream.
+    let first = {
+        let app = app.clone();
+        let key = key.clone();
+        tokio::spawn(async move { app.oneshot(chat_request(&key)).await.unwrap() })
+    };
+    wait_for_upstream_in_flight(&state, "sib-upstream", 1).await;
+
+    // Request 2 arrives while the first account is full.  It must be served by
+    // the sibling account, not queued behind the busy one.
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        app.clone().oneshot(chat_request(&key)),
+    )
+    .await
+    .expect("the sibling account must serve request 2 without waiting for the held slot")
+    .unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::OK,
+        "the sibling account has a free slot, so request 2 must succeed"
+    );
+
+    assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+
+    let keys = seen.lock().unwrap().clone();
+    assert_eq!(keys.len(), 2, "exactly two upstream requests: {keys:?}");
+    assert_ne!(
+        keys[0], keys[1],
+        "request 2 must be served by the sibling account, not the saturated one: {keys:?}"
     );
 }

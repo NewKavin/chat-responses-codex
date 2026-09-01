@@ -503,3 +503,76 @@ async fn adaptive_queue_budget_scales_with_observed_hold_in_milliseconds() {
         "with the skip disabled a doomed-looking wait must still queue"
     );
 }
+
+/// E4.3: the adaptive plan must read the *live* runtime settings, not the
+/// static startup config.  Before E4.3 `local_slot_queue_plan` read
+/// `self.config` while the gateway's non-adaptive branch read the runtime
+/// settings, so hot-reloading `upstream_account_queue_max_wait_ms` silently
+/// did nothing on the adaptive path and an operator raising the wait limit
+/// saw no effect at all.
+#[tokio::test(start_paused = true)]
+async fn hot_reloaded_wait_floor_moves_the_adaptive_budget() {
+    let mut upstream = test_upstream("hot-floor");
+    upstream.max_concurrency = 1;
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_account_queue_max_wait_ms: 10_000,
+            upstream_account_queue_adaptive_budget_factor: 1.5,
+            upstream_account_queue_adaptive_budget_ceiling_ms: 180_000,
+            upstream_account_queue_skip_when_doomed_enabled: false,
+            upstream_local_lease_ttl_seconds: 3_600,
+            upstream_lease_stale_after_ms: 86_400_000,
+            ..AppConfig::default()
+        },
+    );
+    let fingerprint = "fingerprint-hot-floor";
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        fingerprint.to_string(),
+    );
+
+    // No samples yet: the plan returns the configured floor verbatim, which is
+    // the cheapest observation of which config source it read.
+    assert_eq!(
+        state.local_slot_queue_plan(&account),
+        (10_000, false),
+        "the plan must start from the configured floor"
+    );
+
+    // Hot-reload a larger floor.  Nothing else changes.
+    let mut settings = (*state.runtime_settings()).clone();
+    settings.upstream_account_queue_max_wait_ms = 45_000;
+    state
+        .update_runtime_settings(0, settings)
+        .await
+        .expect("raising the wait floor must be accepted");
+
+    assert_eq!(
+        state.local_slot_queue_plan(&account),
+        (45_000, false),
+        "the hot-reloaded floor must take effect on the adaptive path (pre-E4.3 this stayed 10_000)"
+    );
+
+    // With samples present the new floor still governs: two 2s holds give
+    // p95 = 2s, so p95_ms x 1.5 = 3_000 is below the 45s floor and clamps up.
+    for _ in 0..2 {
+        let lease = state
+            .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+            .await
+            .expect("the single slot must be free between sequential holds");
+        advance(Duration::from_secs(2)).await;
+        state.release_upstream_request(lease).await.unwrap();
+    }
+    let (budget, skip) = state.local_slot_queue_plan(&account);
+    assert_eq!(
+        budget, 45_000,
+        "a p95-derived budget below the hot-reloaded floor must clamp up to it"
+    );
+    assert!(!skip, "the skip switch stays off regardless of the floor");
+}
