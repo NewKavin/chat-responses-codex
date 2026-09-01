@@ -202,8 +202,11 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + upstream_first_output_warn_after_seconds (E6)
     // + stream_decode_error_code_split_enabled (G2)
     // + stream_max_skipped_bad_frames (G3)
-    // = 75.
-    assert_eq!(all.len(), 75);
+    // + upstream_account_queue_skip_when_doomed_enabled (E4.3)
+    // + upstream_account_queue_adaptive_budget_factor (E4.3)
+    // + upstream_account_queue_adaptive_budget_ceiling_ms (E4.3)
+    // = 78.
+    assert_eq!(all.len(), 78);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()

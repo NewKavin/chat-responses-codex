@@ -592,6 +592,96 @@ async fn real_upstream_429_keeps_the_upstream_rate_limit_path() {
     );
 }
 
+/// E4.3: the same conditions as
+/// `adaptive_budget_skips_queue_when_median_hold_exceeds_floor` (median hold
+/// above the static floor), but with the skip switched off.  This is the
+/// slow-model deployment shape: being rejected locally while the upstream still
+/// has capacity is strictly worse than waiting for a slot, so the overflow must
+/// queue, reach the upstream, and be served -- a 9th upstream hit is the proof
+/// the gateway stopped answering on the upstream's behalf.
+#[tokio::test]
+async fn skip_switched_off_queues_the_overflow_instead_of_local_429() {
+    // 8 held hits pin the two phases; the 9th (the overflow) is answered
+    // immediately, so `hits == 9` proves it really reached the upstream.
+    let (base_url, hits) = holding_upstream(8, 3_000).await;
+    let (app, state, downstream_key) = fast_fail_harness(base_url, 4, |config| AppConfig {
+        upstream_local_gate_max_wait_ms: 3_000,
+        upstream_local_gate_fast_fail_enabled: true,
+        upstream_local_gate_distinct_error_code_enabled: true,
+        upstream_account_queue_enabled: true,
+        upstream_account_queue_max_depth: 16,
+        // Same 2s floor vs 3s median hold that makes the E4.2 test skip.
+        upstream_account_queue_max_wait_ms: 2_000,
+        upstream_account_queue_adaptive_budget_enabled: true,
+        // The one difference: never skip, always queue.
+        upstream_account_queue_skip_when_doomed_enabled: false,
+        upstream_local_lease_ttl_seconds: 300,
+        ..config
+    })
+    .await;
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        "ff-upstream",
+        chat_responses_codex::keys::upstream_key_fingerprint("ff-upstream", "upstream-secret-c4"),
+    );
+
+    // Phase 1: build the hold samples (p50/p95 = 3s).
+    let phase1 = (0..4)
+        .map(|_| {
+            let app = app.clone();
+            let downstream_key = downstream_key.clone();
+            tokio::spawn(async move { app.oneshot(chat_request(&downstream_key)).await.unwrap() })
+        })
+        .collect::<Vec<_>>();
+    wait_for_upstream_in_flight(&state, "ff-upstream", 4).await;
+    for holder in phase1 {
+        assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while state.local_account_lease_count(&account) != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "phase-1 leases never drained"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Phase 2: pin all 4 slots again.
+    let phase2 = (0..4)
+        .map(|_| {
+            let app = app.clone();
+            let downstream_key = downstream_key.clone();
+            tokio::spawn(async move { app.oneshot(chat_request(&downstream_key)).await.unwrap() })
+        })
+        .collect::<Vec<_>>();
+    wait_for_upstream_in_flight(&state, "ff-upstream", 4).await;
+
+    // The overflow must wait for a phase-2 slot rather than fast-failing.  The
+    // adaptive budget is now p95(3s) x 1.5 = 4.5s, comfortably longer than the
+    // ~3s the phase-2 holders need to release.
+    let response = app
+        .clone()
+        .oneshot(chat_request(&downstream_key))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    for holder in phase2 {
+        let _ = holder.await;
+    }
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "with the skip off the overflow must be queued and served, not locally rejected: {payload}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        9,
+        "the queued overflow must actually reach the upstream (8 pinning hits + itself)"
+    );
+}
 /// E4.2 (§3.4): with hold samples showing the median request holds a slot
 /// longer than the static queue floor, the C3 queue is *not* worth entering —
 /// the median serve outlasts the whole wait, so queueing is the §2.4 "10s
@@ -615,6 +705,9 @@ async fn adaptive_budget_skips_queue_when_median_hold_exceeds_floor() {
         // Static floor: 2s.  The 3s median hold must exceed it → skip queue.
         upstream_account_queue_max_wait_ms: 2_000,
         upstream_account_queue_adaptive_budget_enabled: true,
+        // E4.3: the skip is switchable now; this test pins the skip path, so
+        // it opts in explicitly instead of relying on the default.
+        upstream_account_queue_skip_when_doomed_enabled: true,
         upstream_local_lease_ttl_seconds: 300,
         ..config
     })

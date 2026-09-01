@@ -223,8 +223,11 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_account_queue_adaptive_budget_enabled = 73 (E4.2),
     // plus upstream_first_output_warn_after_seconds = 74 (E6),
     // plus stream_decode_error_code_split_enabled = 75 (G2),
-    // plus stream_max_skipped_bad_frames = 76 (G3).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 76);
+    // plus stream_max_skipped_bad_frames = 76 (G3),
+    // plus upstream_account_queue_skip_when_doomed_enabled = 77 (E4.3),
+    // plus upstream_account_queue_adaptive_budget_factor = 78 (E4.3),
+    // plus upstream_account_queue_adaptive_budget_ceiling_ms = 79 (E4.3).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 79);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

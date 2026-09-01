@@ -407,3 +407,99 @@ fn e4_1_persisted_max_concurrency_survives_default_change() {
         32
     );
 }
+
+/// E4.3: `local_slot_queue_plan` derives the adaptive queue budget from the
+/// observed hold percentiles.  Before E4.3 it fed `hold_p95_seconds` (whole
+/// **seconds**) straight into a **millisecond** clamp, so `p95 × 1.5` could
+/// only clear a 10s floor at a p95 above 6666 s (~1.85 h): the budget was
+/// pinned to the floor and the whole adaptive path was dead code, and the
+/// slower the model the more useless it got.  This pins the converted maths.
+///
+/// The holds are produced through the real reserve/release path on a paused
+/// clock, so the percentiles come from genuine lease accounting rather than a
+/// hand-seeded table.
+#[tokio::test(start_paused = true)]
+async fn adaptive_queue_budget_scales_with_observed_hold_in_milliseconds() {
+    let mut upstream = test_upstream("adaptive-budget");
+    // One slot, so each reserve/release pair is strictly sequential and the
+    // hold sample is exactly the advanced duration.
+    upstream.max_concurrency = 1;
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            // Floor 10s (the shipped default) and an explicit factor/ceiling so
+            // the assertion does not silently follow a changed default.
+            upstream_account_queue_max_wait_ms: 10_000,
+            upstream_account_queue_adaptive_budget_factor: 1.5,
+            upstream_account_queue_adaptive_budget_ceiling_ms: 60_000,
+            upstream_account_queue_skip_when_doomed_enabled: true,
+            // Keep the TTL well past the holds so nothing is reclaimed as stale
+            // mid-test.
+            upstream_local_lease_ttl_seconds: 3_600,
+            upstream_lease_stale_after_ms: 86_400_000,
+            ..AppConfig::default()
+        },
+    );
+    let fingerprint = "fingerprint-adaptive";
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        fingerprint.to_string(),
+    );
+
+    // Fewer than two samples ⇒ fall back to the static floor, no skip.
+    let (budget, skip) = state.local_slot_queue_plan(&account);
+    assert_eq!(
+        (budget, skip),
+        (10_000, false),
+        "with no hold samples the plan must fall back to the static floor"
+    );
+
+    // Four holds: 20s, 20s, 20s, 30s ⇒ p50 = 20s, p95 = 30s.
+    for hold_seconds in [20_u64, 20, 20, 30] {
+        let lease = state
+            .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+            .await
+            .expect("the single slot must be free between sequential holds");
+        advance(Duration::from_secs(hold_seconds)).await;
+        state
+            .release_upstream_request(lease)
+            .await
+            .expect("release must record the hold sample");
+    }
+
+    let (budget, skip) = state.local_slot_queue_plan(&account);
+    // p95 = 30s → 30_000ms × 1.5 = 45_000ms, inside [10_000, 60_000].
+    // Pre-E4.3 this was `30 × 1.5 = 45` clamped up to the 10_000 floor.
+    assert_eq!(
+        budget, 45_000,
+        "the budget must be p95(30s)×1.5 = 45s in ms, not the floor"
+    );
+    // p50 = 20s outlasts the 10s floor ⇒ the E4.2 skip still fires.
+    assert!(
+        skip,
+        "median hold (20s) beyond the 10s floor must still mark the wait doomed"
+    );
+
+    // E4.3: the skip is switchable, and turning it off must not disturb the
+    // budget — a slow-model deployment wants to queue, not be rejected locally.
+    let mut settings = (*state.runtime_settings()).clone();
+    settings.upstream_account_queue_skip_when_doomed_enabled = false;
+    state
+        .update_runtime_settings(0, settings)
+        .await
+        .expect("runtime settings update must apply");
+    let (budget, skip) = state.local_slot_queue_plan(&account);
+    assert_eq!(
+        budget, 45_000,
+        "the budget is independent of the skip switch"
+    );
+    assert!(
+        !skip,
+        "with the skip disabled a doomed-looking wait must still queue"
+    );
+}
