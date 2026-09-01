@@ -221,7 +221,7 @@ floor=2s、中位 hold=3s，断言第 5 个请求本地快失败且上游零命�
 
 **A 和 B 必须是两个独立提交**：它们是不同的 bug，影响面和回滚粒度都不同。
 
-### L4 — 验证场景 2 的兄弟账号回退（只验证，不改行为）
+### L4 — 验证场景 2 的兄弟账号回退（只验证，不改行为）✅ 已完成（`7764d7f0`）
 
 构造 7 个账号、每个并发 4：打满 1 个账号后，请求应落到其余账号；
 只有全部账号都被本地判满，才允许进入本地槽位闸门。
@@ -243,9 +243,9 @@ floor=2s、中位 hold=3s，断言第 5 个请求本地快失败且上游零命�
 - ✅ 端到端网关测试
   （`tests/gateway/upstream_local_gate_fast_fail.rs::skip_switched_off_queues_the_overflow_instead_of_local_429`）：
   关掉 skip 后请求排队、**打到上游**（`hits == 9`）、返回 200，而不是本地 429。
-- ❌ **未做**：热调 `upstream_account_queue_max_wait_ms` 在自适应路径上生效的**专项测试**。
-  代码已改为读运行时设置（`e7c14bfa`），单测里也通过 `update_runtime_settings` 热改了 skip 开关并生效，
-  **但没有针对 `max_wait_ms` 热改后下限随之变化的独立断言**。补这条测试是安全的收尾项。
+- ✅ 热调 `max_wait_ms` 在自适应路径上生效的专项测试（`7764d7f0`）：
+  `tests/upstream_concurrency.rs::hot_reloaded_wait_floor_moves_the_adaptive_budget`。
+  反向验证：把 floor 改回读 `self.config` 后预算停在启动值 `10_000`，测试失败。
 
 不得破坏：`tests/gateway/chat/rate_limits.rs`、`tests/gateway/capacity_failure_no_cooldown.rs`、
 `tests/upstream_concurrency.rs`、`tests/account_concurrency.rs` 全绿；
@@ -266,8 +266,8 @@ grep -E "^test result:" /tmp/verify.log | awk '{p+=$4; f+=$6; n++} END {printf "
 
 1. ✅ 慢模型场景下关掉 skip 开关后不再跳过队列，且**观测到物理上游请求**（端到端测试断言 `hits == 9`）；
 2. ✅ 自适应预算随 p95 变化，不再恒等于下限（单测断言 `45_000`）；
-3. ⚠️ 热调 `max_wait_ms` 在自适应路径上生效——**代码已改，缺专项测试**（见 §6）；
-4. ⏸ 场景 2 兄弟账号回退验证（L4）**未做**；
+3. ✅ 热调 `max_wait_ms` 在自适应路径上生效，已有专项测试（`7764d7f0`）；
+4. ✅ 场景 2 兄弟账号回退验证（L4）通过，**行为未改动**（`7764d7f0`）；
 5. ✅ 全量 62 套件 / 1853 passed / 0 failed；
 6. ⏸ 根因 B **未判定**——判定方法见 §4.1，结论须写进后续提交说明。
 
@@ -311,7 +311,7 @@ grep -E "^test result:" /tmp/verify.log | awk '{p+=$4; f+=$6; n++} END {printf "
 | — | 单测钉住 `budget == 45_000` | `56a933a7` | ✅ 反向验证：坏单位下得 `10_000` |
 | — | 端到端测试：关 skip 后排队并打到上游 | `56a933a7` | ✅ 反向验证：坏单位下复现 `physical_attempt_count: 0` 的本地 429 |
 | L3 | 根因 B（陈旧租约） | — | ⏸ **未做**，判定方法见 §4.1 |
-| L4 | 场景 2 兄弟账号回退验证 | — | ⏸ **未做** |
+| L4 | 场景 2 兄弟账号回退验证 | `7764d7f0` | ✅ 回退确实生效，仅验证未改行为 |
 
 ### 10.1 验证结果
 
@@ -319,7 +319,7 @@ grep -E "^test result:" /tmp/verify.log | awk '{p+=$4; f+=$6; n++} END {printf "
 | --- | --- | --- | --- |
 | fmt | `cargo fmt --check` | 0 | ✅ 无差异（只 `-p chat-responses-codex`，未用 `--all`）|
 | clippy | `cargo clippy --all-targets` | 0 | ✅ 零 warning / error |
-| test | `cargo test` | 0 | ✅ **62 套件 / 1853 passed / 0 failed / 99 ignored**（基线 1851，+2 为本次新增）|
+| test | `cargo test` | 0 | ✅ **62 套件 / 1855 passed / 0 failed / 99 ignored**（基线 1851，+4 为本次新增）|
 
 ### 10.2 三个新设置的接线点（共 10 处，供 B 或后续加设置时照抄）
 
