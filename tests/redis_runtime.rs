@@ -5778,3 +5778,176 @@ async fn redis_downstream_admission_group_rejection_names_the_group() {
         .await
         .unwrap();
 }
+
+/// E4.4: under Redis the C3 slot queue must wait for a *Redis* slot to free.
+///
+/// The queue used to poll `local_account_lease_count`, the in-process lease
+/// table, which the Redis backend never writes — `upstream_reserve.lua` owns
+/// the leases.  So the first poll saw `0 < max_concurrency`, the queue claimed
+/// a slot had freed without waiting, the routing round re-ran straight into the
+/// still-saturated Redis gate, and the request burned its whole round budget in
+/// a busy spin before fast-failing 429 with the upstream never asked.  Every
+/// queue setting was inert on every Redis deployment.
+///
+/// Here one account has a single slot, held by `state_a` and released ~600ms
+/// later.  A correct queue parks the request for that long and then succeeds.
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_local_slot_queue_waits_for_a_redis_slot_to_free() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits = upstream_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Json(json!({
+                    "id": "chatcmpl-queue-wait",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "model-a",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+    let mut config = redis_test_config();
+    config.upstream_stream_max_duration_seconds = 86_400;
+    // The queue branch only runs while route-exhaustion retry is on, so keep it
+    // enabled here (the sibling capacity test disables it on purpose).
+    config.upstream_route_exhaustion_retry_enabled = true;
+    // Starve every *other* waiter so the queue is the only thing that can park
+    // this request.  Without this the ConcurrencySaturated recovery budget
+    // (32 rounds / 30s) sleeps between rounds and masks a broken queue — the
+    // request still succeeds, just via the retry budget rather than the queue,
+    // so the test would pass with the bug in place.  Runtime-settings
+    // validation rejects a zero budget, hence 1ms.
+    config.upstream_concurrency_recovery_max_wait_ms = 1;
+    config.upstream_concurrency_recovery_max_rounds = 1;
+    config.upstream_account_queue_enabled = true;
+    config.upstream_account_queue_max_wait_ms = 10_000;
+    config.upstream_account_queue_max_depth = 16;
+    // Pin the budget to the static floor: the adaptive budget samples hold
+    // durations from the in-process table, which stays empty under Redis, so
+    // leaving it on would only add noise to what this test pins.
+    config.upstream_account_queue_adaptive_budget_enabled = false;
+    config.upstream_account_queue_skip_when_doomed_enabled = false;
+    let (state_a, state_b, _directory) = redis_test_states(&config).await;
+
+    let api_key = "queue-wait-account";
+    let upstream = UpstreamConfig {
+        id: "redis-local-slot-queue-wait".into(),
+        name: "Redis local slot queue wait".into(),
+        base_url: format!("http://{address}"),
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["model-a".into()],
+        max_concurrency: 1,
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    state_b.insert_upstream(upstream.clone()).await.unwrap();
+
+    let downstream_key = generate_downstream_key("redis-queue-wait");
+    let mut downstream = redis_test_downstream("redis-queue-wait-downstream");
+    downstream.hash = downstream_key.hash;
+    downstream.model_allowlist = vec!["model-a".into()];
+    downstream.rate_limit_enabled = false;
+    downstream.max_concurrency = 10;
+    state_b.insert_downstream(downstream).await.unwrap();
+    // `state_a` takes the account's only slot, so `state_b` must queue.  The
+    // lease lives in Redis; the in-process table of *both* states stays empty,
+    // which is precisely why the old local-table poll could not see it.
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+    let held = state_a
+        .try_reserve_upstream_account_request(&upstream, &key_fingerprint, "model-a")
+        .await
+        .unwrap();
+    assert_eq!(
+        state_b.local_account_lease_count(&AccountConcurrencyKey::new(
+            upstream.id.clone(),
+            key_fingerprint.clone()
+        )),
+        0,
+        "the in-process table must stay empty under Redis — the premise of this test"
+    );
+
+    let releaser = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        state_a.release_upstream_request(held).await.unwrap();
+    });
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "model": "model-a",
+                "messages": [{"role": "user", "content": "hello"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let started = Instant::now();
+    let response = build_router(state_b.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    releaser.await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the queue must wait out the held Redis slot instead of fast-failing 429"
+    );
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        1,
+        "the upstream must be asked once the slot frees"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "the request must actually park in the queue, not return before the slot \
+         was released; waited only {elapsed:?}"
+    );
+
+    // The load-bearing assertion.  Waiting alone does not prove the queue
+    // works: with the local-table poll the request *also* got through, because
+    // the round kept re-running until the slot happened to free.  What that
+    // costs is visible here — every re-run dispatches another Redis reserve
+    // that the Lua gate rejects and counts.  Parking once yields a single
+    // rejection (the one that sent the request to the queue); spinning for
+    // ~600ms at a 100ms poll yields many.
+    let rejects = state_b
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .get(&upstream.id)
+        .expect("the upstream must have a runtime snapshot")
+        .capacity_reject_total;
+    assert!(
+        rejects <= 2,
+        "the queue must park on one rejection instead of busy-spinning the Redis \
+         gate; saw {rejects} capacity rejections"
+    );
+
+    upstream_server.abort();
+}

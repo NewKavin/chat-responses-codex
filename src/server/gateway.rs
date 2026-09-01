@@ -881,9 +881,26 @@ async fn wait_for_local_slot_free(
     }
     let started = tokio::time::Instant::now();
     let deadline = started + Duration::from_millis(max_wait_ms);
+    let stale_after = Duration::from_millis(state.runtime_settings().upstream_lease_stale_after_ms);
+    let capacity = upstream.max_concurrency.max(1) as usize;
+    let mut census_unavailable = false;
     let freed = loop {
-        if state.local_account_lease_count(account_key) < upstream.max_concurrency.max(1) as usize {
-            break true;
+        // E4.4: poll the backend that actually enforces the cap.  This used to
+        // read `local_account_lease_count`, which is the *in-process* lease
+        // table — always empty under Redis, where `upstream_reserve.lua` owns
+        // the leases.  So the very first check saw `0 < capacity`, the queue
+        // returned "a slot freed" without waiting at all, the routing round
+        // re-ran straight into the same saturated Redis gate, and the request
+        // burned its round budget in a busy spin before fast-failing 429 —
+        // with the upstream never asked and every queue setting inert.
+        //
+        // `None` means the enforcing backend is unreachable.  That is not
+        // evidence of a free slot: keep waiting out the deadline instead, or
+        // the spin comes straight back.
+        match state.account_lease_census(account_key, stale_after).await {
+            Some((in_flight, _)) if in_flight < capacity => break true,
+            Some(_) => {}
+            None => census_unavailable = true,
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -901,6 +918,8 @@ async fn wait_for_local_slot_free(
             queue_position,
             waited_ms,
             max_wait_ms,
+            capacity,
+            census_unavailable,
             "local concurrency queue hit: a slot freed up"
         );
     } else {
@@ -910,6 +929,8 @@ async fn wait_for_local_slot_free(
             queue_position,
             waited_ms,
             max_wait_ms,
+            capacity,
+            census_unavailable,
             "local concurrency queue gave up (depth limit or wait deadline)"
         );
     }
@@ -8833,16 +8854,26 @@ async fn process_gateway_request_inner(
                     // the local-gate terminal error instead of burning the
                     // ConcurrencySaturated budget.
                     if runtime_settings.upstream_local_gate_distinct_error_code_enabled {
-                        last_error = Some(local_gate_concurrency_saturated_error(
-                            "upstream request concurrency capacity is full",
-                            state.local_account_lease_count(account_key),
-                            upstream_for_slot.max_concurrency,
-                            state.local_account_stale_lease_count(
+                        // E4.4: report the counts held by the backend that
+                        // enforces the cap.  Reading the in-process table here
+                        // pinned `in_flight` and `stale_lease_count` to 0 on
+                        // every Redis deployment, which is exactly the pair of
+                        // fields the runbook says to use to tell "genuinely
+                        // full" from "full of stale leases".
+                        let (in_flight, stale_lease_count) = state
+                            .account_lease_census(
                                 account_key,
                                 Duration::from_millis(
                                     runtime_settings.upstream_lease_stale_after_ms,
                                 ),
-                            ),
+                            )
+                            .await
+                            .unwrap_or((0, 0));
+                        last_error = Some(local_gate_concurrency_saturated_error(
+                            "upstream request concurrency capacity is full",
+                            in_flight,
+                            upstream_for_slot.max_concurrency,
+                            stale_lease_count,
                             state.local_slot_waiter_count(account_key),
                             0,
                             last_error
@@ -8900,14 +8931,22 @@ async fn process_gateway_request_inner(
                                 .upstreams
                                 .iter()
                                 .find(|candidate| candidate.id == account_key.upstream_id);
-                            (
-                                state.local_account_lease_count(account_key),
-                                state.local_account_stale_lease_count(
+                            // E4.4: same correction as the queue-gave-up site —
+                            // the in-process lease table is empty under Redis,
+                            // so these two fields have to come from the
+                            // backend that owns the leases.
+                            let (in_flight, stale_lease_count) = state
+                                .account_lease_census(
                                     account_key,
                                     Duration::from_millis(
                                         runtime_settings.upstream_lease_stale_after_ms,
                                     ),
-                                ),
+                                )
+                                .await
+                                .unwrap_or((0, 0));
+                            (
+                                in_flight,
+                                stale_lease_count,
                                 state.local_slot_waiter_count(account_key),
                                 upstream_for_slot
                                     .map(|upstream| upstream.max_concurrency)

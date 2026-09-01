@@ -1415,6 +1415,58 @@ impl RedisRuntimeCoordinator {
         .await
     }
 
+    /// E4.4: live + stale lease counts for one account, read straight from the
+    /// index `upstream_reserve.lua` enforces the concurrency cap against.
+    ///
+    /// The Redis backend keeps its leases in Redis and never touches the
+    /// in-process lease table, so the local-gate accessors
+    /// (`local_account_lease_count` / `local_account_stale_lease_count`)
+    /// report 0 for every account under Redis.  The C3 slot queue polled the
+    /// local count to decide whether a slot had freed, so it always saw
+    /// "0 < max_concurrency", returned immediately, and the routing round
+    /// re-ran into the same saturated Redis gate — a busy spin that burned the
+    /// round budget and then fast-failed 429 without ever waiting.  This is
+    /// the backend-side counterpart those call sites need.
+    ///
+    /// Read-only: the lazy expiry/stale sweeps stay in `upstream_reserve.lua`,
+    /// so polling this cannot disturb admission accounting.
+    pub(super) async fn account_lease_census(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<(usize, usize), RuntimeCoordinationError> {
+        let upstream_identity = stable_identity(&account.upstream_id);
+        let account_identity = account_identity(account);
+        let account_lease_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "leases");
+        let lease_duration_ms = self.lease_duration_ms.load(Ordering::Relaxed);
+        let stale_after_ms = self.tuning_snapshot().upstream_lease_stale_after_ms;
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let account_lease_key = account_lease_key.clone();
+                async move {
+                    let script = redis::Script::new(include_str!(
+                        "redis_runtime/account_lease_count.lua"
+                    ));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(account_lease_key)
+                        .arg(lease_duration_ms)
+                        .arg(stale_after_ms);
+                    timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
+                        .await
+                }
+            })
+            .await?;
+        match result.as_slice() {
+            [live, stale] => Ok((
+                live.parse::<usize>().map_err(|_| RuntimeCoordinationError)?,
+                stale.parse::<usize>().map_err(|_| RuntimeCoordinationError)?,
+            )),
+            _ => Err(RuntimeCoordinationError),
+        }
+    }
+
     /// Extends an upstream request lease (P7) via the shared
     /// `lease_renew.lua` (the same script `renew_downstream_lease` uses).
     /// Idempotent: a lease that is already gone returns 0 and maps to Ok.

@@ -1360,6 +1360,34 @@ impl AppState {
         table.account_stale_lease_count(account, stale_after, tokio::time::Instant::now())
     }
 
+    /// E4.4: `(in_flight, stale)` lease counts for `account` taken from
+    /// whichever backend actually enforces the concurrency cap.
+    ///
+    /// The two `local_account_*` accessors above only ever see the in-process
+    /// lease table.  Under Redis that table is empty — `upstream_reserve.lua`
+    /// owns the leases — so they answer 0 for every account, which made the C3
+    /// slot queue believe a slot was always free and pinned the C4.2
+    /// `gateway_concurrency_saturated` details to 0/0.  Callers that need the
+    /// *authoritative* occupancy (the queue's poll, the fast-fail diagnostics)
+    /// must use this instead.
+    ///
+    /// `None` means the enforcing backend could not be reached; it is not
+    /// "zero in flight".  A caller waiting for a slot must keep waiting on
+    /// `None` rather than treat it as free, otherwise it spins.
+    pub async fn account_lease_census(
+        &self,
+        account: &AccountConcurrencyKey,
+        stale_after: Duration,
+    ) -> Option<(usize, usize)> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.account_lease_census(account).await.ok();
+        }
+        Some((
+            self.local_account_lease_count(account),
+            self.local_account_stale_lease_count(account, stale_after),
+        ))
+    }
+
     /// C3: atomically reserve a queue slot on the local concurrency gate for
     /// `account`, failing without side effects once the queue already holds
     /// `max_depth` waiters (bounded queue, `upstream_account_queue_max_depth`).
