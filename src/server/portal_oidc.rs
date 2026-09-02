@@ -622,7 +622,7 @@ async fn exchange_token(
         request
     };
 
-    let mut response = match config.auth_style {
+    let response = match config.auth_style {
         AuthStyle::Basic => attempt(false).send().await,
         AuthStyle::Params => attempt(true).send().await,
         AuthStyle::Auto => {
