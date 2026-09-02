@@ -5,6 +5,9 @@ use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
     ModelKeySyncService, RuntimeSettings, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
+    DEFAULT_PORTAL_OIDC_AUTH_STYLE, DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD,
+    DEFAULT_PORTAL_OIDC_EMAIL_FIELD, DEFAULT_PORTAL_OIDC_SCOPES,
+    DEFAULT_PORTAL_OIDC_USERNAME_FIELD, DEFAULT_PORTAL_OIDC_USER_ID_FIELD,
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED, DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
@@ -202,6 +205,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED",
         DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
     );
+    let portal_oidc_client_id = env_or("PORTAL_OIDC_CLIENT_ID", "");
+    let portal_oidc_client_secret = env_or("PORTAL_OIDC_CLIENT_SECRET", "");
+    let portal_oidc_redirect_url = env_or("PORTAL_OIDC_REDIRECT_URL", "");
+    let portal_oidc_issuer_url = env_or("PORTAL_OIDC_ISSUER_URL", "");
+    let portal_oidc_authorization_endpoint = env_or("PORTAL_OIDC_AUTHORIZATION_ENDPOINT", "");
+    let portal_oidc_token_endpoint = env_or("PORTAL_OIDC_TOKEN_ENDPOINT", "");
+    let portal_oidc_userinfo_endpoint = env_or("PORTAL_OIDC_USERINFO_ENDPOINT", "");
+    let portal_oidc_scopes = env_or("PORTAL_OIDC_SCOPES", DEFAULT_PORTAL_OIDC_SCOPES);
+    let portal_oidc_auth_style = env_or("PORTAL_OIDC_AUTH_STYLE", DEFAULT_PORTAL_OIDC_AUTH_STYLE);
+    let portal_oidc_user_id_field = env_or(
+        "PORTAL_OIDC_USER_ID_FIELD",
+        DEFAULT_PORTAL_OIDC_USER_ID_FIELD,
+    );
+    let portal_oidc_email_field =
+        env_or("PORTAL_OIDC_EMAIL_FIELD", DEFAULT_PORTAL_OIDC_EMAIL_FIELD);
+    let portal_oidc_username_field = env_or(
+        "PORTAL_OIDC_USERNAME_FIELD",
+        DEFAULT_PORTAL_OIDC_USERNAME_FIELD,
+    );
+    let portal_oidc_display_name_field = env_or(
+        "PORTAL_OIDC_DISPLAY_NAME_FIELD",
+        DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD,
+    );
     let stream_decode_error_code_split_enabled = env_bool(
         "STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED",
         DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
@@ -363,6 +389,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_local_gate_max_wait_ms,
         upstream_local_gate_fast_fail_enabled,
         upstream_local_gate_distinct_error_code_enabled,
+        portal_oidc_client_id,
+        portal_oidc_client_secret,
+        portal_oidc_redirect_url,
+        portal_oidc_issuer_url,
+        portal_oidc_authorization_endpoint,
+        portal_oidc_token_endpoint,
+        portal_oidc_userinfo_endpoint,
+        portal_oidc_scopes,
+        portal_oidc_auth_style,
+        portal_oidc_user_id_field,
+        portal_oidc_email_field,
+        portal_oidc_username_field,
+        portal_oidc_display_name_field,
         stream_decode_error_code_split_enabled,
         stream_max_skipped_bad_frames,
         upstream_continuation_pin_escape_enabled: env_bool(

@@ -366,6 +366,12 @@ pub const DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS: u64 = 3_000;
 /// pre-C4 behavior where a purely-local concurrency rejection burns the
 /// ordinary ConcurrencySaturated retry budget (30s / 32 rounds).
 pub const DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED: bool = true;
+pub const DEFAULT_PORTAL_OIDC_SCOPES: &str = "openid profile email";
+pub const DEFAULT_PORTAL_OIDC_AUTH_STYLE: &str = "auto";
+pub const DEFAULT_PORTAL_OIDC_USER_ID_FIELD: &str = "sub";
+pub const DEFAULT_PORTAL_OIDC_EMAIL_FIELD: &str = "email";
+pub const DEFAULT_PORTAL_OIDC_USERNAME_FIELD: &str = "preferred_username";
+pub const DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD: &str = "name";
 /// C4.2: whether a fast-failed local-gate rejection returns the distinct
 /// `gateway_concurrency_saturated` error code so clients and operators can
 /// tell "the gateway's own concurrency gate is full" apart from "the upstream
@@ -541,6 +547,32 @@ pub struct AppConfig {
     pub upstream_local_gate_fast_fail_enabled: bool,
     #[serde(default = "default_upstream_local_gate_distinct_error_code_enabled")]
     pub upstream_local_gate_distinct_error_code_enabled: bool,
+    #[serde(default)]
+    pub portal_oidc_client_id: String,
+    #[serde(default)]
+    pub portal_oidc_client_secret: String,
+    #[serde(default)]
+    pub portal_oidc_redirect_url: String,
+    #[serde(default)]
+    pub portal_oidc_issuer_url: String,
+    #[serde(default)]
+    pub portal_oidc_authorization_endpoint: String,
+    #[serde(default)]
+    pub portal_oidc_token_endpoint: String,
+    #[serde(default)]
+    pub portal_oidc_userinfo_endpoint: String,
+    #[serde(default = "default_portal_oidc_scopes")]
+    pub portal_oidc_scopes: String,
+    #[serde(default = "default_portal_oidc_auth_style")]
+    pub portal_oidc_auth_style: String,
+    #[serde(default = "default_portal_oidc_user_id_field")]
+    pub portal_oidc_user_id_field: String,
+    #[serde(default = "default_portal_oidc_email_field")]
+    pub portal_oidc_email_field: String,
+    #[serde(default = "default_portal_oidc_username_field")]
+    pub portal_oidc_username_field: String,
+    #[serde(default = "default_portal_oidc_display_name_field")]
+    pub portal_oidc_display_name_field: String,
     /// G2: split the two decode-failure sources into distinct error codes
     /// (default on).  Turning it off restores the legacy shared code.
     #[serde(default = "default_stream_decode_error_code_split_enabled")]
@@ -688,6 +720,19 @@ impl Default for AppConfig {
             upstream_local_gate_fast_fail_enabled: DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED,
             upstream_local_gate_distinct_error_code_enabled:
                 DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
+            portal_oidc_client_id: String::new(),
+            portal_oidc_client_secret: String::new(),
+            portal_oidc_redirect_url: String::new(),
+            portal_oidc_issuer_url: String::new(),
+            portal_oidc_authorization_endpoint: String::new(),
+            portal_oidc_token_endpoint: String::new(),
+            portal_oidc_userinfo_endpoint: String::new(),
+            portal_oidc_scopes: DEFAULT_PORTAL_OIDC_SCOPES.to_string(),
+            portal_oidc_auth_style: DEFAULT_PORTAL_OIDC_AUTH_STYLE.to_string(),
+            portal_oidc_user_id_field: DEFAULT_PORTAL_OIDC_USER_ID_FIELD.to_string(),
+            portal_oidc_email_field: DEFAULT_PORTAL_OIDC_EMAIL_FIELD.to_string(),
+            portal_oidc_username_field: DEFAULT_PORTAL_OIDC_USERNAME_FIELD.to_string(),
+            portal_oidc_display_name_field: DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD.to_string(),
             stream_decode_error_code_split_enabled: DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
             stream_max_skipped_bad_frames: DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
             upstream_continuation_pin_escape_enabled:
@@ -1636,6 +1681,24 @@ pub fn default_upstream_account_queue_adaptive_budget_ceiling_ms() -> u64 {
 
 pub fn default_upstream_local_gate_max_wait_ms() -> u64 {
     DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS
+}
+pub fn default_portal_oidc_scopes() -> String {
+    DEFAULT_PORTAL_OIDC_SCOPES.to_string()
+}
+pub fn default_portal_oidc_auth_style() -> String {
+    DEFAULT_PORTAL_OIDC_AUTH_STYLE.to_string()
+}
+pub fn default_portal_oidc_user_id_field() -> String {
+    DEFAULT_PORTAL_OIDC_USER_ID_FIELD.to_string()
+}
+pub fn default_portal_oidc_email_field() -> String {
+    DEFAULT_PORTAL_OIDC_EMAIL_FIELD.to_string()
+}
+pub fn default_portal_oidc_username_field() -> String {
+    DEFAULT_PORTAL_OIDC_USERNAME_FIELD.to_string()
+}
+pub fn default_portal_oidc_display_name_field() -> String {
+    DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD.to_string()
 }
 
 pub fn default_upstream_local_gate_fast_fail_enabled() -> bool {
