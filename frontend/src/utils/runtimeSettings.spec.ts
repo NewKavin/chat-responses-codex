@@ -316,3 +316,17 @@ describe('portal OIDC settings', () => {
     expect(portalFields.every(field => field.apply === 'immediate')).toBe(true)
   })
 })
+
+describe('portal OIDC settings save path', () => {
+  it('allows an empty email-domain allowlist (empty = unrestricted)', () => {
+    const settings = validSettings()
+    settings.portal_oidc_allowed_email_domains = ''
+    expect(validateRuntimeSettings(settings)).toEqual({})
+  })
+
+  it('still flags non-allowEmpty text fields as required', () => {
+    const settings = validSettings()
+    ;(settings as unknown as Record<string, unknown>).app_name = ''
+    expect(validateRuntimeSettings(settings).app_name).toBeTruthy()
+  })
+})

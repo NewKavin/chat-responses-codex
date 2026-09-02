@@ -30,6 +30,8 @@ export interface RuntimeSettingField {
   step?: number
   integer?: boolean
   maxLength?: number
+  /** Text fields whose empty string is meaningful (empty = unrestricted). */
+  allowEmpty?: boolean
   description?: string
 }
 
@@ -678,6 +680,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     label: '邮箱域名白名单',
     apply: 'immediate',
     control: 'text',
+    allowEmpty: true,
     description: '逗号分隔的允许域名（如 example.com），空表示不限制。子域自动放行。'
   },
   {
@@ -957,7 +960,9 @@ export const validateRuntimeSettings = (
   for (const field of runtimeSettingFields) {
     const value = settings[field.key]
     if (field.control === 'text') {
-      if (typeof value !== 'string' || value.trim().length === 0) {
+      if (typeof value !== 'string') {
+        errors[field.key] = '不能为空'
+      } else if (value.trim().length === 0 && field.allowEmpty !== true) {
         errors[field.key] = '不能为空'
       } else if (field.maxLength !== undefined && [...value.trim()].length > field.maxLength) {
         errors[field.key] = `最多 ${field.maxLength} 个字符`
