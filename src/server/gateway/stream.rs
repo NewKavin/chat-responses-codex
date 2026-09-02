@@ -3158,14 +3158,14 @@ mod diagnostic_tests {
             .with_writer(capture.clone())
             .finish();
         let usage_context = StreamUsageLogContext {
-            state: AppState::new(
+            state: Arc::new(AppState::new(
                 crate::state::PersistedState::default(),
                 std::env::temp_dir().join(format!(
                     "chat2responses-stream-diagnostics-{}.json",
                     uuid::Uuid::new_v4()
                 )),
                 AppConfig::default(),
-            ),
+            )),
             request_id: "request-diagnostic-marker".into(),
             downstream_key_id: "api-key-secret".into(),
             downstream_name: Some("excluded-downstream-name-marker".into()),

@@ -1055,7 +1055,7 @@ async fn stream_completion_fixture(
         .await
         .unwrap();
     StreamCompletionContext {
-        state: state.clone(),
+        state: Arc::new(state.clone()),
         route_health_key: route,
         route_attempts,
         route_health_permit: Arc::new(TokioMutex::new(Some(permit))),

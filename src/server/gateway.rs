@@ -1858,7 +1858,7 @@ impl FirstTokenLatency {
 
 #[derive(Clone)]
 struct StreamUsageLogContext {
-    state: AppState,
+    state: Arc<AppState>,
     request_id: String,
     downstream_key_id: String,
     downstream_name: Option<String>,
@@ -3783,7 +3783,7 @@ fn upstream_lease_ttl_seconds(state: &AppState) -> u64 {
 
 #[derive(Clone)]
 struct StreamCompletionContext {
-    state: AppState,
+    state: Arc<AppState>,
     route_health_key: RouteHealthKey,
     route_attempts: RequestRouteAttempts,
     route_health_permit: Arc<TokioMutex<Option<RouteHealthPermit>>>,
@@ -4026,7 +4026,7 @@ async fn wait_on_pre_header_preparation_test_gate(gated: bool) {
 
 #[derive(Clone)]
 struct ResponseHistoryContext {
-    state: AppState,
+    state: Arc<AppState>,
     downstream_key_id: String,
     history_input_items: Vec<Value>,
     history_request_state: Map<String, Value>,
@@ -4481,7 +4481,7 @@ async fn prepare_response_history_context_with_replay(
     object.remove("previous_response_id");
 
     Ok(ResponseHistoryContext {
-        state: state.clone(),
+        state: Arc::new(state.clone()),
         downstream_key_id: downstream_key_id.to_string(),
         history_input_items: effective_input_items,
         history_request_state,
@@ -7302,7 +7302,7 @@ async fn process_gateway_request_inner(
                         let stream_completion_context = attempt_mode
                             .needs_stream_completion_context()
                             .then(|| StreamCompletionContext {
-                                state: state.clone(),
+                                state: Arc::new(state.clone()),
                                 route_health_key: route_health_key.clone(),
                                 route_attempts: request_route_attempts.clone(),
                                 route_health_permit: route_health_permit.clone(),
@@ -7318,7 +7318,7 @@ async fn process_gateway_request_inner(
                             cancellation.arm(
                                 completion.clone(),
                                 StreamUsageLogContext {
-                                    state: state.clone(),
+                                    state: Arc::new(state.clone()),
                                     request_id: request_id.clone(),
                                     downstream_key_id: downstream.id.clone(),
                                     downstream_name: Some(downstream.name.clone()),

@@ -745,7 +745,7 @@ fn send_route_hedge_attempt(
             upstream_request_lease,
         ));
         let completion = StreamCompletionContext {
-            state: context.state.clone(),
+            state: Arc::new(context.state.clone()),
             route_health_key: route_health_key.clone(),
             route_attempts: context.route_attempts.clone(),
             route_health_permit,
@@ -2593,7 +2593,7 @@ pub(super) async fn send_to_upstream(
                 body_read_diagnostic_context.first_token_latency = FirstTokenLatency::default();
             }
             let stream_log_context = StreamUsageLogContext {
-                state: state.clone(),
+                state: Arc::new(state.clone()),
                 request_id: request_id.to_string(),
                 downstream_key_id: downstream_key_id.to_string(),
                 downstream_name: Some(downstream_name.to_string()),
