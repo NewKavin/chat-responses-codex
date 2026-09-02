@@ -432,31 +432,40 @@ async fn resolve_identity(
 ) -> Result<crate::state::PortalUser, Response> {
     const PROVIDER: &str = "oidc";
 
-    // Steps 6-7: sub and email are mandatory; the error names the missing field.
-    let subject = config.user_id_field.resolve(userinfo).ok_or_else(|| {
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "missing_user_id_field",
-            &format!(
-                "userinfo is missing '{}' (configured via PORTAL_OIDC_USER_ID_FIELD)",
-                config.user_id_field
-            ),
-        )
-    })?;
-    let email = config.email_field.resolve(userinfo).ok_or_else(|| {
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "missing_email_field",
-            &format!(
-                "userinfo is missing '{}' (configured via PORTAL_OIDC_EMAIL_FIELD)",
-                config.email_field
-            ),
-        )
-    })?;
+    // Steps 6-7: sub and email are mandatory (empty counts as missing); the
+    // error names the offending field.
+    let subject = config
+        .user_id_field
+        .resolve(userinfo)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "missing_user_id_field",
+                &format!(
+                    "userinfo is missing or empty '{}' (configured via PORTAL_OIDC_USER_ID_FIELD)",
+                    config.user_id_field
+                ),
+            )
+        })?;
+    let email = config
+        .email_field
+        .resolve(userinfo)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "missing_email_field",
+                &format!(
+                    "userinfo is missing or empty '{}' (configured via PORTAL_OIDC_EMAIL_FIELD)",
+                    config.email_field
+                ),
+            )
+        })?;
     if !email_allowed(&email, &settings.portal_oidc_allowed_email_domains) {
         return Err(error_response(
             StatusCode::FORBIDDEN,
-            "email_domain_not_allowed",
+            "portal_email_domain_not_allowed",
             &format!("email domain of '{email}' is not allowed"),
         ));
     }
@@ -504,13 +513,11 @@ async fn resolve_identity(
                 }
             }
         }
-        Ok(None) => {
-            return Err(error_response(
-                StatusCode::FORBIDDEN,
-                "registration_disabled",
-                "OIDC registration is disabled and this identity has no portal user",
-            ))
-        }
+        Ok(None) => return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "portal_registration_disabled",
+            "OIDC registration is disabled; contact an administrator or bind this account first",
+        )),
         Err(error) => {
             return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -524,7 +531,7 @@ async fn resolve_identity(
     if user.disabled {
         return Err(error_response(
             StatusCode::FORBIDDEN,
-            "account_disabled",
+            "portal_user_disabled",
             "this portal account is disabled",
         ));
     }
@@ -537,7 +544,7 @@ async fn resolve_identity(
             Ok(Some(_)) => Ok(user),
             Ok(None) => Err(error_response(
                 StatusCode::FORBIDDEN,
-                "access_not_granted",
+                "portal_access_not_granted",
                 "no downstream key is bound to this account; ask an administrator",
             )),
             Err(error) => Err(error_response(
@@ -573,6 +580,14 @@ async fn current_login_downstream(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::to_string)?;
+    if bearer.starts_with("eyJ") {
+        // Legacy 工号+key login issues a JWT whose sub is the employee id,
+        // which is also the downstream id (design §4.2's eyJ branch).
+        if let Ok(claims) = crate::auth::verify_admin_token(&bearer, &state.config.jwt_secret) {
+            return Some(claims.sub);
+        }
+        return None;
+    }
     state
         .downstream_for_secret(&bearer)
         .await

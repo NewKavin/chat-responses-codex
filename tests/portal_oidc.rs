@@ -1615,3 +1615,187 @@ async fn authenticated_but_unbound_first_login_is_403_and_no_key_is_issued() {
     assert_eq!(store.default_downstream(&user.id).await.unwrap(), None);
     idp.abort();
 }
+
+// =================== self-check fixes (RED for discovered gaps) ===================
+
+#[tokio::test]
+async fn bind_works_with_legacy_jwt_login() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    use chat_responses_codex::keys::generate_downstream_key;
+    let key = generate_downstream_key("team-a");
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    let jwt = self_check_portal_jwt(&state, &key).await;
+    let mut downstream = DownstreamConfig {
+        id: "team-a".to_string(),
+        name: "team-a".to_string(),
+        hash: key.hash,
+        plaintext_key: Some(key.plaintext.clone()),
+        active: true,
+        model_allowlist: vec![],
+        ..Default::default()
+    };
+    let _ = downstream.plaintext_key.take();
+    state.insert_downstream(downstream).await.unwrap();
+    let result = run_bind_flow(&router, &jwt, "team-a").await;
+    assert_eq!(
+        result.status,
+        StatusCode::FOUND,
+        "bind must accept a legacy JWT login"
+    );
+    let store = state.portal_store().unwrap();
+    assert!(store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .is_some());
+    idp.abort();
+}
+
+#[tokio::test]
+async fn empty_sub_or_email_is_400_naming_the_field() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    // empty email
+    let idp = MockIdpBuilder::default()
+        .claims(serde_json::json!({ "sub": "sub-x", "email": "" }))
+        .start()
+        .await;
+    let (router, _state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    let result = run_login_flow(&router).await;
+    assert_eq!(
+        result.status,
+        StatusCode::BAD_REQUEST,
+        "empty email must 400"
+    );
+    idp.abort();
+
+    // empty sub
+    let idp = MockIdpBuilder::default()
+        .claims(serde_json::json!({ "sub": "", "email": "u@example.com" }))
+        .start()
+        .await;
+    let (router, _state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    let result = run_login_flow(&router).await;
+    assert_eq!(result.status, StatusCode::BAD_REQUEST, "empty sub must 400");
+    idp.abort();
+}
+
+#[tokio::test]
+async fn expired_state_is_rejected_with_400() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+
+    // Insert a state that is already past its 10-minute TTL.
+    let now = chat_responses_codex::state::unix_seconds() as i64;
+    state
+        .insert_oidc_handshake(
+            "stale-state".to_string(),
+            chat_responses_codex::state::PortalOidcHandshake {
+                code_verifier: None,
+                downstream_id: None,
+                expires_at_unix: now - 1,
+            },
+        )
+        .await;
+    let callback = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/callback?code=whatever&state=stale-state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        callback.status(),
+        StatusCode::BAD_REQUEST,
+        "expired state must 400"
+    );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn second_login_reuses_the_same_user() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+    let store = state.portal_store().unwrap();
+
+    let first = run_login_flow(&router).await;
+    assert_eq!(first.status, StatusCode::FOUND);
+    let user_after_first = store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let second = run_login_flow(&router).await;
+    assert_eq!(second.status, StatusCode::FOUND);
+    let user_after_second = store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        user_after_first.id, user_after_second.id,
+        "second login must reuse the same portal user"
+    );
+
+    let (total, _) = store.list_users("", 100, 0).await.unwrap();
+    assert_eq!(total, 1, "no duplicate users may be created");
+    idp.abort();
+}
+
+/// Legacy JWT for the logged-in employee (sub = employee id = downstream id).
+async fn self_check_portal_jwt(
+    state: &AppState,
+    key: &chat_responses_codex::keys::GeneratedDownstreamKey,
+) -> String {
+    let _ = state;
+    chat_responses_codex::auth::generate_admin_token(&key.plaintext, "test-jwt-secret")
+        .expect("jwt generation")
+}
