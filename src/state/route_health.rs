@@ -602,6 +602,14 @@ pub struct RouteHealthRegistry {
     /// consecutive_failures advance), so a client's retry loop can keep
     /// hitting the (possibly only) route instead of being locked out.
     capacity_failure_cooldown_enabled: bool,
+    /// 2026-09-02: route-health enforcement switch.  When false the registry
+    /// keeps recording health observations (last_access, cooldown, failure
+    /// classes) but never blocks a request: `reserve()` /
+    /// `reserve_route_health_probe()` never return `Cooling` or
+    /// `HalfOpenBusy`, every call is a plain `Ready` admission so a route
+    /// cooldown can no longer mask an upstream error as a local 429/503.
+    /// Default true preserves the historical behavior byte for byte.
+    enforcement_enabled: bool,
     /// E5.3: per-upstream cumulative count of times E1/E2 skipped a route/key
     /// cooldown for a capacity-class failure (recorded as observation only).
     /// The incubating incidents never cool a route, and this counter is how
@@ -710,6 +718,34 @@ impl RouteHealthRegistry {
         credentials_first_strike_seconds: u64,
         capacity_failure_cooldown_enabled: bool,
     ) -> Self {
+        Self::new_with_runtime_tuning_and_enforcement(
+            route_capacity,
+            per_upstream_capacity,
+            concurrency_probe_delays_ms,
+            transient_route_cooldown_base_seconds,
+            transient_route_cooldown_max_seconds,
+            transient_route_cooldown_max_step,
+            half_open_ttl_seconds,
+            half_open_exclusive_window_ms,
+            credentials_first_strike_seconds,
+            capacity_failure_cooldown_enabled,
+            true,
+        )
+    }
+
+    pub fn new_with_runtime_tuning_and_enforcement(
+        route_capacity: usize,
+        per_upstream_capacity: usize,
+        concurrency_probe_delays_ms: Vec<u64>,
+        transient_route_cooldown_base_seconds: u64,
+        transient_route_cooldown_max_seconds: u64,
+        transient_route_cooldown_max_step: u32,
+        half_open_ttl_seconds: u64,
+        half_open_exclusive_window_ms: u64,
+        credentials_first_strike_seconds: u64,
+        capacity_failure_cooldown_enabled: bool,
+        route_health_enforcement_enabled: bool,
+    ) -> Self {
         let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
         let transient_route_cooldown_max_seconds =
             transient_route_cooldown_max_seconds.max(transient_route_cooldown_base_seconds);
@@ -732,6 +768,7 @@ impl RouteHealthRegistry {
             half_open_exclusive_window: Duration::from_millis(half_open_exclusive_window_ms),
             credentials_first_strike: Duration::from_secs(credentials_first_strike_seconds.max(1)),
             capacity_failure_cooldown_enabled,
+            enforcement_enabled: route_health_enforcement_enabled,
             cooldown_skipped_total: HashMap::new(),
         }
     }
@@ -746,6 +783,7 @@ impl RouteHealthRegistry {
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
         capacity_failure_cooldown_enabled: bool,
+        route_health_enforcement_enabled: bool,
     ) {
         let base = Duration::from_secs(transient_route_cooldown_base_seconds.max(1));
         let max = Duration::from_secs(
@@ -770,6 +808,7 @@ impl RouteHealthRegistry {
         self.credentials_first_strike =
             Duration::from_secs(credentials_first_strike_seconds.max(1));
         self.capacity_failure_cooldown_enabled = capacity_failure_cooldown_enabled;
+        self.enforcement_enabled = route_health_enforcement_enabled;
 
         for state in self.routes.values_mut() {
             if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
@@ -807,6 +846,14 @@ impl RouteHealthRegistry {
                 state.half_open_exclusive_until = Some(max_exclusive_until);
             }
         }
+    }
+
+    /// Hot-switch for passthrough mode (2026-09-02).  The runtime-settings
+    /// update path drives this through `update_runtime_tuning`; the setter
+    /// lets tests flip just the enforcement bit without re-applying the whole
+    /// tuning batch.
+    pub fn set_route_health_enforcement_enabled(&mut self, enabled: bool) {
+        self.enforcement_enabled = enabled;
     }
 
     pub fn route_health_snapshot(&self, route: &RouteHealthKey) -> Option<HealthStateSnapshot> {
@@ -999,6 +1046,33 @@ impl RouteHealthRegistry {
         debug_assert_eq!(route.key_fingerprint, key.key_fingerprint);
         let now = Instant::now();
 
+        if !self.enforcement_enabled {
+            // 2026-09-02 passthrough mode: record-only admission.  The health
+            // journal is still updated (last_access / snapshots / failures),
+            // but a cooling route or a busy half-open lease never blocks the
+            // request.  No half-open generation is granted either: a grant
+            // would make a second caller of the same recovering route see
+            // `HalfOpenBusy`, which passthrough mode must never emit.  The
+            // captured `route_state_generation` still lets the regular
+            // success path clear the stale cooldown (same-observation), so
+            // re-enabling enforcement never trips over an old cooldown.
+            if let Some(state) = self.keys.get_mut(key) {
+                state.last_access = now;
+            }
+            if let Some(state) = self.routes.get_mut(route) {
+                state.last_access = now;
+            }
+            let route_state_generation = self.routes.get(route).map(|state| state.state_generation);
+            return RouteAvailability::Ready(HealthLease {
+                route: route.clone(),
+                key: key.clone(),
+                key_generation: None,
+                route_generation: None,
+                route_state_generation,
+                half_open: false,
+            });
+        }
+
         if let Some(state) = self.keys.get_mut(key) {
             state.last_access = now;
             if state.is_cooling(now) {
@@ -1108,6 +1182,29 @@ impl RouteHealthRegistry {
         debug_assert_eq!(route.upstream_id, key.upstream_id);
         debug_assert_eq!(route.key_fingerprint, key.key_fingerprint);
         let now = Instant::now();
+
+        if !self.enforcement_enabled {
+            // Passthrough mode: mirror `reserve()` — plain Ready admission,
+            // no half-open lease, never cooling/busy.  (The early probe is
+            // effectively unreachable while enforcement is off because the
+            // regular reserve never refuses a route, but the branch must not
+            // contradict the switch.)
+            if let Some(state) = self.keys.get_mut(key) {
+                state.last_access = now;
+            }
+            if let Some(state) = self.routes.get_mut(route) {
+                state.last_access = now;
+            }
+            let route_state_generation = self.routes.get(route).map(|state| state.state_generation);
+            return RouteAvailability::Ready(HealthLease {
+                route: route.clone(),
+                key: key.clone(),
+                key_generation: None,
+                route_generation: None,
+                route_state_generation,
+                half_open: false,
+            });
+        }
 
         if let Some(state) = self.keys.get_mut(key) {
             state.last_access = now;

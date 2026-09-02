@@ -46,6 +46,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_transient_route_cooldown_max_seconds: 60,
   upstream_transient_route_cooldown_max_step: 2,
   upstream_route_health_half_open_ttl_seconds: 30,
+  upstream_route_health_enforcement_enabled: true,
   upstream_route_half_open_exclusive_window_ms: 3_000,
   upstream_route_half_open_busy_max_rounds: 10,
   upstream_retry_after_cap_seconds: 30,
@@ -135,6 +136,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_transient_route_cooldown_max_seconds',
   'upstream_transient_route_cooldown_max_step',
   'upstream_route_health_half_open_ttl_seconds',
+  'upstream_route_health_enforcement_enabled',
   'upstream_route_half_open_exclusive_window_ms',
   'upstream_route_half_open_busy_max_rounds',
   'upstream_retry_after_cap_seconds',
@@ -201,10 +203,10 @@ describe('runtime settings catalog', () => {
       'observability',
       'portal'
     ])
-    expect(runtimeSettingFields).toHaveLength(86)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(86)
+    expect(runtimeSettingFields).toHaveLength(87)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(87)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(73)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(74)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

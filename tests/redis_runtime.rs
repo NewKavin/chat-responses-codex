@@ -5502,6 +5502,54 @@ fn redis_lua_scripts_thread_the_t1_cooldown_parameters() {
 }
 
 // ============================================================================
+// 2026-09-02: no-Redis drift guard -- the route-health enforcement switch
+// (passthrough mode) must be threaded into the Redis backend exactly like the
+// local backend.  The Lua reserve/probe scripts share the switch via ARGV[6];
+// the tuning snapshot carries it from RuntimeSettings into the coordinator.
+// A change that leaves the Redis backend behind (the highest-probability
+// failure mode, see the 2026-09-02 plan §4b/§10) fails here on every
+// `cargo test`, no Redis required.
+// ============================================================================
+#[test]
+fn redis_lua_scripts_thread_the_route_health_enforcement_switch() {
+    let reserve = include_str!("../src/state/redis_runtime/route_health_reserve.lua");
+    let probe = include_str!("../src/state/redis_runtime/route_health_probe.lua");
+    let coordinator_source =
+        std::fs::read_to_string("src/state/redis_runtime.rs").expect("redis_runtime.rs");
+
+    // RuntimeSettings -> coordinator tuning.
+    assert!(
+        coordinator_source.contains("settings.upstream_route_health_enforcement_enabled"),
+        "RuntimeCoordination::update_runtime_tuning must read the enforcement switch          from RuntimeSettings"
+    );
+    assert!(
+        coordinator_source.contains("route_health_enforcement_enabled"),
+        "RedisRuntimeTuning must carry route_health_enforcement_enabled"
+    );
+    // Coordinator -> both Lua invocations (reserve + probe).
+    assert!(
+        coordinator_source.contains("self.tuning_snapshot().route_health_enforcement_enabled"),
+        "the coordinator must append the enforcement switch to the Lua invocations"
+    );
+    // Both Lua scripts must honor the switch: record-only admission, never
+    // cooling/busy, never a half-open lease, same-observation generation.
+    for (name, script) in [("reserve", reserve), ("probe", probe)] {
+        assert!(
+            script.contains("ARGV[6] == '1'"),
+            "route_health_{name}.lua must read ARGV[6] as the enforcement switch"
+        );
+        assert!(
+            script.contains("not enforcement_enabled"),
+            "route_health_{name}.lua must branch on the passthrough mode"
+        );
+        assert!(
+            script.contains("route_state_generation"),
+            "route_health_{name}.lua must capture the route state_generation so a              passthrough success clears the stale cooldown (same-observation)"
+        );
+    }
+}
+
+// ============================================================================
 // C7 (2026-08-27): no-Redis drift guard -- the downstream per-model group caps
 // must be threaded into the Redis backend's Lua scripts, mirroring the local
 // backend (group cap first, downstream-wide global backstop second).  This
@@ -6157,4 +6205,156 @@ async fn redis_queue_poll_interval_setting_drives_the_census_cadence() {
     );
 
     upstream_server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-02 passthrough switch, Redis backend.  The Lua reserve/probe scripts
+// carry the same `route_health_enforcement_enabled` ARGV as the local
+// registry: when disabled they record health but never return cooling/busy.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_passthrough_reserve_returns_ready_while_cooling() {
+    let mut config = redis_test_config();
+    // Long cooldown so the seeded failure is still cooling for the whole test
+    // even under the parallel suite.
+    config.upstream_transient_route_cooldown_base_seconds = 30;
+    config.upstream_route_health_enforcement_enabled = false;
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("passthrough-cooling", "fingerprint-a");
+    let route = redis_test_health_route("passthrough-cooling", "fingerprint-a", "model-a");
+
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
+        .await
+        .unwrap();
+    let snapshot = state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("seeded failure must be recorded");
+    assert!(snapshot.cooldown_remaining > Duration::ZERO, "{snapshot:?}");
+
+    let lease = match state.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("passthrough must admit a cooling route, got {other:?}"),
+    };
+    assert!(
+        !lease.is_half_open(),
+        "passthrough leases carry no half-open generation"
+    );
+    lease.finish(RouteOutcome::Success).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_passthrough_reserve_never_reports_half_open_busy() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 30;
+    config.upstream_route_health_enforcement_enabled = false;
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("passthrough-window", "fingerprint-a");
+    let route = redis_test_health_route("passthrough-window", "fingerprint-a", "model-a");
+
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
+        .await
+        .unwrap();
+
+    // Second and third callers inside the (still-cooling) route must both be
+    // admitted, never `HalfOpenBusy`.
+    let first = match state.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected ready lease, got {other:?}"),
+    };
+    assert!(matches!(
+        state.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(lease) if !lease.is_half_open()
+    ));
+    assert!(matches!(
+        state.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(_)
+    ));
+    first.finish(RouteOutcome::Success).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_passthrough_failure_still_records_cooldown() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 30;
+    config.upstream_route_health_enforcement_enabled = false;
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("passthrough-record", "fingerprint-a");
+    let route = redis_test_health_route("passthrough-record", "fingerprint-a", "model-a");
+
+    let lease = match state.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected ready lease, got {other:?}"),
+    };
+    lease
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: Some(502),
+            repeat_within_request: false,
+            sole_candidate: false,
+            capacity_sole_route: false,
+            shared_host_failure_domain: false,
+        })
+        .await
+        .unwrap();
+
+    let snapshot = state
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .expect("the passthrough failure must be recorded");
+    assert_eq!(
+        snapshot.last_failure_class,
+        Some(RouteFailureClass::TransientServer),
+        "{snapshot:?}"
+    );
+    assert_eq!(snapshot.consecutive_failures, 1, "{snapshot:?}");
+    assert!(
+        snapshot.cooldown_remaining > Duration::ZERO,
+        "passthrough must still write the cooldown: {snapshot:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_passthrough_success_clears_route_cooldown() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 30;
+    config.upstream_route_health_enforcement_enabled = false;
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("passthrough-success", "fingerprint-a");
+    let route = redis_test_health_route("passthrough-success", "fingerprint-a", "model-a");
+
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None, false)
+        .await
+        .unwrap();
+    assert!(
+        state
+            .route_health_snapshot(&route)
+            .await
+            .unwrap()
+            .unwrap()
+            .cooldown_remaining
+            > Duration::ZERO
+    );
+
+    let lease = match state.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected ready lease, got {other:?}"),
+    };
+    lease.finish(RouteOutcome::Success).await.unwrap();
+
+    let snapshot = state.route_health_snapshot(&route).await.unwrap();
+    assert!(
+        snapshot.is_none(),
+        "a passthrough success must clear the stale cooldown, got {snapshot:?}"
+    );
 }

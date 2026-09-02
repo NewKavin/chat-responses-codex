@@ -208,8 +208,9 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + upstream_account_queue_poll_interval_ms (C3 census cadence)
     // + portal_oidc_enabled/_registration_enabled/_allowed_email_domains,
     // + portal_session_ttl_seconds, portal_oidc_pkce_enabled, portal_oidc_verify_id_token
-    // = 85.
-    assert_eq!(all.len(), 85);
+    // + upstream_route_health_enforcement_enabled (route-health passthrough)
+    // = 86.
+    assert_eq!(all.len(), 86);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -223,6 +224,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         "upstream_transient_route_cooldown_max_seconds",
         "upstream_transient_route_cooldown_max_step",
         "upstream_route_health_half_open_ttl_seconds",
+        "upstream_route_health_enforcement_enabled",
         "upstream_route_half_open_exclusive_window_ms",
         "upstream_concurrency_recovery_max_wait_ms",
         "upstream_concurrency_probe_delays_ms",

@@ -100,6 +100,13 @@ pub const DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: u64 = 5;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
+/// 2026-09-02: route-health enforcement switch.  When false the gateway keeps
+/// recording route/key health but never blocks: `reserve()` never returns
+/// Cooling / HalfOpenBusy, every request is really forwarded and upstream
+/// errors are no longer masked by a route-health cooldown (the gateway's
+/// pre-existing aggregation/common-mode handling still applies).  Default true
+/// preserves the historical behavior.
+pub const DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 /// T1.3: cap on the failure step for non-half-open failures (default 3).
 /// Without it the local exponential cooldown (`base << (step-1)`) escalates
@@ -477,6 +484,15 @@ pub struct AppConfig {
     /// task, dropped client), the lease must expire so the route can be
     /// probed again instead of blocking every request with a fake 1s retry.
     pub upstream_route_health_half_open_ttl_seconds: u64,
+    /// 2026-09-02: route-health enforcement switch.  When false the health
+    /// layer is record-only: cooldowns and half-open state are still counted
+    /// and surfaced to operators, but `reserve()` never returns Cooling /
+    /// HalfOpenBusy, every request is really sent upstream instead of being
+    /// rejected locally as 429/503, so `upstream_attempted_count` stays > 0.
+    /// The gateway's pre-existing aggregation/common-mode handling still
+    /// applies.  Default true keeps the existing protection on.
+    #[serde(default = "default_upstream_route_health_enforcement_enabled")]
+    pub upstream_route_health_enforcement_enabled: bool,
     /// Maximum time a single half-open probe may exclusively occupy a
     /// recovering route (milliseconds, default 3s; 0 disables the window).
     /// Once the window elapses, concurrent requests are admitted without a
@@ -706,6 +722,8 @@ impl Default for AppConfig {
             upstream_transient_route_cooldown_max_step:
                 DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP,
             upstream_route_health_half_open_ttl_seconds: DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+            upstream_route_health_enforcement_enabled:
+                DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED,
             upstream_route_half_open_exclusive_window_ms:
                 DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
             upstream_route_half_open_busy_max_rounds:
@@ -1622,6 +1640,10 @@ pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
 
 pub fn default_upstream_route_half_open_exclusive_window_ms() -> u64 {
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS
+}
+
+pub fn default_upstream_route_health_enforcement_enabled() -> bool {
+    DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED
 }
 
 pub fn default_upstream_route_half_open_busy_max_rounds() -> u32 {

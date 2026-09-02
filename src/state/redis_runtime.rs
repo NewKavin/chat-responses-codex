@@ -192,6 +192,8 @@ impl RuntimeCoordinationBackend {
                         .saturating_mul(1_000),
                     route_health_half_open_exclusive_window_ms: config
                         .upstream_route_half_open_exclusive_window_ms,
+                    route_health_enforcement_enabled: config
+                        .upstream_route_health_enforcement_enabled,
                     concurrency_probe_delays: normalize_concurrency_probe_delays(
                         config.upstream_concurrency_probe_delays_ms.clone(),
                     ),
@@ -247,6 +249,7 @@ impl RuntimeCoordinationBackend {
                 settings.upstream_route_half_open_exclusive_window_ms,
                 settings.upstream_credentials_first_strike_seconds,
                 settings.upstream_capacity_failure_cooldown_enabled,
+                settings.upstream_route_health_enforcement_enabled,
             );
         }
     }
@@ -270,6 +273,7 @@ struct RedisRuntimeTuning {
     route_health_ttl_seconds: u64,
     route_health_half_open_ttl_ms: u64,
     route_health_half_open_exclusive_window_ms: u64,
+    route_health_enforcement_enabled: bool,
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
@@ -293,6 +297,7 @@ impl RedisRuntimeCoordinator {
         half_open_exclusive_window_ms: u64,
         credentials_first_strike_seconds: u64,
         capacity_failure_cooldown_enabled: bool,
+        route_health_enforcement_enabled: bool,
     ) {
         let base_seconds = transient_route_cooldown_base_seconds.max(1);
         let max_seconds = transient_route_cooldown_max_seconds
@@ -311,6 +316,7 @@ impl RedisRuntimeCoordinator {
             route_health_retention_ttl_seconds(Duration::from_secs(max_seconds));
         tuning.route_health_half_open_ttl_ms = half_open_ttl_seconds.max(1).saturating_mul(1_000);
         tuning.route_health_half_open_exclusive_window_ms = half_open_exclusive_window_ms;
+        tuning.route_health_enforcement_enabled = route_health_enforcement_enabled;
         tuning.concurrency_probe_delays =
             normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
         tuning.transient_route_cooldown_base = Duration::from_secs(base_seconds);
@@ -1771,6 +1777,13 @@ impl RedisRuntimeCoordinator {
             .arg(
                 self.tuning_snapshot()
                     .route_health_half_open_exclusive_window_ms,
+            )
+            .arg(
+                if self.tuning_snapshot().route_health_enforcement_enabled {
+                    1
+                } else {
+                    0
+                },
             );
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
@@ -1805,6 +1818,13 @@ impl RedisRuntimeCoordinator {
             .arg(
                 self.tuning_snapshot()
                     .route_health_half_open_exclusive_window_ms,
+            )
+            .arg(
+                if self.tuning_snapshot().route_health_enforcement_enabled {
+                    1
+                } else {
+                    0
+                },
             );
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;

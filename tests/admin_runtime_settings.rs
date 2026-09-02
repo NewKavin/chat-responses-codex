@@ -227,8 +227,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_account_queue_skip_when_doomed_enabled = 77 (E4.3),
     // plus upstream_account_queue_adaptive_budget_factor = 78 (E4.3),
     // plus upstream_account_queue_adaptive_budget_ceiling_ms = 79 (E4.3),
-    // plus the six portal OIDC settings = 85 (T7).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 86);
+    // plus the six portal OIDC settings = 85 (T7),
+    // plus upstream_route_health_enforcement_enabled = 87 (route-health passthrough).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 87);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }
