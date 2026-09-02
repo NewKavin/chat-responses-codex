@@ -1273,3 +1273,211 @@ async fn admin_portal_endpoints_require_authentication() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     idp.abort();
 }
+
+// ===================== remaining acceptance tests (§8) =====================
+
+#[tokio::test]
+async fn email_domain_allowlist_admits_subdomains() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    // subdomain email admitted when the base domain is allowlisted
+    let idp = MockIdpBuilder::default()
+        .claims(serde_json::json!({
+            "sub": "sub-1",
+            "email": "person@engineering.example.com",
+        }))
+        .start()
+        .await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+        config.portal_oidc_allowed_email_domains = "example.com".to_string();
+    })
+    .await;
+    seed_bound_user(&state, "person@engineering.example.com", "sub-1", "team-a").await;
+    let result = run_login_flow(&router).await;
+    assert_eq!(
+        result.status,
+        StatusCode::FOUND,
+        "subdomain email must pass when the base domain is allowed"
+    );
+    idp.abort();
+
+    // a foreign domain is refused
+    let idp = MockIdpBuilder::default()
+        .claims(serde_json::json!({
+            "sub": "sub-2",
+            "email": "person@evil.org",
+        }))
+        .start()
+        .await;
+    let (router, _state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+        config.portal_oidc_allowed_email_domains = "example.com".to_string();
+    })
+    .await;
+    let result = run_login_flow(&router).await;
+    assert_eq!(
+        result.status,
+        StatusCode::FORBIDDEN,
+        "e-mail outside the allowlist must be refused"
+    );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn disabled_oidc_hides_start_endpoint() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, _state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_enabled = false;
+    })
+    .await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "OIDC start must 404 when disabled (no IdP address leakage)"
+    );
+    assert!(
+        String::from_utf8_lossy(&body_bytes(response.into_body()).await).contains("oidc_disabled")
+    );
+    idp.abort();
+}
+
+async fn file_mode_router() -> (axum::Router, AppState) {
+    use tempfile::TempDir;
+    let directory = TempDir::new().unwrap();
+    let mut config = AppConfig::default();
+    config.portal_oidc_client_id = "client-id".to_string();
+    config.portal_oidc_client_secret = "client-secret".to_string();
+    config.portal_oidc_redirect_url = CALLBACK_URL.to_string();
+    config.portal_oidc_issuer_url = "http://127.0.0.1:1".to_string();
+    config.portal_oidc_enabled = true;
+    config.admin_username = "admin".to_string();
+    config.admin_password = "admin-password".to_string();
+    config.jwt_secret = "test-jwt-secret".to_string();
+    let state = AppState::new(
+        chat_responses_codex::state::PersistedState::default(),
+        directory.path().join("state.json"),
+        config,
+    );
+    (build_router(state.clone()), state)
+}
+
+#[tokio::test]
+async fn file_mode_oidc_answers_503_and_legacy_login_still_works() {
+    let (router, state) = file_mode_router().await;
+    // OIDC endpoints must 503 in file mode (no silent fallback).
+    let start = router
+        .clone()
+        .oneshot(Request::builder().uri("/api/portal/oidc/start").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        start.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "file mode must fail closed with 503"
+    );
+    assert!(
+        String::from_utf8_lossy(&body_bytes(start.into_body()).await)
+            .contains("oidc_requires_durable_store")
+    );
+    let callback = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/callback?code=x&state=y")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // 工号+key login keeps working on the same router.
+    use chat_responses_codex::keys::generate_downstream_key;
+    let key = generate_downstream_key("team-a");
+    let _ = state
+        .insert_downstream(DownstreamConfig {
+            id: "team-a".to_string(),
+            name: "team-a".to_string(),
+            hash: key.hash,
+            plaintext_key: Some(key.plaintext.clone()),
+            active: true,
+            model_allowlist: vec![],
+            ..Default::default()
+        })
+        .await;
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"employee_id":"team-a","key":"{}"}}"#,
+                    key.plaintext
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK, "file-mode 工号+key login must keep working");
+}
+
+#[tokio::test]
+async fn authenticated_but_unbound_first_login_is_403_and_no_key_is_issued() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true; // auto-registration ON
+    })
+    .await;
+    let store = state.portal_store().unwrap();
+
+    let result = run_login_flow(&router).await;
+    assert_eq!(
+        result.status,
+        StatusCode::FORBIDDEN,
+        "an authenticated user with no bound key must be refused"
+    );
+
+    let user = store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .expect("registration created the user");
+    assert_eq!(user.binding_count, 0, "no downstream key may be auto-issued");
+    assert_eq!(store.default_downstream(&user.id).await.unwrap(), None);
+    idp.abort();
+}
