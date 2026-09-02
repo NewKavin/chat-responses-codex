@@ -45,7 +45,15 @@
       </el-form-item>
     </el-form>
 
-    <template #footer>首次使用请联系管理员获取工号和密钥</template>
+    <template #footer>
+      <div class="oidc-entry">
+        <el-divider>或</el-divider>
+        <el-button size="large" class="oidc-entry__button" @click="handleOidcLogin">
+          使用企业账号登录
+        </el-button>
+      </div>
+      <div class="auth-footer">首次使用请联系管理员获取工号和密钥</div>
+    </template>
   </AuthShell>
 </template>
 
@@ -61,6 +69,10 @@ const router = useRouter()
 const loading = ref(false)
 const formRef = ref()
 const succeeded = ref(false)
+
+const handleOidcLogin = () => {
+  window.location.href = '/api/portal/oidc/start'
+}
 
 const form = ref({
   employee_id: '',

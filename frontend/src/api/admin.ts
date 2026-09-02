@@ -366,6 +366,35 @@ export const adminApi = {
   deleteDownstream: (id: string) => adminHttp.delete(`/admin/downstreams/${id}`),
   toggleDownstream: (id: string) => adminHttp.post<{ active: boolean }>(`/admin/downstreams/${id}/toggle`),
   rotateDownstream: (id: string) => adminHttp.post<{ plaintext_key: string }>(`/admin/downstreams/${id}/rotate`),
+
+  // Portal OIDC users (design §4.6)
+  getPortalUsers: (params?: { keyword?: string; page?: number; page_size?: number }) =>
+    adminHttp.get<{
+      total: number
+      page: number
+      items: Array<{
+        id: string
+        email: string
+        display_name: string | null
+        username: string | null
+        disabled: boolean
+        created_at: number
+        last_login_at: number | null
+        provider: string | null
+        subject: string | null
+        binding_count: number
+      }>
+    }>('/admin/portal/users', { params }),
+  setPortalUserDisabled: (id: string, disabled: boolean) =>
+    adminHttp.patch<{ id: string; disabled: boolean }>(`/admin/portal/users/${id}`, { disabled }),
+  getPortalUserBindings: (id: string) =>
+    adminHttp.get<{ items: Array<{ downstream_id: string; is_default: boolean }> }>(
+      `/admin/portal/users/${id}/bindings`
+    ),
+  addPortalUserBinding: (id: string, downstream_id: string, is_default: boolean) =>
+    adminHttp.post(`/admin/portal/users/${id}/bindings`, { downstream_id, is_default }),
+  deletePortalUserBinding: (id: string, downstream_id: string) =>
+    adminHttp.delete(`/admin/portal/users/${id}/bindings/${downstream_id}`),
   batchSetDownstreamMode: (data: {
     ids: string[]
     billing_mode?: 'request' | 'token'

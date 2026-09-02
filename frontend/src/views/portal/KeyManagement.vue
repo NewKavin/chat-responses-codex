@@ -45,6 +45,9 @@
             <el-button type="warning" @click="handleRotate">
               <RotateCcw :size="14" :stroke-width="1.8" style="margin-right: 6px" />轮换密钥
             </el-button>
+            <el-button type="primary" plain @click="handleBindOidc">
+              绑定企业账号
+            </el-button>
           </div>
         </div>
 
@@ -96,6 +99,10 @@
 </template>
 
 <script setup lang="ts">
+const handleBindOidc = () => {
+  window.location.href = '/api/portal/oidc/start?intent=bind'
+}
+
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Copy, Fingerprint, RotateCcw, ShieldCheck } from '@lucide/vue'

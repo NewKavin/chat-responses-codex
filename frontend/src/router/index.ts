@@ -86,6 +86,12 @@ const router = createRouter({
       name: 'AdminSettings',
       component: () => import('@/views/admin/Settings.vue'),
       meta: { requiresAuth: true, title: '网关设置' }
+    },
+    {
+      path: '/admin/portal-users',
+      name: 'AdminPortalUsers',
+      component: () => import('@/views/admin/PortalUsers.vue'),
+      meta: { requiresAuth: true, title: '门户用户' }
     }
   ]
 })
