@@ -1,6 +1,7 @@
 mod admin;
 mod gateway;
 mod portal;
+mod portal_oidc;
 
 pub use crate::state::ProbeJobExecution;
 pub use gateway::compatibility_semantics::{

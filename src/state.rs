@@ -35,7 +35,8 @@ mod portal_store;
 #[doc(hidden)]
 pub use postgres::insert_statement;
 pub use portal_store::{
-    PortalDownstreamBinding, PortalSession, PortalStore, PortalStoreError, PortalUser,
+    PortalDownstreamBinding, PortalOidcHandshake, PortalSession, PortalStore, PortalStoreError,
+    PortalUser,
 };
 #[path = "state/redis_runtime.rs"]
 mod redis_runtime;
@@ -687,6 +688,7 @@ pub struct AppState {
     config_store: Arc<dyn StateStore>,
     postgres: Option<Arc<PostgresStateStore>>,
     portal_store: Option<Arc<PortalStore>>,
+    portal_oidc_handshakes: Arc<tokio::sync::Mutex<HashMap<String, PortalOidcHandshake>>>,
 }
 
 fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealthRegistry>> {
@@ -1158,6 +1160,7 @@ impl AppState {
             config_store,
             postgres: None,
             portal_store: None,
+            portal_oidc_handshakes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1247,6 +1250,7 @@ impl AppState {
             portal_store: postgres
                 .as_ref()
                 .map(|store| Arc::new(PortalStore::from_pool(store.pool()))),
+            portal_oidc_handshakes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1329,6 +1333,7 @@ impl AppState {
             config_store,
             postgres: Some(postgres.clone()),
             portal_store: Some(Arc::new(PortalStore::from_pool(postgres.pool()))),
+            portal_oidc_handshakes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1349,6 +1354,19 @@ impl AppState {
     /// endpoint answers 503 rather than degrading silently).
     pub fn portal_store(&self) -> Option<Arc<PortalStore>> {
         self.portal_store.clone()
+    }
+
+    /// Store a one-shot OIDC login handshake keyed by the raw state value.
+    pub async fn insert_oidc_handshake(&self, raw_state: String, handshake: PortalOidcHandshake) {
+        self.portal_oidc_handshakes
+            .lock()
+            .await
+            .insert(raw_state, handshake);
+    }
+
+    /// One-shot consume of a handshake (replayed states miss, design §4.1).
+    pub async fn take_oidc_handshake(&self, raw_state: &str) -> Option<PortalOidcHandshake> {
+        self.portal_oidc_handshakes.lock().await.remove(raw_state)
     }
 
     pub fn account_concurrency_registry(&self) -> Arc<AccountConcurrencyRegistry> {

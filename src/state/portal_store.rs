@@ -455,3 +455,14 @@ fn classify_conflict(error: tokio_postgres::Error, message: &str) -> PortalStore
         PortalStoreError::Db(error.to_string())
     }
 }
+
+/// One in-flight OIDC login state (design §4.1 step 1, T3).  Kept in process
+/// memory (multi-instance deployments share a sticky reconciliation via the
+/// admin flow), keyed by the **raw** state value the client echoes back.
+#[derive(Debug, Clone)]
+pub struct PortalOidcHandshake {
+    pub code_verifier: Option<String>,
+    pub downstream_id: Option<String>,
+    /// unix seconds; use `state::unix_seconds()` when checking
+    pub expires_at_unix: i64,
+}

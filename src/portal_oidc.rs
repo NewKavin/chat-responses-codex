@@ -49,6 +49,17 @@ impl FieldPath {
         }
         None
     }
+
+    /// The dotted path as configured (used in error messages).
+    pub fn display(&self) -> String {
+        self.segments.join(".")
+    }
+}
+
+impl std::fmt::Display for FieldPath {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.display())
+    }
 }
 
 #[derive(Debug, Clone)]

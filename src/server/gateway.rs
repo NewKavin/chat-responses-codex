@@ -1,5 +1,6 @@
 use super::admin::*;
 use super::portal::*;
+use super::portal_oidc::*;
 use crate::capabilities::{
     Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey,
     EvidenceState, ProbeReason, RequestedFeatures, ResolvedCapabilities,
@@ -2605,6 +2606,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
+        .route("/api/portal/oidc/start", get(portal_oidc_start))
+        .route("/api/portal/oidc/callback", get(portal_oidc_callback))
         // Frontend assets and SPA fallback (with static-only compression);
         // merged so the nested router's fallback becomes the app fallback.
         .merge(static_frontend_router())
