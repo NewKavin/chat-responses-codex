@@ -220,7 +220,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{AppState, DownstreamConfig};
-use common::oidc::{MockIdpBuilder, MockIdp};
+use common::oidc::{MockIdp, MockIdpBuilder};
 use tower::ServiceExt;
 
 const CALLBACK_URL: &str = "http://gateway/api/portal/oidc/callback";
@@ -231,7 +231,10 @@ struct FlowResult {
     pub set_cookie: Option<String>,
 }
 
-async fn oidc_gateway(idp: &MockIdp, configure: impl Fn(&mut AppConfig)) -> (axum::Router, AppState) {
+async fn oidc_gateway(
+    idp: &MockIdp,
+    configure: impl Fn(&mut AppConfig),
+) -> (axum::Router, AppState) {
     let url = common::oidc::database_url().expect("pg configured");
     common::oidc::reset_portal_tables(&url).await;
     let mut config = AppConfig::default();
@@ -283,9 +286,7 @@ async fn seed_downstream(state: &AppState, id: &str) {
 }
 
 // Note: helper returns (router, state, raw_state_from_start, code_from_callback)
-async fn run_login_flow(
-    router: &axum::Router,
-) -> FlowResult {
+async fn run_login_flow(router: &axum::Router) -> FlowResult {
     let start = router
         .clone()
         .oneshot(
@@ -303,7 +304,11 @@ async fn run_login_flow(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     if start_status != StatusCode::FOUND || start_location.is_none() {
-        return FlowResult { status: start_status, location: None, set_cookie: None };
+        return FlowResult {
+            status: start_status,
+            location: None,
+            set_cookie: None,
+        };
     }
     let authorize_url = start_location.as_deref().unwrap();
     let authorize_response = reqwest::Client::builder()
@@ -348,7 +353,11 @@ async fn run_login_flow(
         .get(header::SET_COOKIE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    FlowResult { status, location, set_cookie }
+    FlowResult {
+        status,
+        location,
+        set_cookie,
+    }
 }
 
 #[tokio::test]
@@ -390,7 +399,10 @@ async fn login_flow_with_discovery_succeeds_and_returns_session_cookie() {
         format!("{:x}", Sha256::digest(raw.as_bytes()))
     };
     let session = store.find_session(&sid_hash).await.unwrap();
-    assert!(session.is_some(), "session must be persisted under sha256 of the cookie value");
+    assert!(
+        session.is_some(),
+        "session must be persisted under sha256 of the cookie value"
+    );
     idp.abort();
 }
 
@@ -444,7 +456,12 @@ async fn pkce_challenge_present_by_default_and_absent_when_disabled() {
     let (router, _state) = oidc_gateway(&idp, |_| {}).await;
     let start = router
         .clone()
-        .oneshot(Request::builder().uri("/api/portal/oidc/start").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let location = start
@@ -467,7 +484,12 @@ async fn pkce_challenge_present_by_default_and_absent_when_disabled() {
     .await;
     let start = router
         .clone()
-        .oneshot(Request::builder().uri("/api/portal/oidc/start").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let location = start
@@ -519,10 +541,21 @@ async fn replayed_or_missing_state_is_rejected() {
     // Re-run the flow but capture the callback URL instead of finishing:
     let start = router
         .clone()
-        .oneshot(Request::builder().uri("/api/portal/oidc/start").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let location = start.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
+    let location = start
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let authz = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -531,18 +564,42 @@ async fn replayed_or_missing_state_is_rejected() {
         .send()
         .await
         .unwrap();
-    let callback_url = authz.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let callback_url = authz
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let callback_path = callback_url
-        .split("://").nth(1).and_then(|rest| rest.split_once('/')).map(|(_, p)| format!("/{p}")).unwrap();
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, p)| format!("/{p}"))
+        .unwrap();
     let replay = router
         .clone()
-        .oneshot(Request::builder().uri(&callback_path).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri(&callback_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(replay.status(), StatusCode::FOUND, "first callback consumes the state");
+    assert_eq!(
+        replay.status(),
+        StatusCode::FOUND,
+        "first callback consumes the state"
+    );
     let replay2 = router
         .clone()
-        .oneshot(Request::builder().uri(&callback_path).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri(&callback_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -587,7 +644,11 @@ async fn userinfo_missing_sub_or_email_reports_the_missing_field() {
     .await;
     seed_downstream(&state, "team-a").await;
     let result = run_login_flow(&router).await;
-    assert_eq!(result.status, StatusCode::BAD_REQUEST, "missing sub must 400");
+    assert_eq!(
+        result.status,
+        StatusCode::BAD_REQUEST,
+        "missing sub must 400"
+    );
     idp.abort();
 
     // missing email
@@ -601,7 +662,11 @@ async fn userinfo_missing_sub_or_email_reports_the_missing_field() {
     .await;
     seed_downstream(&state, "team-a").await;
     let result = run_login_flow(&router).await;
-    assert_eq!(result.status, StatusCode::BAD_REQUEST, "missing email must 400");
+    assert_eq!(
+        result.status,
+        StatusCode::BAD_REQUEST,
+        "missing email must 400"
+    );
     idp.abort();
 }
 
@@ -621,12 +686,24 @@ async fn registration_disabled_new_identity_is_403_and_leaves_no_records() {
     })
     .await;
     let store = state.portal_store().unwrap();
-    assert!(store.find_user_by_identity("oidc", "test-user-subject").await.unwrap().is_none());
+    assert!(store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .is_none());
 
     let result = run_login_flow(&router).await;
-    assert_eq!(result.status, StatusCode::FORBIDDEN, "unregistered identity must 403");
+    assert_eq!(
+        result.status,
+        StatusCode::FORBIDDEN,
+        "unregistered identity must 403"
+    );
     assert!(
-        store.find_user_by_identity("oidc", "test-user-subject").await.unwrap().is_none(),
+        store
+            .find_user_by_identity("oidc", "test-user-subject")
+            .await
+            .unwrap()
+            .is_none(),
         "no portal user may be created when registration is disabled"
     );
     idp.abort();
@@ -730,7 +807,7 @@ async fn legacy_bearer_login_is_untouched_by_oidc() {
     let (router, state) = oidc_gateway(&idp, |_config| {}).await;
 
     // 工号+key login gets its JWT via the java-style portal login endpoint.
-    use chat_responses_codex::state::{DownstreamConfig};
+    use chat_responses_codex::state::DownstreamConfig;
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     state.set_capability_probe_sender(tx);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
@@ -808,7 +885,11 @@ async fn legacy_bearer_login_is_untouched_by_oidc() {
         )
         .await
         .unwrap();
-    assert_eq!(overview.status(), StatusCode::OK, "legacy JWT must keep working");
+    assert_eq!(
+        overview.status(),
+        StatusCode::OK,
+        "legacy JWT must keep working"
+    );
     idp.abort();
 }
 
@@ -842,7 +923,11 @@ async fn run_bind_flow(router: &axum::Router, bearer: &str, downstream_id: &str)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     if start_status != StatusCode::FOUND || start_location.is_none() {
-        return FlowResult { status: start_status, location: None, set_cookie: None };
+        return FlowResult {
+            status: start_status,
+            location: None,
+            set_cookie: None,
+        };
     }
     let authz = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -935,7 +1020,10 @@ async fn bind_intent_attaches_identity_to_an_existing_key() {
         .unwrap()
         .expect("identity must now exist");
     assert_eq!(user.email, "user@example.com");
-    assert_eq!(store.default_downstream(&user.id).await.unwrap().as_deref(), Some("team-a"));
+    assert_eq!(
+        store.default_downstream(&user.id).await.unwrap().as_deref(),
+        Some("team-a")
+    );
 
     // A subsequent plain OIDC login now works without registration enabled.
     let login = run_login_flow(&router).await;
@@ -1020,7 +1108,11 @@ async fn bind_requires_login() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "bind without login must 401");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "bind without login must 401"
+    );
     idp.abort();
 }
 
@@ -1041,7 +1133,11 @@ async fn admin_token(router: &axum::Router) -> String {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "admin login must succeed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "admin login must succeed"
+    );
     let (_, body) = response.into_parts();
     let bytes = body_bytes(body).await;
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1092,7 +1188,13 @@ async fn admin_users_listing_paging_and_keyword() {
     let (router, state) = oidc_gateway(&idp, |_config| {}).await;
     let store = state.portal_store().unwrap();
     store
-        .create_user_with_identity("alice@example.com", Some("Alice"), Some("alice"), "oidc", "sub-a")
+        .create_user_with_identity(
+            "alice@example.com",
+            Some("Alice"),
+            Some("alice"),
+            "oidc",
+            "sub-a",
+        )
         .await
         .unwrap();
     store
@@ -1101,12 +1203,26 @@ async fn admin_users_listing_paging_and_keyword() {
         .unwrap();
     let token = admin_token(&router).await;
 
-    let (status, body) = admin_request(&router, &token, "GET", "/api/admin/portal/users?page=1&page_size=1", None).await;
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "GET",
+        "/api/admin/portal/users?page=1&page_size=1",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 2);
     assert_eq!(body["items"].as_array().unwrap().len(), 1);
 
-    let (status, body) = admin_request(&router, &token, "GET", "/api/admin/portal/users?keyword=alice", None).await;
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "GET",
+        "/api/admin/portal/users?keyword=alice",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 1);
     assert_eq!(body["items"][0]["email"], "alice@example.com");
@@ -1209,7 +1325,10 @@ async fn admin_bindings_crud_and_default_promotion() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(store.default_downstream(&user.id).await.unwrap().as_deref(), Some("team-b"));
+    assert_eq!(
+        store.default_downstream(&user.id).await.unwrap().as_deref(),
+        Some("team-b")
+    );
 
     // bindings list
     let (status, body) = admin_request(
@@ -1233,7 +1352,10 @@ async fn admin_bindings_crud_and_default_promotion() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(store.default_downstream(&user.id).await.unwrap().as_deref(), Some("team-a"));
+    assert_eq!(
+        store.default_downstream(&user.id).await.unwrap().as_deref(),
+        Some("team-a")
+    );
 
     // binding to a nonexistent downstream is refused
     let (status, _) = admin_request(
@@ -1392,7 +1514,12 @@ async fn file_mode_oidc_answers_503_and_legacy_login_still_works() {
     // OIDC endpoints must 503 in file mode (no silent fallback).
     let start = router
         .clone()
-        .oneshot(Request::builder().uri("/api/portal/oidc/start").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1445,7 +1572,11 @@ async fn file_mode_oidc_answers_503_and_legacy_login_still_works() {
         )
         .await
         .unwrap();
-    assert_eq!(login.status(), StatusCode::OK, "file-mode 工号+key login must keep working");
+    assert_eq!(
+        login.status(),
+        StatusCode::OK,
+        "file-mode 工号+key login must keep working"
+    );
 }
 
 #[tokio::test]
@@ -1477,7 +1608,10 @@ async fn authenticated_but_unbound_first_login_is_403_and_no_key_is_issued() {
         .await
         .unwrap()
         .expect("registration created the user");
-    assert_eq!(user.binding_count, 0, "no downstream key may be auto-issued");
+    assert_eq!(
+        user.binding_count, 0,
+        "no downstream key may be auto-issued"
+    );
     assert_eq!(store.default_downstream(&user.id).await.unwrap(), None);
     idp.abort();
 }

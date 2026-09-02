@@ -49,9 +49,10 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
 fn oauth_error_redirect(error: &str) -> Response {
     (
         StatusCode::FOUND,
-        [
-            (header::LOCATION, format!("/portal/login?oauth_error={error}")),
-        ],
+        [(
+            header::LOCATION,
+            format!("/portal/login?oauth_error={error}"),
+        )],
     )
         .into_response()
 }
@@ -126,7 +127,11 @@ pub(super) async fn portal_oidc_start(
                 )
             }
         };
-        let target = query.downstream_id.as_deref().unwrap_or(&current).to_string();
+        let target = query
+            .downstream_id
+            .as_deref()
+            .unwrap_or(&current)
+            .to_string();
         if state.downstream_config(&target).await.is_none() {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -138,10 +143,7 @@ pub(super) async fn portal_oidc_start(
     } else {
         None
     };
-    let endpoints = match config
-        .resolve_endpoints(&client)
-        .await
-    {
+    let endpoints = match config.resolve_endpoints(&client).await {
         Ok(endpoints) => endpoints,
         Err(error) => {
             return error_response(
@@ -186,16 +188,13 @@ pub(super) async fn portal_oidc_start(
         authorization_params.push(("code_challenge".to_string(), challenge));
         authorization_params.push(("code_challenge_method".to_string(), "S256".to_string()));
     }
-    let query_string = serde_urlencoded::to_string(authorization_params)
-        .unwrap_or_default();
+    let query_string = serde_urlencoded::to_string(authorization_params).unwrap_or_default();
     (
         StatusCode::FOUND,
-        [
-            (
-                header::LOCATION,
-                format!("{}?{query_string}", endpoints.authorization_endpoint),
-            ),
-        ],
+        [(
+            header::LOCATION,
+            format!("{}?{query_string}", endpoints.authorization_endpoint),
+        )],
     )
         .into_response()
 }
@@ -328,7 +327,10 @@ pub(super) async fn portal_oidc_callback(
                 )
             }
         };
-        if !bindings.iter().any(|binding| binding.downstream_id == target) {
+        if !bindings
+            .iter()
+            .any(|binding| binding.downstream_id == target)
+        {
             if !bindings.is_empty() {
                 return error_response(
                     StatusCode::CONFLICT,
@@ -460,10 +462,7 @@ async fn resolve_identity(
     }
 
     // Step 8: identity -> user, or register when allowed.
-    let user = match store
-        .find_user_by_identity(PROVIDER, &subject)
-        .await
-    {
+    let user = match store.find_user_by_identity(PROVIDER, &subject).await {
         Ok(Some(user)) => user,
         Ok(None) if settings.portal_oidc_registration_enabled || bind_downstream.is_some() => {
             let display_name = config.display_name_field.resolve(userinfo);
@@ -676,4 +675,3 @@ fn email_allowed(email: &str, allowed_domains: &str) -> bool {
         .filter(|allowed| !allowed.is_empty())
         .any(|allowed| domain == allowed || domain.ends_with(&format!(".{allowed}")))
 }
-

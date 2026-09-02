@@ -223,24 +223,22 @@ impl MockIdpBuilder {
                         let codes = codes.clone();
                         let counter = counter.clone();
                         move |Query(query): Query<AuthorizeQuery>| async move {
-                        let code = format!(
-                            "auth-code-{}",
-                            counter.fetch_add(1, Ordering::SeqCst) + 1
-                        );
-                        codes.lock().await.insert(
-                            code.clone(),
-                            CodeInfo {
-                                state: query.state.clone(),
-                                code_challenge: query.code_challenge.clone(),
-                            },
-                        );
-                        let location = format!(
-                            "{}?code={}&state={}",
-                            query.redirect_uri.unwrap_or_default(),
-                            code,
-                            query.state.unwrap_or_default()
-                        );
-                        (axum::http::StatusCode::FOUND, [("Location", location)])
+                            let code =
+                                format!("auth-code-{}", counter.fetch_add(1, Ordering::SeqCst) + 1);
+                            codes.lock().await.insert(
+                                code.clone(),
+                                CodeInfo {
+                                    state: query.state.clone(),
+                                    code_challenge: query.code_challenge.clone(),
+                                },
+                            );
+                            let location = format!(
+                                "{}?code={}&state={}",
+                                query.redirect_uri.unwrap_or_default(),
+                                code,
+                                query.state.unwrap_or_default()
+                            );
+                            (axum::http::StatusCode::FOUND, [("Location", location)])
                         }
                     }),
                 )
@@ -252,67 +250,71 @@ impl MockIdpBuilder {
                         let client_secret = client_secret.clone();
                         let require_pkce = require_pkce.clone();
                         move |headers: HeaderMap, body: Bytes| async move {
-                        let require = require_pkce.load(Ordering::SeqCst);
-                        let form = parse_urlencoded(&body);
-                        let expected_basic = format!(
-                            "Basic {}",
-                            base64::engine::general_purpose::STANDARD
-                                .encode(format!("{client_id}:{client_secret}"))
-                        );
-                        let basic_ok = headers
-                            .get("authorization")
-                            .and_then(|value| value.to_str().ok())
-                            == Some(expected_basic.as_str());
-                        let body_ok = form.get("client_id").map(String::as_str) == Some(client_id.as_str())
-                            && form.get("client_secret").map(String::as_str)
-                                == Some(client_secret.as_str());
-                        if !(basic_ok || body_ok) {
-                            return (
-                                axum::http::StatusCode::UNAUTHORIZED,
-                                axum::Json(json!({"error": "invalid_client"})),
+                            let require = require_pkce.load(Ordering::SeqCst);
+                            let form = parse_urlencoded(&body);
+                            let expected_basic = format!(
+                                "Basic {}",
+                                base64::engine::general_purpose::STANDARD
+                                    .encode(format!("{client_id}:{client_secret}"))
                             );
-                        }
-                        if form.get("grant_type").map(String::as_str) != Some("authorization_code") {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                axum::Json(json!({"error": "invalid_grant"})),
-                            );
-                        }
-                        let code = form.get("code").cloned().unwrap_or_default();
-                        let Some(code_info) = codes.lock().await.remove(&code) else {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                axum::Json(json!({"error": "invalid_grant"})),
-                            );
-                        };
-                        if require {
-                            let verifier_ok = match (
-                                code_info.code_challenge.as_deref(),
-                                form.get("code_verifier").map(String::as_str),
-                            ) {
-                                (Some(challenge), Some(verifier)) => {
-                                    use sha2::{Digest, Sha256};
-                                    let computed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                                        .encode(Sha256::digest(verifier.as_bytes()));
-                                    computed == challenge && verifier.len() >= 43
-                                }
-                                _ => false,
-                            };
-                            if !verifier_ok {
+                            let basic_ok = headers
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                == Some(expected_basic.as_str());
+                            let body_ok = form.get("client_id").map(String::as_str)
+                                == Some(client_id.as_str())
+                                && form.get("client_secret").map(String::as_str)
+                                    == Some(client_secret.as_str());
+                            if !(basic_ok || body_ok) {
+                                return (
+                                    axum::http::StatusCode::UNAUTHORIZED,
+                                    axum::Json(json!({"error": "invalid_client"})),
+                                );
+                            }
+                            if form.get("grant_type").map(String::as_str)
+                                != Some("authorization_code")
+                            {
                                 return (
                                     axum::http::StatusCode::BAD_REQUEST,
                                     axum::Json(json!({"error": "invalid_grant"})),
                                 );
                             }
-                        }
-                        (
-                            axum::http::StatusCode::OK,
-                            axum::Json(json!({
-                                "access_token": "mock-access-token",
-                                "token_type": "Bearer",
-                                "expires_in": 3600,
-                            })),
-                        )
+                            let code = form.get("code").cloned().unwrap_or_default();
+                            let Some(code_info) = codes.lock().await.remove(&code) else {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(json!({"error": "invalid_grant"})),
+                                );
+                            };
+                            if require {
+                                let verifier_ok = match (
+                                    code_info.code_challenge.as_deref(),
+                                    form.get("code_verifier").map(String::as_str),
+                                ) {
+                                    (Some(challenge), Some(verifier)) => {
+                                        use sha2::{Digest, Sha256};
+                                        let computed =
+                                            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                                .encode(Sha256::digest(verifier.as_bytes()));
+                                        computed == challenge && verifier.len() >= 43
+                                    }
+                                    _ => false,
+                                };
+                                if !verifier_ok {
+                                    return (
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                        axum::Json(json!({"error": "invalid_grant"})),
+                                    );
+                                }
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(json!({
+                                    "access_token": "mock-access-token",
+                                    "token_type": "Bearer",
+                                    "expires_in": 3600,
+                                })),
+                            )
                         }
                     }),
                 )
@@ -320,9 +322,7 @@ impl MockIdpBuilder {
                     "/userinfo",
                     get({
                         let userinfo_claims = userinfo_claims.clone();
-                        move || async move {
-                            axum::Json(userinfo_claims.read().unwrap().clone())
-                        }
+                        move || async move { axum::Json(userinfo_claims.read().unwrap().clone()) }
                     }),
                 )
         };

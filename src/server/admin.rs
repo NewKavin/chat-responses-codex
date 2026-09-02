@@ -3342,11 +3342,17 @@ pub(super) async fn admin_portal_users(
     let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
     let page = query.page.unwrap_or(1).max(1);
     let keyword = query.keyword.unwrap_or_default();
-    match store.list_users(&keyword, page_size as i64, ((page - 1) * page_size) as i64).await {
+    match store
+        .list_users(&keyword, page_size as i64, ((page - 1) * page_size) as i64)
+        .await
+    {
         Ok((total, users)) => {
-            let items: Vec<serde_json::Value> =
-                users.iter().map(portal_user_json).collect();
-            (StatusCode::OK, Json(json!({"total": total, "page": page, "items": items}))).into_response()
+            let items: Vec<serde_json::Value> = users.iter().map(portal_user_json).collect();
+            (
+                StatusCode::OK,
+                Json(json!({"total": total, "page": page, "items": items})),
+            )
+                .into_response()
         }
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3451,7 +3457,11 @@ pub(super) async fn admin_portal_user_bindings_post(
             .into_response();
     }
     match store
-        .add_downstream_binding(&user_id, &body.downstream_id, body.is_default.unwrap_or(false))
+        .add_downstream_binding(
+            &user_id,
+            &body.downstream_id,
+            body.is_default.unwrap_or(false),
+        )
         .await
     {
         Ok(()) => (

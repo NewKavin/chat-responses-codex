@@ -2612,9 +2612,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/admin/portal/users/{id}/bindings",
-            get(admin_portal_user_bindings).post(admin_portal_user_bindings_post).route_layer(
-                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
-            ),
+            get(admin_portal_user_bindings)
+                .post(admin_portal_user_bindings_post)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/portal/users/{id}/bindings/{downstream_id}",
