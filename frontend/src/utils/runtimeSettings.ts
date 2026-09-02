@@ -8,6 +8,7 @@ export type RuntimeSettingGroupId =
   | 'http'
   | 'logs'
   | 'observability'
+  | 'portal'
 
 export type RuntimeSettingApplyMode = 'immediate' | 'restart'
 export type RuntimeSettingControl = 'text' | 'switch' | 'number' | 'number-list'
@@ -45,7 +46,8 @@ export const runtimeSettingGroups: RuntimeSettingGroup[] = [
   { id: 'concurrency', label: '并发恢复' },
   { id: 'http', label: 'HTTP 与流式' },
   { id: 'logs', label: '日志' },
-  { id: 'observability', label: '可观测性' }
+  { id: 'observability', label: '可观测性' },
+  { id: 'portal', label: '门户 / OIDC 登录' }
 ]
 
 export const runtimeSettingFields: RuntimeSettingField[] = [
@@ -642,6 +644,60 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     min: 0,
     max: 1_000,
     description: '已有可用输出后，流最多跳过多少个坏帧再报错（默认 8）。0 表示首个坏帧即失败。'
+  },
+  {
+    key: 'portal_oidc_enabled',
+    group: 'portal',
+    label: '允许 OIDC 登录',
+    apply: 'immediate',
+    control: 'switch',
+    description:
+      '开启后门户登录页显示「使用企业账号登录」。关闭时 OIDC 端点返回 404，工号+key 登录不受影响。'
+  },
+  {
+    key: 'portal_oidc_registration_enabled',
+    group: 'portal',
+    label: '允许新身份自动注册',
+    apply: 'immediate',
+    control: 'switch',
+    description:
+      'OIDC 身份首次出现时自动创建门户用户。关闭时新身份返回 403 且不留下任何用户记录；存量用户通过「绑定企业账号」完成迁移。'
+  },
+  {
+    key: 'portal_oidc_allowed_email_domains',
+    group: 'portal',
+    label: '邮箱域名白名单',
+    apply: 'immediate',
+    control: 'text',
+    description: '逗号分隔的允许域名（如 example.com），空表示不限制。子域自动放行。'
+  },
+  {
+    key: 'portal_session_ttl_seconds',
+    group: 'portal',
+    label: '门户会话时长',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 60,
+    max: MAX_SAFE_INTEGER,
+    description: 'OIDC 门户会话的存活时间，过期后需重新登录。'
+  },
+  {
+    key: 'portal_oidc_pkce_enabled',
+    group: 'portal',
+    label: '启用 PKCE',
+    apply: 'immediate',
+    control: 'switch',
+    description: '开启后 authorization 请求携带 code_challenge（S256）。关闭以兼容不支持的 IdP，身份仍来自 userinfo。'
+  },
+  {
+    key: 'portal_oidc_verify_id_token',
+    group: 'portal',
+    label: '验签 id_token',
+    apply: 'immediate',
+    control: 'switch',
+    description:
+      '是否校验并解析 id_token（签名、iss、aud、nonce）。默认关闭：身份一律来自 userinfo，与 new-api 保持一致。'
   },
   {
     key: 'upstream_local_gate_distinct_error_code_enabled',

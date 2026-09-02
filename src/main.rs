@@ -5,9 +5,12 @@ use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
     ModelKeySyncService, RuntimeSettings, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
-    DEFAULT_PORTAL_OIDC_AUTH_STYLE, DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD,
-    DEFAULT_PORTAL_OIDC_EMAIL_FIELD, DEFAULT_PORTAL_OIDC_SCOPES,
+    DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS, DEFAULT_PORTAL_OIDC_AUTH_STYLE,
+    DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD, DEFAULT_PORTAL_OIDC_EMAIL_FIELD,
+    DEFAULT_PORTAL_OIDC_ENABLED, DEFAULT_PORTAL_OIDC_PKCE_ENABLED,
+    DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED, DEFAULT_PORTAL_OIDC_SCOPES,
     DEFAULT_PORTAL_OIDC_USERNAME_FIELD, DEFAULT_PORTAL_OIDC_USER_ID_FIELD,
+    DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN, DEFAULT_PORTAL_SESSION_TTL_SECONDS,
     DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED, DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
     DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
@@ -228,6 +231,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "PORTAL_OIDC_DISPLAY_NAME_FIELD",
         DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD,
     );
+    let portal_oidc_enabled = env_bool("PORTAL_OIDC_ENABLED", DEFAULT_PORTAL_OIDC_ENABLED);
+    let portal_oidc_registration_enabled = env_bool(
+        "PORTAL_OIDC_REGISTRATION_ENABLED",
+        DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED,
+    );
+    let portal_oidc_allowed_email_domains = env_or(
+        "PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS",
+        DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS,
+    );
+    let portal_session_ttl_seconds = env_u64(
+        "PORTAL_SESSION_TTL_SECONDS",
+        DEFAULT_PORTAL_SESSION_TTL_SECONDS,
+    )
+    .max(60);
+    let portal_oidc_pkce_enabled =
+        env_bool("PORTAL_OIDC_PKCE_ENABLED", DEFAULT_PORTAL_OIDC_PKCE_ENABLED);
+    let portal_oidc_verify_id_token = env_bool(
+        "PORTAL_OIDC_VERIFY_ID_TOKEN",
+        DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN,
+    );
     let stream_decode_error_code_split_enabled = env_bool(
         "STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED",
         DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
@@ -402,6 +425,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         portal_oidc_email_field,
         portal_oidc_username_field,
         portal_oidc_display_name_field,
+        portal_oidc_enabled,
+        portal_oidc_registration_enabled,
+        portal_oidc_allowed_email_domains,
+        portal_session_ttl_seconds,
+        portal_oidc_pkce_enabled,
+        portal_oidc_verify_id_token,
         stream_decode_error_code_split_enabled,
         stream_max_skipped_bad_frames,
         upstream_continuation_pin_escape_enabled: env_bool(

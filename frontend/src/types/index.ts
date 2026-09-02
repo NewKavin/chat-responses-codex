@@ -1007,6 +1007,12 @@ export interface RuntimeSettings {
   upstream_first_semantic_output_timeout_seconds: number
   upstream_first_output_warn_after_seconds: number
   gateway_request_body_limit_mb: number
+  portal_oidc_enabled: boolean
+  portal_oidc_registration_enabled: boolean
+  portal_oidc_allowed_email_domains: string
+  portal_session_ttl_seconds: number
+  portal_oidc_pkce_enabled: boolean
+  portal_oidc_verify_id_token: boolean
 }
 
 export type RuntimeSettingKey = keyof RuntimeSettings

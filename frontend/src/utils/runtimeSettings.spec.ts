@@ -91,7 +91,13 @@ const validSettings = (): RuntimeSettings => ({
   upstream_stream_max_duration_seconds: 3_600,
   upstream_first_semantic_output_timeout_seconds: 180,
   upstream_first_output_warn_after_seconds: 120,
-  gateway_request_body_limit_mb: 32
+  gateway_request_body_limit_mb: 32,
+  portal_oidc_enabled: true,
+  portal_oidc_registration_enabled: true,
+  portal_oidc_allowed_email_domains: 'example.com',
+  portal_session_ttl_seconds: 86400,
+  portal_oidc_pkce_enabled: true,
+  portal_oidc_verify_id_token: false
 })
 
 const expectedKeys: Array<keyof RuntimeSettings> = [
@@ -174,11 +180,17 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_stream_max_duration_seconds',
   'upstream_first_semantic_output_timeout_seconds',
   'upstream_first_output_warn_after_seconds',
-  'gateway_request_body_limit_mb'
+  'gateway_request_body_limit_mb',
+  'portal_oidc_enabled',
+  'portal_oidc_registration_enabled',
+  'portal_oidc_allowed_email_domains',
+  'portal_session_ttl_seconds',
+  'portal_oidc_pkce_enabled',
+  'portal_oidc_verify_id_token'
 ]
 
 describe('runtime settings catalog', () => {
-  it('catalogs every managed field exactly once in six groups', () => {
+  it('catalogs every managed field exactly once in seven groups', () => {
     expect(runtimeSettingGroups.map(group => group.id)).toEqual([
       'general',
       'discovery',
@@ -186,12 +198,13 @@ describe('runtime settings catalog', () => {
       'concurrency',
       'http',
       'logs',
-      'observability'
+      'observability',
+      'portal'
     ])
-    expect(runtimeSettingFields).toHaveLength(80)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(80)
+    expect(runtimeSettingFields).toHaveLength(86)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(86)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(67)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(73)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

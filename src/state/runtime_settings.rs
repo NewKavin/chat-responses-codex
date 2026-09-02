@@ -9,6 +9,9 @@ use super::types::{
     default_upstream_account_queue_max_depth, default_upstream_account_queue_max_wait_ms,
     default_upstream_account_queue_poll_interval_ms,
     default_upstream_account_queue_skip_when_doomed_enabled,
+    default_portal_oidc_allowed_email_domains, default_portal_oidc_enabled,
+    default_portal_oidc_pkce_enabled, default_portal_oidc_registration_enabled,
+    default_portal_oidc_verify_id_token, default_portal_session_ttl_seconds,
     default_upstream_capacity_failure_cooldown_enabled,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_same_host_transient_enabled,
@@ -105,6 +108,12 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_stream_idle_timeout_seconds",
     "upstream_first_semantic_output_timeout_seconds",
     "upstream_first_output_warn_after_seconds",
+    "portal_oidc_enabled",
+    "portal_oidc_registration_enabled",
+    "portal_oidc_allowed_email_domains",
+    "portal_session_ttl_seconds",
+    "portal_oidc_pkce_enabled",
+    "portal_oidc_verify_id_token",
 ];
 
 pub const RESTART_RUNTIME_SETTING_FIELDS: &[&str] = &[
@@ -188,6 +197,18 @@ pub struct RuntimeSettings {
     pub upstream_account_queue_max_wait_ms: u64,
     #[serde(default = "default_upstream_account_queue_poll_interval_ms")]
     pub upstream_account_queue_poll_interval_ms: u64,
+    #[serde(default = "default_portal_oidc_enabled")]
+    pub portal_oidc_enabled: bool,
+    #[serde(default = "default_portal_oidc_registration_enabled")]
+    pub portal_oidc_registration_enabled: bool,
+    #[serde(default = "default_portal_oidc_allowed_email_domains")]
+    pub portal_oidc_allowed_email_domains: String,
+    #[serde(default = "default_portal_session_ttl_seconds")]
+    pub portal_session_ttl_seconds: u64,
+    #[serde(default = "default_portal_oidc_pkce_enabled")]
+    pub portal_oidc_pkce_enabled: bool,
+    #[serde(default = "default_portal_oidc_verify_id_token")]
+    pub portal_oidc_verify_id_token: bool,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
@@ -386,6 +407,12 @@ impl RuntimeSettings {
             upstream_account_queue_max_wait_ms: config.upstream_account_queue_max_wait_ms,
             upstream_account_queue_poll_interval_ms: config
                 .upstream_account_queue_poll_interval_ms,
+            portal_oidc_enabled: config.portal_oidc_enabled,
+            portal_oidc_registration_enabled: config.portal_oidc_registration_enabled,
+            portal_oidc_allowed_email_domains: config.portal_oidc_allowed_email_domains.clone(),
+            portal_session_ttl_seconds: config.portal_session_ttl_seconds,
+            portal_oidc_pkce_enabled: config.portal_oidc_pkce_enabled,
+            portal_oidc_verify_id_token: config.portal_oidc_verify_id_token,
             upstream_account_queue_adaptive_budget_enabled: config
                 .upstream_account_queue_adaptive_budget_enabled,
             upstream_account_queue_skip_when_doomed_enabled: config
@@ -507,6 +534,12 @@ impl RuntimeSettings {
         config.upstream_account_queue_max_wait_ms = self.upstream_account_queue_max_wait_ms;
         config.upstream_account_queue_poll_interval_ms =
             self.upstream_account_queue_poll_interval_ms;
+        config.portal_oidc_enabled = self.portal_oidc_enabled;
+        config.portal_oidc_registration_enabled = self.portal_oidc_registration_enabled;
+        config.portal_oidc_allowed_email_domains = self.portal_oidc_allowed_email_domains.clone();
+        config.portal_session_ttl_seconds = self.portal_session_ttl_seconds;
+        config.portal_oidc_pkce_enabled = self.portal_oidc_pkce_enabled;
+        config.portal_oidc_verify_id_token = self.portal_oidc_verify_id_token;
         config.upstream_account_queue_adaptive_budget_enabled =
             self.upstream_account_queue_adaptive_budget_enabled;
         config.upstream_account_queue_skip_when_doomed_enabled =
@@ -746,6 +779,12 @@ impl RuntimeSettings {
             return Err(invalid(
                 "upstream_account_queue_poll_interval_ms",
                 "must be less than or equal to upstream_account_queue_max_wait_ms",
+            ));
+        }
+        if self.portal_session_ttl_seconds < 60 {
+            return Err(invalid(
+                "portal_session_ttl_seconds",
+                "must be at least 60 seconds",
             ));
         }
         if !self

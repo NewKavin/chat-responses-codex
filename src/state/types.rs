@@ -372,6 +372,12 @@ pub const DEFAULT_PORTAL_OIDC_USER_ID_FIELD: &str = "sub";
 pub const DEFAULT_PORTAL_OIDC_EMAIL_FIELD: &str = "email";
 pub const DEFAULT_PORTAL_OIDC_USERNAME_FIELD: &str = "preferred_username";
 pub const DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD: &str = "name";
+pub const DEFAULT_PORTAL_OIDC_ENABLED: bool = false;
+pub const DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED: bool = false;
+pub const DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS: &str = "";
+pub const DEFAULT_PORTAL_SESSION_TTL_SECONDS: u64 = 86_400;
+pub const DEFAULT_PORTAL_OIDC_PKCE_ENABLED: bool = true;
+pub const DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN: bool = false;
 /// C4.2: whether a fast-failed local-gate rejection returns the distinct
 /// `gateway_concurrency_saturated` error code so clients and operators can
 /// tell "the gateway's own concurrency gate is full" apart from "the upstream
@@ -573,6 +579,18 @@ pub struct AppConfig {
     pub portal_oidc_username_field: String,
     #[serde(default = "default_portal_oidc_display_name_field")]
     pub portal_oidc_display_name_field: String,
+    #[serde(default = "default_portal_oidc_enabled")]
+    pub portal_oidc_enabled: bool,
+    #[serde(default = "default_portal_oidc_registration_enabled")]
+    pub portal_oidc_registration_enabled: bool,
+    #[serde(default = "default_portal_oidc_allowed_email_domains")]
+    pub portal_oidc_allowed_email_domains: String,
+    #[serde(default = "default_portal_session_ttl_seconds")]
+    pub portal_session_ttl_seconds: u64,
+    #[serde(default = "default_portal_oidc_pkce_enabled")]
+    pub portal_oidc_pkce_enabled: bool,
+    #[serde(default = "default_portal_oidc_verify_id_token")]
+    pub portal_oidc_verify_id_token: bool,
     /// G2: split the two decode-failure sources into distinct error codes
     /// (default on).  Turning it off restores the legacy shared code.
     #[serde(default = "default_stream_decode_error_code_split_enabled")]
@@ -733,6 +751,12 @@ impl Default for AppConfig {
             portal_oidc_email_field: DEFAULT_PORTAL_OIDC_EMAIL_FIELD.to_string(),
             portal_oidc_username_field: DEFAULT_PORTAL_OIDC_USERNAME_FIELD.to_string(),
             portal_oidc_display_name_field: DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD.to_string(),
+            portal_oidc_enabled: DEFAULT_PORTAL_OIDC_ENABLED,
+            portal_oidc_registration_enabled: DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED,
+            portal_oidc_allowed_email_domains: DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS.to_string(),
+            portal_session_ttl_seconds: DEFAULT_PORTAL_SESSION_TTL_SECONDS,
+            portal_oidc_pkce_enabled: DEFAULT_PORTAL_OIDC_PKCE_ENABLED,
+            portal_oidc_verify_id_token: DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN,
             stream_decode_error_code_split_enabled: DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
             stream_max_skipped_bad_frames: DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
             upstream_continuation_pin_escape_enabled:
@@ -1699,6 +1723,24 @@ pub fn default_portal_oidc_username_field() -> String {
 }
 pub fn default_portal_oidc_display_name_field() -> String {
     DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD.to_string()
+}
+pub fn default_portal_oidc_enabled() -> bool {
+    DEFAULT_PORTAL_OIDC_ENABLED
+}
+pub fn default_portal_oidc_registration_enabled() -> bool {
+    DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED
+}
+pub fn default_portal_oidc_allowed_email_domains() -> String {
+    DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS.to_string()
+}
+pub fn default_portal_session_ttl_seconds() -> u64 {
+    DEFAULT_PORTAL_SESSION_TTL_SECONDS
+}
+pub fn default_portal_oidc_pkce_enabled() -> bool {
+    DEFAULT_PORTAL_OIDC_PKCE_ENABLED
+}
+pub fn default_portal_oidc_verify_id_token() -> bool {
+    DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN
 }
 
 pub fn default_upstream_local_gate_fast_fail_enabled() -> bool {
