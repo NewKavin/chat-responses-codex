@@ -340,7 +340,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     apply: 'immediate',
     control: 'switch',
     description:
-      '关闭后路由健康只记录不阻断：冷却与半开状态照常统计，但不再拦截请求，每个请求都真实发往上游，上游错误原样透传。用于上游故障时最大化争取上游资源；默认开启。'
+      '关闭后路由健康只记录不阻断：冷却与半开状态照常统计，但不再拦截请求，每个请求都真实发往上游，不再因为路由健康冷却而本地拦截成 429/503（upstream_attempted_count 保持大于 0）；上游 502 在多路由/共享网关场景下以 502 直达客户端。用于上游故障时最大化争取上游资源；默认开启。'
   },
   {
     key: 'upstream_route_half_open_exclusive_window_ms',

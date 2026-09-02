@@ -103,7 +103,9 @@ pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS: u64 = 3_000;
 /// 2026-09-02: route-health enforcement switch.  When false the gateway keeps
 /// recording route/key health but never blocks: `reserve()` never returns
 /// Cooling / HalfOpenBusy, every request is really forwarded and upstream
-/// errors pass through.  Default true preserves the historical behavior.
+/// errors are no longer masked by a route-health cooldown (the gateway's
+/// pre-existing aggregation/common-mode handling still applies).  Default true
+/// preserves the historical behavior.
 pub const DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 /// T1.3: cap on the failure step for non-half-open failures (default 3).
@@ -473,9 +475,10 @@ pub struct AppConfig {
     /// 2026-09-02: route-health enforcement switch.  When false the health
     /// layer is record-only: cooldowns and half-open state are still counted
     /// and surfaced to operators, but `reserve()` never returns Cooling /
-    /// HalfOpenBusy, every request is really sent upstream and the upstream's
-    /// 502-family errors pass through instead of a locally aggregated
-    /// 429/503.  Default true keeps the existing protection on.
+    /// HalfOpenBusy, every request is really sent upstream instead of being
+    /// rejected locally as 429/503, so `upstream_attempted_count` stays > 0.
+    /// The gateway's pre-existing aggregation/common-mode handling still
+    /// applies.  Default true keeps the existing protection on.
     #[serde(default = "default_upstream_route_health_enforcement_enabled")]
     pub upstream_route_health_enforcement_enabled: bool,
     /// Maximum time a single half-open probe may exclusively occupy a

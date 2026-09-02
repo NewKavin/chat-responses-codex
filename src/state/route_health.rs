@@ -606,9 +606,9 @@ pub struct RouteHealthRegistry {
     /// keeps recording health observations (last_access, cooldown, failure
     /// classes) but never blocks a request: `reserve()` /
     /// `reserve_route_health_probe()` never return `Cooling` or
-    /// `HalfOpenBusy`, every call is a plain `Ready` admission and upstream
-    /// errors pass through to the client.  Default true preserves the
-    /// historical behavior byte for byte.
+    /// `HalfOpenBusy`, every call is a plain `Ready` admission so a route
+    /// cooldown can no longer mask an upstream error as a local 429/503.
+    /// Default true preserves the historical behavior byte for byte.
     enforcement_enabled: bool,
     /// E5.3: per-upstream cumulative count of times E1/E2 skipped a route/key
     /// cooldown for a capacity-class failure (recorded as observation only).
