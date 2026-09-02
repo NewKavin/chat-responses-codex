@@ -60,6 +60,14 @@ impl PostgresStateStore {
         Ok(store)
     }
 
+    /// Clone of the connection pool, used by the portal OIDC store so both
+    /// share one pool of connections to the same database.
+    pub(crate) fn pool(
+        &self,
+    ) -> bb8::Pool<bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>> {
+        self.pool.clone()
+    }
+
     pub async fn load_state(&self) -> io::Result<PersistedState> {
         let conn = self.pool.get().await.map_err(io_other)?;
 
@@ -2090,6 +2098,52 @@ CREATE INDEX IF NOT EXISTS usage_logs_downstream_idx
     ON usage_logs (downstream_key_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS usage_logs_upstream_idx
     ON usage_logs (upstream_key_id, created_at DESC);
+
+-- Portal OIDC (design: docs/superpowers/specs/2026-09-02-portal-oidc-login-design.md).
+-- Idempotent like the rest of SCHEMA_SQL; the legacy (superseded) shape of
+-- these tables is dropped by the test harness before the initializer runs.
+CREATE TABLE IF NOT EXISTS portal_users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL,
+    display_name  TEXT,
+    username      TEXT,
+    disabled      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at TIMESTAMPTZ,
+    UNIQUE(email)
+);
+
+CREATE TABLE IF NOT EXISTS portal_identities (
+    provider   TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    user_id    TEXT NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (provider, subject)
+);
+
+CREATE TABLE IF NOT EXISTS portal_user_downstreams (
+    user_id       TEXT NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+    downstream_id TEXT NOT NULL,
+    is_default    BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (user_id, downstream_id)
+);
+
+CREATE TABLE IF NOT EXISTS portal_sessions (
+    sid          TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ,
+    user_agent   TEXT,
+    ip           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS portal_identities_user_idx
+    ON portal_identities (user_id);
+CREATE INDEX IF NOT EXISTS portal_sessions_user_idx
+    ON portal_sessions (user_id);
+CREATE INDEX IF NOT EXISTS portal_sessions_expires_idx
+    ON portal_sessions (expires_at);
 "#;
 
 /// Reads the three-state non-standard field policy, preferring the newer

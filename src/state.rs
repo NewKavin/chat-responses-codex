@@ -24,6 +24,8 @@ mod file_store;
 pub mod log_queries;
 #[path = "state/postgres.rs"]
 mod postgres;
+#[path = "state/portal_store.rs"]
+mod portal_store;
 
 /// Test-only seam: builds an INSERT statement with one `$n` placeholder per
 /// column so the placeholder list can never drift from the column list by
@@ -32,6 +34,9 @@ mod postgres;
 /// by the root package's test run).
 #[doc(hidden)]
 pub use postgres::insert_statement;
+pub use portal_store::{
+    PortalDownstreamBinding, PortalSession, PortalStore, PortalStoreError, PortalUser,
+};
 #[path = "state/redis_runtime.rs"]
 mod redis_runtime;
 #[path = "state/store.rs"]
@@ -675,6 +680,7 @@ pub struct AppState {
     direct_client: Client,
     config_store: Arc<dyn StateStore>,
     postgres: Option<Arc<PostgresStateStore>>,
+    portal_store: Option<Arc<PortalStore>>,
 }
 
 fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealthRegistry>> {
@@ -1145,6 +1151,7 @@ impl AppState {
             deployment_calendar,
             config_store,
             postgres: None,
+            portal_store: None,
         }
     }
 
@@ -1230,7 +1237,10 @@ impl AppState {
             config,
             deployment_calendar,
             config_store,
-            postgres,
+            postgres: postgres.clone(),
+            portal_store: postgres
+                .as_ref()
+                .map(|store| Arc::new(PortalStore::from_pool(store.pool()))),
         }
     }
 
@@ -1311,7 +1321,8 @@ impl AppState {
             config,
             deployment_calendar,
             config_store,
-            postgres: Some(postgres),
+            postgres: Some(postgres.clone()),
+            portal_store: Some(Arc::new(PortalStore::from_pool(postgres.pool()))),
         }
     }
 
@@ -1326,6 +1337,12 @@ impl AppState {
 
     pub fn deployment_calendar(&self) -> &DeploymentCalendar {
         &self.deployment_calendar
+    }
+
+    /// Portal OIDC durable store; `None` in file mode (design §3: every OIDC
+    /// endpoint answers 503 rather than degrading silently).
+    pub fn portal_store(&self) -> Option<Arc<PortalStore>> {
+        self.portal_store.clone()
     }
 
     pub fn account_concurrency_registry(&self) -> Arc<AccountConcurrencyRegistry> {

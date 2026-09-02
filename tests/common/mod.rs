@@ -22,3 +22,5 @@ pub async fn setup_test_app() -> (Router, AppState, TempDir) {
 
     (app, state, temp_dir)
 }
+
+pub mod oidc;
