@@ -450,7 +450,7 @@ async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cool
             > Duration::from_secs(2)
     );
 
-    registry.update_runtime_tuning(vec![7, 11], 1, 2, 3, 5, 3000, 60, false);
+    registry.update_runtime_tuning(vec![7, 11], 1, 2, 3, 5, 3000, 60, false, true);
     let clamped = registry.route_health_snapshot(&route).unwrap();
     assert!(clamped.cooldown_remaining <= Duration::from_secs(2));
 
@@ -1718,7 +1718,7 @@ async fn half_open_exclusive_window_update_runtime_tuning_applies_to_live_leases
         RouteAvailability::HalfOpenBusy { .. }
     ));
 
-    registry.update_runtime_tuning(vec![100, 200], 3, 4, 3, 300, 0, 60, false);
+    registry.update_runtime_tuning(vec![100, 200], 3, 4, 3, 300, 0, 60, false, true);
     assert!(matches!(
         registry.reserve(&route, &key),
         RouteAvailability::Ready(lease) if !lease.is_half_open()
@@ -2568,4 +2568,238 @@ fn e54_route_health_detail_shows_capacity_class_observation_only() {
         entry.consecutive_failures, 0,
         "no streak advance for capacity classes"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-02 passthrough switch (`upstream_route_health_enforcement_enabled`):
+// when enforcement is disabled the registry keeps recording health but never
+// returns Cooling / HalfOpenBusy — every reserve is a plain Ready admission.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_reserve_returns_ready_while_route_cooling() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    registry.set_route_health_enforcement_enabled(false);
+    let route = route("passthrough-cooling", "glm-5.2");
+    let key = key("passthrough-cooling");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert!(
+        snapshot.cooldown_remaining > Duration::ZERO,
+        "the seeded failure must still be cooling: {snapshot:?}"
+    );
+
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("passthrough must admit a cooling route, got {other:?}"),
+    };
+    assert!(
+        !lease.is_half_open(),
+        "passthrough leases carry no half-open lease"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_reserve_returns_ready_inside_half_open_exclusive_window() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        1,
+        60,
+        2,
+        300,
+        600_000,
+        60,
+        false,
+    );
+    let route = route("passthrough-window", "glm-5.2");
+    let key = key("passthrough-window");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    // Cooldown (base 1s, jittered 80-120%) elapses; the first caller gets a
+    // half-open lease and holds the (600s) exclusive window.
+    tokio::time::advance(Duration::from_millis(1_300)).await;
+    let first = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open lease, got {other:?}"),
+    };
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // Flipping the switch must not even consult the exclusive window: the
+    // second and third concurrent callers are admitted.
+    registry.set_route_health_enforcement_enabled(false);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(lease) if !lease.is_half_open()
+    ));
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(_)
+    ));
+    registry.finish(first, RouteOutcome::Success);
+}
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_failure_still_records_cooldown_and_class() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    registry.set_route_health_enforcement_enabled(false);
+    let route = route("passthrough-record", "glm-5.2");
+    let key = key("passthrough-record");
+
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected ready lease, got {other:?}"),
+    };
+    registry.finish(
+        lease,
+        RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: Some(502),
+            repeat_within_request: false,
+            sole_candidate: false,
+            capacity_sole_route: false,
+            shared_host_failure_domain: false,
+        },
+    );
+
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.last_failure_class,
+        Some(RouteFailureClass::TransientServer),
+        "passthrough must still record the failure class: {snapshot:?}"
+    );
+    assert_eq!(
+        snapshot.consecutive_failures, 1,
+        "passthrough must still advance the streak: {snapshot:?}"
+    );
+    assert!(
+        snapshot.cooldown_remaining > Duration::ZERO,
+        "passthrough must still write the cooldown: {snapshot:?}"
+    );
+    assert!(!snapshot.half_open, "{snapshot:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_success_clears_route_cooldown() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    registry.set_route_health_enforcement_enabled(false);
+    let route = route("passthrough-success", "glm-5.2");
+    let key = key("passthrough-success");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    assert!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .cooldown_remaining
+            > Duration::ZERO
+    );
+
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected ready lease, got {other:?}"),
+    };
+    registry.finish(lease, RouteOutcome::Success);
+
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert!(
+        snapshot.cooldown_remaining.is_zero(),
+        "a passthrough success must clear the stale cooldown: {snapshot:?}"
+    );
+    assert_eq!(
+        snapshot.last_failure_class, None,
+        "the failure trail must be cleared on success: {snapshot:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_failures_stay_bounded_by_max_step() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        5,
+        300,
+        2,
+        300,
+        3000,
+        60,
+        false,
+    );
+    registry.set_route_health_enforcement_enabled(false);
+    let route = route("passthrough-bounded", "glm-5.2");
+    let key = key("passthrough-bounded");
+
+    for _ in 0..6 {
+        let lease = match registry.reserve(&route, &key) {
+            RouteAvailability::Ready(lease) => lease,
+            other => panic!("expected ready lease, got {other:?}"),
+        };
+        registry.finish(
+            lease,
+            RouteOutcome::RouteFailure {
+                class: RouteFailureClass::TransientServer,
+                upstream_status: Some(502),
+                repeat_within_request: false,
+                sole_candidate: false,
+                capacity_sole_route: false,
+                shared_host_failure_domain: false,
+            },
+        );
+    }
+
+    let snapshot = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        snapshot.consecutive_failures, 2,
+        "max_step=2 must cap the streak, got {snapshot:?}"
+    );
+    // 5s << (2-1) = 10s, jittered up to 120% => at most 12s.
+    assert!(
+        snapshot.cooldown_remaining <= Duration::from_millis(12_000),
+        "the cooldown must stay inside the configured step cap: {snapshot:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_switch_hot_reloads_and_toggles_back() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        5,
+        300,
+        2,
+        300,
+        3000,
+        60,
+        false,
+    );
+    let route = route("passthrough-hot", "glm-5.2");
+    let key = key("passthrough-hot");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None, false);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    // Hot-reload the switch to false: no restart, the cooling route becomes
+    // immediately usable (the cooldown itself is left untouched).
+    registry.update_runtime_tuning(vec![100, 200], 5, 300, 2, 300, 3000, 60, false, false);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(_)
+    ));
+
+    // Toggling back to true re-arms the (still unexpired) cooldown.
+    registry.update_runtime_tuning(vec![100, 200], 5, 300, 2, 300, 3000, 60, false, true);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
 }

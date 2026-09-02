@@ -334,6 +334,15 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'upstream_route_health_enforcement_enabled',
+    group: 'routing',
+    label: '路由健康拦截',
+    apply: 'immediate',
+    control: 'switch',
+    description:
+      '关闭后路由健康只记录不阻断：冷却与半开状态照常统计，但不再拦截请求，每个请求都真实发往上游，上游错误原样透传。用于上游故障时最大化争取上游资源；默认开启。'
+  },
+  {
     key: 'upstream_route_half_open_exclusive_window_ms',
     group: 'routing',
     label: '半开独占窗口',

@@ -28,6 +28,8 @@ mod responses;
 mod responses_reasoning;
 #[path = "gateway/route_exhaustion_budget_invariant.rs"]
 mod route_exhaustion_budget_invariant;
+#[path = "gateway/route_health_passthrough.rs"]
+mod route_health_passthrough;
 #[path = "gateway/slow_stream.rs"]
 mod slow_stream;
 #[path = "gateway/stream_only.rs"]

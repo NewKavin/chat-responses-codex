@@ -86,6 +86,28 @@ end
 
 clear_legacy_local_admission(KEYS[2], KEYS[4], KEYS[6])
 
+-- 2026-09-02 passthrough mode (`enforcement_enabled == 0`): the health layer
+-- is record-only.  Never report cooling/busy and never grant a half-open
+-- lease (a grant would make a concurrent caller see HalfOpenBusy, which
+-- passthrough mode must never emit).  The captured route state_generation
+-- lets the finish script's same-observation success path clear a stale
+-- cooldown, so re-enabling enforcement never trips over an old cooldown.
+local enforcement_enabled = ARGV[6] == '1'
+if not enforcement_enabled then
+  local route_state_generation = state_value(KEYS[2], 'state_generation') or ''
+  if redis.call('EXISTS', KEYS[1]) == 1 then
+    redis.call('HSET', KEYS[1], 'last_access_ms', tostring(now_ms))
+    redis.call('EXPIRE', KEYS[1], ttl_seconds)
+    refresh_indexes(KEYS[1], KEYS[3], KEYS[5])
+  end
+  if redis.call('EXISTS', KEYS[2]) == 1 then
+    redis.call('HSET', KEYS[2], 'last_access_ms', tostring(now_ms))
+    redis.call('EXPIRE', KEYS[2], ttl_seconds)
+    refresh_indexes(KEYS[2], KEYS[4], KEYS[6])
+  end
+  return {'0', '', '', route_state_generation, '0'}
+end
+
 local key_blocked = blocked(KEYS[1])
 if key_blocked then
   return key_blocked

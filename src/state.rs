@@ -180,6 +180,7 @@ pub use types::{
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
@@ -678,8 +679,9 @@ pub struct AppState {
 }
 
 fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealthRegistry>> {
-    Arc::new(Mutex::new(RouteHealthRegistry::new_with_runtime_tuning(
-        ROUTE_HEALTH_GLOBAL_CAPACITY,
+    Arc::new(Mutex::new(
+        RouteHealthRegistry::new_with_runtime_tuning_and_enforcement(
+            ROUTE_HEALTH_GLOBAL_CAPACITY,
         ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
         config.upstream_concurrency_probe_delays_ms.clone(),
         config.upstream_transient_route_cooldown_base_seconds,
@@ -689,7 +691,9 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_route_half_open_exclusive_window_ms,
         config.upstream_credentials_first_strike_seconds,
         config.upstream_capacity_failure_cooldown_enabled,
-    )))
+            config.upstream_route_health_enforcement_enabled,
+        ),
+    ))
 }
 
 fn account_concurrency_registry_from_config(config: &AppConfig) -> Arc<AccountConcurrencyRegistry> {
@@ -3510,6 +3514,7 @@ impl AppState {
                 settings.upstream_route_half_open_exclusive_window_ms,
                 settings.upstream_credentials_first_strike_seconds,
                 settings.upstream_capacity_failure_cooldown_enabled,
+                settings.upstream_route_health_enforcement_enabled,
             );
         }
         self.account_concurrency.update_runtime_tuning(

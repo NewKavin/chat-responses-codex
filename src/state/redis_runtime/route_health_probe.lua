@@ -5,9 +5,33 @@ local ttl_seconds = tonumber(ARGV[2])
 local lease_duration_ms = tonumber(ARGV[3])
 local probe_interval_ms = tonumber(ARGV[4])
 local exclusive_window_ms = tonumber(ARGV[5])
+local enforcement_enabled = ARGV[6] == '1'
 
 local function state_value(key, field)
   return redis.call('HGET', key, field)
+end
+
+-- 2026-09-02 passthrough mode: record-only admission, exactly like the
+-- regular reserve script (never cooling/busy, never a half-open lease).
+if not enforcement_enabled then
+  local route_state_generation = state_value(KEYS[2], 'state_generation') or ''
+  if redis.call('EXISTS', KEYS[1]) == 1 then
+    redis.call('HSET', KEYS[1], 'last_access_ms', tostring(now_ms))
+    redis.call('EXPIRE', KEYS[1], ttl_seconds)
+    redis.call('ZADD', KEYS[3], now_ms, KEYS[1])
+    redis.call('ZADD', KEYS[5], now_ms, KEYS[1])
+    redis.call('EXPIRE', KEYS[3], ttl_seconds)
+    redis.call('EXPIRE', KEYS[5], ttl_seconds)
+  end
+  if redis.call('EXISTS', KEYS[2]) == 1 then
+    redis.call('HSET', KEYS[2], 'last_access_ms', tostring(now_ms))
+    redis.call('EXPIRE', KEYS[2], ttl_seconds)
+    redis.call('ZADD', KEYS[4], now_ms, KEYS[2])
+    redis.call('ZADD', KEYS[6], now_ms, KEYS[2])
+    redis.call('EXPIRE', KEYS[4], ttl_seconds)
+    redis.call('EXPIRE', KEYS[6], ttl_seconds)
+  end
+  return {'0', '', '', route_state_generation, '0'}
 end
 
 -- The key must not be cooling and must not carry an active lease, exactly

@@ -35,7 +35,8 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
-    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
     DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
@@ -101,6 +102,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     )?
     .max(1);
+    let route_health_enforcement_enabled = env_bool(
+        "UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED",
+        DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED,
+    );
     let route_half_open_exclusive_window_ms = env_u64(
         "UPSTREAM_ROUTE_HALF_OPEN_EXCLUSIVE_WINDOW_MS",
         DEFAULT_ROUTE_HEALTH_HALF_OPEN_EXCLUSIVE_WINDOW_MS,
@@ -341,6 +346,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_transient_route_cooldown_max_seconds: transient_route_cooldown_max_seconds,
         upstream_transient_route_cooldown_max_step: transient_route_cooldown_max_step,
         upstream_route_health_half_open_ttl_seconds: route_health_half_open_ttl_seconds,
+        upstream_route_health_enforcement_enabled: route_health_enforcement_enabled,
         upstream_route_half_open_exclusive_window_ms: route_half_open_exclusive_window_ms,
         upstream_route_half_open_busy_max_rounds: route_half_open_busy_max_rounds,
         upstream_retry_after_cap_seconds,
