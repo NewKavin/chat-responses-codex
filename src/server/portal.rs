@@ -617,19 +617,6 @@ pub(super) async fn portal_rotate_key(
 }
 
 /// Helper function to extract downstream ID from Bearer token
-fn session_cookie_value(headers: &HeaderMap) -> Option<String> {
-    let cookie_header = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())?;
-    for pair in cookie_header.split(';') {
-        let (name, value) = pair.trim().split_once('=')?;
-        if name == crate::server::portal_oidc::PORTAL_SESSION_COOKIE {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
 async fn extract_downstream_id_from_bearer(
     state: &AppState,
     headers: &HeaderMap,
@@ -637,7 +624,7 @@ async fn extract_downstream_id_from_bearer(
     // OIDC 会话 Cookie 优先（设计 §4.2）：命中有效会话即返回其默认绑定
     // downstream；无 Cookie 或会话无效时回落到下面的 Bearer 逻辑，现有
     // 工号+key 的调用不受影响。
-    if let Some(cookie) = session_cookie_value(headers) {
+    if let Some(cookie) = crate::server::portal_oidc::session_cookie_value(headers) {
         if let Some(store) = state.portal_store() {
             let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
             if let Ok(Some(session)) = store.find_session(&sid_hash).await {

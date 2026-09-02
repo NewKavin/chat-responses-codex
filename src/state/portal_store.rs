@@ -179,6 +179,21 @@ impl PortalStore {
         }
     }
 
+    /// Look up a user by unique email (bind intent reuses an existing user).
+    pub async fn portal_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<PortalUser>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT u.id, u.email, u.display_name, u.username, u.disabled,                         EXTRACT(EPOCH FROM u.created_at)::bigint,                         (CASE WHEN u.last_login_at IS NULL THEN NULL                          ELSE EXTRACT(EPOCH FROM u.last_login_at)::bigint END),                         (SELECT i.provider FROM portal_identities i                          WHERE i.user_id = u.id ORDER BY i.created_at LIMIT 1),                         (SELECT i.subject FROM portal_identities i                          WHERE i.user_id = u.id ORDER BY i.created_at LIMIT 1),                         (SELECT COUNT(*) FROM portal_user_downstreams b WHERE b.user_id = u.id)                  FROM portal_users u WHERE u.email = $1",
+                &[&email],
+            )
+            .await?;
+        Ok(row.map(parse_user_row))
+    }
+
     pub async fn touch_last_login(&self, user_id: &str) -> Result<(), PortalStoreError> {
         let client = self.pool.get().await?;
         client

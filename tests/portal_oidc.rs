@@ -815,3 +815,208 @@ async fn body_bytes(response: axum::body::Body) -> Vec<u8> {
         .unwrap_or_default();
     bytes.to_vec()
 }
+
+// ============================= T5: bind intent =============================
+
+async fn run_bind_flow(router: &axum::Router, bearer: &str, downstream_id: &str) -> FlowResult {
+    let start = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/portal/oidc/start?intent=bind&downstream_id={downstream_id}"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let start_status = start.status();
+    let start_location = start
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    if start_status != StatusCode::FOUND || start_location.is_none() {
+        return FlowResult { status: start_status, location: None, set_cookie: None };
+    }
+    let authz = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(start_location.unwrap())
+        .send()
+        .await
+        .unwrap();
+    let callback_url = authz
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .unwrap()
+        .to_string();
+    let callback_path = callback_url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, path)| format!("/{path}"))
+        .unwrap();
+    let callback = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(callback_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    FlowResult {
+        status: callback.status(),
+        location: callback
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        set_cookie: callback
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn bind_intent_attaches_identity_to_an_existing_key() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {
+        // registration stays DISABLED: bind is the migration path
+    })
+    .await;
+    use chat_responses_codex::keys::generate_downstream_key;
+    let key = generate_downstream_key("team-a");
+    let mut downstream = DownstreamConfig {
+        id: "team-a".to_string(),
+        name: "team-a".to_string(),
+        hash: key.hash,
+        plaintext_key: Some(key.plaintext.clone()),
+        active: true,
+        model_allowlist: vec![],
+        ..Default::default()
+    };
+    downstream.plaintext_key = Some(key.plaintext.clone());
+    state.insert_downstream(downstream).await.unwrap();
+    let store = state.portal_store().unwrap();
+
+    let result = run_bind_flow(&router, &key.plaintext, "team-a").await;
+    assert_eq!(
+        result.status,
+        StatusCode::FOUND,
+        "bind must redirect back after success"
+    );
+    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert!(result.set_cookie.is_some(), "bind must establish a session");
+
+    // The identity + binding + default exist.
+    let user = store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .expect("identity must now exist");
+    assert_eq!(user.email, "user@example.com");
+    assert_eq!(store.default_downstream(&user.id).await.unwrap().as_deref(), Some("team-a"));
+
+    // A subsequent plain OIDC login now works without registration enabled.
+    let login = run_login_flow(&router).await;
+    assert_eq!(login.status, StatusCode::FOUND);
+    idp.abort();
+}
+
+#[tokio::test]
+async fn bind_conflicts_when_identity_already_bound_to_another_key() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    use chat_responses_codex::keys::generate_downstream_key;
+    let key_a = generate_downstream_key("team-a");
+    let key_b = generate_downstream_key("team-b");
+    for (id, key) in [("team-a", key_a), ("team-b", key_b.clone())] {
+        let mut downstream = DownstreamConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            hash: key.hash,
+            plaintext_key: Some(key.plaintext.clone()),
+            active: true,
+            model_allowlist: vec![],
+            ..Default::default()
+        };
+        let secret = key.plaintext.clone();
+        downstream.plaintext_key = Some(secret);
+        state.insert_downstream(downstream).await.unwrap();
+    }
+    let store = state.portal_store().unwrap();
+    // The identity is already bound (by admin or a previous bind) to team-a.
+    let user = store
+        .create_user_with_identity("user@example.com", None, None, "oidc", "test-user-subject")
+        .await
+        .unwrap();
+    store
+        .add_downstream_binding(&user.id, "team-a", true)
+        .await
+        .unwrap();
+
+    // Binding the same identity to a different key must conflict.
+    let result = run_bind_flow(&router, &key_b.plaintext, "team-b").await;
+    assert_eq!(
+        result.status,
+        StatusCode::CONFLICT,
+        "identity already bound to another key must 409"
+    );
+    assert_eq!(
+        store.default_downstream(&user.id).await.unwrap().as_deref(),
+        Some("team-a"),
+        "existing binding must not change"
+    );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn bind_requires_login() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, _state) = oidc_gateway(&idp, |_config| {}).await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/oidc/start?intent=bind&downstream_id=team-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "bind without login must 401");
+    idp.abort();
+}

@@ -25,6 +25,8 @@ const OIDC_STATE_TTL_SECONDS: i64 = 600;
 pub(super) struct OidcStartQuery {
     #[serde(rename = "intent")]
     pub(super) intent: Option<String>,
+    #[serde(rename = "downstream_id")]
+    pub(super) downstream_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +62,20 @@ fn session_cookie_header(value: &str, max_age_seconds: u64) -> String {
     )
 }
 
+/// Extract the raw `portal_session` cookie value, if present.
+pub(super) fn session_cookie_value(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    for pair in cookie_header.split(';') {
+        let (name, value) = pair.trim().split_once('=')?;
+        if name == PORTAL_SESSION_COOKIE {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -89,11 +105,38 @@ fn build_http_client() -> reqwest::Client {
 /// `GET /api/portal/oidc/start`
 pub(super) async fn portal_oidc_start(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<OidcStartQuery>,
 ) -> Response {
     let (_, settings, config, client) = match oidc_environment(&state).await {
         Ok(environment) => environment,
         Err(response) => return response,
+    };
+
+    // Bind intent (design §4.3): the caller must already be logged in, and
+    // the bind target must be an existing downstream.
+    let bind_downstream = if query.intent.as_deref() == Some("bind") {
+        let current = match current_login_downstream(&state, &headers).await {
+            Some(current) => current,
+            None => {
+                return error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "bind_requires_login",
+                    "binding an OIDC identity requires an active login",
+                )
+            }
+        };
+        let target = query.downstream_id.as_deref().unwrap_or(&current).to_string();
+        if state.downstream_config(&target).await.is_none() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "unknown_downstream",
+                &format!("downstream '{target}' does not exist"),
+            );
+        }
+        Some(target)
+    } else {
+        None
     };
     let endpoints = match config
         .resolve_endpoints(&client)
@@ -122,7 +165,7 @@ pub(super) async fn portal_oidc_start(
             raw_state.clone(),
             crate::state::PortalOidcHandshake {
                 code_verifier: code_verifier.clone(),
-                downstream_id: query.intent.as_deref().map(str::to_string),
+                downstream_id: bind_downstream,
                 expires_at_unix: now + OIDC_STATE_TTL_SECONDS,
             },
         )
@@ -265,10 +308,43 @@ pub(super) async fn portal_oidc_callback(
     };
 
     // Steps 6-8: field mapping, email allowlist, identity resolution.
-    let user = match resolve_identity(&store, &settings, &config, &userinfo).await {
+    let bind_target = handshake.downstream_id.as_deref();
+    let user = match resolve_identity(&store, &settings, &config, &userinfo, bind_target).await {
         Ok(user) => user,
         Err(response) => return response,
     };
+
+    // Bind intent bookkeeping (design §4.3): an identity already bound to
+    // another key refuses; a fresh identity (or one without keys) adopts
+    // the requested key.
+    if let Some(target) = bind_target {
+        let bindings = match store.list_downstream_bindings(&user.id).await {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "oidc_store_failed",
+                    &error.to_string(),
+                )
+            }
+        };
+        if !bindings.iter().any(|binding| binding.downstream_id == target) {
+            if !bindings.is_empty() {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "portal_identity_already_bound",
+                    "this OIDC identity is already bound to another downstream key",
+                );
+            }
+            if let Err(error) = store.add_downstream_binding(&user.id, target, true).await {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "oidc_store_failed",
+                    &error.to_string(),
+                );
+            }
+        }
+    }
 
     // Step 9: session + cookie + redirect.
     let session_ttl = settings.portal_session_ttl_seconds.max(60);
@@ -350,6 +426,7 @@ async fn resolve_identity(
     settings: &crate::state::RuntimeSettings,
     config: &PortalOidcConfig,
     userinfo: &Value,
+    bind_downstream: Option<&str>,
 ) -> Result<crate::state::PortalUser, Response> {
     const PROVIDER: &str = "oidc";
 
@@ -388,7 +465,7 @@ async fn resolve_identity(
         .await
     {
         Ok(Some(user)) => user,
-        Ok(None) if settings.portal_oidc_registration_enabled => {
+        Ok(None) if settings.portal_oidc_registration_enabled || bind_downstream.is_some() => {
             let display_name = config.display_name_field.resolve(userinfo);
             let username = config.username_field.resolve(userinfo);
             match store
@@ -453,21 +530,54 @@ async fn resolve_identity(
         ));
     }
 
-    // Step 8c: a user without a bound downstream key is refused; the gateway
-    // never auto-issues a key to an OIDC identity.
-    match store.default_downstream(&user.id).await {
-        Ok(Some(_)) => Ok(user),
-        Ok(None) => Err(error_response(
-            StatusCode::FORBIDDEN,
-            "access_not_granted",
-            "no downstream key is bound to this account; ask an administrator",
-        )),
-        Err(error) => Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "oidc_store_failed",
-            &error.to_string(),
-        )),
+    // Step 8c: a user without a bound downstream key is refused, unless a
+    // bind intent is in flight (that flow is about to establish the binding).
+    // The gateway never auto-issues a key to an OIDC identity.
+    if bind_downstream.is_none() {
+        match store.default_downstream(&user.id).await {
+            Ok(Some(_)) => Ok(user),
+            Ok(None) => Err(error_response(
+                StatusCode::FORBIDDEN,
+                "access_not_granted",
+                "no downstream key is bound to this account; ask an administrator",
+            )),
+            Err(error) => Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "oidc_store_failed",
+                &error.to_string(),
+            )),
+        }
+    } else {
+        Ok(user)
     }
+}
+
+/// The downstream the current request is authenticated as: session-cookie
+/// default binding first, then Bearer secret.  Used to authorize bind
+/// intents (design §4.3: binding requires an active login).
+async fn current_login_downstream(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    if let Some(cookie) = session_cookie_value(headers) {
+        if let Some(store) = state.portal_store() {
+            let sid_hash = sha256_hex(cookie.as_bytes());
+            if let Ok(Some(session)) = store.find_session(&sid_hash).await {
+                if let Ok(Some(downstream_id)) = store.default_downstream(&session.user_id).await {
+                    return Some(downstream_id);
+                }
+            }
+        }
+    }
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string)?;
+    state
+        .downstream_for_secret(&bearer)
+        .await
+        .map(|downstream| downstream.id)
 }
 
 async fn exchange_token(
