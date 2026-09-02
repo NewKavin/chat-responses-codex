@@ -3303,3 +3303,203 @@ mod tests {
         ));
     }
 }
+
+// ---- Portal OIDC user administration (design §4.6, T6) --------------------
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct PortalUsersQuery {
+    keyword: Option<String>,
+    page: Option<u64>,
+    page_size: Option<u64>,
+}
+
+fn portal_user_json(user: &crate::state::PortalUser) -> serde_json::Value {
+    serde_json::json!({
+        "id": user.id,
+        "email": user.email,
+        "display_name": user.display_name,
+        "username": user.username,
+        "disabled": user.disabled,
+        "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
+        "provider": user.provider,
+        "subject": user.subject,
+        "binding_count": user.binding_count,
+    })
+}
+
+pub(super) async fn admin_portal_users(
+    State(state): State<crate::state::AppState>,
+    Query(query): Query<PortalUsersQuery>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+    let page = query.page.unwrap_or(1).max(1);
+    let keyword = query.keyword.unwrap_or_default();
+    match store.list_users(&keyword, page_size as i64, ((page - 1) * page_size) as i64).await {
+        Ok((total, users)) => {
+            let items: Vec<serde_json::Value> =
+                users.iter().map(portal_user_json).collect();
+            (StatusCode::OK, Json(json!({"total": total, "page": page, "items": items}))).into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct PortalUserPatchBody {
+    disabled: bool,
+}
+
+pub(super) async fn admin_portal_user_patch(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+    axum::Json(body): axum::Json<PortalUserPatchBody>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    match store.set_user_disabled(&user_id, body.disabled).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(json!({"id": user_id, "disabled": body.disabled})),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "portal user not found"}})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+pub(super) async fn admin_portal_user_bindings(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    match store.list_downstream_bindings(&user_id).await {
+        Ok(bindings) => {
+            let items: Vec<serde_json::Value> = bindings
+                .iter()
+                .map(|binding| {
+                    serde_json::json!({
+                        "downstream_id": binding.downstream_id,
+                        "is_default": binding.is_default,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(json!({"items": items}))).into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct BindBody {
+    downstream_id: String,
+    is_default: Option<bool>,
+}
+
+pub(super) async fn admin_portal_user_bindings_post(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+    axum::Json(body): axum::Json<BindBody>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    // The downstream must already exist (design §4.6: 绑定目标必须是已存在的 key).
+    if state.downstream_config(&body.downstream_id).await.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "downstream does not exist"}})),
+        )
+            .into_response();
+    }
+    match store
+        .add_downstream_binding(&user_id, &body.downstream_id, body.is_default.unwrap_or(false))
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "user_id": user_id,
+                "downstream_id": body.downstream_id,
+                "is_default": body.is_default.unwrap_or(false),
+            })),
+        )
+            .into_response(),
+        Err(crate::state::PortalStoreError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "portal user not found"}})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+pub(super) async fn admin_portal_user_bindings_delete(
+    State(state): State<crate::state::AppState>,
+    Path((user_id, downstream_id)): Path<(String, String)>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    match store
+        .remove_downstream_binding(&user_id, &downstream_id)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({"user_id": user_id, "downstream_id": downstream_id})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}

@@ -29,7 +29,7 @@ use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream as futures_stream, FutureExt, StreamExt};
@@ -2594,6 +2594,33 @@ pub fn build_router(state: AppState) -> Router {
                 state.clone(),
                 admin_auth_middleware,
             )),
+        )
+        // Admin API - Portal OIDC users (design §4.6, T6)
+        .route(
+            "/api/admin/portal/users",
+            get(admin_portal_users).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/portal/users/{id}",
+            patch(admin_portal_user_patch).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/portal/users/{id}/bindings",
+            get(admin_portal_user_bindings).post(admin_portal_user_bindings_post).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
+        .route(
+            "/api/admin/portal/users/{id}/bindings/{downstream_id}",
+            delete(admin_portal_user_bindings_delete).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
         )
         // Portal API
         .route("/api/portal/login", post(portal_login))

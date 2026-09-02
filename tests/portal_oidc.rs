@@ -240,6 +240,9 @@ async fn oidc_gateway(idp: &MockIdp, configure: impl Fn(&mut AppConfig)) -> (axu
     config.portal_oidc_redirect_url = CALLBACK_URL.to_string();
     config.portal_oidc_issuer_url = idp.base_url.clone();
     config.portal_oidc_enabled = true;
+    config.admin_username = "admin".to_string();
+    config.admin_password = "admin-password".to_string();
+    config.jwt_secret = "test-jwt-secret".to_string();
     configure(&mut config);
     let state = AppState::load_from_database_url(&url, config)
         .await
@@ -1018,5 +1021,255 @@ async fn bind_requires_login() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "bind without login must 401");
+    idp.abort();
+}
+
+// ============================= T6: admin endpoints =============================
+
+async fn admin_token(router: &axum::Router) -> String {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"username":"admin","password":"admin-password"}"#.to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "admin login must succeed");
+    let (_, body) = response.into_parts();
+    let bytes = body_bytes(body).await;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value["token"].as_str().unwrap().to_string()
+}
+
+async fn admin_request(
+    router: &axum::Router,
+    token: &str,
+    method: &str,
+    uri: &str,
+    payload: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    let body = match payload {
+        Some(value) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(value.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = router
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let (_, body) = response.into_parts();
+    let bytes = body_bytes(body).await;
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn admin_users_listing_paging_and_keyword() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    let store = state.portal_store().unwrap();
+    store
+        .create_user_with_identity("alice@example.com", Some("Alice"), Some("alice"), "oidc", "sub-a")
+        .await
+        .unwrap();
+    store
+        .create_user_with_identity("bob@example.com", Some("Bob"), Some("bob"), "oidc", "sub-b")
+        .await
+        .unwrap();
+    let token = admin_token(&router).await;
+
+    let (status, body) = admin_request(&router, &token, "GET", "/api/admin/portal/users?page=1&page_size=1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+    let (status, body) = admin_request(&router, &token, "GET", "/api/admin/portal/users?keyword=alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["email"], "alice@example.com");
+    assert_eq!(body["items"][0]["subject"], "sub-a");
+    idp.abort();
+}
+
+#[tokio::test]
+async fn admin_disable_user_kills_their_sessions_immediately() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+    let cookie = login_get_cookie(&router).await;
+    assert_eq!(overview_with_cookie(&router, &cookie).await, StatusCode::OK);
+
+    let token = admin_token(&router).await;
+    let store = state.portal_store().unwrap();
+    let user = store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .unwrap();
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({"disabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["disabled"], true);
+    assert_eq!(
+        overview_with_cookie(&router, &cookie).await,
+        StatusCode::UNAUTHORIZED,
+        "disabled user's session dies immediately"
+    );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn admin_bindings_crud_and_default_promotion() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    seed_downstream(&state, "team-a").await;
+    seed_downstream(&state, "team-b").await;
+    let store = state.portal_store().unwrap();
+    let user = store
+        .create_user_with_identity("user@example.com", None, None, "oidc", "sub-u")
+        .await
+        .unwrap();
+    let token = admin_token(&router).await;
+
+    // add team-a as default
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "POST",
+        &format!("/api/admin/portal/users/{}/bindings", user.id),
+        Some(serde_json::json!({"downstream_id": "team-a", "is_default": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // add team-b non-default, then promote it -> team-a demoted
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "POST",
+        &format!("/api/admin/portal/users/{}/bindings", user.id),
+        Some(serde_json::json!({"downstream_id": "team-b", "is_default": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "POST",
+        &format!("/api/admin/portal/users/{}/bindings", user.id),
+        Some(serde_json::json!({"downstream_id": "team-b", "is_default": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(store.default_downstream(&user.id).await.unwrap().as_deref(), Some("team-b"));
+
+    // bindings list
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "GET",
+        &format!("/api/admin/portal/users/{}/bindings", user.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+
+    // deleting the default promotes the other
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "DELETE",
+        &format!("/api/admin/portal/users/{}/bindings/team-b", user.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(store.default_downstream(&user.id).await.unwrap().as_deref(), Some("team-a"));
+
+    // binding to a nonexistent downstream is refused
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "POST",
+        &format!("/api/admin/portal/users/{}/bindings", user.id),
+        Some(serde_json::json!({"downstream_id": "no-such-key", "is_default": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    idp.abort();
+}
+
+#[tokio::test]
+async fn admin_portal_endpoints_require_authentication() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, _state) = oidc_gateway(&idp, |_config| {}).await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/portal/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     idp.abort();
 }
