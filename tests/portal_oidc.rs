@@ -628,3 +628,190 @@ async fn registration_disabled_new_identity_is_403_and_leaves_no_records() {
     );
     idp.abort();
 }
+
+// ============================= T4: session wiring =============================
+
+async fn login_get_cookie(router: &axum::Router) -> String {
+    let result = run_login_flow(router).await;
+    assert_eq!(result.status, StatusCode::FOUND);
+    result
+        .set_cookie
+        .expect("login must set a session cookie")
+        .strip_prefix("portal_session=")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn overview_with_cookie(router: &axum::Router, cookie: &str) -> StatusCode {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/overview")
+                .header(header::COOKIE, format!("portal_session={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response.status()
+}
+
+#[tokio::test]
+async fn session_cookie_unlocks_portal_and_disabling_user_kills_it_immediately() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+
+    let cookie = login_get_cookie(&router).await;
+
+    // The cookie alone (no Authorization header) must unlock the existing
+    // 10 portal endpoints — the exact 10 are untouched, /overview is a proxy.
+    assert_eq!(overview_with_cookie(&router, &cookie).await, StatusCode::OK);
+
+    // An unknown cookie is refused.
+    assert_eq!(
+        overview_with_cookie(&router, &"bogus-session-value").await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Disabling the user purges their sessions in the same transaction, so
+    // the very next request with the old cookie must be refused (design §4.4).
+    let store = state.portal_store().unwrap();
+    let user = store
+        .find_user_by_identity("oidc", "test-user-subject")
+        .await
+        .unwrap()
+        .expect("seeded user");
+    assert!(store.set_user_disabled(&user.id, true).await.unwrap());
+    assert_eq!(
+        overview_with_cookie(&router, &cookie).await,
+        StatusCode::UNAUTHORIZED,
+        "old session must die the moment the user is disabled"
+    );
+
+    // Re-enabling does not resurrect the old session.
+    assert!(store.set_user_disabled(&user.id, false).await.unwrap());
+    assert_eq!(
+        overview_with_cookie(&router, &cookie).await,
+        StatusCode::UNAUTHORIZED
+    );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn legacy_bearer_login_is_untouched_by_oidc() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+
+    // 工号+key login gets its JWT via the java-style portal login endpoint.
+    use chat_responses_codex::state::{DownstreamConfig};
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    state.set_capability_probe_sender(tx);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    // The legacy key is a salt:hexdigest hash (design for 工号+key login).
+    let legacy_hash = {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        "test-salt".hash(&mut hasher);
+        "team-a".hash(&mut hasher);
+        format!("test-salt:{:016x}", hasher.finish())
+    };
+    state
+        .insert_downstream(DownstreamConfig {
+            id: "team-a".to_string(),
+            name: "team-a".to_string(),
+            hash: legacy_hash,
+            plaintext_key: Some("team-a".to_string()),
+            active: true,
+            model_allowlist: vec![],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // The legacy key is the downstream id itself in the test harness.
+    assert!(
+        state.downstream_for_secret("team-a").await.is_some(),
+        "downstream_for_secret must match the plaintext key"
+    );
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"employee_id":"team-a","key":"team-a"}"#.to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let login_status = login.status();
+    if login_status != StatusCode::OK {
+        let (_, body) = login.into_parts();
+        let bytes = axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        panic!(
+            "legacy login failed with {}: {:?}",
+            login_status,
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    let login_token = {
+        let (_, body) = login.into_parts();
+        String::from_utf8_lossy(&body_bytes(body).await).to_string()
+    };
+    let login_token_json: serde_json::Value = serde_json::from_str(&login_token)
+        .unwrap_or_else(|_| panic!("login body must be JSON: {login_token}"));
+    let token = login_token_json
+        .pointer("/token")
+        .or_else(|| login_token_json.pointer("/access_token"))
+        .and_then(|value| value.as_str())
+        .expect("login JSON must carry the token");
+
+    let overview = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overview.status(), StatusCode::OK, "legacy JWT must keep working");
+    idp.abort();
+}
+
+async fn body_bytes(response: axum::body::Body) -> Vec<u8> {
+    let bytes = axum::body::to_bytes(response, 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    bytes.to_vec()
+}

@@ -72,7 +72,7 @@ fn random_bytes(len: usize) -> Vec<u8> {
     bytes
 }
 
-fn sha256_hex(input: &[u8]) -> String {
+pub(super) fn sha256_hex(input: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(input);
