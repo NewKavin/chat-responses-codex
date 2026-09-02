@@ -297,3 +297,20 @@ describe('runtime settings helpers', () => {
     ])
   })
 })
+
+describe('portal OIDC settings', () => {
+  it('appears as a settings group with exactly the six portal fields', () => {
+    const portalGroup = runtimeSettingGroups.find(group => group.id === 'portal')
+    expect(portalGroup).toBeDefined()
+    const portalFields = runtimeSettingFields.filter(field => field.group === 'portal')
+    expect(portalFields.map(field => field.key)).toEqual([
+      'portal_oidc_enabled',
+      'portal_oidc_registration_enabled',
+      'portal_oidc_allowed_email_domains',
+      'portal_session_ttl_seconds',
+      'portal_oidc_pkce_enabled',
+      'portal_oidc_verify_id_token'
+    ])
+    expect(portalFields.every(field => field.apply === 'immediate')).toBe(true)
+  })
+})
