@@ -16,7 +16,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 
 pub(super) const PORTAL_SESSION_COOKIE: &str = "portal_session";
 const OIDC_STATE_TTL_SECONDS: i64 = 600;
