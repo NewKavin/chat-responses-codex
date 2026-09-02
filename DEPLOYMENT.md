@@ -591,6 +591,86 @@ Troubleshooting:
   - If a pool looks dead *only* for existing sessions and `in_flight` never
     returns to 0, restart the gateway to reclaim leaked slots immediately.
 
+## 门户 OIDC 登录 (Portal OIDC)
+
+用 Keycloak / Authentik（或任何 OpenID Connect 提供方，issuer discovery 或
+手工端点皆可）让门户用户免密钥登录。**身份一律来自 userinfo，不来自
+id_token**；开启 `portal_oidc_verify_id_token` 只是额外验签，不改身份来源。
+
+**前置条件**：必须使用 PostgreSQL 后端。文件模式（无 Postgres）下所有 OIDC
+端点返回 503 `oidc_requires_durable_store`，工号+key 登录不受影响。
+
+### 环境变量（端口接线，启动时读取）
+
+| 环境变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PORTAL_OIDC_CLIENT_ID` | 空 | OIDC client id（IdP 上注册）。为空时 OIDC 端点 503 |
+| `PORTAL_OIDC_CLIENT_SECRET` | 空 | OIDC client secret |
+| `PORTAL_OIDC_REDIRECT_URL` | 空 | 回调地址，必须是公开可达的 `https://…/api/portal/oidc/callback` |
+| `PORTAL_OIDC_ISSUER_URL` | 空 | issuer 地址；设置后自动拉取 `/.well-known/openid-configuration` 补端点 |
+| `PORTAL_OIDC_AUTHORIZATION_ENDPOINT` | 空 | 手工指定授权端点（显式优先于 discovery） |
+| `PORTAL_OIDC_TOKEN_ENDPOINT` | 空 | 手工指定令牌端点 |
+| `PORTAL_OIDC_USERINFO_ENDPOINT` | 空 | 手工指定 userinfo 端点 |
+| `PORTAL_OIDC_SCOPES` | `openid profile email` | 授权 scope |
+| `PORTAL_OIDC_AUTH_STYLE` | `auto` | `auto` / `params` / `basic`，控制 client 凭据放 body 还是 Basic header |
+| `PORTAL_OIDC_USER_ID_FIELD` | `sub` | userinfo 里的用户标识字段，支持 `a.b.c` 点路径 |
+| `PORTAL_OIDC_EMAIL_FIELD` | `email` | userinfo 里的邮箱字段（登录必需） |
+| `PORTAL_OIDC_USERNAME_FIELD` | `preferred_username` | 用户名映射（可选） |
+| `PORTAL_OIDC_DISPLAY_NAME_FIELD` | `name` | 显示名映射（可选） |
+
+编排（docker compose / k8s）示例：
+
+```yaml
+environment:
+  - PORTAL_OIDC_CLIENT_ID=chat2responses
+  - PORTAL_OIDC_CLIENT_SECRET=please-rotate
+  - PORTAL_OIDC_REDIRECT_URL=https://gateway.example.com/api/portal/oidc/callback
+  - PORTAL_OIDC_ISSUER_URL=https://idp.example.com/realms/main
+```
+
+### 运行时设置（Admin > Settings，签名「门户 / OIDC 登录」，全部立即生效）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `portal_oidc_enabled` | false | 总开关；关闭时 `/api/portal/oidc/*` 404，不泄露 IdP 地址 |
+| `portal_oidc_registration_enabled` | false | 新身份自动注册；关闭时新身份 403 且无记录 |
+| `portal_oidc_allowed_email_domains` | 空 | 逗号分隔的允许域名，子域自动放行；空 = 不限制 |
+| `portal_session_ttl_seconds` | 86400 | 会话时长（≥60） |
+| `portal_oidc_pkce_enabled` | true | 授权请求携带 S256 code_challenge |
+| `portal_oidc_verify_id_token` | false | 额外验签 id_token（身份仍来自 userinfo） |
+
+**PostgreSQL 必需**：会话与会话哈希只存在 Postgres；文件模式 503 fail closed。
+
+### Keycloak 样例
+
+1. Realm → Clients → Create client：
+   - Client ID: `chat2responses`，Client authentication: ON
+   - Valid redirect URIs: `https://gateway.example.com/api/portal/oidc/callback`
+   - 保存后复制 Client secret
+2. 写环境变量（见上表），重启网关
+3. `Admin > Settings` 开启 `portal_oidc_enabled`；需要自动开户时再开
+   `portal_oidc_registration_enabled`；有邮箱域名限制就填
+   `portal_oidc_allowed_email_domains`
+
+### Authentik 样例
+
+1. Applications → Create：name `chat2responses`；Launch URL 随意
+   （OIDC 回调由网关发起）
+2. Providers → OAuth2/OpenID Provider：
+   - Client type: Confidential；Redirect URIs: 同上
+   - Signing Key 随意；签名算法选 RS256 即可
+3. 返回 Application → 绑上该 Provider，复制 Client ID / Secret
+4. 同 Keycloak 的第 2、3 步
+
+### 行为与安全
+
+- 登录状态由 HttpOnly `portal_session` Cookie 承载，库中只存 SHA-256 哈希
+- state 一次性消费（10 分钟 TTL），重放 400
+- 禁用用户：同事务清空其全部会话，下一次请求立即失效
+- 无绑定 key 的用户登录 403（绝不自动发 key）；绑定发生在
+  「密钥管理」页的「绑定企业账号」，或由管理员在「门户用户」页指派
+- 身份已绑定他人时 bind 409
+
 ## Build The Image
 
 Build the container image directly. The Dockerfile compiles both the frontend
