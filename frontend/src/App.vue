@@ -40,6 +40,7 @@ import {
   ScrollText,
   Settings as SettingsIcon,
   ArrowRightLeft,
+  Layers,
   Users
 } from '@lucide/vue'
 import AppShell from '@/components/AppShell.vue'
@@ -70,6 +71,7 @@ const adminNavItems: AppNavItem[] = [
   { path: '/admin/upstreams', label: '上游管理', icon: SatelliteDish, group: '资源管理' },
   { path: '/admin/downstreams', label: '下游管理', icon: KeyRound, group: '资源管理' },
   { path: '/admin/model-aliases', label: '模型映射', icon: ArrowRightLeft, group: '资源管理' },
+  { path: '/admin/model-groups', label: '模型分组', icon: Layers, group: '资源管理' },
   { path: '/admin/logs', label: '运行日志', icon: ScrollText, group: '运维' },
   { path: '/admin/announcement', label: '公告管理', icon: Megaphone, group: '运维' },
   { path: '/admin/settings', label: '网关设置', icon: SettingsIcon, group: '运维' },

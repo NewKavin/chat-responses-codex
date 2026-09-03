@@ -82,6 +82,12 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '模型映射' }
     },
     {
+      path: '/admin/model-groups',
+      name: 'AdminModelGroups',
+      component: () => import('@/views/admin/ModelGroupManagement.vue'),
+      meta: { requiresAuth: true, title: '模型分组' }
+    },
+    {
       path: '/admin/settings',
       name: 'AdminSettings',
       component: () => import('@/views/admin/Settings.vue'),
