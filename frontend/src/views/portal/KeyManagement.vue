@@ -45,10 +45,12 @@
           v-for="key in sortedKeys"
           :key="key.downstream_id"
           :key-data="key"
+          :model-groups="modelGroups"
           @edit="handleEdit"
           @rotate="handleRotate"
           @delete="handleDelete"
           @set-default="handleSetDefault"
+          @change-model-group="handleChangeModelGroup"
         />
       </div>
       <footer class="key-count">
@@ -75,6 +77,21 @@
             placeholder="为密钥添加备注标签"
           />
         </el-form-item>
+        <el-form-item label="模型分组">
+          <el-select
+            v-model="newKeyForm.model_group_id"
+            placeholder="选择模型分组（默认 basic）"
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="group in modelGroups"
+              :key="group.id"
+              :label="group.name"
+              :value="group.id"
+            />
+          </el-select>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showAddDialog = false">取消</el-button>
@@ -94,16 +111,18 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, RotateCw, KeyRound } from '@lucide/vue'
-import { portalApi, type PortalKey } from '@/api/portal'
+import { portalApi, type ModelGroup, type PortalKey } from '@/api/portal'
 import KeyCard from '@/components/KeyCard.vue'
 
 const loading = ref(true)
 const error = ref<string | null>(null)
 const keys = ref<PortalKey[]>([])
 const showAddDialog = ref(false)
+const modelGroups = ref<ModelGroup[]>([])
 const newKeyForm = ref({
   downstream_id: '',
-  label: ''
+  label: '',
+  model_group_id: ''
 })
 
 const sortedKeys = computed(() => {
@@ -132,11 +151,12 @@ const handleCreate = async () => {
   try {
     await portalApi.createKey({
       downstream_id: newKeyForm.value.downstream_id,
-      label: newKeyForm.value.label || undefined
+      label: newKeyForm.value.label || undefined,
+      model_group_id: newKeyForm.value.model_group_id || 'basic'
     })
     ElMessage.success('密钥添加成功')
     showAddDialog.value = false
-    newKeyForm.value = { downstream_id: '', label: '' }
+    newKeyForm.value = { downstream_id: '', label: '', model_group_id: '' }
     await loadKeys()
   } catch (err: any) {
     ElMessage.error(err.message || '添加密钥失败')
@@ -178,8 +198,29 @@ const handleSetDefault = async (downstreamId: string) => {
   }
 }
 
+const handleChangeModelGroup = async (downstreamId: string, modelGroupId: string) => {
+  try {
+    await portalApi.updateKeyModelGroup(downstreamId, modelGroupId)
+    ElMessage.success('模型分组已更新')
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '更新模型分组失败')
+    throw err
+  }
+}
+
+const loadModelGroups = async () => {
+  try {
+    const { data } = await portalApi.listModelGroups()
+    modelGroups.value = data.groups ?? []
+  } catch (err: any) {
+    console.warn('加载模型分组失败', err)
+  }
+}
+
 onMounted(() => {
   loadKeys()
+  loadModelGroups()
 })
 </script>
 

@@ -60,7 +60,17 @@
         <div class="key-meta">
           <span class="meta-item">
             <Layers :size="12" :stroke-width="1.8" />
-            {{ keyData.model_group_id }}
+            {{ keyData.model_group_name || keyData.model_group_id }}
+            <el-button
+              aria-label="Change model group"
+              text
+              size="small"
+              class="group-change-btn"
+              :disabled="loading"
+              @click="showGroupDialog = true"
+            >
+              <Pencil :size="11" :stroke-width="1.8" />
+            </el-button>
           </span>
           <span class="meta-item">
             <Clock :size="12" :stroke-width="1.8" />
@@ -135,6 +145,40 @@
       </template>
     </el-dialog>
 
+    <!-- Change Model Group Dialog -->
+    <el-dialog
+      v-model="showGroupDialog"
+      title="更改模型分组"
+      width="min(440px, calc(100vw - 32px))"
+    >
+      <p class="group-dialog-hint">
+        当前分组：{{ keyData.model_group_name || keyData.model_group_id }}。切换后该密钥只能请求新分组允许的模型。
+      </p>
+      <el-select
+        v-model="selectedGroupId"
+        placeholder="选择模型分组"
+        style="width: 100%; margin-top: 12px"
+        data-testid="group-select"
+      >
+        <el-option
+          v-for="group in modelGroups"
+          :key="group.id"
+          :label="group.name"
+          :value="group.id"
+        />
+      </el-select>
+      <template #footer>
+        <el-button @click="showGroupDialog = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!selectedGroupId || loading"
+          @click="handleGroupChange"
+        >
+          确认更改
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- Delete Dialog -->
     <el-dialog
       v-model="showDeleteDialog"
@@ -171,14 +215,16 @@ import {
   Activity,
   Layers
 } from '@lucide/vue'
-import type { PortalKey } from '@/api/portal'
+import type { ModelGroup, PortalKey } from '@/api/portal'
 
 interface Props {
   keyData: PortalKey
+  modelGroups: ModelGroup[]
   onEdit: (downstreamId: string, newLabel: string) => Promise<void>
   onRotate: (downstreamId: string, newId: string) => Promise<void>
   onDelete: (downstreamId: string) => Promise<void>
   onSetDefault: (downstreamId: string) => Promise<void>
+  onChangeModelGroup: (downstreamId: string, modelGroupId: string) => Promise<void>
 }
 
 const props = defineProps<Props>()
@@ -189,6 +235,8 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const showRotateDialog = ref(false)
 const showDeleteDialog = ref(false)
+const showGroupDialog = ref(false)
+const selectedGroupId = ref('')
 const newKeyId = ref('')
 
 const maskedKeyId = computed(() => {
@@ -256,6 +304,21 @@ const handleSetDefault = async () => {
   }
 }
 
+const handleGroupChange = async () => {
+  if (!selectedGroupId.value) return
+  loading.value = true
+  error.value = null
+  try {
+    await props.onChangeModelGroup(props.keyData.downstream_id, selectedGroupId.value)
+    showGroupDialog.value = false
+    selectedGroupId.value = ''
+  } catch (err: any) {
+    error.value = err.message || '操作失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 const handleRotate = async () => {
   loading.value = true
   error.value = null
@@ -285,6 +348,15 @@ const handleDelete = async () => {
 </script>
 
 <style scoped>
+.group-change-btn {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.group-dialog-hint {
+  font-size: 13px;
+  color: var(--crc-text-muted, #909399);
+  line-height: 1.6;
+}
 .key-card {
   padding: 20px;
   border: 1px solid var(--crc-border);
