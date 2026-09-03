@@ -67,22 +67,17 @@ impl KeyType {
 
 ### 2.2 数据模型变更
 
-**数据库 Migration**：
+**数据库 Migration（简化方案 - 无需停机）**：
 
 ```sql
--- 添加 label 列
+-- 添加 label 列（允许 NULL，兼容现有数据）
 ALTER TABLE portal_user_downstreams 
 ADD COLUMN IF NOT EXISTS label TEXT;
 
--- 为现有记录设置默认 label
-UPDATE portal_user_downstreams 
-SET label = 'Default Key'
-WHERE label IS NULL;
-
--- 添加约束
+-- 添加约束：最大 100 字符（NULL 仍然允许）
 ALTER TABLE portal_user_downstreams 
-ALTER COLUMN label SET NOT NULL,
-ADD CONSTRAINT label_max_length CHECK (char_length(label) <= 100);
+ADD CONSTRAINT IF NOT EXISTS label_max_length 
+CHECK (label IS NULL OR char_length(label) <= 100);
 
 -- 添加索引（优化查询）
 CREATE INDEX IF NOT EXISTS idx_portal_user_downstreams_user_id 
@@ -93,6 +88,10 @@ ALTER TABLE portal_user_downstreams
 ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 ```
 
+**注意**：
+- 现有绑定的 `label` 为 `NULL`，应用层读取时提供默认值 `"Default Key"`
+- 新创建的绑定必须提供 label（应用层强制，非数据库约束）
+
 **Rust 结构体**：
 
 ```rust
@@ -100,14 +99,21 @@ ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 pub struct PortalDownstreamBinding {
     pub downstream_id: String,
     pub is_default: bool,
-    pub label: String,  // 新增字段
+    pub label: Option<String>,  // 兼容现有数据（NULL）
+}
+
+impl PortalDownstreamBinding {
+    /// 获取 label，现有数据返回默认值
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or("Default Key")
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct PortalDownstreamBindingWithLabel {
     pub downstream_id: String,
     pub is_default: bool,
-    pub label: String,
+    pub label: String,  // 前端总是收到非空 label
     pub created_at: i64,  // Unix timestamp
 }
 ```
@@ -763,39 +769,46 @@ it('shows usage warning when deleting active key', () => {
 
 ## 8. 部署与迁移
 
-### 8.1 数据库 Migration
+### 8.1 数据库 Migration（简化方案 - 无需停机）
 
 ```sql
 -- migrations/2026-09-03-add-key-labels.sql
+-- 此迁移无需停机，可在运行时执行
 
 BEGIN;
 
+-- 添加 label 列（允许 NULL，兼容现有数据）
 ALTER TABLE portal_user_downstreams 
 ADD COLUMN IF NOT EXISTS label TEXT;
 
-UPDATE portal_user_downstreams 
-SET label = 'Default Key'
-WHERE label IS NULL;
-
+-- 添加约束：最大 100 字符
 ALTER TABLE portal_user_downstreams 
-ALTER COLUMN label SET NOT NULL,
-ADD CONSTRAINT label_max_length CHECK (char_length(label) <= 100);
+ADD CONSTRAINT IF NOT EXISTS label_max_length 
+CHECK (label IS NULL OR char_length(label) <= 100);
 
+-- 添加索引（优化查询）
 CREATE INDEX IF NOT EXISTS idx_portal_user_downstreams_user_id 
 ON portal_user_downstreams(user_id);
 
+-- 添加创建时间列
 ALTER TABLE portal_user_downstreams 
 ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 
 COMMIT;
 ```
 
-### 8.2 部署步骤
+**说明**：
+- 现有绑定的 `label` 为 `NULL`，应用层读取时自动提供默认值 `"Default Key"`
+- 新创建的绑定由应用层保证 label 非空（无需数据库 NOT NULL 约束）
+- 此 SQL 可在生产环境直接执行，无需停机
 
-1. **数据库迁移**（停机/低峰期）：
+### 8.2 部署步骤（零停机升级）
+
+1. **数据库迁移**（可在生产环境直接执行）：
    ```bash
    psql -U postgres -d chat_responses_codex -f migrations/2026-09-03-add-key-labels.sql
    ```
+   **说明**：`ALTER TABLE ADD COLUMN` 在 PostgreSQL 10+ 中是瞬时操作，不会锁表
 
 2. **后端部署**：
    ```bash
@@ -806,7 +819,8 @@ COMMIT;
 
 3. **验证**：
    - 访问 `/portal/keys` 确认页面正常
-   - 创建一个新 key，确认前缀为 `sk-`
+   - 现有绑定显示 "Default Key"（label 为 NULL，应用层提供默认值）
+   - 创建一个新 key，确认前缀为 `sk-`，label 已保存
    - 尝试用 `sk-` key 登录 Portal，确认被拒绝
    - 删除非最后一个 key，确认成功
    - 尝试删除最后一个 key，确认被阻止
@@ -821,12 +835,13 @@ COMMIT;
    docker-compose up -d chat-responses-codex:v0.1.2
    ```
 
-2. **数据库回滚**（仅在必要时）：
-   ```sql
-   ALTER TABLE portal_user_downstreams DROP COLUMN IF EXISTS label;
-   ```
-
-**注意**：移除 `label` 列不会影响旧版本运行（旧版本不读取此列），但新创建的 bindings 会丢失 label 信息。
+2. **数据库无需回滚**：
+   - `label` 列的存在不影响旧版本运行（旧版本不读取此列）
+   - 如果确实需要清理：
+     ```sql
+     ALTER TABLE portal_user_downstreams DROP COLUMN IF EXISTS label;
+     ALTER TABLE portal_user_downstreams DROP COLUMN IF EXISTS created_at;
+     ```
 
 3. **向后兼容性**：旧版本前端会继续调用 `/api/portal/key`（旧接口保留），功能不受影响。
 
@@ -904,14 +919,25 @@ chat-responses-codex 支持两种 key 类型：
 ```markdown
 ## 升级到 v0.2.0（多 Key 管理）
 
-1. 执行数据库迁移：
+### 零停机升级步骤
+
+1. 执行数据库迁移（瞬时操作，无需停机）：
    ```bash
    psql -U postgres -d chat_responses_codex -f migrations/2026-09-03-add-key-labels.sql
    ```
 
-2. 升级后端镜像到 v0.2.0
+2. 升级后端镜像到 v0.2.0：
+   ```bash
+   docker-compose pull
+   docker-compose up -d
+   ```
 
 3. 验证：访问 `/portal/keys` 确认功能正常
+
+### 注意事项
+
+- 现有 OAuth 用户的 key 会显示为 "Default Key"（可在 Portal 中重命名）
+- 新功能向后兼容，旧客户端无需更新
 ```
 
 **SECURITY.md** - 安全说明：
