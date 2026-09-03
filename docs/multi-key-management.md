@@ -314,3 +314,52 @@ The frontend keys management page (`/keys`) provides:
 All queries are indexed appropriately:
 - `idx_portal_user_downstreams_user_id` on `user_id`
 - `idx_response_history_downstream_created` on `(downstream_key_id, created_at DESC)`
+
+## Model Groups
+
+Every Portal key is bound to a **model group**, and the gateway enforces the
+group's allowed-models whitelist on every `/v1/*` request (see the [Model
+Groups API](api/model-groups.md) for the full reference).
+
+### Key Properties
+
+- **model_group_id** - Group id, defaults to `basic` when not specified
+- **model_group_name** - Resolved group display name (read-only, from the
+  `model_groups` table)
+
+### Group Semantics
+
+- `*` inside `allowed_models` allows every model (seeded `all` group).
+- Missing portal binding (direct-config downstream) skips validation.
+- The `basic` group cannot be deleted; deleting another group falls back to
+  `basic` for dependent keys.
+- Group changes apply immediately; no restart or cache flush needed.
+
+### Portal Workflows
+
+- **Create key** - optional `model_group_id` in the create payload, defaults
+  to `basic`.
+- **Change group** - `PUT /api/portal/keys/{downstream_id}/model-group` with
+  `{"model_group_id": "..."}`.
+- **List** - each key response includes `model_group_id` / `model_group_name`.
+
+### Admin Workflows
+
+- Manage groups at `GET/POST/PUT/DELETE /api/admin/model-groups`.
+- `basic` is protected: delete returns `403 cannot_delete_basic`.
+
+### Storage
+
+```sql
+model_groups (
+  id TEXT PRIMARY KEY CHECK (id ~ '^[a-z0-9-]+$'),
+  name TEXT NOT NULL,
+  description TEXT,
+  allowed_models JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+)
+
+portal_user_downstreams.model_group_id TEXT DEFAULT 'basic'
+  REFERENCES model_groups(id) ON DELETE SET DEFAULT
+```

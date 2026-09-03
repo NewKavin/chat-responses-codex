@@ -366,9 +366,12 @@ Portal users can now manage multiple API keys (up to 10) instead of a single key
 - **Zero-downtime rotation** - Create new keys, migrate traffic, then delete old keys
 - **Organizational clarity** - Label keys by purpose or owner
 - **Usage tracking** - Each key tracks its own request count independently
+- **Model groups** - Bind each key to a model group; the gateway enforces the
+  group's allowed-models whitelist on every request (admin-managed, portal-selectable)
 
 See:
 - [Multi-key management documentation](docs/multi-key-management.md) - API endpoints, workflows, technical implementation
+- [Model Groups API](docs/api/model-groups.md) - group management and gateway enforcement reference
 - [Deployment guide](docs/deployment-guide-multi-keys.md) - Database migrations, deployment steps, rollback procedures
 
 ### Repository Layout
