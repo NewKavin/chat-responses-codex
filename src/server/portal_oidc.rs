@@ -403,7 +403,7 @@ pub(super) async fn portal_oidc_callback(
     (
         StatusCode::FOUND,
         [
-            (header::LOCATION, "/portal".to_string()),
+            (header::LOCATION, "/#/portal".to_string()),
             (
                 header::SET_COOKIE,
                 session_cookie_header(&raw_sid, session_ttl),

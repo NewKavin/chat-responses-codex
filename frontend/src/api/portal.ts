@@ -14,6 +14,17 @@ export interface AnnouncementResponse {
   announcement: Announcement | null
 }
 
+export interface PortalSessionResponse {
+  user: {
+    id: string
+    email: string
+    display_name: string | null
+    username: string | null
+    provider: string | null
+    subject: string | null
+  }
+}
+
 export const portalHttp = axios.create({
   baseURL: '/api',
   timeout: 10000
@@ -69,5 +80,7 @@ export const portalApi = {
   rotateKey: () => portalHttp.post<{ plaintext_key: string }>('/portal/key/rotate'),
 
   // Announcement
-  getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement')
+  getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement'),
+  getSession: () => portalHttp.get<PortalSessionResponse>('/portal/session'),
+  logout: () => portalHttp.post<{ ok: boolean }>('/portal/logout')
 }

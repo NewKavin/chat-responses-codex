@@ -103,6 +103,26 @@ impl PortalStore {
         Ok(result.map(parse_user_row))
     }
 
+    pub async fn find_user_by_id(&self, user_id: &str) -> Result<Option<PortalUser>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let result = client
+            .query_opt(
+                "SELECT u.id, u.email, u.display_name, u.username, u.disabled, \
+                        EXTRACT(EPOCH FROM u.created_at)::bigint AS created_at, \
+                        (CASE WHEN u.last_login_at IS NULL THEN NULL \
+                              ELSE EXTRACT(EPOCH FROM u.last_login_at)::bigint END) AS last_login_at, \
+                        (SELECT i.provider FROM portal_identities i \
+                         WHERE i.user_id = u.id ORDER BY i.created_at LIMIT 1), \
+                        (SELECT i.subject FROM portal_identities i \
+                         WHERE i.user_id = u.id ORDER BY i.created_at LIMIT 1), \
+                        (SELECT COUNT(*) FROM portal_user_downstreams b WHERE b.user_id = u.id) \
+                 FROM portal_users u WHERE u.id = $1",
+                &[&user_id],
+            )
+            .await?;
+        Ok(result.map(parse_user_row))
+    }
+
     /// Create user + first identity atomically (OIDC registration path).
     /// Unique-email or unique-(provider,subject) violations map to
     /// `PortalStoreError::Conflict`.
@@ -405,6 +425,14 @@ impl PortalStore {
             user_agent: row.get(4),
             ip: row.get(5),
         }))
+    }
+
+    pub async fn delete_session(&self, sid_hash: &str) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        client
+            .execute("DELETE FROM portal_sessions WHERE sid = $1", &[&sid_hash])
+            .await?;
+        Ok(())
     }
 
     pub async fn touch_session(&self, sid_hash: &str) -> Result<(), PortalStoreError> {

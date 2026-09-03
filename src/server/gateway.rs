@@ -2636,6 +2636,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
+        .route("/api/portal/session", get(portal_session_info))
+        .route("/api/portal/logout", post(portal_logout))
         .route("/api/portal/oidc/start", get(portal_oidc_start))
         .route("/api/portal/oidc/callback", get(portal_oidc_callback))
         // Frontend assets and SPA fallback (with static-only compression);

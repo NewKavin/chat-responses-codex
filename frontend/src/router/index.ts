@@ -1,4 +1,5 @@
 import { createMemoryHistory, createRouter, createWebHashHistory } from 'vue-router'
+import { portalApi } from '@/api/portal'
 
 const history =
   typeof window === 'undefined' ? createMemoryHistory() : createWebHashHistory()
@@ -97,7 +98,7 @@ const router = createRouter({
 })
 
 // Navigation guard for admin routes
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   if (to.meta.requiresAuth) {
     const token = localStorage.getItem('admin_token')
     if (!token) {
@@ -107,10 +108,21 @@ router.beforeEach((to, _from, next) => {
     }
   } else if (to.meta.requiresPortalAuth) {
     const token = localStorage.getItem('portal_token')
-    if (!token) {
-      next('/portal/login')
-    } else {
+    if (token) {
       next()
+      return
+    }
+    // OIDC 登录不产生 localStorage token（HttpOnly cookie），
+    // 需要探测 cookie 会话；无效则回登录页。
+    try {
+      const { data } = await portalApi.getSession()
+      if (data?.user?.id) {
+        next()
+      } else {
+        next('/portal/login')
+      }
+    } catch {
+      next('/portal/login')
     }
   } else {
     next()

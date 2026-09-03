@@ -616,6 +616,99 @@ pub(super) async fn portal_rotate_key(
     }
 }
 
+pub(super) async fn portal_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Some(store) = state.portal_store() {
+        if let Some(cookie) = crate::server::portal_oidc::session_cookie_value(&headers) {
+            let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
+            let _ = store.delete_session(&sid_hash).await;
+        }
+    }
+    (
+        StatusCode::OK,
+        [(
+            header::SET_COOKIE,
+            format!(
+                "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+                crate::server::portal_oidc::PORTAL_SESSION_COOKIE,
+            ),
+        )],
+        Json(json!({"ok": true})),
+    )
+        .into_response()
+}
+
+pub(super) async fn portal_session_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    let Some(cookie) = crate::server::portal_oidc::session_cookie_value(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "no portal session"}})),
+        )
+            .into_response();
+    };
+    let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
+    let session = match store.find_session(&sid_hash).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "invalid or expired portal session"}})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response()
+        }
+    };
+    let user = match store.find_user_by_id(&session.user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "portal user no longer exists"}})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response()
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "display_name": user.display_name,
+                "username": user.username,
+                "provider": user.provider,
+                "subject": user.subject,
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// Helper function to extract downstream ID from Bearer token
 async fn extract_downstream_id_from_bearer(
     state: &AppState,

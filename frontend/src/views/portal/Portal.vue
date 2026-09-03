@@ -45,6 +45,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, provide, ref } from 'vue'
+import { portalApi } from '@/api/portal'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ChartLine,
@@ -55,7 +56,6 @@ import {
   Radar
 } from '@lucide/vue'
 import AppShell from '@/components/AppShell.vue'
-import { portalApi } from '@/api/portal'
 import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '@/utils/announcement'
 import { resolveActiveNavigationPath } from '@/utils/navigation'
 import type { Announcement } from '@/types'
@@ -150,9 +150,11 @@ const extractEmployeeId = () => {
     employeeId.value = id
     return id
   }
-  router.push('/portal/login')
   return null
 }
+
+// OIDC 用户没有工号：用会话标识（email/subject）作为公告已读 key 的稳定身份。
+const sessionIdentity = ref('')
 
 const announcementLevelLabel = computed(() => {
   const level = currentAnnouncement.value?.level
@@ -188,13 +190,14 @@ const loadAnnouncement = async (employee: string) => {
 }
 
 const handleAcknowledge = () => {
-  if (!currentAnnouncement.value || !employeeId.value) {
+  const identity = employeeId.value || sessionIdentity.value
+  if (!currentAnnouncement.value || !identity) {
     announcementDialogVisible.value = false
     currentAnnouncement.value = null
     return
   }
   safeLocalStorageSet(
-    buildAnnouncementSeenKey(employeeId.value),
+    buildAnnouncementSeenKey(identity),
     currentAnnouncement.value.id
   )
   announcementDialogVisible.value = false
@@ -203,6 +206,9 @@ const handleAcknowledge = () => {
 
 const handleLogout = () => {
   try {
+    portalApi.logout().catch(() => {
+      // Best-effort: the cookie is cleared client-side below as fallback too.
+    })
     localStorage.removeItem('portal_token')
     localStorage.removeItem('portal_employee_id')
   } catch {
@@ -215,7 +221,19 @@ const handleLogout = () => {
 
 onMounted(async () => {
   const id = extractEmployeeId()
-  if (id) await loadAnnouncement(id)
+  if (id) {
+    await loadAnnouncement(id)
+    return
+  }
+  // No employee id: rely on the OIDC cookie session, if any.
+  try {
+    const { data } = await portalApi.getSession()
+    const identity = data.user?.email || data.user?.subject || data.user?.username || ''
+    sessionIdentity.value = identity
+    if (identity) await loadAnnouncement(identity)
+  } catch {
+    router.push('/portal/login')
+  }
 })
 
 provide('portalToken', () => safeLocalStorageGet('portal_token'))

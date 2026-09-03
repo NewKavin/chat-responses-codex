@@ -397,7 +397,7 @@ async fn login_flow_with_discovery_succeeds_and_returns_session_cookie() {
 
     let result = run_login_flow(&router).await;
     assert_eq!(result.status, StatusCode::FOUND);
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     let cookie = result.set_cookie.expect("login must set a session cookie");
     assert!(cookie.starts_with("portal_session="), "{cookie}");
     assert!(cookie.contains("HttpOnly"), "{cookie}");
@@ -463,7 +463,7 @@ async fn login_flow_with_explicit_endpoints_skips_discovery() {
 
     let result = run_login_flow(&router).await;
     assert_eq!(result.status, StatusCode::FOUND);
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     assert!(result.set_cookie.is_some());
     idp.abort();
 }
@@ -542,7 +542,7 @@ async fn pkce_challenge_present_by_default_and_absent_when_disabled() {
     seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
     let result = run_login_flow(&router).await;
     assert_eq!(result.status, StatusCode::FOUND);
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     idp.abort();
 }
 
@@ -1038,7 +1038,7 @@ async fn bind_intent_attaches_identity_to_an_existing_key() {
         StatusCode::FOUND,
         "bind must redirect back after success"
     );
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     assert!(result.set_cookie.is_some(), "bind must establish a session");
 
     // The identity + binding + default exist.
@@ -2037,7 +2037,7 @@ async fn login_flow_with_custom_token_path_succeeds() {
 
     let result = run_login_flow(&router).await;
     assert_eq!(result.status, StatusCode::FOUND);
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     assert!(
         result.set_cookie.is_some(),
         "custom token path login must set a session cookie"
@@ -2075,7 +2075,7 @@ async fn userinfo_post_method_sends_json_body() {
 
     let result = run_login_flow(&router).await;
     assert_eq!(result.status, StatusCode::FOUND);
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     assert!(
         result.set_cookie.is_some(),
         "POST userinfo login must set session cookie"
@@ -2138,7 +2138,7 @@ async fn login_flow_with_uuid_field_derives_identity_without_email() {
 
     let result = run_login_flow(&router).await;
     assert_eq!(result.status, StatusCode::FOUND);
-    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert_eq!(result.location.as_deref(), Some("/#/portal"));
     assert!(
         result.set_cookie.is_some(),
         "uuid-based login must set a session cookie"
@@ -2313,6 +2313,159 @@ async fn admin_patch_rejects_subject_edit_and_email_conflict() {
         .unwrap()
         .unwrap();
     assert_eq!(reloaded.email, "user@example.com");
+
+    idp.abort();
+}
+
+#[tokio::test]
+async fn portal_session_probe_returns_user_for_valid_cookie_and_401_without() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+
+    let result = run_login_flow(&router).await;
+    assert_eq!(result.status, StatusCode::FOUND);
+    let set_cookie = result.set_cookie.as_deref().expect("cookie header");
+    let raw_sid = set_cookie
+        .split(';')
+        .next()
+        .and_then(|part| part.split_once('='))
+        .map(|(_, value)| value.to_string())
+        .expect("portal_session cookie");
+
+    // With the session cookie the probe returns the user profile.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/session")
+                .header(header::COOKIE, format!("portal_session={raw_sid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = body_bytes(response.into_body()).await;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["user"]["email"], "user@example.com");
+    assert_eq!(
+        payload["user"]["id"],
+        state
+            .portal_store()
+            .unwrap()
+            .find_user_by_identity("oidc", "test-user-subject")
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    );
+
+    // Without the cookie the probe is a 401.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/session")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    idp.abort();
+}
+
+#[tokio::test]
+async fn portal_logout_invalidates_the_session_cookie() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+
+    let result = run_login_flow(&router).await;
+    let set_cookie = result.set_cookie.as_deref().expect("cookie header");
+    let raw_sid = set_cookie
+        .split(';')
+        .next()
+        .and_then(|part| part.split_once('='))
+        .map(|(_, value)| value.to_string())
+        .expect("portal_session cookie");
+    let cookie_header = format!("portal_session={raw_sid}");
+
+    // A probe with the session cookie succeeds before logout.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/session")
+                .header(header::COOKIE, &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Logout kills the server-side session and clears the cookie.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/logout")
+                .header(header::COOKIE, &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let logout_set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("logout must clear the cookie");
+    assert!(
+        logout_set_cookie.starts_with("portal_session="),
+        "{logout_set_cookie}"
+    );
+    assert!(
+        logout_set_cookie.contains("Max-Age=0"),
+        "{logout_set_cookie}"
+    );
+
+    // The same cookie no longer authenticates.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/session")
+                .header(header::COOKIE, &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     idp.abort();
 }
