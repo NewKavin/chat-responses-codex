@@ -896,23 +896,23 @@ git commit -m "feat(gateway): add model access validation middleware
 
 ---
 
-### Task 17: Portal API - 创建/列出 Key 时支持模型分组
+### Task 17: Portal API - 修改查询以返回模型分组名称
 
 **Files:**
-- Modify: `src/server/portal.rs` - 修改 `portal_create_key` 和 `portal_list_keys`
-- Modify: `src/state/portal_store.rs` - 修改 `PortalDownstreamBindingWithLabel` 结构体
+- Modify: `src/state/portal_store.rs` - 修改 `list_downstream_bindings_with_labels` 使用 LEFT JOIN
 
 **Interfaces:**
 - Consumes:
-  - `portal_create_key` (Task 5)
-  - `portal_list_keys` (Task 5)
+  - `list_downstream_bindings_with_labels` (Task 2，主计划)
+  - `model_groups` 表 (Task 13)
 - Produces:
-  - 创建 key 时接受 `model_group_id` 参数
-  - 列出 key 时返回 `model_group_id` 和 `model_group_name`
+  - 列出 key 时返回 `model_group_name`（通过 JOIN 查询）
+
+**说明：** 主计划已经预留了 `model_group_id` 字段和相关实现，这个 Task 只需要修改查询语句，添加 LEFT JOIN 来获取 `model_group_name`，避免 N+1 查询问题。
 
 - [ ] **Step 1: 修改 PortalDownstreamBindingWithLabel 结构体**
 
-在 `src/state/portal_store.rs` 中修改：
+在 `src/state/portal_store.rs` 中添加 `model_group_name` 字段：
 
 ```rust
 #[derive(Debug, Clone)]
@@ -921,11 +921,12 @@ pub struct PortalDownstreamBindingWithLabel {
     pub is_default: bool,
     pub label: String,
     pub created_at: i64,
-    pub model_group_id: String,  // 新增
+    pub model_group_id: String,
+    pub model_group_name: String,  // 新增
 }
 ```
 
-- [ ] **Step 2: 修改 list_downstream_bindings_with_labels 查询**
+- [ ] **Step 2: 修改 list_downstream_bindings_with_labels 使用 LEFT JOIN**
 
 ```rust
 pub async fn list_downstream_bindings_with_labels(
@@ -935,12 +936,17 @@ pub async fn list_downstream_bindings_with_labels(
     let client = self.pool.get().await?;
     let rows = client
         .query(
-            "SELECT downstream_id, is_default, COALESCE(label, 'Default Key'), \
-                    EXTRACT(EPOCH FROM created_at)::bigint, \
-                    COALESCE(model_group_id, 'basic') \
-             FROM portal_user_downstreams \
-             WHERE user_id = $1 \
-             ORDER BY is_default DESC, created_at DESC",
+            "SELECT 
+                pud.downstream_id, 
+                pud.is_default, 
+                COALESCE(pud.label, 'Default Key'), 
+                EXTRACT(EPOCH FROM pud.created_at)::bigint,
+                COALESCE(pud.model_group_id, 'basic'),
+                COALESCE(mg.name, 'Basic Models')
+             FROM portal_user_downstreams pud
+             LEFT JOIN model_groups mg ON pud.model_group_id = mg.id
+             WHERE pud.user_id = $1
+             ORDER BY pud.is_default DESC, pud.created_at DESC",
             &[&user_id],
         )
         .await?;
@@ -953,55 +959,28 @@ pub async fn list_downstream_bindings_with_labels(
             label: row.get(2),
             created_at: row.get(3),
             model_group_id: row.get(4),
+            model_group_name: row.get(5),
         })
         .collect())
 }
 ```
 
-- [ ] **Step 3: 修改 add_downstream_binding_with_label 方法签名**
+- [ ] **Step 3: 运行测试验证**
 
-```rust
-pub async fn add_downstream_binding_with_label(
-    &self,
-    user_id: &str,
-    downstream_id: &str,
-    label: &str,
-    is_default: bool,
-    model_group_id: &str,  // 新增参数
-) -> Result<(), PortalStoreError> {
-    let client = self.pool.get().await?;
-    
-    // 如果设为默认，先取消其他 key 的默认状态
-    if is_default {
-        client
-            .execute(
-                "UPDATE portal_user_downstreams SET is_default = FALSE WHERE user_id = $1",
-                &[&user_id],
-            )
-            .await?;
-    }
-    
-    client
-        .execute(
-            "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id) \
-             VALUES ($1, $2, $3, $4, $5)",
-            &[&user_id, &downstream_id, &is_default, &label, &model_group_id],
-        )
-        .await?;
-    
-    Ok(())
-}
+运行：`cargo test list_downstream_bindings_with_labels`
+
+预期：测试通过，返回结果包含 `model_group_name`
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add src/state/portal_store.rs
+git commit -m "feat(model-groups): add JOIN to return model_group_name in list keys"
 ```
 
-- [ ] **Step 4: 修改 portal_create_key handler**
+---
 
-在 `src/server/portal.rs` 中修改：
-
-```rust
-#[derive(serde::Deserialize)]
-struct CreateKeyRequest {
-    label: String,
-    model_group_id: Option<String>,  // 新增，可选，默认 "basic"
+### Task 18: 前端 API 封装 - 模型分组
 }
 
 pub(super) async fn portal_create_key(

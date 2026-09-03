@@ -79,6 +79,10 @@ ALTER TABLE portal_user_downstreams
 ADD CONSTRAINT IF NOT EXISTS label_max_length 
 CHECK (label IS NULL OR char_length(label) <= 100);
 
+-- 添加模型分组列（为模型分组功能预留，默认 'basic'）
+ALTER TABLE portal_user_downstreams 
+ADD COLUMN IF NOT EXISTS model_group_id TEXT DEFAULT 'basic';
+
 -- 添加索引（优化查询）
 CREATE INDEX IF NOT EXISTS idx_portal_user_downstreams_user_id 
 ON portal_user_downstreams(user_id);
@@ -115,6 +119,7 @@ pub struct PortalDownstreamBindingWithLabel {
     pub is_default: bool,
     pub label: String,  // 前端总是收到非空 label
     pub created_at: i64,  // Unix timestamp
+    pub model_group_id: String,  // 模型分组 ID，默认 "basic"（为模型分组功能预留）
 }
 ```
 
@@ -162,7 +167,9 @@ Cookie: crc_portal_session=<session_id>
       "is_default": true,
       "created_at": 1725350400,
       "last_used_at": 1725436800,
-      "usage_last_7days": 1234
+      "usage_last_7days": 1234,
+      "model_group_id": "basic",
+      "model_group_name": "Basic Models"
     },
     {
       "downstream_id": "ds_xyz789",
@@ -172,7 +179,9 @@ Cookie: crc_portal_session=<session_id>
       "is_default": false,
       "created_at": 1725264000,
       "last_used_at": null,
-      "usage_last_7days": 0
+      "usage_last_7days": 0,
+      "model_group_id": "basic",
+      "model_group_name": "Basic Models"
     }
   ],
   "total": 2,
@@ -182,7 +191,9 @@ Cookie: crc_portal_session=<session_id>
 
 **字段说明**：
 - `last_used_at`: 最近一次 API 调用时间（从 `response_history` 表查询），可选
-- `usage_last_7days`: 最近 7 天的调用次数，可选
+- `usage_last_7days`: 最近 7 天的调用次数（从 `response_history` 表查询），可选
+- `model_group_id`: 模型分组 ID（为模型分组功能预留，默认 "basic"）
+- `model_group_name`: 模型分组名称（为模型分组功能预留，默认 "Basic Models"）
 
 #### POST /api/portal/keys
 
@@ -400,39 +411,106 @@ impl PortalStore {
         label: &str,
         downstream: DownstreamConfig,
     ) -> Result<(), PortalStoreError>;
-}
-```
-
-### 4.2 AppState 新增方法
-
-```rust
-impl AppState {
+    
     /// 获取 key 的使用统计（从 response_history 表）
     pub async fn get_key_usage_stats(
         &self,
         downstream_id: &str,
-    ) -> Result<KeyUsageStats, io::Error>;
+    ) -> Result<KeyUsageStats, PortalStoreError>;
 }
 
 pub struct KeyUsageStats {
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_used_at: Option<i64>,  // Unix timestamp
     pub usage_last_7days: i64,
-    pub usage_last_30days: i64,
 }
 ```
 
-**SQL 查询**：
+### 4.2 使用统计查询实现
 
-```sql
-SELECT 
-    MAX(created_at) AS last_used_at,
-    COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS usage_last_7days,
-    COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') AS usage_last_30days
-FROM response_history
-WHERE downstream_key_id = $1
+**SQL 查询实现**：
+
+```rust
+// src/state/portal_store.rs
+
+pub struct KeyUsageStats {
+    pub last_used_at: Option<i64>,  // Unix timestamp
+    pub usage_last_7days: i64,
+}
+
+impl PortalStore {
+    pub async fn get_key_usage_stats(
+        &self,
+        downstream_id: &str,
+    ) -> Result<KeyUsageStats, PortalStoreError> {
+        let client = self.pool.get().await?;
+        
+        let row = client
+            .query_opt(
+                "SELECT \
+                     EXTRACT(EPOCH FROM MAX(created_at))::bigint AS last_used_at, \
+                     COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS usage_last_7days \
+                 FROM response_history \
+                 WHERE downstream_key_id = $1",
+                &[&downstream_id],
+            )
+            .await?;
+        
+        match row {
+            Some(row) => Ok(KeyUsageStats {
+                last_used_at: row.get(0),
+                usage_last_7days: row.get(1),
+            }),
+            None => Ok(KeyUsageStats {
+                last_used_at: None,
+                usage_last_7days: 0,
+            }),
+        }
+    }
+}
 ```
 
-### 4.3 Portal Login 修改
+**性能考虑**：
+- `response_history` 表可能很大，需要在 `downstream_key_id` 和 `created_at` 上建立索引
+- 建议索引：`CREATE INDEX idx_response_history_downstream_created ON response_history(downstream_key_id, created_at DESC);`
+
+### 4.3 列表查询优化（避免 N+1）
+
+**使用 SQL JOIN 一次查询所有数据**：
+
+```rust
+pub async fn list_downstream_bindings_with_all_info(
+    &self,
+    user_id: &str,
+) -> Result<Vec<PortalDownstreamBindingFull>, PortalStoreError> {
+    let client = self.pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT pud.downstream_id, pud.is_default, \
+                    COALESCE(pud.label, 'Default Key') AS label, \
+                    EXTRACT(EPOCH FROM pud.created_at)::bigint AS created_at, \
+                    pud.model_group_id \
+             FROM portal_user_downstreams pud \
+             WHERE pud.user_id = $1 \
+             ORDER BY pud.is_default DESC, pud.created_at DESC",
+            &[&user_id],
+        )
+        .await?;
+    
+    Ok(rows.into_iter().map(|row| {
+        PortalDownstreamBindingFull {
+            downstream_id: row.get(0),
+            is_default: row.get(1),
+            label: row.get(2),
+            created_at: row.get(3),
+            model_group_id: row.get(4),
+        }
+    }).collect())
+}
+```
+
+**注意**：使用统计（`last_used_at`, `usage_last_7days`）在 handler 中单独查询，避免 JOIN `response_history` 导致性能问题。
+
+### 4.4 Portal Login 修改
 
 **拒绝 `sk-` key 登录**：
 
@@ -854,7 +932,144 @@ COMMIT;
 - **`sk-` key 无法登录 Portal**：前端表单校验 + 后端 `portal_login` 接口校验
 - **防止权限提升**：用户只能操作自己的 keys（Session 提取 user_id）
 
-### 9.2 Plaintext 存储风险
+### 9.2 Admin API 权限控制
+
+**问题**：模型分组管理的 Admin API 需要严格的权限控制，防止普通用户修改全局配置。
+
+**解决方案**：
+
+#### 9.2.1 数据库添加管理员标识
+
+```sql
+-- Migration: 添加管理员标识
+ALTER TABLE portal_users 
+ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
+
+-- 将现有管理员标记（根据实际情况调整）
+UPDATE portal_users SET is_admin = TRUE WHERE email = 'admin@example.com';
+```
+
+#### 9.2.2 后端权限校验中间件
+
+```rust
+// src/state/portal_store.rs
+
+impl PortalStore {
+    pub async fn is_user_admin(&self, user_id: &str) -> Result<bool, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT is_admin FROM portal_users WHERE id = $1",
+                &[&user_id],
+            )
+            .await?;
+        
+        Ok(row.map(|r| r.get(0)).unwrap_or(false))
+    }
+}
+```
+
+#### 9.2.3 Admin Handler 通用校验
+
+```rust
+// src/server/portal.rs
+
+async fn require_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
+    // 提取 user_id
+    let user_id = match extract_user_id_from_session(state, headers).await {
+        Ok(id) => id,
+        Err(response) => return Err(response),
+    };
+    
+    // 检查是否是管理员
+    match state.portal_store().is_user_admin(&user_id).await {
+        Ok(true) => Ok(user_id),
+        Ok(false) => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": {
+                    "code": "admin_required",
+                    "message": "Administrator privileges required"
+                }
+            })),
+        ).into_response()),
+        Err(error) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            &error.to_string()
+        )),
+    }
+}
+
+// 在每个 admin_* handler 开头调用
+pub(super) async fn admin_create_model_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateModelGroupRequest>,
+) -> impl IntoResponse {
+    // 权限校验
+    let _admin_user_id = match require_admin(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    // 继续处理...
+}
+```
+
+#### 9.2.4 前端权限控制
+
+```typescript
+// src/api/auth.ts
+
+export interface User {
+  id: string
+  email: string
+  is_admin: boolean  // 新增字段
+}
+
+export async function getCurrentUser(): Promise<User> {
+  const response = await api.get('/api/portal/user')
+  return response.data
+}
+```
+
+```vue
+<!-- src/views/admin/ModelGroups.vue -->
+<template>
+  <div v-if="!user?.is_admin">
+    <el-alert type="error" :closable="false">
+      您没有权限访问此页面
+    </el-alert>
+  </div>
+  <div v-else>
+    <!-- Admin 面板内容 -->
+  </div>
+</template>
+```
+
+**路由守卫**：
+
+```typescript
+// src/router/index.ts
+
+router.beforeEach(async (to, from, next) => {
+  if (to.meta.requireAdmin) {
+    const user = await getCurrentUser()
+    if (!user.is_admin) {
+      ElMessage.error('需要管理员权限')
+      next('/portal/keys')
+      return
+    }
+  }
+  next()
+})
+```
+
+### 9.3 Plaintext 存储风险
 
 **现状**：`plaintext_key` 已经存储在数据库中（当前设计）
 

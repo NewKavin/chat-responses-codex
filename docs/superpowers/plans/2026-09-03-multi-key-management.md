@@ -52,7 +52,7 @@
 **Interfaces:**
 - Consumes: 无（基础设施变更）
 - Produces: 
-  - `PortalDownstreamBinding { downstream_id: String, is_default: bool, label: Option<String> }`
+  - `PortalDownstreamBinding { downstream_id: String, is_default: bool, label: Option<String>, model_group_id: String }`
   - `PortalDownstreamBinding::label(&self) -> &str` - 返回 label 或默认值 "Default Key"
 
 - [ ] **Step 1: 创建 Migration SQL 文件**
@@ -74,6 +74,10 @@ ALTER TABLE portal_user_downstreams
 ADD CONSTRAINT IF NOT EXISTS label_max_length 
 CHECK (label IS NULL OR char_length(label) <= 100);
 
+-- 添加模型分组列（为模型分组功能预留，默认 'basic'）
+ALTER TABLE portal_user_downstreams 
+ADD COLUMN IF NOT EXISTS model_group_id TEXT DEFAULT 'basic';
+
 -- 添加索引（优化查询）
 CREATE INDEX IF NOT EXISTS idx_portal_user_downstreams_user_id 
 ON portal_user_downstreams(user_id);
@@ -81,6 +85,10 @@ ON portal_user_downstreams(user_id);
 -- 添加创建时间列
 ALTER TABLE portal_user_downstreams 
 ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 添加 response_history 索引（优化使用统计查询）
+CREATE INDEX IF NOT EXISTS idx_response_history_downstream_created 
+ON response_history(downstream_key_id, created_at DESC);
 
 COMMIT;
 ```
@@ -95,6 +103,7 @@ pub struct PortalDownstreamBinding {
     pub downstream_id: String,
     pub is_default: bool,
     pub label: Option<String>,  // 新增：兼容 NULL
+    pub model_group_id: String,  // 新增：模型分组（默认 'basic'）
 }
 
 impl PortalDownstreamBinding {
@@ -115,7 +124,9 @@ pub struct PortalDownstreamBindingWithLabel {
     pub downstream_id: String,
     pub is_default: bool,
     pub label: String,  // 前端总是收到非空 label
+    pub model_group_id: String,  // 模型分组
     pub created_at: i64,  // Unix timestamp
+    pub usage_count: i64,  // 使用次数（从 response_history 统计）
 }
 ```
 
@@ -210,12 +221,16 @@ pub async fn list_downstream_bindings_with_labels(
     let client = self.pool.get().await?;
     let rows = client
         .query(
-            "SELECT downstream_id, is_default, \
-                    COALESCE(label, 'Default Key') AS label, \
-                    EXTRACT(EPOCH FROM COALESCE(created_at, NOW()))::bigint AS created_at \
-             FROM portal_user_downstreams \
-             WHERE user_id = $1 \
-             ORDER BY is_default DESC, created_at DESC",
+            "SELECT d.downstream_id, d.is_default, \
+                    COALESCE(d.label, 'Default Key') AS label, \
+                    d.model_group_id, \
+                    EXTRACT(EPOCH FROM COALESCE(d.created_at, NOW()))::bigint AS created_at, \
+                    COALESCE(COUNT(r.id), 0) AS usage_count \
+             FROM portal_user_downstreams d \
+             LEFT JOIN response_history r ON d.downstream_id = r.downstream_key_id \
+             WHERE d.user_id = $1 \
+             GROUP BY d.downstream_id, d.is_default, d.label, d.model_group_id, d.created_at \
+             ORDER BY d.is_default DESC, d.created_at DESC",
             &[&user_id],
         )
         .await?;
@@ -226,7 +241,9 @@ pub async fn list_downstream_bindings_with_labels(
             downstream_id: row.get(0),
             is_default: row.get(1),
             label: row.get(2),
-            created_at: row.get(3),
+            model_group_id: row.get(3),
+            created_at: row.get(4),
+            usage_count: row.get(5),
         })
         .collect())
 }
@@ -316,7 +333,7 @@ git commit -m "feat(portal): add list_downstream_bindings_with_labels and count_
   - `PortalStore` (Task 2)
   - `PortalStoreError` 现有枚举
 - Produces:
-  - `async fn add_downstream_binding_with_label(&self, user_id: &str, downstream_id: &str, label: &str, is_default: bool) -> Result<(), PortalStoreError>`
+  - `async fn add_downstream_binding_with_label(&self, user_id: &str, downstream_id: &str, label: &str, model_group_id: &str, is_default: bool) -> Result<(), PortalStoreError>`
   - `async fn update_downstream_label(&self, user_id: &str, downstream_id: &str, label: &str) -> Result<(), PortalStoreError>`
   - `async fn remove_downstream_binding_safe(&self, user_id: &str, downstream_id: &str) -> Result<(), PortalStoreError>`
   - `async fn set_default_key(&self, user_id: &str, downstream_id: &str) -> Result<(), PortalStoreError>`
@@ -336,18 +353,18 @@ async fn test_add_downstream_binding_with_label() {
     client.execute("DELETE FROM portal_users WHERE id = $1", &[&user_id]).await.unwrap();
     client.execute("INSERT INTO portal_users (id, email) VALUES ($1, $2)", &[&user_id, &"test@example.com"]).await.unwrap();
     
-    store.add_downstream_binding_with_label(user_id, "ds_1", "First Key", true).await.unwrap();
+    store.add_downstream_binding_with_label(user_id, "ds_1", "First Key", "basic", true).await.unwrap();
     
     let bindings = store.list_downstream_bindings_with_labels(user_id).await.unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].label, "First Key");
     assert!(bindings[0].is_default);
     
-    store.add_downstream_binding_with_label(user_id, "ds_2", "Second Key", false).await.unwrap();
+    store.add_downstream_binding_with_label(user_id, "ds_2", "Second Key", "basic", false).await.unwrap();
     let bindings = store.list_downstream_bindings_with_labels(user_id).await.unwrap();
     assert_eq!(bindings.len(), 2);
     
-    store.add_downstream_binding_with_label(user_id, "ds_3", "Third Key", true).await.unwrap();
+    store.add_downstream_binding_with_label(user_id, "ds_3", "Third Key", "basic", true).await.unwrap();
     let bindings = store.list_downstream_bindings_with_labels(user_id).await.unwrap();
     let default_count = bindings.iter().filter(|b| b.is_default).count();
     assert_eq!(default_count, 1);
@@ -369,6 +386,7 @@ pub async fn add_downstream_binding_with_label(
     user_id: &str,
     downstream_id: &str,
     label: &str,
+    model_group_id: &str,
     is_default: bool,
 ) -> Result<(), PortalStoreError> {
     let mut client = self.pool.get().await?;
@@ -379,8 +397,8 @@ pub async fn add_downstream_binding_with_label(
     }
     
     tx.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label) VALUES ($1, $2, $3, $4)",
-        &[&user_id, &downstream_id, &is_default, &label],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id) VALUES ($1, $2, $3, $4, $5)",
+        &[&user_id, &downstream_id, &is_default, &label, &model_group_id],
     ).await?;
     
     tx.commit().await?;
@@ -407,8 +425,8 @@ async fn test_set_default_key() {
     client.execute("DELETE FROM portal_users WHERE id = $1", &[&user_id]).await.unwrap();
     client.execute("INSERT INTO portal_users (id, email) VALUES ($1, $2)", &[&user_id, &"test@example.com"]).await.unwrap();
     
-    store.add_downstream_binding_with_label(user_id, "ds_1", "Key 1", true).await.unwrap();
-    store.add_downstream_binding_with_label(user_id, "ds_2", "Key 2", false).await.unwrap();
+    store.add_downstream_binding_with_label(user_id, "ds_1", "Key 1", "basic", true).await.unwrap();
+    store.add_downstream_binding_with_label(user_id, "ds_2", "Key 2", "basic", false).await.unwrap();
     
     store.set_default_key(user_id, "ds_2").await.unwrap();
     
@@ -579,7 +597,7 @@ git commit -m "feat(portal): add write operations for key management
 - Consumes:
   - `PortalStore` (Task 3)
 - Produces:
-  - `async fn create_key_with_limit_check(&self, user_id: &str, label: &str, downstream_id: &str) -> Result<(), PortalStoreError>`
+  - `async fn create_key_with_limit_check(&self, user_id: &str, label: &str, model_group_id: &str, downstream_id: &str) -> Result<(), PortalStoreError>`
 
 - [ ] **Step 1: 写测试 - 并发创建 key 时的限制检查**
 
@@ -597,13 +615,13 @@ async fn test_concurrent_key_creation_limit() {
     client.execute("INSERT INTO portal_users (id, email) VALUES ($1, $2)", &[&user_id, &"test@example.com"]).await.unwrap();
     
     for i in 1..=9 {
-        store.create_key_with_limit_check(user_id, &format!("Key {}", i), &format!("ds_{}", i)).await.unwrap();
+        store.create_key_with_limit_check(user_id, &format!("Key {}", i), "basic", &format!("ds_{}", i)).await.unwrap();
     }
     
-    let result = store.create_key_with_limit_check(user_id, "Key 10", "ds_10").await;
+    let result = store.create_key_with_limit_check(user_id, "Key 10", "basic", "ds_10").await;
     assert!(result.is_ok());
     
-    let result = store.create_key_with_limit_check(user_id, "Key 11", "ds_11").await;
+    let result = store.create_key_with_limit_check(user_id, "Key 11", "basic", "ds_11").await;
     assert!(matches!(result, Err(PortalStoreError::Conflict(_))));
     
     let count = store.count_user_keys(user_id).await.unwrap();
@@ -624,6 +642,7 @@ pub async fn create_key_with_limit_check(
     &self,
     user_id: &str,
     label: &str,
+    model_group_id: &str,
     downstream_id: &str,
 ) -> Result<(), PortalStoreError> {
     let mut client = self.pool.get().await?;
@@ -637,8 +656,8 @@ pub async fn create_key_with_limit_check(
     }
     
     tx.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label) VALUES ($1, $2, FALSE, $3)",
-        &[&user_id, &downstream_id, &label],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id) VALUES ($1, $2, FALSE, $3, $4)",
+        &[&user_id, &downstream_id, &label, &model_group_id],
     ).await?;
     
     tx.commit().await?;
@@ -715,6 +734,8 @@ struct KeyInfo {
     key_type: String,
     prefix: String,
     is_default: bool,
+    model_group_id: String,
+    model_group_name: String,
     created_at: i64,
 }
 
@@ -751,6 +772,8 @@ pub(super) async fn portal_list_keys(
             key_type: key_type.to_string(),
             prefix: prefix.to_string(),
             is_default: b.is_default,
+            model_group_id: b.model_group_id.clone(),
+            model_group_name: b.model_group_name.clone(),
             created_at: b.created_at,
         }
     }).collect();
@@ -777,6 +800,7 @@ pub(super) async fn portal_list_keys(
 #[derive(serde::Deserialize)]
 struct CreateKeyRequest {
     label: String,
+    model_group_id: Option<String>,
 }
 
 pub(super) async fn portal_create_key(
@@ -793,6 +817,8 @@ pub(super) async fn portal_create_key(
     if label.is_empty() || label.len() > 100 {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": {"code": "invalid_label", "message": "Label must be 1-100 characters"}}))).into_response();
     }
+    
+    let model_group_id = payload.model_group_id.unwrap_or_else(|| "basic".to_string());
     
     let portal_store = match state.portal_store() {
         Some(store) => store,
@@ -813,12 +839,13 @@ pub(super) async fn portal_create_key(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": {"code": "downstream_creation_failed", "message": error}}))).into_response();
     }
     
-    match portal_store.create_key_with_limit_check(&user_id, label, &downstream_id).await {
+    match portal_store.create_key_with_limit_check(&user_id, label, &model_group_id, &downstream_id).await {
         Ok(_) => Json(json!({
             "downstream_id": downstream_id,
             "label": label,
             "plaintext_key": generated.plaintext,
             "key_type": "ApiOnly",
+            "model_group_id": model_group_id,
             "created_at": chrono::Utc::now().timestamp()
         })).into_response(),
         Err(PortalStoreError::Conflict(msg)) if msg.contains("limit exceeded") => {
@@ -1156,7 +1183,7 @@ git commit -m "feat(portal): reject sk- keys from Portal login
   - 后端 6 个端点 (Task 5)
 - Produces:
   - `listKeys(): Promise<KeyListResponse>`
-  - `createKey(label: string): Promise<KeyCreateResponse>`
+  - `createKey(label: string, modelGroupId?: string): Promise<KeyCreateResponse>`
   - `getKey(id: string): Promise<KeyInfo>`
   - `rotateKey(id: string): Promise<RotateResponse>`
   - `setDefaultKey(id: string): Promise<void>`
@@ -1173,6 +1200,8 @@ export interface KeyInfo {
   key_type: 'LoginEnabled' | 'ApiOnly'
   prefix: 'key-' | 'sk-'
   is_default: boolean
+  model_group_id: string
+  model_group_name: string
   created_at: number
 }
 
@@ -1187,6 +1216,7 @@ export interface KeyCreateResponse {
   label: string
   plaintext_key: string
   key_type: 'ApiOnly'
+  model_group_id: string
   created_at: number
 }
 
@@ -1218,12 +1248,12 @@ export async function listKeys(): Promise<KeyListResponse> {
 - [ ] **Step 3: 实现 createKey**
 
 ```typescript
-export async function createKey(label: string): Promise<KeyCreateResponse> {
+export async function createKey(label: string, modelGroupId?: string): Promise<KeyCreateResponse> {
   const response = await fetch('/api/portal/keys', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ label })
+    body: JSON.stringify({ label, model_group_id: modelGroupId })
   })
   
   if (!response.ok) {
