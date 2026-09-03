@@ -1014,6 +1014,19 @@ export interface RuntimeSettings {
   portal_session_ttl_seconds: number
   portal_oidc_pkce_enabled: boolean
   portal_oidc_verify_id_token: boolean
+  portal_oidc_client_id: string
+  portal_oidc_client_secret: string
+  portal_oidc_redirect_url: string
+  portal_oidc_issuer_url: string
+  portal_oidc_authorization_endpoint: string
+  portal_oidc_token_endpoint: string
+  portal_oidc_userinfo_endpoint: string
+  portal_oidc_scopes: string
+  portal_oidc_auth_style: string
+  portal_oidc_user_id_field: string
+  portal_oidc_email_field: string
+  portal_oidc_username_field: string
+  portal_oidc_display_name_field: string
 }
 
 export type RuntimeSettingKey = keyof RuntimeSettings

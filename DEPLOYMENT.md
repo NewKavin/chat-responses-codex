@@ -600,35 +600,15 @@ id_token**；开启 `portal_oidc_verify_id_token` 只是额外验签，不改身
 **前置条件**：必须使用 PostgreSQL 后端。文件模式（无 Postgres）下所有 OIDC
 端点返回 503 `oidc_requires_durable_store`，工号+key 登录不受影响。
 
-### 环境变量（端口接线，启动时读取）
+### 管理面配置（Admin > Settings，签名「门户 / OIDC 登录」，全部立即生效）
 
-| 环境变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `PORTAL_OIDC_CLIENT_ID` | 空 | OIDC client id（IdP 上注册）。为空时 OIDC 端点 503 |
-| `PORTAL_OIDC_CLIENT_SECRET` | 空 | OIDC client secret |
-| `PORTAL_OIDC_REDIRECT_URL` | 空 | 回调地址，必须是公开可达的 `https://…/api/portal/oidc/callback` |
-| `PORTAL_OIDC_ISSUER_URL` | 空 | issuer 地址；设置后自动拉取 `/.well-known/openid-configuration` 补端点 |
-| `PORTAL_OIDC_AUTHORIZATION_ENDPOINT` | 空 | 手工指定授权端点（显式优先于 discovery） |
-| `PORTAL_OIDC_TOKEN_ENDPOINT` | 空 | 手工指定令牌端点 |
-| `PORTAL_OIDC_USERINFO_ENDPOINT` | 空 | 手工指定 userinfo 端点 |
-| `PORTAL_OIDC_SCOPES` | `openid profile email` | 授权 scope |
-| `PORTAL_OIDC_AUTH_STYLE` | `auto` | `auto` / `params` / `basic`，控制 client 凭据放 body 还是 Basic header |
-| `PORTAL_OIDC_USER_ID_FIELD` | `sub` | userinfo 里的用户标识字段，支持 `a.b.c` 点路径 |
-| `PORTAL_OIDC_EMAIL_FIELD` | `email` | userinfo 里的邮箱字段（登录必需） |
-| `PORTAL_OIDC_USERNAME_FIELD` | `preferred_username` | 用户名映射（可选） |
-| `PORTAL_OIDC_DISPLAY_NAME_FIELD` | `name` | 显示名映射（可选） |
-
-编排（docker compose / k8s）示例：
-
-```yaml
-environment:
-  - PORTAL_OIDC_CLIENT_ID=chat2responses
-  - PORTAL_OIDC_CLIENT_SECRET=please-rotate
-  - PORTAL_OIDC_REDIRECT_URL=https://gateway.example.com/api/portal/oidc/callback
-  - PORTAL_OIDC_ISSUER_URL=https://idp.example.com/realms/main
-```
-
-### 运行时设置（Admin > Settings，签名「门户 / OIDC 登录」，全部立即生效）
+OIDC 接线与开关**都在管理面配置**（持久化到 Postgres，重启保留；本
+部署不使用环境变量注入 OIDC 接线，避免凭据散布在编排文件中）：
+**客户端 ID / 客户端密钥（仅管理员可见）/ 回调地址 / issuer 地址 /
+三个手工端点 / 授权 scope / 客户端认证方式 / 四个字段映射**，加上下面的
+开关。回调地址必须是公开可达的
+`https://你的网关域名/api/portal/oidc/callback`，且与 IdP 登记的
+redirect URI 完全一致。
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -638,6 +618,19 @@ environment:
 | `portal_session_ttl_seconds` | 86400 | 会话时长（≥60） |
 | `portal_oidc_pkce_enabled` | true | 授权请求携带 S256 code_challenge |
 | `portal_oidc_verify_id_token` | false | 额外验签 id_token（身份仍来自 userinfo） |
+| `portal_oidc_client_id` | 空 | OIDC 客户端 ID；为空时 OIDC 端点 503 |
+| `portal_oidc_client_secret` | 空 | OIDC 客户端密钥 |
+| `portal_oidc_redirect_url` | 空 | 回调地址（见上） |
+| `portal_oidc_issuer_url` | 空 | issuer 地址；设置后自动拉取 `/.well-known/openid-configuration` 补端点 |
+| `portal_oidc_authorization_endpoint` | 空 | 手工授权端点（显式优先于 discovery） |
+| `portal_oidc_token_endpoint` | 空 | 手工令牌端点 |
+| `portal_oidc_userinfo_endpoint` | 空 | 手工 userinfo 端点 |
+| `portal_oidc_scopes` | `openid profile email` | 授权 scope |
+| `portal_oidc_auth_style` | `auto` | `auto` / `params` / `basic` |
+| `portal_oidc_user_id_field` | `sub` | userinfo 用户标识字段，支持 `a.b.c` 点路径 |
+| `portal_oidc_email_field` | `email` | userinfo 邮箱字段（登录必需） |
+| `portal_oidc_username_field` | `preferred_username` | 用户名映射（可选） |
+| `portal_oidc_display_name_field` | `name` | 显示名映射（可选） |
 
 **PostgreSQL 必需**：会话与会话哈希只存在 Postgres；文件模式 503 fail closed。
 

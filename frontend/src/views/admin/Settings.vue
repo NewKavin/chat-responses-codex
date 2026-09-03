@@ -116,6 +116,16 @@
               />
 
               <el-input
+                v-else-if="field.control === 'password'"
+                type="password"
+                show-password
+                :model-value="textValue(field.key)"
+                :maxlength="field.maxLength"
+                autocomplete="new-password"
+                @update:model-value="updateText(field.key, $event)"
+              />
+
+              <el-input
                 v-else-if="field.control === 'text'"
                 :model-value="textValue(field.key)"
                 :maxlength="field.maxLength"

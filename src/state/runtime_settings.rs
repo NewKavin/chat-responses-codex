@@ -9,8 +9,11 @@ use super::types::{
     default_upstream_account_queue_max_depth, default_upstream_account_queue_max_wait_ms,
     default_upstream_account_queue_poll_interval_ms,
     default_upstream_account_queue_skip_when_doomed_enabled,
-    default_portal_oidc_allowed_email_domains, default_portal_oidc_enabled,
-    default_portal_oidc_pkce_enabled, default_portal_oidc_registration_enabled,
+    default_portal_oidc_allowed_email_domains, default_portal_oidc_auth_style,
+    default_portal_oidc_display_name_field, default_portal_oidc_email_field,
+    default_portal_oidc_enabled, default_portal_oidc_pkce_enabled,
+    default_portal_oidc_registration_enabled, default_portal_oidc_scopes,
+    default_portal_oidc_user_id_field, default_portal_oidc_username_field,
     default_portal_oidc_verify_id_token, default_portal_session_ttl_seconds,
     default_upstream_capacity_failure_cooldown_enabled,
     default_upstream_common_mode_breaker_threshold,
@@ -116,6 +119,19 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "portal_session_ttl_seconds",
     "portal_oidc_pkce_enabled",
     "portal_oidc_verify_id_token",
+    "portal_oidc_client_id",
+    "portal_oidc_client_secret",
+    "portal_oidc_redirect_url",
+    "portal_oidc_issuer_url",
+    "portal_oidc_authorization_endpoint",
+    "portal_oidc_token_endpoint",
+    "portal_oidc_userinfo_endpoint",
+    "portal_oidc_scopes",
+    "portal_oidc_auth_style",
+    "portal_oidc_user_id_field",
+    "portal_oidc_email_field",
+    "portal_oidc_username_field",
+    "portal_oidc_display_name_field",
 ];
 
 pub const RESTART_RUNTIME_SETTING_FIELDS: &[&str] = &[
@@ -213,6 +229,32 @@ pub struct RuntimeSettings {
     pub portal_oidc_pkce_enabled: bool,
     #[serde(default = "default_portal_oidc_verify_id_token")]
     pub portal_oidc_verify_id_token: bool,
+    #[serde(default)]
+    pub portal_oidc_client_id: String,
+    #[serde(default)]
+    pub portal_oidc_client_secret: String,
+    #[serde(default)]
+    pub portal_oidc_redirect_url: String,
+    #[serde(default)]
+    pub portal_oidc_issuer_url: String,
+    #[serde(default)]
+    pub portal_oidc_authorization_endpoint: String,
+    #[serde(default)]
+    pub portal_oidc_token_endpoint: String,
+    #[serde(default)]
+    pub portal_oidc_userinfo_endpoint: String,
+    #[serde(default = "default_portal_oidc_scopes")]
+    pub portal_oidc_scopes: String,
+    #[serde(default = "default_portal_oidc_auth_style")]
+    pub portal_oidc_auth_style: String,
+    #[serde(default = "default_portal_oidc_user_id_field")]
+    pub portal_oidc_user_id_field: String,
+    #[serde(default = "default_portal_oidc_email_field")]
+    pub portal_oidc_email_field: String,
+    #[serde(default = "default_portal_oidc_username_field")]
+    pub portal_oidc_username_field: String,
+    #[serde(default = "default_portal_oidc_display_name_field")]
+    pub portal_oidc_display_name_field: String,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
@@ -419,6 +461,19 @@ impl RuntimeSettings {
             portal_session_ttl_seconds: config.portal_session_ttl_seconds,
             portal_oidc_pkce_enabled: config.portal_oidc_pkce_enabled,
             portal_oidc_verify_id_token: config.portal_oidc_verify_id_token,
+            portal_oidc_client_id: config.portal_oidc_client_id.clone(),
+            portal_oidc_client_secret: config.portal_oidc_client_secret.clone(),
+            portal_oidc_redirect_url: config.portal_oidc_redirect_url.clone(),
+            portal_oidc_issuer_url: config.portal_oidc_issuer_url.clone(),
+            portal_oidc_authorization_endpoint: config.portal_oidc_authorization_endpoint.clone(),
+            portal_oidc_token_endpoint: config.portal_oidc_token_endpoint.clone(),
+            portal_oidc_userinfo_endpoint: config.portal_oidc_userinfo_endpoint.clone(),
+            portal_oidc_scopes: config.portal_oidc_scopes.clone(),
+            portal_oidc_auth_style: config.portal_oidc_auth_style.clone(),
+            portal_oidc_user_id_field: config.portal_oidc_user_id_field.clone(),
+            portal_oidc_email_field: config.portal_oidc_email_field.clone(),
+            portal_oidc_username_field: config.portal_oidc_username_field.clone(),
+            portal_oidc_display_name_field: config.portal_oidc_display_name_field.clone(),
             upstream_account_queue_adaptive_budget_enabled: config
                 .upstream_account_queue_adaptive_budget_enabled,
             upstream_account_queue_skip_when_doomed_enabled: config
@@ -548,6 +603,19 @@ impl RuntimeSettings {
         config.portal_session_ttl_seconds = self.portal_session_ttl_seconds;
         config.portal_oidc_pkce_enabled = self.portal_oidc_pkce_enabled;
         config.portal_oidc_verify_id_token = self.portal_oidc_verify_id_token;
+        config.portal_oidc_client_id = self.portal_oidc_client_id.clone();
+        config.portal_oidc_client_secret = self.portal_oidc_client_secret.clone();
+        config.portal_oidc_redirect_url = self.portal_oidc_redirect_url.clone();
+        config.portal_oidc_issuer_url = self.portal_oidc_issuer_url.clone();
+        config.portal_oidc_authorization_endpoint = self.portal_oidc_authorization_endpoint.clone();
+        config.portal_oidc_token_endpoint = self.portal_oidc_token_endpoint.clone();
+        config.portal_oidc_userinfo_endpoint = self.portal_oidc_userinfo_endpoint.clone();
+        config.portal_oidc_scopes = self.portal_oidc_scopes.clone();
+        config.portal_oidc_auth_style = self.portal_oidc_auth_style.clone();
+        config.portal_oidc_user_id_field = self.portal_oidc_user_id_field.clone();
+        config.portal_oidc_email_field = self.portal_oidc_email_field.clone();
+        config.portal_oidc_username_field = self.portal_oidc_username_field.clone();
+        config.portal_oidc_display_name_field = self.portal_oidc_display_name_field.clone();
         config.upstream_account_queue_adaptive_budget_enabled =
             self.upstream_account_queue_adaptive_budget_enabled;
         config.upstream_account_queue_skip_when_doomed_enabled =

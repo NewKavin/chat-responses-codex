@@ -1799,3 +1799,111 @@ async fn self_check_portal_jwt(
     chat_responses_codex::auth::generate_admin_token(&key.plaintext, "test-jwt-secret")
         .expect("jwt generation")
 }
+
+// ============ 方案2：OIDC 接线在管理面可配（runtime settings 优先） ============
+
+#[tokio::test]
+async fn admin_wiring_changes_are_used_by_the_oidc_flow() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+    })
+    .await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+    let token = admin_token(&router).await;
+
+    // Baseline: the wiring came from the config (env) defaults, client id
+    // "client-id", authorization endpoint from the mock IdP.
+    let (status, body) =
+        admin_request(&router, &token, "GET", "/api/admin/runtime-settings", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let revision = body["revision"].as_u64().unwrap();
+    let settings = body["settings"].as_object().unwrap();
+
+    // The 13 wiring keys are mutable from the admin UI now.
+    let n_wiring = settings
+        .keys()
+        .filter(|key| key.starts_with("portal_oidc_"))
+        .count();
+    assert!(
+        n_wiring >= 13,
+        "admin must expose the portal OIDC wiring keys, found {n_wiring}: {:?}",
+        settings
+            .keys()
+            .filter(|k| k.starts_with("portal_oidc_"))
+            .collect::<Vec<_>>()
+    );
+
+    let start_location = |router: &axum::Router| {
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/portal/oidc/start")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        }
+    };
+    let before = start_location(&router).await.expect("start must redirect");
+    assert!(
+        before.contains("client_id=client-id"),
+        "baseline start must use the config client id: {before}"
+    );
+
+    // Switch the OIDC wiring through the admin endpoint: issuer + client id.
+    let mut changed = settings.clone();
+    changed.insert(
+        "portal_oidc_client_id".to_string(),
+        serde_json::json!("admin-edited-client"),
+    );
+    changed.insert(
+        "portal_oidc_issuer_url".to_string(),
+        serde_json::json!(idp.base_url),
+    );
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "PUT",
+        "/api/admin/runtime-settings",
+        Some(serde_json::json!({
+            "expected_revision": revision,
+            "settings": changed,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin must accept wiring edits: {body:?}"
+    );
+
+    // The very next /start must reflect the admin-edited client id.
+    let after = start_location(&router)
+        .await
+        .expect("start must redirect after edit");
+    assert!(
+        after.contains("client_id=admin-edited-client"),
+        "start must use the admin-edited client id: {after}"
+    );
+    assert!(
+        !after.contains("client_id=client-id"),
+        "the env/config default must no longer win: {after}"
+    );
+    idp.abort();
+}

@@ -79,7 +79,8 @@ pub async fn reset_portal_tables(database_url: &str) {
     client
         .batch_execute(
             "DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
-             portal_identities, portal_users, oauth_login_attempts CASCADE",
+             portal_identities, portal_users, oauth_login_attempts, runtime_settings \
+             CASCADE",
         )
         .await
         .expect("dropping legacy portal tables must succeed");

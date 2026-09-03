@@ -11,7 +11,7 @@ export type RuntimeSettingGroupId =
   | 'portal'
 
 export type RuntimeSettingApplyMode = 'immediate' | 'restart'
-export type RuntimeSettingControl = 'text' | 'switch' | 'number' | 'number-list'
+export type RuntimeSettingControl = 'text' | 'password' | 'switch' | 'number' | 'number-list'
 
 export interface RuntimeSettingGroup {
   id: RuntimeSettingGroupId
@@ -710,6 +710,113 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     control: 'switch',
     description:
       '是否校验并解析 id_token（签名、iss、aud、nonce）。默认关闭：身份一律来自 userinfo，与 new-api 保持一致。'
+  },
+  {
+    key: 'portal_oidc_client_id',
+    group: 'portal',
+    label: '客户端 ID',
+    apply: 'immediate',
+    control: 'text',
+    description: 'OIDC 客户端 ID（企业 IdP 上注册）。必填，留空时 OIDC 端点 503。'
+  },
+  {
+    key: 'portal_oidc_client_secret',
+    group: 'portal',
+    label: '客户端密钥',
+    apply: 'immediate',
+    control: 'password',
+    description: 'OIDC 客户端密钥（企业 IdP 上注册）。保存在数据库，仅管理员可见。'
+  },
+  {
+    key: 'portal_oidc_redirect_url',
+    group: 'portal',
+    label: '回调地址',
+    apply: 'immediate',
+    control: 'text',
+    description: '必须与 IdP 登记的 redirect URI 一致：https://网关域名/api/portal/oidc/callback。'
+  },
+  {
+    key: 'portal_oidc_issuer_url',
+    group: 'portal',
+    label: 'Issuer 地址',
+    apply: 'immediate',
+    control: 'text',
+    description: '设置后自动拉取 /.well-known/openid-configuration 补齐三个端点（推荐）。'
+  },
+  {
+    key: 'portal_oidc_authorization_endpoint',
+    group: 'portal',
+    allowEmpty: true,
+    label: '授权端点（手工）',
+    apply: 'immediate',
+    control: 'text',
+    description: '手工指定授权端点（显式值优先于 discovery）。'
+  },
+  {
+    key: 'portal_oidc_token_endpoint',
+    group: 'portal',
+    allowEmpty: true,
+    label: '令牌端点（手工）',
+    apply: 'immediate',
+    control: 'text',
+    description: '手工指定令牌端点（显式值优先于 discovery）。'
+  },
+  {
+    key: 'portal_oidc_userinfo_endpoint',
+    group: 'portal',
+    allowEmpty: true,
+    label: '用户信息端点（手工）',
+    apply: 'immediate',
+    control: 'text',
+    description: '手工指定 userinfo 端点（显式值优先于 discovery）。'
+  },
+  {
+    key: 'portal_oidc_scopes',
+    group: 'portal',
+    label: '授权范围',
+    apply: 'immediate',
+    control: 'text',
+    description: '空格分隔的 scope，默认 openid profile email。'
+  },
+  {
+    key: 'portal_oidc_auth_style',
+    group: 'portal',
+    label: '客户端认证方式',
+    apply: 'immediate',
+    control: 'text',
+    description: 'auto / params / basic。auto 默认按 form 参数发送，失败回退 Basic 头。'
+  },
+  {
+    key: 'portal_oidc_user_id_field',
+    group: 'portal',
+    label: '用户 ID 字段',
+    apply: 'immediate',
+    control: 'text',
+    description: 'userinfo 里的用户标识字段，支持 a.b.c 点路径，默认 sub。'
+  },
+  {
+    key: 'portal_oidc_email_field',
+    group: 'portal',
+    label: '邮箱字段',
+    apply: 'immediate',
+    control: 'text',
+    description: 'userinfo 里的邮箱字段（登录必需），支持点路径，默认 email。'
+  },
+  {
+    key: 'portal_oidc_username_field',
+    group: 'portal',
+    label: '用户名字段',
+    apply: 'immediate',
+    control: 'text',
+    description: '用户名映射，支持点路径，默认 preferred_username。'
+  },
+  {
+    key: 'portal_oidc_display_name_field',
+    group: 'portal',
+    label: '显示名字段',
+    apply: 'immediate',
+    control: 'text',
+    description: '显示名映射，支持点路径，默认 name。'
   },
   {
     key: 'upstream_local_gate_distinct_error_code_enabled',

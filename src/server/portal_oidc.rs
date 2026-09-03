@@ -412,7 +412,7 @@ async fn oidc_environment(
             "OIDC login requires the Postgres-backed deployment",
         ));
     };
-    let config = PortalOidcConfig::from_app_config(&state.config).map_err(|error| {
+    let config = PortalOidcConfig::from_runtime_settings(&settings).map_err(|error| {
         error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "oidc_misconfigured",

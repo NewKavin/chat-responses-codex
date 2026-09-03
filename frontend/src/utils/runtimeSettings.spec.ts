@@ -98,7 +98,20 @@ const validSettings = (): RuntimeSettings => ({
   portal_oidc_allowed_email_domains: 'example.com',
   portal_session_ttl_seconds: 86400,
   portal_oidc_pkce_enabled: true,
-  portal_oidc_verify_id_token: false
+  portal_oidc_verify_id_token: false,
+  portal_oidc_client_id: 'client-id',
+  portal_oidc_client_secret: 'client-secret',
+  portal_oidc_redirect_url: 'http://gateway/api/portal/oidc/callback',
+  portal_oidc_issuer_url: 'http://idp.example.com',
+  portal_oidc_authorization_endpoint: '',
+  portal_oidc_token_endpoint: '',
+  portal_oidc_userinfo_endpoint: '',
+  portal_oidc_scopes: 'openid profile email',
+  portal_oidc_auth_style: 'auto',
+  portal_oidc_user_id_field: 'sub',
+  portal_oidc_email_field: 'email',
+  portal_oidc_username_field: 'preferred_username',
+  portal_oidc_display_name_field: 'name'
 })
 
 const expectedKeys: Array<keyof RuntimeSettings> = [
@@ -188,7 +201,20 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'portal_oidc_allowed_email_domains',
   'portal_session_ttl_seconds',
   'portal_oidc_pkce_enabled',
-  'portal_oidc_verify_id_token'
+  'portal_oidc_verify_id_token',
+  'portal_oidc_client_id',
+  'portal_oidc_client_secret',
+  'portal_oidc_redirect_url',
+  'portal_oidc_issuer_url',
+  'portal_oidc_authorization_endpoint',
+  'portal_oidc_token_endpoint',
+  'portal_oidc_userinfo_endpoint',
+  'portal_oidc_scopes',
+  'portal_oidc_auth_style',
+  'portal_oidc_user_id_field',
+  'portal_oidc_email_field',
+  'portal_oidc_username_field',
+  'portal_oidc_display_name_field'
 ]
 
 describe('runtime settings catalog', () => {
@@ -203,10 +229,10 @@ describe('runtime settings catalog', () => {
       'observability',
       'portal'
     ])
-    expect(runtimeSettingFields).toHaveLength(87)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(87)
+    expect(runtimeSettingFields).toHaveLength(100)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(100)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(74)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(87)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
@@ -301,7 +327,7 @@ describe('runtime settings helpers', () => {
 })
 
 describe('portal OIDC settings', () => {
-  it('appears as a settings group with exactly the six portal fields', () => {
+  it('appears as a settings group with the six switches plus the thirteen wiring fields', () => {
     const portalGroup = runtimeSettingGroups.find(group => group.id === 'portal')
     expect(portalGroup).toBeDefined()
     const portalFields = runtimeSettingFields.filter(field => field.group === 'portal')
@@ -311,7 +337,20 @@ describe('portal OIDC settings', () => {
       'portal_oidc_allowed_email_domains',
       'portal_session_ttl_seconds',
       'portal_oidc_pkce_enabled',
-      'portal_oidc_verify_id_token'
+      'portal_oidc_verify_id_token',
+      'portal_oidc_client_id',
+      'portal_oidc_client_secret',
+      'portal_oidc_redirect_url',
+      'portal_oidc_issuer_url',
+      'portal_oidc_authorization_endpoint',
+      'portal_oidc_token_endpoint',
+      'portal_oidc_userinfo_endpoint',
+      'portal_oidc_scopes',
+      'portal_oidc_auth_style',
+      'portal_oidc_user_id_field',
+      'portal_oidc_email_field',
+      'portal_oidc_username_field',
+      'portal_oidc_display_name_field'
     ])
     expect(portalFields.every(field => field.apply === 'immediate')).toBe(true)
   })

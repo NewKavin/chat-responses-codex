@@ -209,8 +209,8 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + portal_oidc_enabled/_registration_enabled/_allowed_email_domains,
     // + portal_session_ttl_seconds, portal_oidc_pkce_enabled, portal_oidc_verify_id_token
     // + upstream_route_health_enforcement_enabled (route-health passthrough)
-    // = 86.
-    assert_eq!(all.len(), 86);
+    // + the 13 portal OIDC wiring keys (client/secret/endpoints/field maps) = 99.
+    assert_eq!(all.len(), 99);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
