@@ -817,13 +817,26 @@ pub(super) async fn portal_create_key(
             .into_response();
     };
 
-    // Call Task 3 method
+    // Resolve the model group: explicit id validated against existing groups,
+    // otherwise fall back to the conservative default.
+    let model_group_id = payload.model_group_id.as_deref().unwrap_or("basic");
+    if store.get_model_group(model_group_id).await.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {
+                "code": "model_group_not_found",
+                "message": format!("Model group '{}' does not exist", model_group_id)
+            }})),
+        )
+            .into_response();
+    }
+
     if store
         .add_downstream_binding_with_label(
             &user_id,
             &payload.downstream_id,
             payload.label.as_deref(),
-            payload.model_group_id.as_deref(),
+            Some(model_group_id),
         )
         .await
         .is_err()
@@ -835,7 +848,14 @@ pub(super) async fn portal_create_key(
             .into_response();
     }
 
-    StatusCode::CREATED.into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "downstream_id": payload.downstream_id,
+            "model_group_id": model_group_id,
+        })),
+    )
+        .into_response()
 }
 
 pub(super) async fn portal_get_key_by_id(
@@ -1025,6 +1045,95 @@ pub(super) async fn portal_delete_key(
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": "Failed to delete key"}})),
+        )
+            .into_response(),
+    }
+}
+
+
+pub(super) async fn portal_list_model_groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Portal users may read the available model groups (to pick one for a key)
+    // but not manage them; group management stays admin-only.
+    // Require a portal session to read the group list (management stays admin-only).
+    if extract_user_id_from_session(&state, &headers).await.is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "Unauthorized"}})),
+        )
+            .into_response();
+    }
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    match store.list_model_groups().await {
+        Ok(groups) => (StatusCode::OK, Json(json!({ "groups": groups }))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct UpdateKeyModelGroupRequest {
+    model_group_id: String,
+}
+
+pub(super) async fn portal_update_key_model_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(downstream_id): axum::extract::Path<String>,
+    Json(payload): Json<UpdateKeyModelGroupRequest>,
+) -> impl IntoResponse {
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // The target group must exist.
+    if store.get_model_group(&payload.model_group_id).await.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {
+                "code": "model_group_not_found",
+                "message": format!("Model group '{}' does not exist", payload.model_group_id)
+            }})),
+        )
+            .into_response();
+    }
+
+    match store
+        .update_downstream_label(
+            &user_id,
+            &downstream_id,
+            None,
+            Some(payload.model_group_id.as_str()),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
         )
             .into_response(),
     }
