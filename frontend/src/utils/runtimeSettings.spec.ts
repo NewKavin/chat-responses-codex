@@ -369,3 +369,43 @@ describe('portal OIDC settings save path', () => {
     expect(validateRuntimeSettings(settings).app_name).toBeTruthy()
   })
 })
+
+describe('portal OIDC wiring may be left empty (staged configuration)', () => {
+  it('allows every wiring field to be empty without blocking the save button', () => {
+    const settings = validSettings()
+    const wiringKeys = [
+      'portal_oidc_client_id',
+      'portal_oidc_client_secret',
+      'portal_oidc_redirect_url',
+      'portal_oidc_issuer_url',
+      'portal_oidc_authorization_endpoint',
+      'portal_oidc_token_endpoint',
+      'portal_oidc_userinfo_endpoint',
+      'portal_oidc_scopes',
+      'portal_oidc_auth_style',
+      'portal_oidc_user_id_field',
+      'portal_oidc_email_field',
+      'portal_oidc_username_field',
+      'portal_oidc_display_name_field'
+    ]
+    for (const key of wiringKeys as Array<keyof RuntimeSettings>) {
+      const candidate = { ...settings, [key]: '' }
+      const errors = validateRuntimeSettings(candidate)
+      expect(errors[key]).toBeUndefined()
+    }
+  })
+
+  it('accepts a fully empty wiring set (issuer-only staged setup)', () => {
+    const settings = {
+      ...validSettings(),
+      portal_oidc_client_id: '',
+      portal_oidc_client_secret: '',
+      portal_oidc_redirect_url: '',
+      portal_oidc_issuer_url: '',
+      portal_oidc_authorization_endpoint: '',
+      portal_oidc_token_endpoint: '',
+      portal_oidc_userinfo_endpoint: ''
+    }
+    expect(validateRuntimeSettings(settings)).toEqual({})
+  })
+})

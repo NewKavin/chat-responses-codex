@@ -714,6 +714,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_client_id',
     group: 'portal',
+    allowEmpty: true,
     label: '客户端 ID',
     apply: 'immediate',
     control: 'text',
@@ -730,6 +731,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_redirect_url',
     group: 'portal',
+    allowEmpty: true,
     label: '回调地址',
     apply: 'immediate',
     control: 'text',
@@ -738,6 +740,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_issuer_url',
     group: 'portal',
+    allowEmpty: true,
     label: 'Issuer 地址',
     apply: 'immediate',
     control: 'text',
@@ -773,6 +776,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_scopes',
     group: 'portal',
+    allowEmpty: true,
     label: '授权范围',
     apply: 'immediate',
     control: 'text',
@@ -781,6 +785,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_auth_style',
     group: 'portal',
+    allowEmpty: true,
     label: '客户端认证方式',
     apply: 'immediate',
     control: 'text',
@@ -789,6 +794,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_user_id_field',
     group: 'portal',
+    allowEmpty: true,
     label: '用户 ID 字段',
     apply: 'immediate',
     control: 'text',
@@ -797,6 +803,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_email_field',
     group: 'portal',
+    allowEmpty: true,
     label: '邮箱字段',
     apply: 'immediate',
     control: 'text',
@@ -805,6 +812,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_username_field',
     group: 'portal',
+    allowEmpty: true,
     label: '用户名字段',
     apply: 'immediate',
     control: 'text',
@@ -813,6 +821,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
   {
     key: 'portal_oidc_display_name_field',
     group: 'portal',
+    allowEmpty: true,
     label: '显示名字段',
     apply: 'immediate',
     control: 'text',
