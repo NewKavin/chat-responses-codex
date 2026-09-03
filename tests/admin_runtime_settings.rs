@@ -230,8 +230,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus the six portal OIDC settings = 85 (T7),
     // plus upstream_route_health_enforcement_enabled = 87 (route-health passthrough),
     // plus the 13 portal OIDC wiring keys = 100,
-    // plus portal_oidc_userinfo_method and portal_oidc_token_path = 102.
-    assert_eq!(body["settings"].as_object().unwrap().len(), 102);
+    // plus portal_oidc_userinfo_method and portal_oidc_token_path = 102,
+    // plus portal_oidc_uuid_field = 103.
+    assert_eq!(body["settings"].as_object().unwrap().len(), 103);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

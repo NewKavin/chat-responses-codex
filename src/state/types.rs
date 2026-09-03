@@ -387,6 +387,7 @@ pub const DEFAULT_PORTAL_OIDC_PKCE_ENABLED: bool = true;
 pub const DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN: bool = false;
 pub const DEFAULT_PORTAL_OIDC_USERINFO_METHOD: &str = "GET";
 pub const DEFAULT_PORTAL_OIDC_TOKEN_PATH: &str = "/token";
+pub const DEFAULT_PORTAL_OIDC_UUID_FIELD: &str = "";
 /// C4.2: whether a fast-failed local-gate rejection returns the distinct
 /// `gateway_concurrency_saturated` error code so clients and operators can
 /// tell "the gateway's own concurrency gate is full" apart from "the upstream
@@ -613,6 +614,8 @@ pub struct AppConfig {
     pub portal_oidc_userinfo_method: String,
     #[serde(default = "default_portal_oidc_token_path")]
     pub portal_oidc_token_path: String,
+    #[serde(default = "default_portal_oidc_uuid_field")]
+    pub portal_oidc_uuid_field: String,
     /// G2: split the two decode-failure sources into distinct error codes
     /// (default on).  Turning it off restores the legacy shared code.
     #[serde(default = "default_stream_decode_error_code_split_enabled")]
@@ -783,6 +786,7 @@ impl Default for AppConfig {
             portal_oidc_verify_id_token: DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN,
             portal_oidc_userinfo_method: DEFAULT_PORTAL_OIDC_USERINFO_METHOD.to_string(),
             portal_oidc_token_path: DEFAULT_PORTAL_OIDC_TOKEN_PATH.to_string(),
+            portal_oidc_uuid_field: DEFAULT_PORTAL_OIDC_UUID_FIELD.to_string(),
             stream_decode_error_code_split_enabled: DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
             stream_max_skipped_bad_frames: DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
             upstream_continuation_pin_escape_enabled:
@@ -1777,6 +1781,9 @@ pub fn default_portal_oidc_userinfo_method() -> String {
 }
 pub fn default_portal_oidc_token_path() -> String {
     DEFAULT_PORTAL_OIDC_TOKEN_PATH.to_string()
+}
+pub fn default_portal_oidc_uuid_field() -> String {
+    DEFAULT_PORTAL_OIDC_UUID_FIELD.to_string()
 }
 
 pub fn default_upstream_local_gate_fast_fail_enabled() -> bool {

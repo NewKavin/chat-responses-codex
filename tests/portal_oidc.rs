@@ -2094,3 +2094,65 @@ async fn userinfo_post_method_sends_json_body() {
 
     idp.abort();
 }
+
+#[test]
+fn config_parses_uuid_field() {
+    let mut config = oidc_config();
+    config.portal_oidc_uuid_field = "uuid".to_string();
+
+    let parsed = PortalOidcConfig::from_app_config(&config).expect("config must parse");
+    assert_eq!(
+        parsed.uuid_field.resolve(&json!({"uuid": "u-42"})),
+        Some("u-42".to_string())
+    );
+}
+
+#[tokio::test]
+async fn login_flow_with_uuid_field_derives_identity_without_email() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    // Internal IdP userinfo carries no email and no sub, only a uuid.
+    let idp = MockIdpBuilder::default()
+        .claims(serde_json::json!({
+            "uuid": "uuid-123",
+            "name": "Test User",
+            "preferred_username": "testuser",
+        }))
+        .start()
+        .await;
+
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+        config.portal_oidc_uuid_field = "uuid".to_string();
+    })
+    .await;
+    // The placeholder email the gateway derives: {uuid}@oidc.local
+    seed_bound_user(&state, "uuid-123@oidc.local", "uuid-123", "team-a").await;
+
+    let result = run_login_flow(&router).await;
+    assert_eq!(result.status, StatusCode::FOUND);
+    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert!(
+        result.set_cookie.is_some(),
+        "uuid-based login must set a session cookie"
+    );
+
+    // The stored user must carry the derived placeholder email and the uuid
+    // as the OIDC subject.
+    let store = state.portal_store().expect("portal store");
+    let user = store
+        .find_user_by_identity("oidc", "uuid-123")
+        .await
+        .expect("user must exist")
+        .expect("identity must resolve to a user");
+    assert_eq!(user.email, "uuid-123@oidc.local");
+
+    idp.abort();
+}

@@ -79,6 +79,7 @@ pub struct PortalOidcConfig {
     pub issuer_url: Option<String>,
     pub token_path: String,
     pub userinfo_method: String,
+    pub uuid_field: FieldPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +120,7 @@ impl PortalOidcConfig {
             display_name_field: settings.portal_oidc_display_name_field.clone(),
             token_path: settings.portal_oidc_token_path.clone(),
             userinfo_method: settings.portal_oidc_userinfo_method.clone(),
+            uuid_field: settings.portal_oidc_uuid_field.clone(),
         };
         fields.parse()
     }
@@ -157,6 +159,7 @@ impl PortalOidcConfig {
             display_name_field: config.portal_oidc_display_name_field.clone(),
             token_path: config.portal_oidc_token_path.clone(),
             userinfo_method: config.portal_oidc_userinfo_method.clone(),
+            uuid_field: config.portal_oidc_uuid_field.clone(),
         };
         fields.parse()
     }
@@ -282,6 +285,7 @@ struct OidcFieldMappings {
     display_name_field: String,
     token_path: String,
     userinfo_method: String,
+    uuid_field: String,
 }
 
 impl OidcFieldMappings {
@@ -329,6 +333,7 @@ impl OidcFieldMappings {
             issuer_url: non_empty(&self.issuer_url),
             token_path: self.token_path.trim().to_string(),
             userinfo_method: self.userinfo_method.trim().to_string(),
+            uuid_field: FieldPath::new(&self.uuid_field),
         })
     }
 }

@@ -846,6 +846,15 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '非标准 IdP 的自定义 token 路径（如 /accesstoken、/oa）。默认 /token。仅在未手工指定令牌端点时生效，按 issuer + 路径拼接。'
   },
   {
+    key: 'portal_oidc_uuid_field',
+    group: 'portal',
+    allowEmpty: true,
+    label: 'UUID 字段',
+    apply: 'immediate',
+    control: 'text',
+    description: '内部 IdP 无邮箱时，从 userinfo 提取用户唯一标识（如 uuid），并自动使用占位邮箱 {uuid}@oidc.local 完成注册。留空维持原行为。'
+  },
+  {
     key: 'upstream_local_gate_distinct_error_code_enabled',
     group: 'concurrency',
     label: '闸门独立错误码',

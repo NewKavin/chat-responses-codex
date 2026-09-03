@@ -461,17 +461,22 @@ async fn resolve_identity(
     const PROVIDER: &str = "oidc";
 
     // Steps 6-7: sub and email are mandatory (empty counts as missing); the
-    // error names the offending field.
+    // error names the offending field.  Internal IdPs that expose no email
+    // may configure PORTAL_OIDC_UUID_FIELD: the uuid is then used as the
+    // subject fallback and to derive a placeholder email ({uuid}@oidc.local).
     let subject = config
         .user_id_field
         .resolve(userinfo)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| config.uuid_field.resolve(userinfo))
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
             error_response(
                 StatusCode::BAD_REQUEST,
                 "missing_user_id_field",
                 &format!(
-                    "userinfo is missing or empty '{}' (configured via PORTAL_OIDC_USER_ID_FIELD)",
+                    "userinfo is missing or empty '{}' (configured via \
+                     PORTAL_OIDC_USER_ID_FIELD or PORTAL_OIDC_UUID_FIELD)",
                     config.user_id_field
                 ),
             )
@@ -479,18 +484,31 @@ async fn resolve_identity(
     let email = config
         .email_field
         .resolve(userinfo)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "missing_email_field",
-                &format!(
-                    "userinfo is missing or empty '{}' (configured via PORTAL_OIDC_EMAIL_FIELD)",
-                    config.email_field
-                ),
-            )
-        })?;
-    if !email_allowed(&email, &settings.portal_oidc_allowed_email_domains) {
+        .filter(|value| !value.trim().is_empty());
+    let derived_email = if email.is_none() {
+        config.uuid_field.resolve(userinfo).map(|uuid| {
+            // Synthetic mailbox that satisfies portal_users.email NOT NULL /
+            // UNIQUE without pretending to be a real address.
+            format!("{uuid}@oidc.local")
+        })
+    } else {
+        None
+    };
+    let email_is_derived = derived_email.is_some();
+    let email = email.or(derived_email).ok_or_else(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_email_field",
+            &format!(
+                "userinfo is missing or empty '{}' (configured via \
+                 PORTAL_OIDC_EMAIL_FIELD or PORTAL_OIDC_UUID_FIELD)",
+                config.email_field
+            ),
+        )
+    })?;
+    // Synthetic emails derived from a uuid are exempt from the allowlist:
+    // they are not real addresses and would always be rejected otherwise.
+    if !email_is_derived && !email_allowed(&email, &settings.portal_oidc_allowed_email_domains) {
         return Err(error_response(
             StatusCode::FORBIDDEN,
             "portal_email_domain_not_allowed",
