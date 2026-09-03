@@ -59,6 +59,19 @@ Repositories:
 - 做内部模型池：同一个客户端配置，切换上游不需要改每个开发者的本地配置。
 - 用日志页和门户页排查路由、延迟、失败和 token 形态。
 
+### 多 Key 管理
+
+Portal 用户现在可以管理多个 API keys（最多 10 个），而不是单个 key。这使得：
+
+- **环境隔离** - 为开发、测试、生产环境使用不同的 keys
+- **无中断轮换** - 创建新 key，切换流量，删除旧 key
+- **组织管理** - 用自定义标签标识不同用途的 keys
+- **使用追踪** - 每个 key 独立统计请求次数
+
+详见：
+- [多 key 管理功能文档](docs/multi-key-management.md) - API 端点、工作流程、技术实现
+- [部署指南](docs/deployment-guide-multi-keys.md) - 数据库迁移、部署步骤、回滚流程
+
 ### 仓库结构
 
 - `src/`
@@ -71,6 +84,8 @@ Repositories:
   - Codex 与状态模板。
 - `docs/`
   - 集成指南和设计说明。
+  - [multi-key-management.md](docs/multi-key-management.md) - 多 key 管理功能文档
+  - [deployment-guide-multi-keys.md](docs/deployment-guide-multi-keys.md) - 多 key 功能部署指南
 
 ### 本地部署
 
@@ -343,6 +358,19 @@ rtk cargo test --workspace
 - Share one internal model gateway across many developers without making them reconfigure every provider.
 - Use logs and portal pages to inspect routing, latency, failures, and token shapes.
 
+### Multi-Key Management
+
+Portal users can now manage multiple API keys (up to 10) instead of a single key. This enables:
+
+- **Environment separation** - Use different keys for development, staging, and production
+- **Zero-downtime rotation** - Create new keys, migrate traffic, then delete old keys
+- **Organizational clarity** - Label keys by purpose or owner
+- **Usage tracking** - Each key tracks its own request count independently
+
+See:
+- [Multi-key management documentation](docs/multi-key-management.md) - API endpoints, workflows, technical implementation
+- [Deployment guide](docs/deployment-guide-multi-keys.md) - Database migrations, deployment steps, rollback procedures
+
 ### Repository Layout
 
 - `src/`
@@ -355,6 +383,8 @@ rtk cargo test --workspace
   - Codex and state templates.
 - `docs/`
   - Integration guide and design notes.
+  - [multi-key-management.md](docs/multi-key-management.md) - Multi-key management feature documentation
+  - [deployment-guide-multi-keys.md](docs/deployment-guide-multi-keys.md) - Multi-key feature deployment guide
 
 ### Local Deployment
 
