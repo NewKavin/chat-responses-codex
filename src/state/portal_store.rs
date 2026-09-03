@@ -259,13 +259,16 @@ impl PortalStore {
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "SELECT d.downstream_id, d.is_default, d.label, d.model_group_id, d.created_at, \
-                        COALESCE(COUNT(r.id), 0)::int4 AS usage_count \
+                "SELECT d.downstream_id, d.is_default, \
+                        COALESCE(d.label, 'Default Key') AS label, \
+                        d.model_group_id, \
+                        EXTRACT(EPOCH FROM COALESCE(d.created_at, NOW()))::bigint AS created_at, \
+                        COALESCE(COUNT(r.id), 0) AS usage_count \
                  FROM portal_user_downstreams d \
-                 LEFT JOIN portal_requests r ON r.user_id = d.user_id AND r.downstream_id = d.downstream_id \
+                 LEFT JOIN response_history r ON d.downstream_id = r.downstream_key_id \
                  WHERE d.user_id = $1 \
                  GROUP BY d.downstream_id, d.is_default, d.label, d.model_group_id, d.created_at \
-                 ORDER BY d.downstream_id",
+                 ORDER BY d.is_default DESC, d.created_at DESC",
                 &[&user_id],
             )
             .await?;
