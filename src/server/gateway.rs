@@ -29,7 +29,7 @@ use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream as futures_stream, FutureExt, StreamExt};
@@ -2638,6 +2638,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/key/rotate", post(portal_rotate_key))
         .route("/api/portal/oidc/start", get(portal_oidc_start))
         .route("/api/portal/oidc/callback", get(portal_oidc_callback))
+        // Multi-key management API
+        .route("/api/portal/keys", get(portal_list_keys).post(portal_create_key))
+        .route("/api/portal/keys/{downstream_id}", get(portal_get_key_by_id).delete(portal_delete_key))
+        .route("/api/portal/keys/{downstream_id}/rotate", post(portal_rotate_key_by_id))
+        .route("/api/portal/keys/{downstream_id}/default", put(portal_set_default_key))
         // Frontend assets and SPA fallback (with static-only compression);
         // merged so the nested router's fallback becomes the app fallback.
         .merge(static_frontend_router())

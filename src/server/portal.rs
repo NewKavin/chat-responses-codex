@@ -677,3 +677,55 @@ async fn extract_downstream_id_from_bearer(
     )
         .into_response())
 }
+
+// ============================================================================
+// Multi-key Management API Handlers (Stubs for Task 4)
+// ============================================================================
+
+pub(super) async fn portal_list_keys(
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+) -> impl IntoResponse {
+    Err::<Json<Value>, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+}
+
+pub(super) async fn portal_create_key(
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    Json(_payload): Json<Value>,
+) -> impl IntoResponse {
+    Err::<StatusCode, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+}
+
+pub(super) async fn portal_get_key_by_id(
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    Err::<Json<Value>, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+}
+
+pub(super) async fn portal_rotate_key_by_id(
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+    Json(_payload): Json<Value>,
+) -> impl IntoResponse {
+    Err::<Json<Value>, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+}
+
+pub(super) async fn portal_set_default_key(
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    Err::<StatusCode, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+}
+
+pub(super) async fn portal_delete_key(
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    Err::<StatusCode, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+}
