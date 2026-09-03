@@ -2560,6 +2560,25 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
+        // Admin API - Model Groups
+        .route(
+            "/api/admin/model-groups",
+            get(admin_list_model_groups)
+                .post(admin_create_model_group)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/model-groups/{id}",
+            put(admin_update_model_group)
+                .delete(admin_delete_model_group)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
         // Admin API - Logs
         .route(
             "/api/admin/logs",
@@ -2639,10 +2658,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/oidc/start", get(portal_oidc_start))
         .route("/api/portal/oidc/callback", get(portal_oidc_callback))
         // Multi-key management API
+        .route("/api/portal/model-groups", get(portal_list_model_groups))
         .route("/api/portal/keys", get(portal_list_keys).post(portal_create_key))
         .route("/api/portal/keys/{downstream_id}", get(portal_get_key_by_id).delete(portal_delete_key))
         .route("/api/portal/keys/{downstream_id}/rotate", post(portal_rotate_key_by_id))
         .route("/api/portal/keys/{downstream_id}/default", put(portal_set_default_key))
+        .route(
+            "/api/portal/keys/{downstream_id}/model-group",
+            put(portal_update_key_model_group),
+        )
         // Frontend assets and SPA fallback (with static-only compression);
         // merged so the nested router's fallback becomes the app fallback.
         .merge(static_frontend_router())
@@ -5527,6 +5551,107 @@ async fn process_gateway_request_inner(
         .await;
         active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
+    }
+
+    // Model Groups 权限校验：绑定到 Portal key 时按分组白名单放行/拒绝。
+    // - 空列表（无 portal 绑定，直接配置的 downstream）跳过校验，向后兼容。
+    // - 通配符 "*" 放行全部模型。
+    // - 查询失败 fail-closed（500），不允许权限层静默放行。
+    if let Some(portal_store) = state.portal_store() {
+        match portal_store
+            .get_key_allowed_models(&downstream.id)
+            .await
+        {
+            Ok(allowed_models) => {
+                let has_restriction = !allowed_models.is_empty();
+                let is_allowed = !has_restriction
+                    || allowed_models.contains(&"*".to_string())
+                    || allowed_models.iter().any(|allowed| allowed == model);
+
+                if has_restriction && !is_allowed {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream.id,
+                        path = %request_path,
+                        original_model = %model,
+                        normalized_model = %&normalized_model,
+                        "model not allowed by model group"
+                    );
+                    let error = GatewayError::classified(
+                        StatusCode::FORBIDDEN,
+                        "model not allowed",
+                        "permission_error",
+                        "model_not_allowed",
+                        "model_not_allowed",
+                        None,
+                        None,
+                    );
+                    let _ = append_gateway_usage_log(
+                        &state,
+                        &request_id,
+                        &downstream.id,
+                        &downstream.name,
+                        "",
+                        None,
+                        request_path,
+                        model,
+                        inference_strength.as_deref(),
+                        user_agent.as_deref(),
+                        None,
+                        error.status_code(),
+                        Some(error.to_string()),
+                        Some(error.error_category().to_string()),
+                        0,
+                        0,
+                        0,
+                        started,
+                    )
+                    .await;
+                    active_request_guard.fail_and_finish(error.error_category());
+                    return Err(error);
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    error = %e,
+                    "failed to check model group permissions; failing closed"
+                );
+                let error = GatewayError::classified(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "model group permission check failed",
+                    "permission_error",
+                    "model_group_check_failed",
+                    "model_group_check_failed",
+                    None,
+                    None,
+                );
+                let _ = append_gateway_usage_log(
+                    &state,
+                    &request_id,
+                    &downstream.id,
+                    &downstream.name,
+                    "",
+                    None,
+                    request_path,
+                    model,
+                    inference_strength.as_deref(),
+                    user_agent.as_deref(),
+                    None,
+                    error.status_code(),
+                    Some(error.to_string()),
+                    Some(error.error_category().to_string()),
+                    0,
+                    0,
+                    0,
+                    started,
+                )
+                .await;
+                active_request_guard.fail_and_finish(error.error_category());
+                return Err(error);
+            }
+        }
     }
 
     if request_has_unknown_tool_kind(endpoint, &body) {
