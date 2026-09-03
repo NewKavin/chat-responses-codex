@@ -3513,3 +3513,169 @@ pub(super) async fn admin_portal_user_bindings_delete(
             .into_response(),
     }
 }
+
+// Model Groups CRUD handlers
+
+pub(super) async fn admin_list_model_groups(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+
+    match store.list_model_groups().await {
+        Ok(groups) => (StatusCode::OK, Json(json!({"groups": groups}))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CreateModelGroupRequest {
+    id: String,
+    name: String,
+    description: Option<String>,
+    allowed_models: Vec<String>,
+}
+
+pub(super) async fn admin_create_model_group(
+    State(state): State<AppState>,
+    Json(body): Json<CreateModelGroupRequest>,
+) -> impl IntoResponse {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+
+    let valid_id = !body.id.is_empty()
+        && body
+            .id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "invalid_id", "message": "ID must contain only lowercase letters, digits, and hyphens"}})),
+        )
+            .into_response();
+    }
+    if body.allowed_models.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "invalid_models", "message": "allowed_models cannot be empty"}})),
+        )
+            .into_response();
+    }
+
+    let model_group = crate::state::ModelGroup {
+        id: body.id,
+        name: body.name,
+        description: body.description,
+        allowed_models: body.allowed_models,
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    match store.create_model_group(&model_group).await {
+        Ok(()) => (StatusCode::CREATED, Json(json!(model_group))).into_response(),
+        Err(crate::state::PortalStoreError::Conflict(message)) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"code": "group_exists", "message": message}})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct UpdateModelGroupRequest {
+    name: String,
+    description: Option<String>,
+    allowed_models: Vec<String>,
+}
+
+pub(super) async fn admin_update_model_group(
+    State(state): State<AppState>,
+    Path(group_id): Path<String>,
+    Json(body): Json<UpdateModelGroupRequest>,
+) -> impl IntoResponse {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+
+    if body.allowed_models.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "invalid_models", "message": "allowed_models cannot be empty"}})),
+        )
+            .into_response();
+    }
+
+    match store
+        .update_model_group(&group_id, &body.name, body.description.as_deref(), body.allowed_models)
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({"id": group_id}))).into_response(),
+        Err(crate::state::PortalStoreError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "group_not_found", "message": "model group not found"}})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+pub(super) async fn admin_delete_model_group(
+    State(state): State<AppState>,
+    Path(group_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+
+    if group_id == "basic" {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": {"code": "cannot_delete_basic", "message": "cannot delete the basic group"}})),
+        )
+            .into_response();
+    }
+
+    match store.delete_model_group(&group_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(crate::state::PortalStoreError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "group_not_found", "message": "model group not found"}})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
