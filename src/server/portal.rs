@@ -654,6 +654,18 @@ async fn extract_downstream_id_from_bearer(
             .into_response()
     })?;
 
+    // Block sk- API keys from Portal access (Task 6: security enhancement)
+    if token.starts_with("sk-") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "forbidden",
+                "message": "API keys (sk-*) cannot be used to access the Portal. Please log in via OAuth/OIDC."
+            })),
+        )
+            .into_response());
+    }
+
     if token.starts_with("eyJ") {
         match crate::auth::verify_admin_token(token, &state.config.jwt_secret) {
             Ok(claims) => return Ok(claims.sub),
