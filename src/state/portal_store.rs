@@ -99,6 +99,11 @@ impl PortalStore {
         Self { pool }
     }
 
+    /// Get a database client (exposed for testing)
+    pub async fn get_client(&self) -> Result<bb8::PooledConnection<'_, Manager>, PortalStoreError> {
+        Ok(self.pool.get().await?)
+    }
+
     /// (provider, subject) -> user row.  None when unbound.
     pub async fn find_user_by_identity(
         &self,
@@ -245,6 +250,47 @@ impl PortalStore {
                 model_group_id: row.get(3),
             })
             .collect())
+    }
+
+    pub async fn list_downstream_bindings_with_labels(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<PortalDownstreamBindingWithLabel>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT d.downstream_id, d.is_default, d.label, d.model_group_id, d.created_at, \
+                        COALESCE(COUNT(r.id), 0)::int4 AS usage_count \
+                 FROM portal_user_downstreams d \
+                 LEFT JOIN portal_requests r ON r.user_id = d.user_id AND r.downstream_id = d.downstream_id \
+                 WHERE d.user_id = $1 \
+                 GROUP BY d.downstream_id, d.is_default, d.label, d.model_group_id, d.created_at \
+                 ORDER BY d.downstream_id",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| PortalDownstreamBindingWithLabel {
+                downstream_id: row.get(0),
+                is_default: row.get(1),
+                label: row.get(2),
+                model_group_id: row.get(3),
+                created_at: row.get(4),
+                usage_count: row.get(5),
+            })
+            .collect())
+    }
+
+    pub async fn count_user_keys(&self, user_id: &str) -> Result<i64, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM portal_user_downstreams WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.get(0))
     }
 
     /// Add a binding; setting `is_default` demotes every other row.  Returns
