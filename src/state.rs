@@ -35,8 +35,8 @@ mod portal_store;
 #[doc(hidden)]
 pub use postgres::insert_statement;
 pub use portal_store::{
-    PortalDownstreamBinding, PortalDownstreamBindingWithLabel, PortalOidcHandshake, PortalSession,
-    PortalStore, PortalStoreError, PortalUser,
+    ModelGroup, PortalDownstreamBinding, PortalDownstreamBindingWithLabel, PortalOidcHandshake,
+    PortalSession, PortalStore, PortalStoreError, PortalUser,
 };
 #[path = "state/redis_runtime.rs"]
 mod redis_runtime;
