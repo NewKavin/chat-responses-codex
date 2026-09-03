@@ -678,54 +678,342 @@ async fn extract_downstream_id_from_bearer(
         .into_response())
 }
 
+/// Helper function to extract user_id from session cookie (for multi-key API)
+async fn extract_user_id_from_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
+    let cookie = crate::server::portal_oidc::session_cookie_value(headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "Missing session cookie"}})),
+        )
+            .into_response()
+    })?;
+
+    let Some(store) = state.portal_store() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response());
+    };
+
+    let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
+    let session = store
+        .find_session(&sid_hash)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to verify session"}})),
+            )
+                .into_response()
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "Invalid or expired session"}})),
+            )
+                .into_response()
+        })?;
+
+    Ok(session.user_id)
+}
+
 // ============================================================================
 // Multi-key Management API Handlers (Stubs for Task 4)
 // ============================================================================
 
+// Request/Response types
+#[derive(Deserialize)]
+pub(super) struct CreateKeyRequest {
+    downstream_id: String,
+    label: Option<String>,
+    model_group_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct RotateKeyRequest {
+    new_downstream_id: String,
+}
+
 pub(super) async fn portal_list_keys(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
+    State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    Err::<Json<Value>, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // Call Task 2 methods
+    let keys = match store.list_downstream_bindings_with_labels(&user_id).await {
+        Ok(keys) => keys,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to list keys"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let total = match store.count_user_keys(&user_id).await {
+        Ok(count) => count,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to count keys"}})),
+            )
+                .into_response();
+        }
+    };
+
+    Json(json!({
+        "keys": keys,
+        "total": total
+    }))
+    .into_response()
 }
 
 pub(super) async fn portal_create_key(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-    Json(_payload): Json<Value>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
-    Err::<StatusCode, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // Call Task 3 method
+    if store
+        .add_downstream_binding_with_label(
+            &user_id,
+            &payload.downstream_id,
+            payload.label.as_deref(),
+            payload.model_group_id.as_deref(),
+        )
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Failed to create key"}})),
+        )
+            .into_response();
+    }
+
+    StatusCode::CREATED.into_response()
 }
 
 pub(super) async fn portal_get_key_by_id(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(downstream_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    Err::<Json<Value>, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // Call list method and filter
+    let keys = match store.list_downstream_bindings_with_labels(&user_id).await {
+        Ok(keys) => keys,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to list keys"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let key = keys
+        .into_iter()
+        .find(|k| k.downstream_id == downstream_id)
+        .ok_or(StatusCode::NOT_FOUND);
+
+    match key {
+        Ok(key) => Json(serde_json::to_value(key).unwrap()).into_response(),
+        Err(status) => (
+            status,
+            Json(json!({"error": {"message": "Key not found"}})),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn portal_rotate_key_by_id(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
-    Json(_payload): Json<Value>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(old_downstream_id): axum::extract::Path<String>,
+    Json(payload): Json<RotateKeyRequest>,
 ) -> impl IntoResponse {
-    Err::<Json<Value>, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // Get old key details
+    let keys = match store.list_downstream_bindings_with_labels(&user_id).await {
+        Ok(keys) => keys,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to list keys"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let old_key = match keys.iter().find(|k| k.downstream_id == old_downstream_id) {
+        Some(key) => key,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "Old key not found"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let was_default = old_key.is_default;
+    let label = (!old_key.label.is_empty()).then_some(old_key.label.as_str());
+    let model_group_id = (!old_key.model_group_id.is_empty()).then_some(old_key.model_group_id.as_str());
+
+    // Add new key with same label and model_group_id
+    if store
+        .add_downstream_binding_with_label(
+            &user_id,
+            &payload.new_downstream_id,
+            label,
+            model_group_id,
+        )
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Failed to add new key"}})),
+        )
+            .into_response();
+    }
+
+    // If old key was default, set new key as default
+    if was_default && store.set_default_key(&user_id, &payload.new_downstream_id).await.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Failed to set new key as default"}})),
+        )
+            .into_response();
+    }
+
+    // Try to delete old key (best effort)
+    let _ = store.remove_downstream_binding_safe(&user_id, &old_downstream_id).await;
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub(super) async fn portal_set_default_key(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(downstream_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    Err::<StatusCode, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // Call Task 3 method
+    if store.set_default_key(&user_id, &downstream_id).await.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Failed to set default key"}})),
+        )
+            .into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub(super) async fn portal_delete_key(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-    axum::extract::Path(_downstream_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(downstream_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    Err::<StatusCode, StatusCode>(StatusCode::NOT_IMPLEMENTED).into_response()
+    // Extract user_id from session cookie
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // Call Task 3 safe delete method
+    match store.remove_downstream_binding_safe(&user_id, &downstream_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": {"message": "Cannot delete: key is default or in use"}})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Failed to delete key"}})),
+        )
+            .into_response(),
+    }
 }
