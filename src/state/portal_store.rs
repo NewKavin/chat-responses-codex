@@ -33,6 +33,25 @@ pub struct PortalUser {
 pub struct PortalDownstreamBinding {
     pub downstream_id: String,
     pub is_default: bool,
+    pub label: Option<String>,  // 新增：兼容 NULL
+    pub model_group_id: String,  // 新增：模型分组（默认 'basic'）
+}
+
+impl PortalDownstreamBinding {
+    /// 获取 label，现有数据返回默认值
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or("Default Key")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PortalDownstreamBindingWithLabel {
+    pub downstream_id: String,
+    pub is_default: bool,
+    pub label: String,  // 前端总是收到非空 label
+    pub model_group_id: String,  // 模型分组
+    pub created_at: i64,  // Unix timestamp
+    pub usage_count: i64,  // 使用次数（从 response_history 统计）
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,7 +231,7 @@ impl PortalStore {
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "SELECT downstream_id, is_default FROM portal_user_downstreams \
+                "SELECT downstream_id, is_default, label, model_group_id FROM portal_user_downstreams \
                  WHERE user_id = $1 ORDER BY downstream_id",
                 &[&user_id],
             )
@@ -222,6 +241,8 @@ impl PortalStore {
             .map(|row| PortalDownstreamBinding {
                 downstream_id: row.get(0),
                 is_default: row.get(1),
+                label: row.get(2),
+                model_group_id: row.get(3),
             })
             .collect())
     }
