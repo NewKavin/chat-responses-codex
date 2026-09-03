@@ -2156,3 +2156,163 @@ async fn login_flow_with_uuid_field_derives_identity_without_email() {
 
     idp.abort();
 }
+
+#[tokio::test]
+async fn admin_patch_updates_user_profile_fields() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    let store = state.portal_store().unwrap();
+    let user = store
+        .create_user_with_identity("user@example.com", None, None, "oidc", "sub-u")
+        .await
+        .unwrap();
+    let token = admin_token(&router).await;
+
+    // Patch display_name + username + email together.
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({
+            "display_name": "张三",
+            "username": "zhangsan",
+            "email": "updated@example.com",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated = store
+        .find_user_by_identity("oidc", "sub-u")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.email, "updated@example.com");
+    assert_eq!(updated.display_name.as_deref(), Some("张三"));
+    assert_eq!(updated.username.as_deref(), Some("zhangsan"));
+
+    // Partial patch leaves the other fields untouched.
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({"username": "lisi"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated = store
+        .find_user_by_identity("oidc", "sub-u")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.username.as_deref(), Some("lisi"));
+    assert_eq!(updated.email, "updated@example.com");
+    assert_eq!(updated.display_name.as_deref(), Some("张三"));
+
+    // Empty string clears the display name back to NULL.
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({"display_name": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated = store
+        .find_user_by_identity("oidc", "sub-u")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.display_name, None);
+
+    idp.abort();
+}
+
+#[tokio::test]
+async fn admin_patch_rejects_subject_edit_and_email_conflict() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, state) = oidc_gateway(&idp, |_config| {}).await;
+    let store = state.portal_store().unwrap();
+    let user = store
+        .create_user_with_identity("user@example.com", None, None, "oidc", "sub-u")
+        .await
+        .unwrap();
+    let other = store
+        .create_user_with_identity("other@example.com", None, None, "oidc", "sub-v")
+        .await
+        .unwrap();
+    let token = admin_token(&router).await;
+
+    // The uuid (identity subject) is not editable: sending it must be rejected.
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({"subject": "forged-uuid"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "subject edit must be rejected: {body}",
+    );
+
+    // Reusing another user's email hits the UNIQUE constraint.
+    let (status, body) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({"email": "other@example.com"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "duplicate email must conflict: {body}"
+    );
+
+    // An empty body is a no-op request.
+    let (status, _) = admin_request(
+        &router,
+        &token,
+        "PATCH",
+        &format!("/api/admin/portal/users/{}", user.id),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty patch must be rejected"
+    );
+
+    // subject unchanged after all rejected attempts
+    let reloaded = store
+        .find_user_by_identity("oidc", "sub-u")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.email, "user@example.com");
+
+    idp.abort();
+}

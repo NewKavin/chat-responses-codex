@@ -387,6 +387,8 @@ export const adminApi = {
     }>('/admin/portal/users', { params }),
   setPortalUserDisabled: (id: string, disabled: boolean) =>
     adminHttp.patch<{ id: string; disabled: boolean }>(`/admin/portal/users/${id}`, { disabled }),
+  updatePortalUser: (id: string, data: { display_name?: string; username?: string; email?: string }) =>
+    adminHttp.patch<{ id: string }>(`/admin/portal/users/${id}`, data),
   getPortalUserBindings: (id: string) =>
     adminHttp.get<{ items: Array<{ downstream_id: string; is_default: boolean }> }>(
       `/admin/portal/users/${id}/bindings`

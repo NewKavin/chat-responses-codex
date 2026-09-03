@@ -106,6 +106,54 @@ impl PortalStore {
     /// Create user + first identity atomically (OIDC registration path).
     /// Unique-email or unique-(provider,subject) violations map to
     /// `PortalStoreError::Conflict`.
+
+    /// Update the editable profile fields of a portal user.  `None` leaves a
+    /// field untouched; `Some("")` clears it (stored as NULL).  The identity
+    /// subject (uuid) is deliberately never updateable.
+    pub async fn update_user_profile(
+        &self,
+        user_id: &str,
+        display_name: Option<String>,
+        username: Option<String>,
+        email: Option<String>,
+    ) -> Result<bool, PortalStoreError> {
+        use tokio_postgres::types::ToSql;
+        let client = self.pool.get().await?;
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn ToSql + Sync + Send>> = vec![Box::new(user_id.to_string())];
+        let mut push = |column: &str, value: Option<String>| {
+            sets.push(format!("{column} = ${}", params.len() + 1));
+            // Empty input clears the column to NULL; absent input keeps it.
+            let normalized = value
+                .map(|raw| raw.trim().to_string())
+                .filter(|trimmed| !trimmed.is_empty());
+            params.push(Box::new(normalized));
+        };
+        if let Some(value) = display_name {
+            push("display_name", Some(value));
+        }
+        if let Some(value) = username {
+            push("username", Some(value));
+        }
+        if let Some(value) = email {
+            push("email", Some(value));
+        }
+        debug_assert!(!sets.is_empty(), "caller must provide at least one field");
+        let sql = format!("UPDATE portal_users SET {} WHERE id = $1", sets.join(", "));
+        let refs: Vec<&(dyn ToSql + Sync)> = params
+            .iter()
+            .map(|value| {
+                let reference: &(dyn ToSql + Sync) = value.as_ref();
+                reference
+            })
+            .collect();
+        let affected = client
+            .execute(&sql, &refs)
+            .await
+            .map_err(|error| classify_conflict(error, "email already in use"))?;
+        Ok(affected == 1)
+    }
+
     pub async fn create_user_with_identity(
         &self,
         email: &str,

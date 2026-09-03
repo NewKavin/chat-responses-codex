@@ -42,6 +42,7 @@
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" @click="openBindings(row)">绑定</el-button>
             <el-button
               size="small"
@@ -65,6 +66,28 @@
         />
       </div>
     </el-card>
+
+    <el-dialog v-model="editVisible" title="编辑门户用户" width="480">
+      <el-form :model="editForm" label-width="90px">
+        <el-form-item label="邮箱">
+          <el-input v-model="editForm.email" placeholder="用户邮箱" />
+        </el-form-item>
+        <el-form-item label="姓名">
+          <el-input v-model="editForm.display_name" placeholder="可留空" />
+        </el-form-item>
+        <el-form-item label="用户名">
+          <el-input v-model="editForm.username" placeholder="可留空" />
+        </el-form-item>
+        <el-form-item label="身份（UUID）">
+          <el-input :model-value="editSubject" disabled placeholder="—" />
+          <div class="field-hint">身份标识不可编辑</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editSaving" @click="saveEdit">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="bindingsVisible" :title="`密钥绑定：${bindingsUser?.email ?? ''}`" width="560">
       <el-table :data="bindings" v-loading="bindingsLoading" stripe>
@@ -168,6 +191,48 @@ const toggleDisabled = async (row: PortalUserRow) => {
   load()
 }
 
+const editVisible = ref(false)
+const editSaving = ref(false)
+const editSubject = ref('')
+const editForm = ref<{ email: string; display_name: string; username: string }>({
+  email: '',
+  display_name: '',
+  username: ''
+})
+
+const openEdit = (row: PortalUserRow) => {
+  currentlyEditingId.value = row.id
+  editSubject.value = row.subject ?? '—'
+  editForm.value = {
+    email: row.email,
+    display_name: row.display_name ?? '',
+    username: row.username ?? ''
+  }
+  editVisible.value = true
+}
+
+const saveEdit = async () => {
+  if (!editForm.value.email.trim()) {
+    ElMessage.warning('邮箱不能为空')
+    return
+  }
+  editSaving.value = true
+  try {
+    await adminApi.updatePortalUser(currentlyEditingId.value, {
+      email: editForm.value.email.trim(),
+      display_name: editForm.value.display_name.trim(),
+      username: editForm.value.username.trim()
+    })
+    ElMessage.success('已保存')
+    editVisible.value = false
+    load()
+  } finally {
+    editSaving.value = false
+  }
+}
+
+const currentlyEditingId = ref('')
+
 const openBindings = async (row: PortalUserRow) => {
   bindingsUser.value = row
   bindingsVisible.value = true
@@ -236,5 +301,10 @@ onMounted(load)
 }
 .muted {
   color: var(--el-text-color-placeholder);
+}
+.field-hint {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+  line-height: 1.5;
 }
 </style>

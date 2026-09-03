@@ -3363,8 +3363,16 @@ pub(super) async fn admin_portal_users(
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PortalUserPatchBody {
-    disabled: bool,
+    #[serde(default)]
+    disabled: Option<bool>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 pub(super) async fn admin_portal_user_patch(
@@ -3379,15 +3387,58 @@ pub(super) async fn admin_portal_user_patch(
         )
             .into_response();
     };
-    match store.set_user_disabled(&user_id, body.disabled).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(json!({"id": user_id, "disabled": body.disabled})),
+    // Existing disabled toggle keeps its exact semantics (sessions are killed
+    // when disabling).  The identity subject (uuid) is not editable: the body
+    // schema above has no field for it and unknown fields are rejected.
+    if let Some(disabled) = body.disabled {
+        return match store.set_user_disabled(&user_id, disabled).await {
+            Ok(true) => (
+                StatusCode::OK,
+                Json(json!({"id": user_id, "disabled": disabled})),
+            )
+                .into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "portal user not found"}})),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response(),
+        };
+    }
+    if body.display_name.is_none() && body.username.is_none() && body.email.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "no editable fields provided"}})),
         )
-            .into_response(),
+            .into_response();
+    }
+    // portal_users.email is NOT NULL: clearing it is not a supported edit.
+    if let Some(email) = body.email.as_ref() {
+        if email.trim().is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": "email cannot be empty"}})),
+            )
+                .into_response();
+        }
+    }
+    match store
+        .update_user_profile(&user_id, body.display_name, body.username, body.email)
+        .await
+    {
+        Ok(true) => (StatusCode::OK, Json(json!({"id": user_id}))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"message": "portal user not found"}})),
+        )
+            .into_response(),
+        Err(crate::state::PortalStoreError::Conflict(_)) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"message": "email already in use"}})),
         )
             .into_response(),
         Err(error) => (
