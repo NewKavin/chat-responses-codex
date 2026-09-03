@@ -15,9 +15,19 @@ export interface PortalKey {
   downstream_id: string
   label: string
   model_group_id: string
+  model_group_name?: string | null
   created_at: number
   usage_count: number
   is_default: boolean
+}
+
+export interface ModelGroup {
+  id: string
+  name: string
+  description: string | null
+  allowed_models: string[]
+  created_at: number
+  updated_at: number
 }
 
 export interface CreateKeyRequest {
@@ -100,6 +110,13 @@ export const portalApi = {
     portalHttp.put<{ success: boolean }>(`/portal/keys/${downstreamId}/default`),
   deleteKey: (downstreamId: string) =>
     portalHttp.delete<{ success: boolean }>(`/portal/keys/${downstreamId}`),
+
+  // Model groups (portal users can read groups and set their keys' group)
+  listModelGroups: () => portalHttp.get<{ groups: ModelGroup[] }>('/portal/model-groups'),
+  updateKeyModelGroup: (downstreamId: string, modelGroupId: string) =>
+    portalHttp.put<{ success: boolean }>(`/portal/keys/${downstreamId}/model-group`, {
+      model_group_id: modelGroupId
+    }),
 
   // Announcement
   getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement')

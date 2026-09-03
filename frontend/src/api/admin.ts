@@ -38,6 +38,7 @@ import type {
   NonstandardFieldPolicy,
   ModelAliasRule
 } from '@/types'
+import type { ModelGroup } from './portal'
 
 
 export interface BatchCreateUpstreamPayload {
@@ -495,5 +496,20 @@ export const adminApi = {
   updateModelAliases: (data: { model_aliases: ModelAliasRule[] }) =>
     adminHttp.put<{ success: boolean }>('/admin/model-aliases', data),
   getModelMappingStatuses: () =>
-    adminHttp.get<ModelMappingStatusesResponse>('/admin/model-mappings/status')
+    adminHttp.get<ModelMappingStatusesResponse>('/admin/model-mappings/status'),
+
+  // Model Groups
+  listModelGroups: () => adminHttp.get<{ groups: ModelGroup[] }>('/admin/model-groups'),
+  createModelGroup: (data: {
+    id: string
+    name: string
+    description?: string | null
+    allowed_models: string[]
+  }) => adminHttp.post<ModelGroup>('/admin/model-groups', data),
+  updateModelGroup: (
+    id: string,
+    data: { name: string; description?: string | null; allowed_models: string[] }
+  ) => adminHttp.put<{ id: string }>(`/admin/model-groups/${id}`, data),
+  deleteModelGroup: (id: string) =>
+    adminHttp.delete<{ success: boolean }>(`/admin/model-groups/${id}`)
 }
