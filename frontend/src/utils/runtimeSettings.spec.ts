@@ -111,7 +111,9 @@ const validSettings = (): RuntimeSettings => ({
   portal_oidc_user_id_field: 'sub',
   portal_oidc_email_field: 'email',
   portal_oidc_username_field: 'preferred_username',
-  portal_oidc_display_name_field: 'name'
+  portal_oidc_display_name_field: 'name',
+  portal_oidc_userinfo_method: 'GET',
+  portal_oidc_token_path: '/token'
 })
 
 const expectedKeys: Array<keyof RuntimeSettings> = [
@@ -214,7 +216,9 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'portal_oidc_user_id_field',
   'portal_oidc_email_field',
   'portal_oidc_username_field',
-  'portal_oidc_display_name_field'
+  'portal_oidc_display_name_field',
+  'portal_oidc_userinfo_method',
+  'portal_oidc_token_path'
 ]
 
 describe('runtime settings catalog', () => {
@@ -229,10 +233,10 @@ describe('runtime settings catalog', () => {
       'observability',
       'portal'
     ])
-    expect(runtimeSettingFields).toHaveLength(100)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(100)
+    expect(runtimeSettingFields).toHaveLength(102)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(102)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(87)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(89)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
@@ -350,7 +354,9 @@ describe('portal OIDC settings', () => {
       'portal_oidc_user_id_field',
       'portal_oidc_email_field',
       'portal_oidc_username_field',
-      'portal_oidc_display_name_field'
+      'portal_oidc_display_name_field',
+      'portal_oidc_userinfo_method',
+      'portal_oidc_token_path'
     ])
     expect(portalFields.every(field => field.apply === 'immediate')).toBe(true)
   })
@@ -386,7 +392,9 @@ describe('portal OIDC wiring may be left empty (staged configuration)', () => {
       'portal_oidc_user_id_field',
       'portal_oidc_email_field',
       'portal_oidc_username_field',
-      'portal_oidc_display_name_field'
+      'portal_oidc_display_name_field',
+      'portal_oidc_userinfo_method',
+      'portal_oidc_token_path'
     ]
     for (const key of wiringKeys as Array<keyof RuntimeSettings>) {
       const candidate = { ...settings, [key]: '' }

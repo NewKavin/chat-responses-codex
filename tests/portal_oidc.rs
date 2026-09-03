@@ -87,6 +87,24 @@ fn config_rejects_unknown_auth_style() {
     );
 }
 
+#[test]
+fn config_parses_userinfo_method() {
+    let mut config = oidc_config();
+    config.portal_oidc_userinfo_method = "POST".to_string();
+
+    let parsed = PortalOidcConfig::from_app_config(&config).expect("config must parse");
+    assert_eq!(parsed.userinfo_method, "POST");
+}
+
+#[test]
+fn config_parses_token_path() {
+    let mut config = oidc_config();
+    config.portal_oidc_token_path = "/accesstoken".to_string();
+
+    let parsed = PortalOidcConfig::from_app_config(&config).expect("config must parse");
+    assert_eq!(parsed.token_path, "/accesstoken");
+}
+
 /// Minimal axum server serving only the discovery document.
 type DiscoveryBody = std::sync::Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 
@@ -403,6 +421,16 @@ async fn login_flow_with_discovery_succeeds_and_returns_session_cookie() {
         session.is_some(),
         "session must be persisted under sha256 of the cookie value"
     );
+    // Default userinfo method stays GET + Bearer: the mock IdP must have
+    // seen exactly one GET request and no POST body.
+    let requests = idp.userinfo_requests();
+    assert_eq!(requests.len(), 1, "userinfo must be fetched exactly once");
+    assert_eq!(requests[0].0, "GET", "default userinfo method must be GET");
+    assert!(
+        requests[0].1.is_none(),
+        "GET userinfo must not carry a JSON body"
+    );
+
     idp.abort();
 }
 
@@ -1943,5 +1971,126 @@ async fn provider_denial_redirects_with_oauth_error() {
         location.contains("/portal/login?oauth_error=denied"),
         "provider denial must redirect to the portal login with oauth_error: {location}"
     );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn token_path_overrides_discovery() {
+    // Endpoint resolution only — no database required.  The mock IdP always
+    // advertises /token in its discovery document; the custom token_path must
+    // win when resolving.
+    let idp = MockIdpBuilder::default().start().await;
+
+    let mut config = oidc_config();
+    config.portal_oidc_issuer_url = idp.base_url.clone();
+    config.portal_oidc_token_path = "/accesstoken".to_string();
+
+    let parsed = PortalOidcConfig::from_app_config(&config).expect("config must parse");
+    let client = reqwest::Client::new();
+    let endpoints = parsed
+        .resolve_endpoints(&client)
+        .await
+        .expect("endpoints must resolve");
+
+    // When token_path is non-default, it should override discovery.
+    assert_eq!(
+        endpoints.token_endpoint,
+        format!("{}/accesstoken", idp.base_url),
+        "token_endpoint should use custom token_path instead of discovery"
+    );
+    // The other two endpoints still come from discovery.
+    assert_eq!(
+        endpoints.authorization_endpoint,
+        format!("{}/authorize", idp.base_url)
+    );
+    assert_eq!(
+        endpoints.userinfo_endpoint,
+        format!("{}/userinfo", idp.base_url)
+    );
+
+    idp.abort();
+}
+
+#[tokio::test]
+async fn login_flow_with_custom_token_path_succeeds() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    // The mock IdP serves its token endpoint at the non-standard /accesstoken
+    // path, mirroring the internal OAuth implementation.
+    let idp = MockIdpBuilder::default()
+        .token_path("/accesstoken")
+        .start()
+        .await;
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+        config.portal_oidc_token_path = "/accesstoken".to_string();
+    })
+    .await;
+    seed_bound_user(&state, "user@example.com", "test-user-subject", "team-a").await;
+
+    let result = run_login_flow(&router).await;
+    assert_eq!(result.status, StatusCode::FOUND);
+    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert!(
+        result.set_cookie.is_some(),
+        "custom token path login must set a session cookie"
+    );
+    idp.abort();
+}
+
+#[tokio::test]
+async fn userinfo_post_method_sends_json_body() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    let idp = MockIdpBuilder::default()
+        .claims(serde_json::json!({
+            "sub": "test-user-123",
+            "email": "testuser@example.com",
+            "name": "Test User",
+            "preferred_username": "testuser",
+        }))
+        .start()
+        .await;
+
+    let (router, state) = oidc_gateway(&idp, |config| {
+        config.portal_oidc_registration_enabled = true;
+        config.portal_oidc_userinfo_method = "POST".to_string();
+    })
+    .await;
+    seed_bound_user(&state, "testuser@example.com", "test-user-123", "team-a").await;
+
+    let result = run_login_flow(&router).await;
+    assert_eq!(result.status, StatusCode::FOUND);
+    assert_eq!(result.location.as_deref(), Some("/portal"));
+    assert!(
+        result.set_cookie.is_some(),
+        "POST userinfo login must set session cookie"
+    );
+
+    // The gateway must have sent exactly one POST request carrying a JSON
+    // body with access_token, client_id and scope.
+    let requests = idp.userinfo_requests();
+    assert_eq!(requests.len(), 1, "userinfo must be fetched exactly once");
+    let (method, body) = &requests[0];
+    assert_eq!(method, "POST", "userinfo request must use POST");
+    let body = body.as_ref().expect("POST userinfo must carry a JSON body");
+    assert_eq!(body["access_token"], "mock-access-token");
+    assert_eq!(body["client_id"], "client-id");
+    assert_eq!(body["scope"], "openid profile email");
+
     idp.abort();
 }

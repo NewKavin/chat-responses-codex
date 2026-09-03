@@ -77,6 +77,8 @@ pub struct PortalOidcConfig {
     pub token_endpoint: Option<String>,
     pub userinfo_endpoint: Option<String>,
     pub issuer_url: Option<String>,
+    pub token_path: String,
+    pub userinfo_method: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +117,8 @@ impl PortalOidcConfig {
             email_field: settings.portal_oidc_email_field.clone(),
             username_field: settings.portal_oidc_username_field.clone(),
             display_name_field: settings.portal_oidc_display_name_field.clone(),
+            token_path: settings.portal_oidc_token_path.clone(),
+            userinfo_method: settings.portal_oidc_userinfo_method.clone(),
         };
         fields.parse()
     }
@@ -151,6 +155,8 @@ impl PortalOidcConfig {
             email_field: config.portal_oidc_email_field.clone(),
             username_field: config.portal_oidc_username_field.clone(),
             display_name_field: config.portal_oidc_display_name_field.clone(),
+            token_path: config.portal_oidc_token_path.clone(),
+            userinfo_method: config.portal_oidc_userinfo_method.clone(),
         };
         fields.parse()
     }
@@ -226,7 +232,15 @@ impl PortalOidcConfig {
                     };
                     let token = match explicit.1.as_ref() {
                         Some(value) => value.clone(),
-                        None => take("token_endpoint")?,
+                        None => {
+                            // If token_path is non-default, construct from issuer + path
+                            // instead of using discovery
+                            if self.token_path != "/token" {
+                                format!("{}{}", issuer.trim_end_matches('/'), self.token_path)
+                            } else {
+                                take("token_endpoint")?
+                            }
+                        }
                     };
                     let userinfo = match explicit.2.as_ref() {
                         Some(value) => value.clone(),
@@ -266,6 +280,8 @@ struct OidcFieldMappings {
     email_field: String,
     username_field: String,
     display_name_field: String,
+    token_path: String,
+    userinfo_method: String,
 }
 
 impl OidcFieldMappings {
@@ -311,6 +327,8 @@ impl OidcFieldMappings {
             token_endpoint: non_empty(&self.token_endpoint),
             userinfo_endpoint: non_empty(&self.userinfo_endpoint),
             issuer_url: non_empty(&self.issuer_url),
+            token_path: self.token_path.trim().to_string(),
+            userinfo_method: self.userinfo_method.trim().to_string(),
         })
     }
 }

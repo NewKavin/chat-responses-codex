@@ -828,6 +828,24 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     description: '显示名映射，支持点路径，默认 name。'
   },
   {
+    key: 'portal_oidc_userinfo_method',
+    group: 'portal',
+    allowEmpty: true,
+    label: '用户信息接口方式',
+    apply: 'immediate',
+    control: 'text',
+    description: 'GET 发 Bearer 头（标准 OAuth2）；POST 把 access_token/client_id/scope 放 JSON body（兼容内部非标准实现）。默认 GET。'
+  },
+  {
+    key: 'portal_oidc_token_path',
+    group: 'portal',
+    allowEmpty: true,
+    label: '令牌端点路径',
+    apply: 'immediate',
+    control: 'text',
+    description: '非标准 IdP 的自定义 token 路径（如 /accesstoken、/oa）。默认 /token。仅在未手工指定令牌端点时生效，按 issuer + 路径拼接。'
+  },
+  {
     key: 'upstream_local_gate_distinct_error_code_enabled',
     group: 'concurrency',
     label: '闸门独立错误码',

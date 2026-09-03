@@ -133,6 +133,7 @@ struct CodeInfo {
 pub struct MockIdp {
     pub base_url: String,
     pub userinfo_claims: Arc<RwLock<Value>>,
+    userinfo_requests: Arc<RwLock<Vec<(String, Option<Value>)>>>,
     codes: Arc<TokioMutex<HashMap<String, CodeInfo>>>,
     counter: Arc<AtomicU64>,
     require_pkce: Arc<AtomicBool>,
@@ -146,6 +147,7 @@ pub struct MockIdpBuilder {
     client_secret: String,
     require_pkce: bool,
     userinfo_claims: Value,
+    token_path: String,
 }
 
 impl Default for MockIdpBuilder {
@@ -154,6 +156,7 @@ impl Default for MockIdpBuilder {
             client_id: "client-id".to_string(),
             client_secret: "client-secret".to_string(),
             require_pkce: false,
+            token_path: "/token".to_string(),
             userinfo_claims: json!({
                 "sub": "test-user-subject",
                 "email": "user@example.com",
@@ -181,6 +184,14 @@ impl MockIdpBuilder {
         self
     }
 
+    /// Serve the token endpoint at a custom path (e.g. `/accesstoken`)
+    /// instead of the standard `/token`, mirroring non-standard internal
+    /// OAuth implementations.
+    pub fn token_path(mut self, path: &str) -> Self {
+        self.token_path = path.to_string();
+        self
+    }
+
     pub async fn start(self) -> MockIdp {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -192,12 +203,13 @@ impl MockIdpBuilder {
         let client_secret = self.client_secret.clone();
         let require_pkce = Arc::new(AtomicBool::new(self.require_pkce));
         let userinfo_claims = Arc::new(RwLock::new(self.userinfo_claims));
+        let userinfo_requests = Arc::new(RwLock::new(Vec::<(String, Option<Value>)>::new()));
+        let token_path = self.token_path.clone();
         let codes = Arc::new(TokioMutex::new(HashMap::<String, CodeInfo>::new()));
         let counter = Arc::new(AtomicU64::new(0));
 
         let app = {
             use axum::body::Bytes;
-            use axum::extract::State as AxumState;
             use axum::http::HeaderMap;
             use axum::routing::{get, post};
             use axum::Router;
@@ -207,11 +219,12 @@ impl MockIdpBuilder {
                     "/.well-known/openid-configuration",
                     get({
                         let base_url = base_url.clone();
+                        let token_path = token_path.clone();
                         move || async move {
                             axum::Json(json!({
                                 "issuer": base_url,
                                 "authorization_endpoint": format!("{base_url}/authorize"),
-                                "token_endpoint": format!("{base_url}/token"),
+                                "token_endpoint": format!("{base_url}{token_path}"),
                                 "userinfo_endpoint": format!("{base_url}/userinfo"),
                                 "code_challenge_methods_supported": ["S256"],
                             }))
@@ -244,7 +257,7 @@ impl MockIdpBuilder {
                     }),
                 )
                 .route(
-                    "/token",
+                    token_path.as_str(),
                     post({
                         let codes = codes.clone();
                         let client_id = client_id.clone();
@@ -323,7 +336,28 @@ impl MockIdpBuilder {
                     "/userinfo",
                     get({
                         let userinfo_claims = userinfo_claims.clone();
-                        move || async move { axum::Json(userinfo_claims.read().unwrap().clone()) }
+                        let userinfo_requests = userinfo_requests.clone();
+                        move || async move {
+                            userinfo_requests
+                                .write()
+                                .unwrap()
+                                .push(("GET".to_string(), None));
+                            axum::Json(userinfo_claims.read().unwrap().clone())
+                        }
+                    })
+                    .post({
+                        let userinfo_claims = userinfo_claims.clone();
+                        let userinfo_requests = userinfo_requests.clone();
+                        move |body: Bytes| async move {
+                            // POST userinfo accepts a JSON body carrying the
+                            // access token; record it for assertions.
+                            let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                            userinfo_requests
+                                .write()
+                                .unwrap()
+                                .push(("POST".to_string(), Some(parsed)));
+                            axum::Json(userinfo_claims.read().unwrap().clone())
+                        }
                     }),
                 )
         };
@@ -335,6 +369,7 @@ impl MockIdpBuilder {
         MockIdp {
             base_url,
             userinfo_claims,
+            userinfo_requests,
             codes,
             counter,
             require_pkce,
@@ -355,6 +390,13 @@ impl MockIdpBuilder {
 }
 
 impl MockIdp {
+    /// Snapshot of the userinfo requests the gateway sent to this mock IdP:
+    /// `(HTTP method, JSON body)`.  GET requests carry no body (`None`);
+    /// POST requests carry the parsed JSON body.
+    pub fn userinfo_requests(&self) -> Vec<(String, Option<Value>)> {
+        self.userinfo_requests.read().unwrap().clone()
+    }
+
     pub fn abort(self) {
         self.handle.abort();
     }

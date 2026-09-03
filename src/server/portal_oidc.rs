@@ -287,13 +287,33 @@ pub(super) async fn portal_oidc_callback(
     };
 
     // Step 5: fetch userinfo — the identity source of truth.
-    let userinfo_response = match client
-        .get(&endpoints.userinfo_endpoint)
-        .bearer_auth(&access_token)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-    {
+    let userinfo_response = match config.userinfo_method.as_str() {
+        "POST" => {
+            // Non-standard POST + JSON body method (internal OAuth implementations)
+            let body = serde_json::json!({
+                "access_token": &access_token,
+                "client_id": &config.client_id,
+                "scope": &config.scopes,
+            });
+            client
+                .post(&endpoints.userinfo_endpoint)
+                .json(&body)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+        }
+        _ => {
+            // Standard GET + Bearer token method (default)
+            client
+                .get(&endpoints.userinfo_endpoint)
+                .bearer_auth(&access_token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+        }
+    };
+
+    let userinfo_response = match userinfo_response {
         Ok(response) => response,
         Err(error) => {
             return error_response(

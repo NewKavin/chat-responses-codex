@@ -385,6 +385,8 @@ pub const DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS: &str = "";
 pub const DEFAULT_PORTAL_SESSION_TTL_SECONDS: u64 = 86_400;
 pub const DEFAULT_PORTAL_OIDC_PKCE_ENABLED: bool = true;
 pub const DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN: bool = false;
+pub const DEFAULT_PORTAL_OIDC_USERINFO_METHOD: &str = "GET";
+pub const DEFAULT_PORTAL_OIDC_TOKEN_PATH: &str = "/token";
 /// C4.2: whether a fast-failed local-gate rejection returns the distinct
 /// `gateway_concurrency_saturated` error code so clients and operators can
 /// tell "the gateway's own concurrency gate is full" apart from "the upstream
@@ -607,6 +609,10 @@ pub struct AppConfig {
     pub portal_oidc_pkce_enabled: bool,
     #[serde(default = "default_portal_oidc_verify_id_token")]
     pub portal_oidc_verify_id_token: bool,
+    #[serde(default = "default_portal_oidc_userinfo_method")]
+    pub portal_oidc_userinfo_method: String,
+    #[serde(default = "default_portal_oidc_token_path")]
+    pub portal_oidc_token_path: String,
     /// G2: split the two decode-failure sources into distinct error codes
     /// (default on).  Turning it off restores the legacy shared code.
     #[serde(default = "default_stream_decode_error_code_split_enabled")]
@@ -775,6 +781,8 @@ impl Default for AppConfig {
             portal_session_ttl_seconds: DEFAULT_PORTAL_SESSION_TTL_SECONDS,
             portal_oidc_pkce_enabled: DEFAULT_PORTAL_OIDC_PKCE_ENABLED,
             portal_oidc_verify_id_token: DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN,
+            portal_oidc_userinfo_method: DEFAULT_PORTAL_OIDC_USERINFO_METHOD.to_string(),
+            portal_oidc_token_path: DEFAULT_PORTAL_OIDC_TOKEN_PATH.to_string(),
             stream_decode_error_code_split_enabled: DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
             stream_max_skipped_bad_frames: DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
             upstream_continuation_pin_escape_enabled:
@@ -1764,6 +1772,12 @@ pub fn default_portal_oidc_pkce_enabled() -> bool {
 pub fn default_portal_oidc_verify_id_token() -> bool {
     DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN
 }
+pub fn default_portal_oidc_userinfo_method() -> String {
+    DEFAULT_PORTAL_OIDC_USERINFO_METHOD.to_string()
+}
+pub fn default_portal_oidc_token_path() -> String {
+    DEFAULT_PORTAL_OIDC_TOKEN_PATH.to_string()
+}
 
 pub fn default_upstream_local_gate_fast_fail_enabled() -> bool {
     DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED
@@ -1976,5 +1990,22 @@ mod downstream_concurrency_group_tests {
             ..base
         };
         assert!(empty_match.validate_model_concurrency_groups().is_err());
+    }
+}
+
+#[cfg(test)]
+mod portal_oidc_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_portal_oidc_userinfo_method_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.portal_oidc_userinfo_method, "GET");
+    }
+
+    #[test]
+    fn test_portal_oidc_token_path_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.portal_oidc_token_path, "/token");
     }
 }

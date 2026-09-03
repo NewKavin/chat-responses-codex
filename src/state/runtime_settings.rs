@@ -14,7 +14,8 @@ use super::types::{
     default_portal_oidc_enabled, default_portal_oidc_pkce_enabled,
     default_portal_oidc_registration_enabled, default_portal_oidc_scopes,
     default_portal_oidc_user_id_field, default_portal_oidc_username_field,
-    default_portal_oidc_verify_id_token, default_portal_session_ttl_seconds,
+    default_portal_oidc_verify_id_token, default_portal_oidc_userinfo_method,
+    default_portal_oidc_token_path, default_portal_session_ttl_seconds,
     default_upstream_capacity_failure_cooldown_enabled,
     default_upstream_common_mode_breaker_threshold,
     default_upstream_common_mode_same_host_transient_enabled,
@@ -132,6 +133,8 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "portal_oidc_email_field",
     "portal_oidc_username_field",
     "portal_oidc_display_name_field",
+    "portal_oidc_userinfo_method",
+    "portal_oidc_token_path",
 ];
 
 pub const RESTART_RUNTIME_SETTING_FIELDS: &[&str] = &[
@@ -255,6 +258,10 @@ pub struct RuntimeSettings {
     pub portal_oidc_username_field: String,
     #[serde(default = "default_portal_oidc_display_name_field")]
     pub portal_oidc_display_name_field: String,
+    #[serde(default = "default_portal_oidc_userinfo_method")]
+    pub portal_oidc_userinfo_method: String,
+    #[serde(default = "default_portal_oidc_token_path")]
+    pub portal_oidc_token_path: String,
     #[serde(default = "default_upstream_account_queue_adaptive_budget_enabled")]
     pub upstream_account_queue_adaptive_budget_enabled: bool,
     #[serde(default = "default_upstream_account_queue_skip_when_doomed_enabled")]
@@ -474,6 +481,8 @@ impl RuntimeSettings {
             portal_oidc_email_field: config.portal_oidc_email_field.clone(),
             portal_oidc_username_field: config.portal_oidc_username_field.clone(),
             portal_oidc_display_name_field: config.portal_oidc_display_name_field.clone(),
+            portal_oidc_userinfo_method: config.portal_oidc_userinfo_method.clone(),
+            portal_oidc_token_path: config.portal_oidc_token_path.clone(),
             upstream_account_queue_adaptive_budget_enabled: config
                 .upstream_account_queue_adaptive_budget_enabled,
             upstream_account_queue_skip_when_doomed_enabled: config

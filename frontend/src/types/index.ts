@@ -1027,6 +1027,8 @@ export interface RuntimeSettings {
   portal_oidc_email_field: string
   portal_oidc_username_field: string
   portal_oidc_display_name_field: string
+  portal_oidc_userinfo_method: string
+  portal_oidc_token_path: string
 }
 
 export type RuntimeSettingKey = keyof RuntimeSettings
