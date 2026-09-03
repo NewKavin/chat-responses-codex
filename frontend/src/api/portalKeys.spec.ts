@@ -125,4 +125,50 @@ describe('Portal Keys API', () => {
       expect(del).toHaveBeenCalledWith('/portal/keys/key1')
     })
   })
+
+  describe('listModelGroups', () => {
+    it('returns the available model groups', async () => {
+      const mockGroups = {
+        groups: [
+          {
+            id: 'basic',
+            name: 'Basic',
+            description: null,
+            allowed_models: ['gpt-3.5-turbo'],
+            created_at: 1,
+            updated_at: 1
+          },
+          {
+            id: 'premium',
+            name: 'Premium',
+            description: null,
+            allowed_models: ['gpt-4'],
+            created_at: 1,
+            updated_at: 1
+          }
+        ]
+      }
+
+      const get = vi.spyOn(portalHttp, 'get').mockResolvedValue({ data: mockGroups })
+
+      const result = await portalApi.listModelGroups()
+
+      expect(get).toHaveBeenCalledWith('/portal/model-groups')
+      expect(result.data.groups).toHaveLength(2)
+      expect(result.data.groups[0].id).toBe('basic')
+      expect(result.data.groups[1].id).toBe('premium')
+    })
+  })
+
+  describe('updateKeyModelGroup', () => {
+    it('sends PUT request to change a key model group', async () => {
+      const put = vi.spyOn(portalHttp, 'put').mockResolvedValue({ data: { success: true } })
+
+      await portalApi.updateKeyModelGroup('key1', 'premium')
+
+      expect(put).toHaveBeenCalledWith('/portal/keys/key1/model-group', {
+        model_group_id: 'premium'
+      })
+    })
+  })
 })

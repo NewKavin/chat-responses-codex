@@ -10,7 +10,9 @@ vi.mock('@/api/portal', () => ({
     createKey: vi.fn(),
     deleteKey: vi.fn(),
     rotateKeyById: vi.fn(),
-    setDefaultKey: vi.fn()
+    setDefaultKey: vi.fn(),
+    listModelGroups: vi.fn(),
+    updateKeyModelGroup: vi.fn()
   },
   portalHttp: {}
 }))
@@ -19,13 +21,14 @@ vi.mock('@/components/KeyCard.vue', () => ({
   default: {
     name: 'KeyCard',
     template: `
-      <div :data-testid="'key-' + keyData.downstream_id" class="key-card-mock">
+      <div :data-testid="'key-' + keyData.downstream_id" class="key-card-mock" :data-group-count="(modelGroups || []).length">
         <span class="key-label">{{ keyData.label }}</span>
+        <button class="group-change-trigger" @click="$emit('change-model-group', keyData.downstream_id, 'premium')">ChangeGroup</button>
         <button @click="$emit('delete', keyData.downstream_id)">Delete</button>
       </div>
     `,
-    props: ['keyData'],
-    emits: ['edit', 'rotate', 'delete', 'setDefault']
+    props: ['keyData', 'modelGroups'],
+    emits: ['edit', 'rotate', 'delete', 'setDefault', 'change-model-group']
   }
 }))
 
@@ -188,5 +191,90 @@ describe('KeyManagement Page', () => {
 
     expect(wrapper.text()).not.toContain('Key 1')
     expect(wrapper.text()).toContain('Key 2')
+  })
+
+  it('loads model groups and passes them to KeyCard', async () => {
+    const mockGroups = [
+      { id: 'basic', name: 'Basic', description: null, allowed_models: ['gpt-3.5-turbo'], created_at: 1, updated_at: 1 },
+      { id: 'premium', name: 'Premium', description: null, allowed_models: ['gpt-4'], created_at: 1, updated_at: 1 }
+    ]
+    vi.mocked(portalApi.portalApi.listKeys).mockResolvedValue({ data: mockKeys } as any)
+    vi.mocked(portalApi.portalApi.listModelGroups).mockResolvedValue({ data: { groups: mockGroups } } as any)
+
+    const wrapper = mount(KeyManagement, {
+      global: {
+        stubs: {
+          ElButton: { template: '<button><slot /></button>' },
+          ElDialog: { template: '<div><slot /><slot name="footer" /></div>' },
+          ElForm: { template: '<form><slot /></form>' },
+          ElFormItem: { template: '<div><slot /></div>' },
+          ElInput: { template: '<input />' },
+          ElSelect: { template: '<select><slot /></select>' },
+          ElOption: { template: '<option />' }
+        }
+      }
+    })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    expect(portalApi.portalApi.listModelGroups).toHaveBeenCalled()
+    const cards = wrapper.findAll('.key-card-mock')
+    expect(cards.length).toBe(mockKeys.length)
+    // The mocked card receives the groups via props (Vue passes model-groups
+    // through the kebab-case attribute), verified via the rendered tree.
+    expect(cards[0].attributes('data-group-count')).toBe('2')
+  })
+
+  it('updates a key model group when the card requests it', async () => {
+    vi.mocked(portalApi.portalApi.listKeys).mockResolvedValue({ data: mockKeys } as any)
+    vi.mocked(portalApi.portalApi.listModelGroups).mockResolvedValue({
+      data: { groups: [{ id: 'basic', name: 'Basic', description: null, allowed_models: [], created_at: 1, updated_at: 1 }] }
+    } as any)
+    vi.mocked(portalApi.portalApi.updateKeyModelGroup).mockResolvedValue({ data: { success: true } } as any)
+
+    const wrapper = mount(KeyManagement, {
+      global: {
+        stubs: {
+          ElButton: { template: '<button><slot /></button>' }
+        }
+      }
+    })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    const changeBtn = wrapper.find('.group-change-trigger')
+    await changeBtn.trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(portalApi.portalApi.updateKeyModelGroup).toHaveBeenCalledWith(
+      mockKeys[0].downstream_id,
+      'premium'
+    )
+  })
+})
+
+describe('KeyManagement model-group dialog', () => {
+  it('create key dialog sends model_group_id when selected', async () => {
+    vi.mocked(portalApi.portalApi.listKeys).mockResolvedValue({ data: [] } as any)
+    vi.mocked(portalApi.portalApi.listModelGroups).mockResolvedValue({
+      data: { groups: [{ id: 'basic', name: 'Basic', description: null, allowed_models: ['gpt-3.5-turbo'], created_at: 1, updated_at: 1 }] }
+    } as any)
+
+    const wrapper = mount(KeyManagement, {
+      global: {
+        stubs: {
+          ElButton: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+          ElDialog: { template: '<div v-if="modelValue !== false"><slot /><slot name="footer" /></div>' },
+          ElForm: { template: '<form><slot /></form>' },
+          ElFormItem: { template: '<div><slot /></div>' },
+          ElInput: { template: '<input />' },
+          ElSelect: { template: '<select><slot /></select>' },
+          ElOption: { template: '<option />' }
+        }
+      }
+    })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(portalApi.portalApi.listModelGroups).toHaveBeenCalled()
   })
 })

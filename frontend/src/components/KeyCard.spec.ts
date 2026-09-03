@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import KeyCard from './KeyCard.vue'
-import type { PortalKey } from '@/api/portal'
+import type { ModelGroup, PortalKey } from '@/api/portal'
 
 const mockKey: PortalKey = {
   downstream_id: 'sk-test123abc',
@@ -18,11 +18,18 @@ const mockHandlers = {
   onRotate: vi.fn().mockResolvedValue(undefined),
   onDelete: vi.fn().mockResolvedValue(undefined),
   onSetDefault: vi.fn().mockResolvedValue(undefined),
+  onChangeModelGroup: vi.fn().mockResolvedValue(undefined),
 }
+
+const mockGroups: ModelGroup[] = [
+  { id: 'basic', name: 'Basic', description: null, allowed_models: ['gpt-3.5-turbo'], created_at: 1, updated_at: 1 },
+  { id: 'premium', name: 'Premium', description: null, allowed_models: ['gpt-4'], created_at: 1, updated_at: 1 },
+]
 
 const render = (keyData: PortalKey = mockKey) => mount(KeyCard, {
   props: {
     keyData,
+    modelGroups: mockGroups,
     ...mockHandlers
   },
   global: {
