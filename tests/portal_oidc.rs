@@ -1907,3 +1907,41 @@ async fn admin_wiring_changes_are_used_by_the_oidc_flow() {
     );
     idp.abort();
 }
+
+#[tokio::test]
+async fn provider_denial_redirects_with_oauth_error() {
+    let Some(url) = common::oidc::database_url() else {
+        eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
+        return;
+    };
+    let _guard = common::oidc::lock().lock();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    let idp = MockIdpBuilder::default().start().await;
+    let (router, _state) = oidc_gateway(&idp, |_config| {}).await;
+    let callback = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/api/portal/oidc/callback?error=access_denied&error_description=user%20declined",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::FOUND);
+    let location = callback
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert!(
+        location.contains("/portal/login?oauth_error=denied"),
+        "provider denial must redirect to the portal login with oauth_error: {location}"
+    );
+    idp.abort();
+}

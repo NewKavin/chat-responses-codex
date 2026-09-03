@@ -204,8 +204,17 @@ pub(super) async fn portal_oidc_callback(
     headers: axum::http::HeaderMap,
     Query(query): Query<OidcCallbackQuery>,
 ) -> Response {
-    // Step 0: the provider denied / errored.
+    // Step 0: the provider denied / errored.  Surface the code in the
+    // redirect and keep the optional description in the gateway log so the
+    // operator can see why the provider refused the request.
     if let Some(error) = query.error.as_deref() {
+        if let Some(description) = query.error_description.as_deref() {
+            tracing::info!(
+                provider_error = error,
+                error_description = description,
+                "oidc provider refused the login request"
+            );
+        }
         return oauth_error_redirect(match error {
             "access_denied" => "denied",
             other => other,
