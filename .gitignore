@@ -19,3 +19,6 @@ node_modules/
 # Hermes Agent (bun-installed npm bridge + python venv)
 .hermes-venv/
 .hermes.env
+
+# Claude Code worktrees (multi-key management etc.)
+.claude/
