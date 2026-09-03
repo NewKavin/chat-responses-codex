@@ -34,7 +34,7 @@ fn sha256_hex(input: &[u8]) -> String {
 
 #[tokio::test]
 async fn test_list_keys_empty() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -103,7 +103,7 @@ async fn test_list_keys_empty() {
 
 #[tokio::test]
 async fn test_create_and_list_keys() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -131,7 +131,7 @@ async fn test_create_and_list_keys() {
         .await
         .expect("Failed to add key1");
 
-    store.add_downstream_binding_with_label(&user.id, "key2", Some("Personal Key"), Some("advanced"))
+    store.add_downstream_binding_with_label(&user.id, "key2", Some("Personal Key"), Some("premium"))
         .await
         .expect("Failed to add key2");
 
@@ -181,7 +181,7 @@ async fn test_create_and_list_keys() {
     // Verify key2 details
     let key2 = keys.iter().find(|k| k["downstream_id"] == "key2").unwrap();
     assert_eq!(key2["label"], "Personal Key");
-    assert_eq!(key2["model_group_id"], "advanced");
+    assert_eq!(key2["model_group_id"], "premium");
     assert_eq!(key2["is_default"], false);
     assert_eq!(key2["usage_count"], 0);
 }
@@ -192,7 +192,7 @@ async fn test_create_and_list_keys() {
 
 #[tokio::test]
 async fn test_create_key() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -279,7 +279,7 @@ async fn test_create_key() {
 
 #[tokio::test]
 async fn test_get_key_by_id() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -358,7 +358,7 @@ async fn test_get_key_by_id() {
 
 #[tokio::test]
 async fn test_set_default_key() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -386,7 +386,7 @@ async fn test_set_default_key() {
         .await
         .expect("Failed to add key1");
 
-    store.add_downstream_binding_with_label(&user.id, "key2", Some("Key 2"), Some("advanced"))
+    store.add_downstream_binding_with_label(&user.id, "key2", Some("Key 2"), Some("premium"))
         .await
         .expect("Failed to add key2");
 
@@ -450,7 +450,7 @@ async fn test_set_default_key() {
 
 #[tokio::test]
 async fn test_rotate_key() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -546,7 +546,7 @@ async fn test_rotate_key() {
 
 #[tokio::test]
 async fn test_delete_key_success() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -574,7 +574,7 @@ async fn test_delete_key_success() {
         .await
         .expect("Failed to add key1");
 
-    store.add_downstream_binding_with_label(&user.id, "key2", Some("Key 2"), Some("advanced"))
+    store.add_downstream_binding_with_label(&user.id, "key2", Some("Key 2"), Some("premium"))
         .await
         .expect("Failed to add key2");
 
@@ -631,7 +631,7 @@ async fn test_delete_key_success() {
 
 #[tokio::test]
 async fn test_delete_key_forbidden_default() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -696,7 +696,7 @@ async fn test_delete_key_forbidden_default() {
 
 #[tokio::test]
 async fn test_delete_key_forbidden_used() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -736,8 +736,8 @@ async fn test_delete_key_forbidden_used() {
     let client = store.get_client().await.expect("Failed to get client");
     client
         .execute(
-            "INSERT INTO response_history (id, downstream_key_id, model, prompt_tokens, completion_tokens, created_at) \
-             VALUES (gen_random_uuid()::text, $1, 'test-model', 10, 20, NOW())",
+            "INSERT INTO response_history (downstream_key_id, response_id, items, state, created_at) \
+             VALUES ($1, gen_random_uuid()::text, '[]', '{}', EXTRACT(EPOCH FROM NOW())::bigint)",
             &[&"used-key"],
         )
         .await
@@ -772,4 +772,167 @@ async fn test_delete_key_forbidden_used() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["error"]["message"].as_str().unwrap().contains("default or in use"));
+}
+
+#[tokio::test]
+async fn test_list_model_groups_requires_portal_session() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    // No session cookie -> unauthorized
+    let req = Request::builder()
+        .uri("/api/portal/model-groups")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_list_model_groups_with_session() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let portal_store_opt = state.portal_store();
+    let store = portal_store_opt.as_ref().expect("portal_store must exist");
+
+    // Create a test user + session
+    let user = store
+        .create_user_with_identity(
+            "modelgroups@example.com",
+            None,
+            None,
+            "google",
+            "google-mg-1",
+        )
+        .await
+        .expect("Failed to create user");
+    let raw_sid = "test_session_id_model_groups";
+    let sid_hash = sha256_hex(raw_sid.as_bytes());
+    let now = chat_responses_codex::state::unix_seconds() as i64;
+    store
+        .create_session(&sid_hash, &user.id, now + 3600, None, None)
+        .await
+        .expect("Failed to create session");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let req = Request::builder()
+        .uri("/api/portal/model-groups")
+        .method("GET")
+        .header(header::COOKIE, format!("portal_session={}", raw_sid))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let groups = json["groups"].as_array().expect("groups must be an array");
+    assert!(groups.len() >= 3, "at least the three seeded groups");
+    let ids: Vec<&str> = groups
+        .iter()
+        .filter_map(|g| g["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"basic"));
+    assert!(ids.contains(&"premium"));
+    assert!(ids.contains(&"all"));
+}
+
+#[tokio::test]
+async fn test_update_key_model_group() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let portal_store_opt = state.portal_store();
+    let store = portal_store_opt.as_ref().expect("portal_store must exist");
+
+    let user = store
+        .create_user_with_identity(
+            "updategroup@example.com",
+            None,
+            None,
+            "google",
+            "google-updategroup-1",
+        )
+        .await
+        .expect("Failed to create user");
+    let raw_sid = "test_session_id_update_group";
+    let sid_hash = sha256_hex(raw_sid.as_bytes());
+    let now = chat_responses_codex::state::unix_seconds() as i64;
+    store
+        .create_session(&sid_hash, &user.id, now + 3600, None, None)
+        .await
+        .expect("Failed to create session");
+
+    store
+        .add_downstream_binding_with_label(
+            &user.id,
+            "key-group-test",
+            Some("Group Test Key"),
+            Some("basic"),
+        )
+        .await
+        .expect("Failed to add binding");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    // Move the key to the premium group
+    let req = Request::builder()
+        .uri("/api/portal/keys/key-group-test/model-group")
+        .method("PUT")
+        .header(header::COOKIE, format!("portal_session={}", raw_sid))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "model_group_id": "premium" }).to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Verify the binding now points at premium
+    let bindings = store
+        .list_downstream_bindings_with_labels(&user.id)
+        .await
+        .expect("list bindings");
+    let binding = bindings
+        .iter()
+        .find(|b| b.downstream_id == "key-group-test")
+        .expect("binding must exist");
+    assert_eq!(binding.model_group_id, "premium");
+
+    // Unknown group -> 404
+    let req = Request::builder()
+        .uri("/api/portal/keys/key-group-test/model-group")
+        .method("PUT")
+        .header(header::COOKIE, format!("portal_session={}", raw_sid))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "model_group_id": "does-not-exist" }).to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

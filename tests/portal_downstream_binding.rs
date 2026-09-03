@@ -18,7 +18,7 @@ fn test_portal_downstream_binding_has_new_fields() {
     };
 
     assert_eq!(binding.downstream_id, "test-key-1");
-    assert_eq!(binding.is_default, true);
+    assert!(binding.is_default);
     assert_eq!(binding.label, Some("Production Key".to_string()));
     assert_eq!(binding.model_group_id, "advanced");
 }
@@ -66,14 +66,16 @@ fn test_portal_downstream_binding_with_label_struct() {
         is_default: true,
         label: "Production Key".to_string(),
         model_group_id: "advanced".to_string(),
+        model_group_name: Some("Advanced Models".to_string()),
         created_at: 1725350400,
         usage_count: 42,
     };
 
     assert_eq!(binding_with_label.downstream_id, "test-key-1");
-    assert_eq!(binding_with_label.is_default, true);
+    assert!(binding_with_label.is_default);
     assert_eq!(binding_with_label.label, "Production Key");
     assert_eq!(binding_with_label.model_group_id, "advanced");
+    assert_eq!(binding_with_label.model_group_name.as_deref(), Some("Advanced Models"));
     assert_eq!(binding_with_label.created_at, 1725350400);
     assert_eq!(binding_with_label.usage_count, 42);
 }

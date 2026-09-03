@@ -20,7 +20,7 @@ async fn load_state(database_url: &str) -> AppState {
 
 #[tokio::test]
 async fn test_list_downstream_bindings_with_labels() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -48,15 +48,15 @@ async fn test_list_downstream_bindings_with_labels() {
 
     // Insert test downstream bindings with label and model_group_id
     client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_name, api_key, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())",
-        &[&user.id, &"openai".to_string(), &"key1".to_string(), &true, &"Work".to_string(), &"basic".to_string()],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+        &[&user.id, &"openai".to_string(), &true, &"Work".to_string(), &"basic".to_string()],
     ).await.expect("Failed to insert binding 1");
 
     client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_name, api_key, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())",
-        &[&user.id, &"anthropic".to_string(), &"key2".to_string(), &false, &"Personal".to_string(), &"advanced".to_string()],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+        &[&user.id, &"anthropic".to_string(), &false, &"Personal".to_string(), &"premium".to_string()],
     ).await.expect("Failed to insert binding 2");
 
     // Test list_downstream_bindings_with_labels
@@ -68,20 +68,22 @@ async fn test_list_downstream_bindings_with_labels() {
     let openai = bindings.iter().find(|b| b.downstream_id == "openai").unwrap();
     assert_eq!(openai.label, "Work");
     assert_eq!(openai.model_group_id, "basic");
+    assert_eq!(openai.model_group_name, Some("Basic Models".to_string()));
     assert_eq!(openai.usage_count, 0);
     assert!(openai.is_default);
 
     // Find the "anthropic" binding
     let anthropic = bindings.iter().find(|b| b.downstream_id == "anthropic").unwrap();
     assert_eq!(anthropic.label, "Personal");
-    assert_eq!(anthropic.model_group_id, "advanced");
+    assert_eq!(anthropic.model_group_id, "premium");
+    assert_eq!(anthropic.model_group_name, Some("Premium Models".to_string()));
     assert_eq!(anthropic.usage_count, 0);
     assert!(!anthropic.is_default);
 }
 
 #[tokio::test]
 async fn test_count_user_keys() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -113,21 +115,21 @@ async fn test_count_user_keys() {
 
     // Add some keys
     client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_name, api_key, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())",
-        &[&user.id, &"openai".to_string(), &"key1".to_string(), &true, &"Key1".to_string(), &"basic".to_string()],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+        &[&user.id, &"openai".to_string(), &true, &"Key1".to_string(), &"basic".to_string()],
     ).await.expect("Failed to insert binding 1");
 
     client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_name, api_key, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())",
-        &[&user.id, &"anthropic".to_string(), &"key2".to_string(), &false, &"Key2".to_string(), &"advanced".to_string()],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+        &[&user.id, &"anthropic".to_string(), &false, &"Key2".to_string(), &"premium".to_string()],
     ).await.expect("Failed to insert binding 2");
 
     client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_name, api_key, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())",
-        &[&user.id, &"gemini".to_string(), &"key3".to_string(), &false, &"Key3".to_string(), &"basic".to_string()],
+        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+        &[&user.id, &"gemini".to_string(), &false, &"Key3".to_string(), &"basic".to_string()],
     ).await.expect("Failed to insert binding 3");
 
     // Count should be 3

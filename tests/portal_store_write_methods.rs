@@ -20,7 +20,7 @@ async fn load_state(database_url: &str) -> AppState {
 
 #[tokio::test]
 async fn test_add_downstream_binding_with_label() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -49,7 +49,7 @@ async fn test_add_downstream_binding_with_label() {
             &user.id,
             "openai",
             Some("Work Key"),
-            Some("advanced"),
+            Some("premium"),
         )
         .await
         .expect("Failed to add binding");
@@ -60,7 +60,7 @@ async fn test_add_downstream_binding_with_label() {
     let binding = &bindings[0];
     assert_eq!(binding.downstream_id, "openai");
     assert_eq!(binding.label, "Work Key");
-    assert_eq!(binding.model_group_id, "advanced");
+    assert_eq!(binding.model_group_id, "premium");
     assert!(!binding.is_default); // Should be FALSE initially
     assert!(binding.created_at > 0); // Should have timestamp
 
@@ -79,7 +79,7 @@ async fn test_add_downstream_binding_with_label() {
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].label, "Work Key"); // Original label unchanged
-    assert_eq!(bindings[0].model_group_id, "advanced"); // Original model_group unchanged
+    assert_eq!(bindings[0].model_group_id, "premium"); // Original model_group unchanged
 
     // Test 3: Add binding with NULL label and model_group
     store
@@ -100,7 +100,7 @@ async fn test_add_downstream_binding_with_label() {
 
 #[tokio::test]
 async fn test_update_downstream_label() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -139,7 +139,7 @@ async fn test_update_downstream_label() {
             &user.id,
             "openai",
             Some("Updated Label"),
-            Some("advanced"),
+            Some("premium"),
         )
         .await
         .expect("Failed to update label");
@@ -147,7 +147,7 @@ async fn test_update_downstream_label() {
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].label, "Updated Label");
-    assert_eq!(bindings[0].model_group_id, "advanced");
+    assert_eq!(bindings[0].model_group_id, "premium");
 
     // Test 2: Update to NULL (clear label)
     store
@@ -181,7 +181,7 @@ async fn test_update_downstream_label() {
 
 #[tokio::test]
 async fn test_remove_downstream_binding_safe() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -244,8 +244,8 @@ async fn test_remove_downstream_binding_safe() {
     // Insert a response_history record for cohere
     client
         .execute(
-            "INSERT INTO response_history (id, downstream_key_id, model, prompt_tokens, completion_tokens, created_at) \
-             VALUES (gen_random_uuid()::text, $1, 'test-model', 10, 20, NOW())",
+            "INSERT INTO response_history (downstream_key_id, response_id, items, state, created_at) \
+             VALUES ($1, gen_random_uuid()::text, '[]', '{}', EXTRACT(EPOCH FROM NOW())::bigint)",
             &[&"cohere"],
         )
         .await
@@ -264,7 +264,7 @@ async fn test_remove_downstream_binding_safe() {
 
 #[tokio::test]
 async fn test_set_default_key() {
-    let _guard = common::oidc::lock().lock().unwrap();
+    let _guard = common::oidc::lock().lock();
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

@@ -36,7 +36,7 @@ fn stable_today_noon() -> u64 {
 /// Helper function to create a test AppState with usage logs
 fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
@@ -80,7 +80,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
 /// limit in cents).
 fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
@@ -1528,7 +1528,7 @@ async fn test_compute_model_stats_empty_allowlist() {
     ];
 
     let config = chat_responses_codex::state::AppConfig::default();
-    let generated = chat_responses_codex::keys::generate_downstream_key("sk");
+    let generated = chat_responses_codex::keys::generate_downstream_key("key");
 
     let state = chat_responses_codex::state::PersistedState {
         upstreams: std::sync::Arc::new(vec![]),

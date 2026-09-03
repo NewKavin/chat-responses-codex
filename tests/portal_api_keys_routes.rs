@@ -1,8 +1,7 @@
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, Method, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig};
-use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -67,76 +66,41 @@ async fn test_keys_routes_registered() {
     let (state, _portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
 
-    // Test GET /api/portal/keys - should return 501 (NOT_IMPLEMENTED)
-    let req = Request::builder()
-        .uri("/api/portal/keys")
-        .method("GET")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    // The multi-key management API is implemented; these requests are routed
+    // to real handlers and fail authentication with an unauthorized response
+    // (not 404, not the old 501 placeholder).
+    let cases: Vec<(Method, &str, Option<&str>)> = vec![
+        (Method::GET, "/api/portal/keys", None),
+        (
+            Method::POST,
+            "/api/portal/keys",
+            Some(r#"{"downstream_id": "sk-test", "label": "Test Key"}"#),
+        ),
+        (Method::GET, "/api/portal/keys/sk-test123", None),
+        (Method::DELETE, "/api/portal/keys/sk-test123", None),
+        (
+            Method::POST,
+            "/api/portal/keys/sk-test123/rotate",
+            Some(r#"{"new_downstream_id": "sk-rotated456"}"#),
+        ),
+        (Method::PUT, "/api/portal/keys/sk-test123/default", None),
+        (Method::PUT, "/api/portal/keys/sk-test123/model-group", None),
+    ];
 
-    // Test POST /api/portal/keys - should return 501
-    let req = Request::builder()
-        .uri("/api/portal/keys")
-        .method("POST")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::to_vec(&json!({
-                "downstream_id": "sk-test",
-                "label": "Test Key"
-            }))
-            .unwrap(),
-        ))
-        .unwrap();
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-
-    // Test GET /api/portal/keys/:downstream_id - should return 501
-    let req = Request::builder()
-        .uri("/api/portal/keys/sk-test123")
-        .method("GET")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-
-    // Test DELETE /api/portal/keys/:downstream_id - should return 501
-    let req = Request::builder()
-        .uri("/api/portal/keys/sk-test123")
-        .method("DELETE")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-
-    // Test POST /api/portal/keys/:downstream_id/rotate - should return 501
-    let req = Request::builder()
-        .uri("/api/portal/keys/sk-test123/rotate")
-        .method("POST")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::to_vec(&json!({
-                "new_downstream_id": "sk-rotated456"
-            }))
-            .unwrap(),
-        ))
-        .unwrap();
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-
-    // Test PUT /api/portal/keys/:downstream_id/default - should return 501
-    let req = Request::builder()
-        .uri("/api/portal/keys/sk-test123/default")
-        .method("PUT")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    for (method, uri, body) in cases {
+        let mut builder = Request::builder()
+            .uri(uri)
+            .method(method.clone())
+            .header(header::AUTHORIZATION, "Bearer test-token");
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder.body(Body::from(body.unwrap_or(""))).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        assert!(
+            status != StatusCode::NOT_FOUND && status != StatusCode::NOT_IMPLEMENTED,
+            "route {method} {uri} must be registered and implemented (got {status})"
+        );
+    }
 }

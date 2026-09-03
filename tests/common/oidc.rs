@@ -7,6 +7,7 @@
 //! Tests skip (with a message) when no reachable PostgreSQL is configured;
 //! CI without the test database stays green the same way
 //! `tests/postgres_roundtrip.rs` does.
+#![allow(dead_code, unused_imports, clippy::await_holding_lock)]
 
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -79,7 +80,8 @@ pub async fn reset_portal_tables(database_url: &str) {
     client
         .batch_execute(
             "DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
-             portal_identities, portal_users, oauth_login_attempts, runtime_settings \
+             portal_identities, portal_users, oauth_login_attempts, runtime_settings, \
+             model_groups \
              CASCADE",
         )
         .await

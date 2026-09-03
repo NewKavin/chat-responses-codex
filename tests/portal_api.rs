@@ -36,7 +36,7 @@ fn stable_today_noon() -> u64 {
 
 fn canonical_upstream_state() -> (AppState, String) {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
     let now = stable_today_noon();
 
     let state = PersistedState {
@@ -203,7 +203,7 @@ fn canonical_upstream_state() -> (AppState, String) {
 /// Helper function to create a test AppState with downstream and logs
 fn create_test_state() -> (AppState, String) {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let now = stable_today_noon();
 
@@ -304,7 +304,7 @@ fn create_test_state() -> (AppState, String) {
 
 fn create_test_state_without_token_limits() -> (AppState, String) {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
     let now = chat_responses_codex::state::unix_seconds();
 
     let today_start = (now / 86_400) * 86_400;
@@ -406,7 +406,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
 
 fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
     let now = chat_responses_codex::state::unix_seconds();
 
     let usage_logs = (0..count)
@@ -1303,7 +1303,7 @@ async fn test_portal_models_calculates_success_rate() {
 /// Helper to create a test state with plaintext_key_prefix set
 fn create_test_state_with_key_prefix() -> (AppState, String) {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
@@ -1370,7 +1370,7 @@ async fn test_portal_get_key_returns_full_key() {
     // Should return full plaintext_key for copying
     assert!(result["plaintext_key"].is_string());
     let key = result["plaintext_key"].as_str().unwrap();
-    assert!(key.starts_with("sk-"));
+    assert!(key.starts_with("key-"));
 }
 
 #[tokio::test]
@@ -1579,7 +1579,7 @@ async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
 
 fn create_state_with_context_limits() -> (AppState, String) {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![
@@ -1742,7 +1742,7 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
         deployment_timezone: timezone.to_string(),
         ..Default::default()
     };
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let now = chat_responses_codex::state::unix_seconds();
 
@@ -1963,7 +1963,7 @@ async fn portal_usage_summary_supports_1d_time_range() {
 #[tokio::test]
 async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
     let now = stable_today_noon();
 
     let state = PersistedState {
@@ -2067,7 +2067,7 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
 #[tokio::test]
 async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
     let config = AppConfig::default();
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
     let now = stable_today_noon();
 
     let state = PersistedState {
