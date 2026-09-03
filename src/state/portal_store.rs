@@ -296,6 +296,142 @@ impl PortalStore {
         Ok(row.get(0))
     }
 
+    /// Add a downstream binding with label and model_group_id.
+    /// Sets is_default to FALSE initially, created_at to NOW().
+    /// ON CONFLICT DO NOTHING makes this idempotent.
+    pub async fn add_downstream_binding_with_label(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        label: Option<&str>,
+        model_group_id: Option<&str>,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO portal_user_downstreams \
+                   (user_id, downstream_id, label, model_group_id, is_default, created_at) \
+                 VALUES ($1, $2, $3, $4, FALSE, NOW()) \
+                 ON CONFLICT (user_id, downstream_id) DO NOTHING",
+                &[&user_id, &downstream_id, &label, &model_group_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Update the label and model_group_id for an existing downstream binding.
+    /// Does not check if the row exists - caller should handle missing rows.
+    /// Supports NULL values to clear the label/model_group.
+    pub async fn update_downstream_label(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        label: Option<&str>,
+        model_group_id: Option<&str>,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET label = $3, model_group_id = $4 \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id, &label, &model_group_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Safe delete: only removes if non-default AND no usage history.
+    /// Returns Ok(true) if deleted, Ok(false) if rejected (default or has usage).
+    /// Must run in a transaction to ensure consistency.
+    pub async fn remove_downstream_binding_safe(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+    ) -> Result<bool, PortalStoreError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+
+        // Step 1: Check if the binding exists and get its properties
+        let row = transaction
+            .query_opt(
+                "SELECT is_default, \
+                        COALESCE((SELECT COUNT(*) FROM response_history \
+                                  WHERE downstream_key_id = $2), 0) AS usage_count \
+                 FROM portal_user_downstreams \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id],
+            )
+            .await?;
+
+        let Some(row) = row else {
+            // Binding doesn't exist - treat as successful no-op
+            transaction.commit().await?;
+            return Ok(false);
+        };
+
+        let is_default: bool = row.get(0);
+        let usage_count: i64 = row.get(1);
+
+        // Step 2: Reject if default or has usage
+        if is_default || usage_count > 0 {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+
+        // Step 3: Delete the binding
+        let deleted = transaction
+            .execute(
+                "DELETE FROM portal_user_downstreams \
+                 WHERE user_id = $1 AND downstream_id = $2 \
+                   AND NOT is_default \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM response_history \
+                     WHERE downstream_key_id = $2 \
+                   )",
+                &[&user_id, &downstream_id],
+            )
+            .await?;
+
+        transaction.commit().await?;
+        Ok(deleted > 0)
+    }
+
+    /// Set a downstream binding as the default key.
+    /// Clears all other defaults for this user in a transaction to ensure uniqueness.
+    /// Silently succeeds even if downstream_id doesn't exist (no rows updated).
+    pub async fn set_default_key(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+    ) -> Result<(), PortalStoreError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+
+        // Step 1: Clear all defaults for this user
+        transaction
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET is_default = FALSE \
+                 WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+
+        // Step 2: Set the new default
+        transaction
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET is_default = TRUE \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id],
+            )
+            .await?;
+
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Add a binding; setting `is_default` demotes every other row.  Returns
     /// `NotFound` when the user does not exist.
     pub async fn add_downstream_binding(
