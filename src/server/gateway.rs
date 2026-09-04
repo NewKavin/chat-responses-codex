@@ -2644,6 +2644,15 @@ pub fn build_router(state: AppState) -> Router {
                 axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
             ),
         )
+        .route(
+            "/api/admin/portal/users/{id}/model-groups",
+            get(admin_portal_user_model_groups_get)
+                .put(admin_portal_user_model_groups_put)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
         // Portal API
         .route("/api/portal/login", post(portal_login))
         .route("/api/portal/overview", get(portal_overview))

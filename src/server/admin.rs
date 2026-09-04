@@ -3313,7 +3313,10 @@ pub(super) struct PortalUsersQuery {
     page_size: Option<u64>,
 }
 
-fn portal_user_json(user: &crate::state::PortalUser) -> serde_json::Value {
+fn portal_user_json(
+    user: &crate::state::PortalUser,
+    model_group_ids: &[String],
+) -> serde_json::Value {
     serde_json::json!({
         "id": user.id,
         "email": user.email,
@@ -3325,6 +3328,7 @@ fn portal_user_json(user: &crate::state::PortalUser) -> serde_json::Value {
         "provider": user.provider,
         "subject": user.subject,
         "binding_count": user.binding_count,
+        "model_group_ids": model_group_ids,
     })
 }
 
@@ -3347,7 +3351,25 @@ pub(super) async fn admin_portal_users(
         .await
     {
         Ok((total, users)) => {
-            let items: Vec<serde_json::Value> = users.iter().map(portal_user_json).collect();
+            let user_ids: Vec<String> = users.iter().map(|u| u.id.clone()).collect();
+            let group_map = store.list_users_model_group_ids(&user_ids).await;
+            let group_map = match group_map {
+                Ok(map) => map,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": {"message": error.to_string()}})),
+                    )
+                        .into_response();
+                }
+            };
+            let items: Vec<serde_json::Value> = users
+                .iter()
+                .map(|user| {
+                    let group_ids = group_map.get(&user.id).cloned().unwrap_or_default();
+                    portal_user_json(user, &group_ids)
+                })
+                .collect();
             (
                 StatusCode::OK,
                 Json(json!({"total": total, "page": page, "items": items})),
@@ -3555,6 +3577,188 @@ pub(super) async fn admin_portal_user_bindings_delete(
         Ok(()) => (
             StatusCode::OK,
             Json(json!({"user_id": user_id, "downstream_id": downstream_id})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+// ---- Portal user model-group assignment (admin) --------------------------
+
+fn portal_user_model_groups_response(
+    groups: &[crate::state::ModelGroup],
+) -> serde_json::Value {
+    let ids: Vec<String> = groups.iter().map(|g| g.id.clone()).collect();
+    serde_json::json!({
+        "model_group_ids": ids,
+        "groups": groups,
+    })
+}
+
+/// GET /api/admin/portal/users/{id}/model-groups
+/// 返回用户当前可访问的模型分组（basic 恒在列表内）。
+pub(super) async fn admin_portal_user_model_groups_get(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    match store.find_user_by_id(&user_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "portal user not found"}})),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+    match store.list_user_accessible_model_groups(&user_id).await {
+        Ok(groups) => (
+            StatusCode::OK,
+            Json(portal_user_model_groups_response(&groups)),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SetUserModelGroupsBody {
+    /// 目标分组 id 集合（basic 恒保留，无需显式传入）。
+    model_group_ids: Vec<String>,
+}
+
+/// PUT /api/admin/portal/users/{id}/model-groups
+/// 差量同步用户可访问的模型分组：为目标集合增量 grant、为差异部分 revoke。
+/// `basic` 恒为可访问分组且不可被撤销。
+pub(super) async fn admin_portal_user_model_groups_put(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+    axum::Json(body): axum::Json<SetUserModelGroupsBody>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    match store.find_user_by_id(&user_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "portal user not found"}})),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+
+    // 去重，并保证 basic 恒在目标集合中。
+    let mut target: Vec<String> = body.model_group_ids;
+    target.sort();
+    target.dedup();
+    if !target.iter().any(|id| id == "basic") {
+        target.push("basic".to_string());
+        target.sort();
+    }
+
+    // 校验所有目标分组存在。
+    for group_id in &target {
+        match store.get_model_group(group_id).await {
+            Ok(_) => {}
+            Err(crate::state::PortalStoreError::NotFound) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "code": "group_not_found",
+                            "message": format!("model group '{group_id}' not found")
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": {"message": error.to_string()}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let current = match store.list_user_accessible_model_groups(&user_id).await {
+        Ok(groups) => groups,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+    let current_ids: HashSet<String> = current.iter().map(|g| g.id.clone()).collect();
+    let target_set: HashSet<String> = target.iter().cloned().collect();
+
+    // 需要新增的授权。
+    for group_id in target_set.difference(&current_ids) {
+        if let Err(error) = store
+            .grant_user_model_group(&user_id, group_id, Some("admin"))
+            .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
+    }
+    // 需要撤销的授权（basic 由 store 内部保护，不会被撤销）。
+    for group_id in current_ids.difference(&target_set) {
+        if let Err(error) = store.revoke_user_model_group(&user_id, group_id).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
+    }
+
+    match store.list_user_accessible_model_groups(&user_id).await {
+        Ok(groups) => (
+            StatusCode::OK,
+            Json(portal_user_model_groups_response(&groups)),
         )
             .into_response(),
         Err(error) => (

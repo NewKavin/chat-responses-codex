@@ -878,7 +878,7 @@ impl PortalStore {
     pub async fn get_model_group(&self, id: &str) -> Result<ModelGroup, PortalStoreError> {
         let client = self.pool.get().await?;
         let row = client
-            .query_one(
+            .query_opt(
                 "SELECT id, name, description, allowed_models::text, \
                         EXTRACT(EPOCH FROM created_at)::bigint, \
                         EXTRACT(EPOCH FROM updated_at)::bigint \
@@ -886,14 +886,8 @@ impl PortalStore {
                  WHERE id = $1",
                 &[&id],
             )
-            .await
-            .map_err(|e| {
-                if matches!(e.code(), Some(&tokio_postgres::error::SqlState::NO_DATA)) {
-                    PortalStoreError::NotFound
-                } else {
-                    PortalStoreError::from(e)
-                }
-            })?;
+            .await?
+            .ok_or(PortalStoreError::NotFound)?;
 
         let allowed_models_json: String = row.get(3);
         let allowed_models: Vec<String> = serde_json::from_str(&allowed_models_json)
@@ -1029,6 +1023,31 @@ impl PortalStore {
                 }
             })
             .collect())
+    }
+
+    /// 批量查询多个用户被显式授权的模型分组 id（不含 basic，basic 恒可见）。
+    /// 返回 user_id -> 已授权分组 id 列表（已排序）。
+    pub async fn list_users_model_group_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, PortalStoreError> {
+        let mut result = std::collections::HashMap::new();
+        if user_ids.is_empty() {
+            return Ok(result);
+        }
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT user_id, model_group_id                  FROM portal_user_model_groups                  WHERE user_id = ANY($1)                  ORDER BY model_group_id",
+                &[&user_ids],
+            )
+            .await?;
+        for row in rows {
+            let user_id: String = row.get(0);
+            let group_id: String = row.get(1);
+            result.entry(user_id).or_insert_with(Vec::new).push(group_id);
+        }
+        Ok(result)
     }
 
     /// 检查用户是否有权访问指定分组。

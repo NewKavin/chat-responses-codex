@@ -39,6 +39,10 @@
         <el-button type="primary" @click="handleCreate">
           <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建上游
         </el-button>
+        <el-button :loading="globalFetching" @click="openGlobalFetch">
+          <RefreshCw :size="15" :stroke-width="2" style="margin-right: 5px" />
+          全局获取模型
+        </el-button>
       </div>
     </header>
 
@@ -158,18 +162,6 @@
           </template>
         </el-table-column>
         
-        <el-table-column v-if="isColumnVisible('premium')" label="高端模型保护" min-width="160">
-          <template #default="{ row }">
-            <el-tooltip v-if="row.protect_premium_quota && row.premium_models.length > 0" 
-                        :content="'保护模型: ' + row.premium_models.join(', ')" 
-                        placement="top">
-              <el-tag type="warning" size="small">
-                保护中 ({{ row.premium_models.length }}个)
-              </el-tag>
-            </el-tooltip>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
         
         <el-table-column v-if="isColumnVisible('status')" label="状态" width="100">
           <template #default="{ row }">
@@ -491,31 +483,6 @@
             用于控制路由优先级。权重高的账号优先被选中。默认为0。
           </el-alert>
         </el-form-item>
-        <el-form-item label="高端模型列表">
-          <el-select v-model="form.premium_models" multiple filterable allow-create placeholder="选择此账号的高端模型（可手动输入）">
-            <el-option v-for="model in premiumModelOptions" :key="model" :label="model" :value="model" />
-          </el-select>
-          <el-alert
-            title="说明"
-            type="info"
-            :closable="false"
-            class="helper-text"
-          >
-            配置此账号独有的高端模型(如 glm-5.1)。这些模型只能通过此账号访问。
-          </el-alert>
-        </el-form-item>
-        <el-form-item label="保护高端额度">
-          <el-switch v-model="form.protect_premium_quota" />
-          <el-alert
-            title="说明"
-            type="warning"
-            :closable="false"
-            class="helper-text"
-          >
-            <strong>重要:</strong> 开启后,请求非高端模型时会优先避开此账号,仅在其他账号不可用时才回退使用。
-            这样可以保护高端模型的额度,避免被低权重模型占用。
-          </el-alert>
-        </el-form-item>
 
         <el-form-item label="启用">
           <el-switch v-model="form.active" />
@@ -565,6 +532,82 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- Global model discovery dialog -->
+    <el-dialog
+      v-model="globalFetchVisible"
+      title="全局获取模型"
+      width="min(720px, calc(100vw - 32px))"
+      :close-on-click-modal="false"
+      @closed="resetGlobalFetch"
+    >
+      <template v-if="globalFetching">
+        <div class="global-fetch-progress">
+          <el-icon class="is-loading" :size="18"><RefreshCw /></el-icon>
+          <span>正在获取各上游账号的模型列表（{{ globalProgress.done }}/{{ globalProgress.total }}）…</span>
+        </div>
+      </template>
+
+      <template v-else-if="globalModelPool.length > 0">
+        <div class="global-fetch-summary">
+          已从 <strong>{{ Object.keys(globalUpstreamModels).length }}</strong> 个上游账号获取到
+          <strong>{{ globalModelPool.length }}</strong> 个模型。
+          勾选模型后，凡是支持该模型的上游账号都会被自动选中并保存。
+        </div>
+        <el-form label-width="90px" class="global-model-form">
+          <el-form-item label="选择模型">
+            <el-select
+              v-model="globalSelectedModels"
+              multiple
+              filterable
+              collapse-tags
+              collapse-tags-tooltip
+              placeholder="搜索并勾选要全局启用的模型"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="model in globalModelPool"
+                :key="model"
+                :label="`${model}（${globalModelAccountCount(model)} 个账号支持）`"
+                :value="model"
+              />
+            </el-select>
+          </el-form-item>
+        </el-form>
+
+        <div class="global-apply-preview" v-if="globalSelectedModels.length > 0">
+          <p class="global-apply-title">应用预览：以下 {{ globalSelectedModels.length }} 个模型将被合并到支持它们的上游</p>
+          <el-table :data="globalApplyPreview" size="small" max-height="300" stripe empty-text="无可应用的上游">
+            <el-table-column prop="upstream_name" label="上游账号" min-width="160" show-overflow-tooltip />
+            <el-table-column label="将新增的模型" min-width="260">
+              <template #default="{ row }">
+                <el-tag
+                  v-for="model in row.new_models"
+                  :key="model"
+                  size="small"
+                  type="success"
+                  class="global-new-model-tag"
+                >{{ model }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </template>
+
+      <el-empty v-else description="没有可用的上游账号（需要 Base URL 和 API Key）" />
+
+      <template #footer>
+        <el-button :disabled="globalFetching" @click="globalFetchVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="globalApplying"
+          :disabled="globalFetching || globalSelectedModels.length === 0"
+          @click="applyGlobalModels"
+        >
+          应用到支持的上游
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -604,7 +647,6 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'keys', label: 'Key 数量' },
   { key: 'key_concurrency', label: '每 Key 最大并发' },
   { key: 'compatibility', label: '兼容清理' },
-  { key: 'premium', label: '高端模型保护' },
   { key: 'route_health', label: '路由健康' },
   { key: 'concurrency_gate', label: '并发闸门' },
   { key: 'status', label: '状态' },
@@ -652,8 +694,6 @@ const form = ref<Partial<UpstreamConfig>>({
   active: true,
   model_contexts: [],
   priority: 0,
-  premium_models: [],
-  protect_premium_quota: false,
   strip_nonstandard_chat_fields: 'auto',
   dialect_preset: null,
   model_dialect_presets: {} as Record<string, string>,
@@ -702,13 +742,6 @@ const updateModelPreset = (pattern: string, value: string) => {
 const availableModelOptions = computed(() => {
   const supported = form.value.supported_models || []
   return Array.from(new Set(supported)).sort()
-})
-
-const premiumModelOptions = computed(() => {
-  const supported = form.value.supported_models || []
-  const premium = form.value.premium_models || []
-  const combined = [...supported, ...premium]
-  return Array.from(new Set(combined)).sort()
 })
 
 const selectableModelOptions = computed(() => Array.from(new Set([
@@ -1007,8 +1040,6 @@ const handleCreate = async () => {
     active: true,
     model_contexts: [],
     priority: 0,
-    premium_models: [],
-    protect_premium_quota: false,
     strip_nonstandard_chat_fields: 'auto',
     dialect_preset: null,
     model_dialect_presets: {},
@@ -1042,8 +1073,6 @@ const handleCopy = (row: UpstreamConfig) => {
     model_contexts: row.model_contexts ? [...row.model_contexts] : [],
     priority: row.priority,
     max_concurrency: row.max_concurrency,
-    premium_models: [...(row.premium_models || [])],
-    protect_premium_quota: row.protect_premium_quota,
     strip_nonstandard_chat_fields: normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields),
     dialect_preset: row.dialect_preset || null,
     model_dialect_presets: row.model_dialect_presets ? { ...row.model_dialect_presets } : {},
@@ -1511,6 +1540,161 @@ const fetchModels = async () => {
   }
 }
 
+// ---- 全局获取模型：一键拉取所有上游账号的模型，勾选后自动应用到支持的上游 ----
+const globalFetchVisible = ref(false)
+const globalFetching = ref(false)
+const globalApplying = ref(false)
+const globalProgress = ref({ done: 0, total: 0 })
+const globalSelectedModels = ref<string[]>([])
+/** upstream id -> { name, models } */
+const globalUpstreamModels = ref<Record<string, { name: string; models: string[] }>>({})
+
+/** 全部上游发现的模型去重排序 */
+const globalModelPool = computed(() => {
+  const set = new Set<string>()
+  for (const entry of Object.values(globalUpstreamModels.value)) {
+    for (const model of entry.models) set.add(model)
+  }
+  return Array.from(set).sort()
+})
+
+/** 某个模型被几个上游账号支持 */
+const globalModelAccountCount = (model: string) =>
+  Object.values(globalUpstreamModels.value).filter(entry => entry.models.includes(model)).length
+
+/** 应用预览：每个上游将新增的模型（选中 ∩ 该上游支持 - 已有） */
+const globalApplyPreview = computed(() => {
+  const selected = new Set(globalSelectedModels.value)
+  const preview: Array<{ upstream_name: string; new_models: string[] }> = []
+  for (const [id, entry] of Object.entries(globalUpstreamModels.value)) {
+    const existing = new Set((upstreams.value.find(u => u.id === id)?.supported_models) || [])
+    const newModels = entry.models
+      .filter(model => selected.has(model) && !existing.has(model))
+      .sort()
+    if (newModels.length > 0) {
+      preview.push({ upstream_name: entry.name, new_models: newModels })
+    }
+  }
+  return preview
+})
+
+const openGlobalFetch = async () => {
+  globalFetchVisible.value = true
+  globalFetching.value = true
+  globalSelectedModels.value = []
+  globalUpstreamModels.value = {}
+
+  const targets = upstreams.value.filter(
+    upstream =>
+      upstream.base_url &&
+      ((upstream.api_key || '').trim() || (upstream.api_keys || []).some(key => key.trim()))
+  )
+
+  if (targets.length === 0) {
+    globalFetching.value = false
+    ElMessage.warning('没有可用的上游账号（需要配置 Base URL 和 API Key）')
+    return
+  }
+
+  globalProgress.value = { done: 0, total: targets.length }
+  let succeeded = 0
+  let failed = 0
+
+  for (const upstream of targets) {
+    const apiKeys = [
+      upstream.api_key || '',
+      ...(upstream.api_keys || [])
+    ]
+      .map(key => key.trim())
+      .filter(key => key.length > 0)
+    const uniqueKeys = Array.from(new Set(apiKeys))
+
+    try {
+      const response = await adminApi.discoverUpstreamModels({
+        base_url: upstream.base_url,
+        keys: uniqueKeys
+      })
+      const models = (response.data.models || []).filter(Boolean)
+      if (models.length > 0) {
+        globalUpstreamModels.value[upstream.id] = {
+          name: upstream.name || upstream.id,
+          models: Array.from(new Set(models)).sort()
+        }
+        succeeded++
+      } else {
+        failed++
+      }
+    } catch (error: any) {
+      failed++
+      console.error(`获取上游 ${upstream.name || upstream.id} 模型失败:`, error?.message || error)
+    }
+    globalProgress.value.done++
+  }
+
+  globalFetching.value = false
+  if (succeeded === 0) {
+    ElMessage.error(`获取失败：${failed} 个上游账号均未能获取到模型`)
+  } else if (failed > 0) {
+    ElMessage.warning(`成功获取 ${succeeded} 个上游账号的模型，${failed} 个账号获取失败`)
+  } else {
+    ElMessage.success(`成功获取 ${succeeded} 个上游账号的模型`)
+  }
+}
+
+const applyGlobalModels = async () => {
+  const selected = new Set(globalSelectedModels.value)
+  if (selected.size === 0) {
+    ElMessage.warning('请先选择要全局启用的模型')
+    return
+  }
+
+  globalApplying.value = true
+  const appliedIds: string[] = []
+  const failedIds: string[] = []
+  let totalAdded = 0
+
+  try {
+    for (const [id, entry] of Object.entries(globalUpstreamModels.value)) {
+      const upstream = upstreams.value.find(u => u.id === id)
+      if (!upstream) continue
+      const existing = new Set(upstream.supported_models || [])
+      const additions = entry.models.filter(model => selected.has(model) && !existing.has(model))
+      if (additions.length === 0) continue
+
+      const merged = Array.from(new Set([...(upstream.supported_models || []), ...additions])).sort()
+      try {
+        // 只更新 supported_models，不携带 _replace_api_keys，不会改动 API Key
+        await adminApi.updateUpstream(id, { supported_models: merged })
+        appliedIds.push(entry.name)
+        totalAdded += additions.length
+      } catch (error: any) {
+        failedIds.push(`${entry.name}（${error?.message || '未知错误'}）`)
+      }
+    }
+
+    if (appliedIds.length > 0) {
+      ElMessage.success(`已为 ${appliedIds.length} 个上游账号自动选中 ${totalAdded} 个模型`)
+    }
+    if (failedIds.length > 0) {
+      ElMessage.error(`更新失败：${failedIds.join('；')}`)
+    }
+    if (appliedIds.length === 0 && failedIds.length === 0) {
+      ElMessage.info('所选模型已全部存在于各上游账号中，无需更新')
+    }
+
+    globalFetchVisible.value = false
+    await loadData()
+  } finally {
+    globalApplying.value = false
+  }
+}
+
+const resetGlobalFetch = () => {
+  globalSelectedModels.value = []
+  globalUpstreamModels.value = {}
+  globalProgress.value = { done: 0, total: 0 }
+}
+
 
 onMounted(() => {
   loadData()
@@ -1568,6 +1752,40 @@ onMounted(() => {
 
 .helper-text {
   margin-top: 8px;
+}
+
+.global-fetch-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 8px;
+  color: var(--el-text-color-secondary);
+}
+
+.global-fetch-summary {
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  line-height: 1.6;
+}
+
+.global-model-form {
+  margin-bottom: 4px;
+}
+
+.global-apply-preview {
+  margin-top: 8px;
+}
+
+.global-apply-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.global-new-model-tag {
+  margin: 2px 4px 2px 0;
 }
 
 .form-hint {

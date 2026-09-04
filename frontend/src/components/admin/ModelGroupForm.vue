@@ -32,26 +32,27 @@
         filterable
         allow-create
         default-first-option
-        placeholder="输入模型名后回车添加；输入 * 表示全部"
+        placeholder="搜索选择或输入模型名后回车添加；输入 * 表示全部"
         style="width: 100%"
         data-testid="group-models-select"
       >
         <el-option
-          v-for="model in form.allowed_models"
+          v-for="model in availableModelOptions"
           :key="model"
           :label="model"
           :value="model"
         />
       </el-select>
       <div class="form-help-text">
-        逗号分隔也可；空列表不允许。`*` 代表允许所有模型（all 分组）。
+        可从网关已知模型候选中选择，也可手动输入（回车添加）；空列表不允许。`*` 代表允许所有模型（all 分组）。
       </div>
     </el-form-item>
   </el-form>
 </template>
 
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { adminApi } from '@/api/admin'
 import type { ModelGroup } from '@/api/portal'
 
 const props = defineProps<{
@@ -65,6 +66,39 @@ const form = reactive({
   description: '',
   allowed_models: [] as string[]
 })
+
+/** 网关已知模型候选（活跃上游模型 ∪ 各上游 supported_models） */
+const modelCandidates = ref<string[]>([])
+
+/** 候选列表 ∪ 当前已选，确保已选但不在候选中的模型也能显示 */
+const availableModelOptions = computed(() => {
+  const selected = form.allowed_models ?? []
+  return Array.from(new Set([...modelCandidates.value, ...selected])).sort()
+})
+
+const loadModelCandidates = async () => {
+  try {
+    const [modelsResp, upstreamsResp] = await Promise.all([
+      adminApi.getModels(),
+      adminApi.getUpstreams()
+    ])
+    const set = new Set<string>()
+    for (const model of modelsResp.data.models ?? []) {
+      if (model && model.trim()) set.add(model.trim())
+    }
+    for (const upstream of upstreamsResp.data ?? []) {
+      for (const model of upstream.supported_models ?? []) {
+        if (model && model.trim()) set.add(model.trim())
+      }
+    }
+    modelCandidates.value = Array.from(set).sort()
+  } catch {
+    // 候选加载失败不阻塞手动输入
+    modelCandidates.value = []
+  }
+}
+
+onMounted(loadModelCandidates)
 
 watch(
   () => props.group,

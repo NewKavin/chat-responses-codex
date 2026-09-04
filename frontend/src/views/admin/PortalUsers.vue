@@ -28,6 +28,21 @@
           </template>
         </el-table-column>
         <el-table-column prop="binding_count" label="密钥数" width="80" align="center" />
+        <el-table-column label="模型分组" min-width="180">
+          <template #default="{ row }">
+            <template v-if="(row.model_group_ids || []).length === 0">
+              <el-tag size="small" type="info">basic</el-tag>
+            </template>
+            <el-tag
+              v-for="gid in row.model_group_ids || []"
+              :key="gid"
+              size="small"
+              class="group-tag"
+            >
+              {{ groupName(gid) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
             <el-tag :type="row.disabled ? 'danger' : 'success'" size="small">
@@ -82,6 +97,18 @@
           <el-input :model-value="editSubject" disabled placeholder="—" />
           <div class="field-hint">身份标识不可编辑</div>
         </el-form-item>
+        <el-form-item label="模型分组">
+          <el-select
+            v-model="editForm.model_group_ids"
+            multiple
+            filterable
+            style="width: 100%"
+            placeholder="选择该用户可用的模型分组"
+          >
+            <el-option v-for="g in allModelGroups" :key="g.id" :label="groupLabel(g)" :value="g.id" :disabled="g.id === 'basic'" />
+          </el-select>
+          <div class="field-hint">basic 分组恒可用，不可撤销；用户可在此范围内为自己的密钥切换分组。</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -126,6 +153,7 @@ import { onMounted, ref } from 'vue'
 import { Search } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
+import type { ModelGroup } from '@/api/portal'
 
 interface PortalUserRow {
   id: string
@@ -136,6 +164,7 @@ interface PortalUserRow {
   last_login_at: number | null
   subject: string | null
   binding_count: number
+  model_group_ids?: string[]
 }
 
 interface BindingRow {
@@ -158,6 +187,25 @@ const newBindingKey = ref('')
 const newBindingDefault = ref(false)
 const bindingSaving = ref(false)
 const availableKeys = ref<Array<{ id: string; name: string }>>([])
+const allModelGroups = ref<ModelGroup[]>([])
+
+const groupName = (gid: string) => {
+  const group = allModelGroups.value.find(g => g.id === gid)
+  return group ? `${group.name} (${group.id})` : gid
+}
+
+const groupLabel = (group: ModelGroup) => {
+  return group.id === 'basic' ? `${group.name}（${group.id}，恒可用）` : `${group.name} (${group.id})`
+}
+
+const loadModelGroups = async () => {
+  try {
+    const response = await adminApi.listModelGroups()
+    allModelGroups.value = response.data.groups ?? []
+  } catch {
+    allModelGroups.value = []
+  }
+}
 
 const formatTime = (unix: number) => {
   return new Date(unix * 1000).toLocaleString()
@@ -194,21 +242,33 @@ const toggleDisabled = async (row: PortalUserRow) => {
 const editVisible = ref(false)
 const editSaving = ref(false)
 const editSubject = ref('')
-const editForm = ref<{ email: string; display_name: string; username: string }>({
+const editForm = ref<{ email: string; display_name: string; username: string; model_group_ids: string[] }>({
   email: '',
   display_name: '',
-  username: ''
+  username: '',
+  model_group_ids: ['basic']
 })
 
-const openEdit = (row: PortalUserRow) => {
+const openEdit = async (row: PortalUserRow) => {
   currentlyEditingId.value = row.id
   editSubject.value = row.subject ?? '—'
   editForm.value = {
     email: row.email,
     display_name: row.display_name ?? '',
-    username: row.username ?? ''
+    username: row.username ?? '',
+    model_group_ids: ['basic']
+  }
+  if (row.model_group_ids && row.model_group_ids.length > 0) {
+    editForm.value.model_group_ids = Array.from(new Set(['basic', ...row.model_group_ids]))
   }
   editVisible.value = true
+  try {
+    const response = await adminApi.getPortalUserModelGroups(row.id)
+    const ids = response.data.model_group_ids ?? []
+    editForm.value.model_group_ids = Array.from(new Set(ids.length ? ids : ['basic']))
+  } catch {
+    // 保留列表里的分组信息，加载失败不阻塞编辑
+  }
 }
 
 const saveEdit = async () => {
@@ -223,6 +283,12 @@ const saveEdit = async () => {
       display_name: editForm.value.display_name.trim(),
       username: editForm.value.username.trim()
     })
+    if (currentlyEditingId.value) {
+      await adminApi.setPortalUserModelGroups(
+        currentlyEditingId.value,
+        Array.from(new Set(editForm.value.model_group_ids))
+      )
+    }
     ElMessage.success('已保存')
     editVisible.value = false
     load()
@@ -277,7 +343,10 @@ const removeBinding = async (row: BindingRow) => {
   await refreshBindings()
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadModelGroups()
+})
 </script>
 
 <style scoped>
@@ -301,6 +370,9 @@ onMounted(load)
 }
 .muted {
   color: var(--el-text-color-placeholder);
+}
+.group-tag {
+  margin-right: 4px;
 }
 .field-hint {
   font-size: 12px;

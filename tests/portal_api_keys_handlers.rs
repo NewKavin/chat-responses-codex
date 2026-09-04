@@ -841,6 +841,15 @@ async fn test_list_model_groups_with_session() {
         )
         .await
         .expect("Failed to create user");
+    // basic 恒可访问；授予 premium / all 后，用户应能看到全部 3 个种子分组
+    store
+        .grant_user_model_group(&user.id, "premium", Some("admin"))
+        .await
+        .expect("grant premium");
+    store
+        .grant_user_model_group(&user.id, "all", Some("admin"))
+        .await
+        .expect("grant all");
     let raw_sid = "test_session_id_model_groups";
     let sid_hash = sha256_hex(raw_sid.as_bytes());
     let now = chat_responses_codex::state::unix_seconds() as i64;
@@ -864,7 +873,8 @@ async fn test_list_model_groups_with_session() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let groups = json["groups"].as_array().expect("groups must be an array");
-    assert!(groups.len() >= 3, "at least the three seeded groups");
+    // 当前语义：只返回用户可访问的分组（basic + 已授权分组）
+    assert_eq!(groups.len(), 3, "user-accessible groups should be exactly the three seeded groups after grant");
     let ids: Vec<&str> = groups
         .iter()
         .filter_map(|g| g["id"].as_str())
@@ -915,6 +925,11 @@ async fn test_update_key_model_group() {
         )
         .await
         .expect("Failed to add binding");
+    // 当前语义：切换分组要求用户已被授予该分组访问权限
+    store
+        .grant_user_model_group(&user.id, "premium", Some("admin"))
+        .await
+        .expect("grant premium");
 
     let app = chat_responses_codex::server::build_router(state.clone());
 

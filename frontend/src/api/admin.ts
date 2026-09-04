@@ -384,6 +384,7 @@ export const adminApi = {
         provider: string | null
         subject: string | null
         binding_count: number
+        model_group_ids: string[]
       }>
     }>('/admin/portal/users', { params }),
   setPortalUserDisabled: (id: string, disabled: boolean) =>
@@ -398,6 +399,15 @@ export const adminApi = {
     adminHttp.post(`/admin/portal/users/${id}/bindings`, { downstream_id, is_default }),
   deletePortalUserBinding: (id: string, downstream_id: string) =>
     adminHttp.delete(`/admin/portal/users/${id}/bindings/${downstream_id}`),
+  getPortalUserModelGroups: (id: string) =>
+    adminHttp.get<{ model_group_ids: string[]; groups: ModelGroup[] }>(
+      `/admin/portal/users/${id}/model-groups`
+    ),
+  setPortalUserModelGroups: (id: string, model_group_ids: string[]) =>
+    adminHttp.put<{ model_group_ids: string[]; groups: ModelGroup[] }>(
+      `/admin/portal/users/${id}/model-groups`,
+      { model_group_ids }
+    ),
   batchSetDownstreamMode: (data: {
     ids: string[]
     billing_mode?: 'request' | 'token'
