@@ -168,7 +168,7 @@ async fn test_update_model_group() {
         .unwrap();
 
     let res = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

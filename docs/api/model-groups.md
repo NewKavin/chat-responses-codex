@@ -92,7 +92,7 @@ PUT /api/admin/model-groups/{id}
 }
 ```
 
-**Response:** 200 `{"id": "..."}`
+**Response:** 204 No Content
 
 **Errors:**
 - `400` — empty `allowed_models`

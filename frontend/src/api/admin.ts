@@ -509,7 +509,7 @@ export const adminApi = {
   updateModelGroup: (
     id: string,
     data: { name: string; description?: string | null; allowed_models: string[] }
-  ) => adminHttp.put<{ id: string }>(`/admin/model-groups/${id}`, data),
+  ) => adminHttp.put<null>(`/admin/model-groups/${id}`, data),
   deleteModelGroup: (id: string) =>
     adminHttp.delete<{ success: boolean }>(`/admin/model-groups/${id}`)
 }

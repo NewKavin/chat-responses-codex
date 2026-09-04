@@ -3631,7 +3631,7 @@ pub(super) async fn admin_update_model_group(
         .update_model_group(&group_id, &body.name, body.description.as_deref(), body.allowed_models)
         .await
     {
-        Ok(()) => (StatusCode::OK, Json(json!({"id": group_id}))).into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(crate::state::PortalStoreError::NotFound) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"code": "group_not_found", "message": "model group not found"}})),

@@ -33,13 +33,18 @@ CREATE INDEX IF NOT EXISTS idx_portal_user_downstreams_model_group
 ON portal_user_downstreams(model_group_id);
 
 -- 更新现有的 key- 前缀 key 为 'all' 分组（向后兼容）
--- 注意：这需要连接 downstreams 表
-UPDATE portal_user_downstreams pud
-SET model_group_id = 'all'
-WHERE EXISTS (
-  SELECT 1 FROM downstreams d
-  WHERE d.id = pud.downstream_id
-    AND d.plaintext_key LIKE 'key-%'
-);
+-- 注意：这需要连接 downstreams 表，假设该表存在
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'downstreams') THEN
+    UPDATE portal_user_downstreams pud
+    SET model_group_id = 'all'
+    WHERE EXISTS (
+      SELECT 1 FROM downstreams d
+      WHERE d.id = pud.downstream_id
+        AND d.plaintext_key LIKE 'key-%'
+    );
+  END IF;
+END $$;
 
 COMMIT;
