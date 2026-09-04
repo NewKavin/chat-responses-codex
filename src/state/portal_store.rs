@@ -92,6 +92,8 @@ pub enum PortalStoreError {
     NotFound,
     #[error("portal conflict: {0}")]
     Conflict(String),
+    #[error("portal access forbidden: {0}")]
+    Forbidden(String),
     #[error("portal store failure: {0}")]
     Db(String),
 }
@@ -644,7 +646,7 @@ impl PortalStore {
         let row = client
             .query_opt(
                 "SELECT user_id FROM portal_user_downstreams \
-                 WHERE downstream_id = $1 ORDER BY created_at LIMIT 1",
+                 WHERE downstream_id = $1 ORDER BY created_at, user_id LIMIT 1",
                 &[&downstream_id],
             )
             .await?;
@@ -662,6 +664,14 @@ impl PortalStore {
         display_name: Option<&str>,
     ) -> Result<String, PortalStoreError> {
         if let Some(user_id) = self.find_user_id_by_downstream(downstream_id).await? {
+            // H2: 管理员禁用门户用户后，Bearer 身份（工号+密钥）不得绕过
+            // disabled 继续管理密钥（cookie 路径由 find_session 的
+            // `AND NOT u.disabled` 保证，这里补齐 Bearer 路径）。
+            if let Some(user) = self.find_user_by_id(&user_id).await? {
+                if user.disabled {
+                    return Err(PortalStoreError::Forbidden("user is disabled".into()));
+                }
+            }
             return Ok(user_id);
         }
         let user_id = uuid::Uuid::new_v4().to_string();

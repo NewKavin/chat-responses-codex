@@ -11,6 +11,29 @@ fn database_url() -> String {
         .expect("OIDC_TEST_DATABASE_URL unset; tests should skip before reaching here")
 }
 
+async fn postgres_client(database_url: &str) -> tokio_postgres::Client {
+    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
+        .await
+        .expect("oidc test db must connect");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+}
+
+/// 插入一个真实存在的 downstream，供 Bearer 回退的自动建档使用。
+async fn insert_test_downstream(database_url: &str, downstream_id: &str) {
+    let client = postgres_client(database_url).await;
+    client
+        .execute(
+            "INSERT INTO downstreams (id, name, hash, per_minute_limit, active)
+             VALUES ($1, $1, $1, 60, TRUE) ON CONFLICT (id) DO NOTHING",
+            &[&downstream_id],
+        )
+        .await
+        .expect("inserting test downstream must succeed");
+}
+
 async fn load_state(database_url: &str) -> AppState {
     let state = AppState::load_from_database_url(database_url, AppConfig::default())
         .await
@@ -950,6 +973,8 @@ async fn test_list_keys_bearer_jwt_fallback_provisions_user() {
         return; // Skip test when database is unavailable
     }
     common::oidc::reset_portal_tables(&url).await;
+    // 自动建档只对真实存在的 downstream 生效（H1 修复），先插入。
+    insert_test_downstream(&url, "downstream-bearer-1").await;
 
     let state = load_state(&url).await;
     let portal_store_opt = state.portal_store();
@@ -1010,4 +1035,116 @@ async fn test_list_keys_bearer_jwt_fallback_provisions_user() {
         .unwrap();
     let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert_eq!(json2.as_array().unwrap().len(), 1);
+}
+
+// ============================================================================
+// H1: Bearer 身份对应的 downstream 不存在时，禁止自动建档（避免 admin
+// JWT / 幽灵下游产生幻影门户用户和默认 key）。
+// ============================================================================
+
+#[tokio::test]
+async fn test_list_keys_bearer_unknown_downstream_rejected() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return; // Skip test when database is unavailable
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let portal_store_opt = state.portal_store();
+    let store = portal_store_opt.as_ref().expect("portal_store must exist");
+
+    // sub 指向不存在的 downstream（例如 admin 后台 JWT 的 sub）。
+    let token = chat_responses_codex::auth::generate_admin_token(
+        "ghost-downstream",
+        &state.config.jwt_secret,
+    )
+    .expect("token must sign");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let req = Request::builder()
+        .uri("/api/portal/keys")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // 不得留下幻影绑定。
+    let owner = store
+        .find_user_id_by_downstream("ghost-downstream")
+        .await
+        .unwrap();
+    assert!(
+        owner.is_none(),
+        "unknown downstream must not provision a phantom portal user"
+    );
+}
+
+// ============================================================================
+// H2: 管理员禁用门户用户后，Bearer 路径同样被拒（cookie 路径由
+// find_session 的 `AND NOT u.disabled` 保证，这里验证 Bearer 补齐）。
+// ============================================================================
+
+#[tokio::test]
+async fn test_list_keys_bearer_disabled_user_rejected() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return; // Skip test when database is unavailable
+    }
+    common::oidc::reset_portal_tables(&url).await;
+    insert_test_downstream(&url, "downstream-disabled-1").await;
+
+    let state = load_state(&url).await;
+    let portal_store_opt = state.portal_store();
+    let store = portal_store_opt.as_ref().expect("portal_store must exist");
+
+    let token = chat_responses_codex::auth::generate_admin_token(
+        "downstream-disabled-1",
+        &state.config.jwt_secret,
+    )
+    .expect("token must sign");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    // 首次访问自动建档成功。
+    let req = Request::builder()
+        .uri("/api/portal/keys")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 管理员禁用该门户用户。
+    let owner = store
+        .find_user_id_by_downstream("downstream-disabled-1")
+        .await
+        .unwrap()
+        .expect("user must exist after provisioning");
+    let client = postgres_client(&url).await;
+    client
+        .execute(
+            "UPDATE portal_users SET disabled = TRUE WHERE id = $1",
+            &[&owner],
+        )
+        .await
+        .expect("disabling user must succeed");
+
+    // 同一 Bearer 身份再次访问必须 403，且不再返回 keys。
+    let req2 = Request::builder()
+        .uri("/api/portal/keys")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(response2.status(), StatusCode::FORBIDDEN);
 }

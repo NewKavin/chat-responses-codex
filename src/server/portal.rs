@@ -794,35 +794,17 @@ async fn extract_user_id_from_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<String, Response> {
+    // OIDC session cookie 优先（与 extract_downstream_id_from_bearer 一致）：
+    // 命中有效会话立即返回；cookie 缺失、失效、或 store 不可用时回落
+    // Bearer 身份。这样残留的 OIDC cookie 不会把工号+密钥登录的用户挡在
+    // 密钥管理之外（修复点：cookie 存在但会话无效时不再直接 401 登出）。
     if let Some(cookie) = crate::server::portal_oidc::session_cookie_value(headers) {
-        let Some(store) = state.portal_store() else {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "Portal store not available"}})),
-            )
-                .into_response());
-        };
-
-        let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
-        let session = store
-            .find_session(&sid_hash)
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"message": "Failed to verify session"}})),
-                )
-                    .into_response()
-            })?
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": {"message": "Invalid or expired session"}})),
-                )
-                    .into_response()
-            })?;
-
-        return Ok(session.user_id);
+        if let Some(store) = state.portal_store() {
+            let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
+            if let Ok(Some(session)) = store.find_session(&sid_hash).await {
+                return Ok(session.user_id);
+            }
+        }
     }
 
     // Bearer 回退：工号+密钥登录产生的 JWT（或无 JWT 时的下游密钥）。
@@ -834,20 +816,34 @@ async fn extract_user_id_from_session(
         )
             .into_response());
     };
-    let display_name = state
-        .downstream_config(&downstream_id)
-        .await
-        .map(|downstream| downstream.name);
-    store
-        .ensure_user_for_downstream(&downstream_id, display_name.as_deref())
+
+    // 只允许真实存在的下游自动建档：拒绝 admin JWT（sub 非下游）和
+    // 已删除/幽灵下游产生的幻影门户用户与默认 key。
+    let Some(downstream) = state.downstream_config(&downstream_id).await else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "Unknown downstream identity"}})),
+        )
+            .into_response());
+    };
+
+    let user_id = store
+        .ensure_user_for_downstream(&downstream_id, Some(&downstream.name))
         .await
         .map_err(|error| {
+            let status = if matches!(error, crate::state::PortalStoreError::Forbidden(_)) {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(json!({"error": {"message": error.to_string()}})),
             )
                 .into_response()
-        })
+        })?;
+
+    Ok(user_id)
 }
 
 // ============================================================================

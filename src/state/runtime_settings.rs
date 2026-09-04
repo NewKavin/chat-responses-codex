@@ -110,6 +110,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_route_exhaustion_alignment_truncated_enabled",
     "upstream_transient_last_resort_probe_enabled",
     "upstream_common_mode_transient_threshold",
+    "upstream_common_mode_breaker_threshold",
     "default_upstream_max_concurrency",
     "upstream_concurrency_recovery_max_wait_ms",
     "upstream_concurrency_probe_delays_ms",

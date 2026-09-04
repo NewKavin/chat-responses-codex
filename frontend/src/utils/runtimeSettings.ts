@@ -433,7 +433,7 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     label: '429 网关内持续重试',
     apply: 'immediate',
     control: 'switch',
-    description: '开启后纯上游 429/KeyQuota 耗尽也进入网关内等待预算，按 Retry-After 持续真实打上游（内网强占资源模式）；关闭时保持默认行为：429 立即交还客户端由其重试。'
+    description: '开启后纯上游 429/KeyQuota 耗尽也进入网关内等待预算，按 Retry-After（上限 5 秒）持续真实打上游（内网强占资源模式）；关闭时保持默认行为：429 立即交还客户端由其重试。'
   },
   {
     key: 'upstream_route_exhaustion_retry_max_wait_ms',

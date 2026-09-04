@@ -126,7 +126,10 @@ pub(super) struct RouteRetryPolicy {
     alignment_truncated_enabled: bool,
     /// 2026-09-04: B3 门开关。默认 false 保持 B3 语义（纯 429/KeyQuota
     /// 耗尽立即交还客户端，由 codex 按 Retry-After 重试）；true 时纯
-    /// 429 也纳入进程内等待预算，按 Retry-After 醒来继续真实打上游。
+    /// 429 也纳入进程内等待预算，醒来间隔为
+    /// `min(Retry-After, upstream_retry_after_cooldown_cap_seconds)`
+    /// （无 Retry-After 时用 `upstream_rate_limit_default_retry_seconds`），
+    /// 每轮真实打上游直到 max_wait/max_rounds 耗尽。
     rate_limit_internal_retry_enabled: bool,
 }
 
@@ -284,8 +287,9 @@ impl RouteRetryPolicy {
             // absorb the cooldown in-process.
             // With `upstream_rate_limit_internal_retry_enabled` the gate is
             // opened: the request falls through to the ordinary wait budget,
-            // wakes on Retry-After and really hits the upstream again on the
-            // next round (intranet "fight for upstream resources" mode).
+            // wakes after min(Retry-After, cooldown cap, default retry) and
+            // really hits the upstream again on the next round (intranet
+            // "fight for upstream resources" mode).
             return (None, None);
         }
         if busy_only {

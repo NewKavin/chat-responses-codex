@@ -212,8 +212,9 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + the 13 portal OIDC wiring keys (client/secret/endpoints/field maps)
     // + portal_oidc_userinfo_method and portal_oidc_token_path = 101,
     // + portal_oidc_uuid_field = 102,
-    // + upstream_rate_limit_internal_retry_enabled = 103 (B3 gate switch).
-    assert_eq!(all.len(), 103);
+    // + upstream_rate_limit_internal_retry_enabled = 103 (B3 gate switch),
+    // + upstream_common_mode_breaker_threshold = 104 (immediate metadata).
+    assert_eq!(all.len(), 104);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()

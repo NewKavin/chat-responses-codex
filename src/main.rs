@@ -596,6 +596,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         route_half_open_exclusive_window_ms = config.upstream_route_half_open_exclusive_window_ms,
         route_half_open_busy_max_rounds = config.upstream_route_half_open_busy_max_rounds,
         route_exhaustion_retry_enabled = config.upstream_route_exhaustion_retry_enabled,
+        rate_limit_internal_retry_enabled = config.upstream_rate_limit_internal_retry_enabled,
         route_exhaustion_retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
         route_exhaustion_retry_max_rounds = config.upstream_route_exhaustion_retry_max_rounds,
         concurrency_recovery_max_wait_ms = config.upstream_concurrency_recovery_max_wait_ms,
