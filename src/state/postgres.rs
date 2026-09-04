@@ -78,8 +78,7 @@ impl PostgresStateStore {
                  model_contexts, default_model_context, \
                  COALESCE(request_quota_window_hours, 5), \
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
-                 requests_per_minute, max_concurrency, priority, premium_only, \
-                 protect_premium_quota, active, failure_count, \
+                 requests_per_minute, max_concurrency, priority, active, failure_count, \
                  auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
                  strip_nonstandard_chat_fields, nonstandard_field_policy, \
                  COALESCE(remark, ''), continuation_provider_group, dialect_preset, \
@@ -92,11 +91,11 @@ impl PostgresStateStore {
         {
             let protocol = decode_protocol(row.get::<_, String>(4))?;
             let api_keys: Vec<String> = row
-                .get::<_, Option<String>>(20)
+                .get::<_, Option<String>>(18)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             let api_key_models: Vec<ApiKeyModelConfig> = row
-                .get::<_, Option<String>>(21)
+                .get::<_, Option<String>>(19)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             upstreams.push(UpstreamConfig {
@@ -120,22 +119,22 @@ impl PostgresStateStore {
                 priority: row.get::<_, i32>(12) as u32,
                 active: row.get::<_, bool>(13),
                 failure_count: row.get::<_, i32>(14) as u32,
-                auto_managed: row.get::<_, bool>(17),
-                managed_source: row.get::<_, Option<String>>(18),
-                last_synced_at: row.get::<_, i64>(19) as u64,
+                auto_managed: row.get::<_, bool>(15),
+                managed_source: row.get::<_, Option<String>>(16),
+                last_synced_at: row.get::<_, i64>(17) as u64,
                 strip_nonstandard_chat_fields: decode_nonstandard_field_policy(
-                    row.get::<_, String>(23),
-                    row.get::<_, bool>(22),
+                    row.get::<_, String>(21),
+                    row.get::<_, bool>(20),
                 ),
-                remark: row.get::<_, String>(24),
-                continuation_provider_group: row.get::<_, Option<String>>(25),
-                dialect_preset: row.get::<_, Option<String>>(26),
+                remark: row.get::<_, String>(22),
+                continuation_provider_group: row.get::<_, Option<String>>(23),
+                dialect_preset: row.get::<_, Option<String>>(24),
                 model_mappings: row
-                    .get::<_, Option<String>>(27)
+                    .get::<_, Option<String>>(25)
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
                 model_dialect_presets: row
-                    .get::<_, Option<String>>(28)
+                    .get::<_, Option<String>>(26)
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
             });

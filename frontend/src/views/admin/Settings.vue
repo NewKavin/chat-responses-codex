@@ -34,6 +34,27 @@
       </div>
     </header>
 
+    <div v-if="editableSettings" class="settings-search-container">
+      <el-input
+        v-model="searchQuery"
+        data-test="settings-search"
+        placeholder="搜索配置项（名称、标签、描述）"
+        clearable
+        :prefix-icon="Search"
+        class="settings-search-input"
+      />
+      <span v-if="searchQuery && filteredFields.length > 0" class="settings-search-hint">
+        找到 {{ filteredFields.length }} 项配置
+      </span>
+      <div
+        v-if="searchQuery && filteredFields.length === 0"
+        data-test="search-no-results"
+        class="settings-search-no-results"
+      >
+        未找到匹配「{{ searchQuery }}」的配置项
+      </div>
+    </div>
+
     <section v-if="loadedSettings" class="settings-status-band" aria-label="设置状态">
       <div class="settings-status-item">
         <span>来源</span>
@@ -86,11 +107,22 @@
           <div
             v-for="field in fieldsForGroup(group.id)"
             :key="field.key"
+            :data-test="`setting-field-${field.key}`"
             class="settings-row"
           >
             <div class="settings-field-label">
               <div class="settings-field-title">
-                <strong>{{ field.label }}</strong>
+                <strong v-html="highlightMatch(field.label)"></strong>
+                <el-tag
+                  v-if="searchQuery.trim()"
+                  data-test="field-group-badge"
+                  size="small"
+                  type="info"
+                  effect="light"
+                  class="group-badge"
+                >
+                  {{ group.label }}
+                </el-tag>
                 <el-tag
                   v-if="field.apply === 'restart'"
                   size="small"
@@ -100,9 +132,9 @@
                   重启后生效
                 </el-tag>
               </div>
-              <code>{{ field.key }}</code>
-              <p v-if="field.description" class="settings-field-description">
-                {{ field.description }}
+              <code v-html="highlightMatch(field.key)"></code>
+              <p v-if="field.description" class="settings-field-desc">
+                <span v-html="highlightMatch(field.description)"></span>
               </p>
             </div>
 
@@ -167,7 +199,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { RefreshCw, RotateCcw, Save } from '@lucide/vue'
+import { RefreshCw, RotateCcw, Save, Search } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type {
   RuntimeSettingKey,
@@ -215,6 +247,27 @@ const backendFieldError = ref<{ field: RuntimeSettingKey; message: string } | nu
 const loadedSettings = ref<RuntimeSettings | null>(null)
 const editableSettings = ref<RuntimeSettings | null>(null)
 const probeDelayInput = ref('')
+const searchQuery = ref('')
+
+const highlightMatch = (text: string) => {
+  const query = searchQuery.value.trim()
+  if (!query) return text
+
+  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+  return text.replace(regex, '<mark>$1</mark>')
+}
+
+const filteredFields = computed(() => {
+  if (!searchQuery.value.trim()) return runtimeSettingFields
+  const query = searchQuery.value.toLowerCase().trim()
+  return runtimeSettingFields.filter(field => {
+    return (
+      field.key.toLowerCase().includes(query) ||
+      field.label.toLowerCase().includes(query) ||
+      (field.description?.toLowerCase().includes(query) ?? false)
+    )
+  })
+})
 
 const localErrors = computed(() => {
   if (!editableSettings.value) return {}
@@ -274,8 +327,10 @@ const restartStatusLabel = computed(() => {
   return count > 0 ? `${count} 项待重启` : '无需重启'
 })
 
-const fieldsForGroup = (group: RuntimeSettingGroupId) =>
-  runtimeSettingFields.filter(field => field.group === group)
+const fieldsForGroup = (group: RuntimeSettingGroupId) => {
+  const fields = searchQuery.value.trim() ? filteredFields.value : runtimeSettingFields
+  return fields.filter(field => field.group === group)
+}
 
 const restartCountForGroup = (group: RuntimeSettingGroupId) =>
   runtimeSettingFields.filter(field => field.group === group && field.apply === 'restart').length
@@ -450,6 +505,36 @@ onMounted(loadSettings)
   background: var(--crc-surface-muted);
 }
 
+.settings-search-container {
+  margin-bottom: 24px;
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: 8px;
+  background: var(--crc-surface);
+}
+
+.settings-search-input {
+  width: 100%;
+  max-width: 600px;
+}
+
+.settings-search-hint {
+  display: inline-block;
+  margin-top: 12px;
+  color: var(--crc-text-muted);
+  font-size: 13px;
+}
+
+.settings-search-no-results {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  background: var(--crc-surface-muted);
+  color: var(--crc-text-muted);
+  font-size: 14px;
+  text-align: center;
+}
+
 .settings-status-item {
   display: flex;
   align-items: baseline;
@@ -558,12 +643,32 @@ onMounted(loadSettings)
 
 .settings-row {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(300px, 430px);
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 480px);
+  align-items: start;
+  gap: 32px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--crc-border-subtle);
+}
+
+.settings-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-row:hover {
+  background: var(--crc-surface-hover);
+}
+
+.settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-label-header {
+  display: flex;
   align-items: center;
-  gap: 28px;
-  min-height: 78px;
-  padding: 14px 4px;
-  border-bottom: 1px solid var(--crc-border);
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .settings-field-label {
@@ -591,9 +696,24 @@ onMounted(loadSettings)
   overflow-wrap: anywhere;
 }
 
-.settings-field-title :deep(.el-tag) {
-  border-radius: 4px;
-  flex-shrink: 0;
+.settings-field-desc {
+  color: var(--crc-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 520px;
+}
+
+.settings-field-desc :deep(mark) {
+  background: var(--crc-warning-soft);
+  color: var(--crc-text-strong);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.group-badge {
+  font-size: 11px;
+  padding: 0 8px;
 }
 
 .settings-control-column {
