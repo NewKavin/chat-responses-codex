@@ -33,6 +33,26 @@ pub struct PortalUser {
 pub struct PortalDownstreamBinding {
     pub downstream_id: String,
     pub is_default: bool,
+    pub label: Option<String>,  // 新增：兼容 NULL
+    pub model_group_id: String,  // 新增：模型分组（默认 'basic'）
+}
+
+impl PortalDownstreamBinding {
+    /// 获取 label，现有数据返回默认值
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or("Default Key")
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalDownstreamBindingWithLabel {
+    pub downstream_id: String,
+    pub is_default: bool,
+    pub label: String,  // 前端总是收到非空 label
+    pub model_group_id: String,  // 模型分组
+    pub model_group_name: Option<String>,  // 模型分组名称
+    pub created_at: i64,  // Unix timestamp
+    pub usage_count: i64,  // 使用次数（从 response_history 统计）
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +66,24 @@ pub struct PortalSession {
     pub last_seen_at: Option<i64>,
     pub user_agent: Option<String>,
     pub ip: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelGroup {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub allowed_models: Vec<String>,
+    pub created_at: i64,  // Unix timestamp
+    pub updated_at: i64,  // Unix timestamp
+}
+
+impl ModelGroup {
+    /// 检查模型是否在允许列表中（支持通配符 "*"）
+    pub fn allows_model(&self, model: &str) -> bool {
+        self.allowed_models.contains(&"*".to_string())
+            || self.allowed_models.contains(&model.to_string())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +116,11 @@ pub struct PortalStore {
 impl PortalStore {
     pub fn from_pool(pool: Pool<Manager>) -> Self {
         Self { pool }
+    }
+
+    /// Get a database client (exposed for testing)
+    pub async fn get_client(&self) -> Result<bb8::PooledConnection<'_, Manager>, PortalStoreError> {
+        Ok(self.pool.get().await?)
     }
 
     /// (provider, subject) -> user row.  None when unbound.
@@ -280,7 +323,7 @@ impl PortalStore {
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "SELECT downstream_id, is_default FROM portal_user_downstreams \
+                "SELECT downstream_id, is_default, label, model_group_id FROM portal_user_downstreams \
                  WHERE user_id = $1 ORDER BY downstream_id",
                 &[&user_id],
             )
@@ -290,8 +333,217 @@ impl PortalStore {
             .map(|row| PortalDownstreamBinding {
                 downstream_id: row.get(0),
                 is_default: row.get(1),
+                label: row.get(2),
+                model_group_id: row.get(3),
             })
             .collect())
+    }
+
+    pub async fn list_downstream_bindings_with_labels(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<PortalDownstreamBindingWithLabel>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT d.downstream_id, d.is_default, \
+                        COALESCE(d.label, 'Default Key') AS label, \
+                        COALESCE(d.model_group_id, 'basic') AS model_group_id, \
+                        mg.name AS model_group_name, \
+                        EXTRACT(EPOCH FROM COALESCE(d.created_at, NOW()))::bigint AS created_at, \
+                        COALESCE(COUNT(r.response_id), 0) AS usage_count \
+                 FROM portal_user_downstreams d \
+                 LEFT JOIN model_groups mg ON COALESCE(d.model_group_id, 'basic') = mg.id \
+                 LEFT JOIN response_history r ON d.downstream_id = r.downstream_key_id \
+                 WHERE d.user_id = $1 \
+                 GROUP BY d.downstream_id, d.is_default, d.label, COALESCE(d.model_group_id, 'basic'), mg.name, d.created_at \
+                 ORDER BY d.is_default DESC, d.created_at DESC",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| PortalDownstreamBindingWithLabel {
+                downstream_id: row.get(0),
+                is_default: row.get(1),
+                label: row.get(2),
+                model_group_id: row.get(3),
+                model_group_name: row.get(4),
+                created_at: row.get(5),
+                usage_count: row.get(6),
+            })
+            .collect())
+    }
+
+    pub async fn count_user_keys(&self, user_id: &str) -> Result<i64, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM portal_user_downstreams WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    /// Add a downstream binding with label and model_group_id.
+    /// Sets is_default to FALSE initially, created_at to NOW().
+    /// ON CONFLICT DO NOTHING makes this idempotent.
+    pub async fn add_downstream_binding_with_label(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        label: Option<&str>,
+        model_group_id: Option<&str>,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO portal_user_downstreams \
+                   (user_id, downstream_id, label, model_group_id, is_default, created_at) \
+                 VALUES ($1, $2, $3, $4, FALSE, NOW()) \
+                 ON CONFLICT (user_id, downstream_id) DO NOTHING",
+                &[&user_id, &downstream_id, &label, &model_group_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Update the label and model_group_id for an existing downstream binding.
+    /// Does not check if the row exists - caller should handle missing rows.
+    /// Supports NULL values to clear the label/model_group.
+    pub async fn update_downstream_label(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        label: Option<&str>,
+        model_group_id: Option<&str>,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET label = $3, model_group_id = $4 \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id, &label, &model_group_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Update only the model_group_id of an existing downstream binding,
+    /// preserving the label.  Returns NotFound when the binding does not
+    /// exist for this user.
+    pub async fn update_downstream_model_group(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        model_group_id: &str,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET model_group_id = $3 \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id, &model_group_id],
+            )
+            .await?;
+        if rows == 0 {
+            return Err(PortalStoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Safe delete: only removes if non-default AND no usage history.
+    /// Returns Ok(true) if deleted, Ok(false) if rejected (default or has usage).
+    /// Must run in a transaction to ensure consistency.
+    pub async fn remove_downstream_binding_safe(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+    ) -> Result<bool, PortalStoreError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+
+        // Step 1: Check if the binding exists and get its properties
+        let row = transaction
+            .query_opt(
+                "SELECT is_default, \
+                        COALESCE((SELECT COUNT(*) FROM response_history \
+                                  WHERE downstream_key_id = $2), 0) AS usage_count \
+                 FROM portal_user_downstreams \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id],
+            )
+            .await?;
+
+        let Some(row) = row else {
+            // Binding doesn't exist - treat as successful no-op
+            transaction.commit().await?;
+            return Ok(false);
+        };
+
+        let is_default: bool = row.get(0);
+        let usage_count: i64 = row.get(1);
+
+        // Step 2: Reject if default or has usage
+        if is_default || usage_count > 0 {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+
+        // Step 3: Delete the binding
+        let deleted = transaction
+            .execute(
+                "DELETE FROM portal_user_downstreams \
+                 WHERE user_id = $1 AND downstream_id = $2 \
+                   AND NOT is_default \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM response_history \
+                     WHERE downstream_key_id = $2 \
+                   )",
+                &[&user_id, &downstream_id],
+            )
+            .await?;
+
+        transaction.commit().await?;
+        Ok(deleted > 0)
+    }
+
+    /// Set a downstream binding as the default key.
+    /// Clears all other defaults for this user in a transaction to ensure uniqueness.
+    /// Silently succeeds even if downstream_id doesn't exist (no rows updated).
+    pub async fn set_default_key(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+    ) -> Result<(), PortalStoreError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+
+        // Step 1: Clear all defaults for this user
+        transaction
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET is_default = FALSE \
+                 WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+
+        // Step 2: Set the new default
+        transaction
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET is_default = TRUE \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id],
+            )
+            .await?;
+
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Add a binding; setting `is_default` demotes every other row.  Returns
@@ -517,6 +769,203 @@ impl PortalStore {
             )
             .await?;
         Ok((total, rows.into_iter().map(parse_user_row).collect()))
+    }
+
+    /// List all model groups with their allowed models.
+    /// Returns groups ordered by id.
+    pub async fn list_model_groups(&self) -> Result<Vec<ModelGroup>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id, name, description, allowed_models::text, \
+                        EXTRACT(EPOCH FROM created_at)::bigint, \
+                        EXTRACT(EPOCH FROM updated_at)::bigint \
+                 FROM model_groups \
+                 ORDER BY id",
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let allowed_models_json: String = row.get(3);
+                let allowed_models: Vec<String> = serde_json::from_str(&allowed_models_json)
+                    .unwrap_or_default();
+
+                ModelGroup {
+                    id: row.get(0),
+                    name: row.get(1),
+                    description: row.get(2),
+                    allowed_models,
+                    created_at: row.get(4),
+                    updated_at: row.get(5),
+                }
+            })
+            .collect())
+    }
+
+    /// Get a single model group by id.
+    pub async fn get_model_group(&self, id: &str) -> Result<ModelGroup, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT id, name, description, allowed_models::text, \
+                        EXTRACT(EPOCH FROM created_at)::bigint, \
+                        EXTRACT(EPOCH FROM updated_at)::bigint \
+                 FROM model_groups \
+                 WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(|e| {
+                if matches!(e.code(), Some(&tokio_postgres::error::SqlState::NO_DATA)) {
+                    PortalStoreError::NotFound
+                } else {
+                    PortalStoreError::from(e)
+                }
+            })?;
+
+        let allowed_models_json: String = row.get(3);
+        let allowed_models: Vec<String> = serde_json::from_str(&allowed_models_json)
+            .unwrap_or_default();
+
+        Ok(ModelGroup {
+            id: row.get(0),
+            name: row.get(1),
+            description: row.get(2),
+            allowed_models,
+            created_at: row.get(4),
+            updated_at: row.get(5),
+        })
+    }
+
+    /// Create a new model group.  The id must match `^[a-z0-9-]+$` (the same
+    /// CHECK the schema enforces); duplicates surface as `Conflict`.
+    pub async fn create_model_group(&self, group: &ModelGroup) -> Result<(), PortalStoreError> {
+        let valid_id = !group.id.is_empty()
+            && group
+                .id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !valid_id {
+            return Err(PortalStoreError::Conflict(
+                "invalid group id format".to_string(),
+            ));
+        }
+        let client = self.pool.get().await?;
+        let allowed_models_json = serde_json::to_value(&group.allowed_models)
+            .map_err(|e| PortalStoreError::Db(e.to_string()))?;
+
+        // Bind `serde_json::Value` (JSONB-aware via with-serde_json-1); a plain
+        // String does not implement accepts(jsonb).
+        client
+            .execute(
+                "INSERT INTO model_groups (id, name, description, allowed_models) \
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &group.id,
+                    &group.name,
+                    &group.description.as_deref(),
+                    &allowed_models_json,
+                ],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| classify_conflict(error, "group id already exists"))
+    }
+
+    /// Update an existing model group.
+    pub async fn update_model_group(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        allowed_models: Vec<String>,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        let allowed_models_json = serde_json::to_value(&allowed_models)
+            .map_err(|e| PortalStoreError::Db(e.to_string()))?;
+
+        // description is already Option<&str>, which postgres-types handles correctly
+        let rows = client
+            .execute(
+                "UPDATE model_groups \
+                 SET name = $2, description = $3, allowed_models = $4, updated_at = NOW() \
+                 WHERE id = $1",
+                &[&id, &name, &description, &allowed_models_json],
+            )
+            .await?;
+        if rows == 0 {
+            return Err(PortalStoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Delete a model group.  The `basic` group is protected (spec §3.1.4);
+    /// deleting any other group resets dependent keys to `basic` via the
+    /// `ON DELETE SET DEFAULT` foreign key.
+    pub async fn delete_model_group(&self, id: &str) -> Result<(), PortalStoreError> {
+        if id == "basic" {
+            return Err(PortalStoreError::Conflict(
+                "cannot delete basic group".to_string(),
+            ));
+        }
+        let client = self.pool.get().await?;
+        let rows = client
+            .execute("DELETE FROM model_groups WHERE id = $1", &[&id])
+            .await?;
+        if rows == 0 {
+            return Err(PortalStoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Get allowed models for a specific downstream key.
+    /// Returns the allowed_models list from the key's model_group, or empty vec if no group assigned.
+    pub async fn get_key_allowed_models(
+        &self,
+        downstream_id: &str,
+    ) -> Result<Vec<String>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT mg.id, mg.allowed_models::text \
+                 FROM portal_user_downstreams d \
+                 LEFT JOIN model_groups mg ON d.model_group_id = mg.id \
+                 WHERE d.downstream_id = $1",
+                &[&downstream_id],
+            )
+            .await?;
+
+        match row {
+            // Binding found, group resolved: return the group's allowed models.
+            Some(r) if r.get::<_, Option<String>>(0).is_some() => {
+                let allowed_models_json: String = r.get(1);
+                let models: Vec<String> = serde_json::from_str(&allowed_models_json)
+                    .unwrap_or_default();
+                Ok(models)
+            }
+            // Binding found but model_group_id is NULL (created before the
+            // columns existed): enforce the conservative default group.
+            Some(_) => {
+                let allowed_models_json: String = client
+                    .query_one(
+                        "SELECT allowed_models::text FROM model_groups WHERE id = 'basic'",
+                        &[],
+                    )
+                    .await
+                    .map(|row| row.get::<_, String>(0))
+                    .unwrap_or_else(|_| "[]".to_string());
+                let models: Vec<String> = serde_json::from_str(&allowed_models_json)
+                    .unwrap_or_default();
+                Ok(models)
+            }
+            // No portal binding: this is a direct-config downstream key; no
+            // model-group enforcement (backward compatible).  An empty list
+            // therefore means "no restriction" at the gateway.
+            None => Ok(vec![]),
+        }
     }
 }
 

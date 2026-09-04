@@ -10,6 +10,36 @@ import type {
   ChartTimeRange
 } from '@/types'
 
+// Multi-key management types
+export interface PortalKey {
+  downstream_id: string
+  label: string
+  model_group_id: string
+  model_group_name?: string | null
+  created_at: number
+  usage_count: number
+  is_default: boolean
+}
+
+export interface ModelGroup {
+  id: string
+  name: string
+  description: string | null
+  allowed_models: string[]
+  created_at: number
+  updated_at: number
+}
+
+export interface CreateKeyRequest {
+  downstream_id: string
+  label?: string
+  model_group_id?: string
+}
+
+export interface RotateKeyRequest {
+  new_downstream_id: string
+}
+
 export interface AnnouncementResponse {
   announcement: Announcement | null
 }
@@ -74,10 +104,30 @@ export const portalApi = {
   getUsageSummary: (params: { time_range?: ChartTimeRange }) =>
     portalHttp.get<PortalUsageSummary>('/portal/usage-summary', { params }),
 
-  // Key Management
+  // Key Management (legacy single key)
   getKey: () => portalHttp.get<{ plaintext_key: string | null }>('/portal/key'),
   getModels: () => portalHttp.get<PortalModelStat[]>('/portal/models'),
   rotateKey: () => portalHttp.post<{ plaintext_key: string }>('/portal/key/rotate'),
+
+  // Multi-Key Management
+  listKeys: () => portalHttp.get<PortalKey[]>('/portal/keys'),
+  createKey: (data: CreateKeyRequest) => portalHttp.post<{ success: boolean }>('/portal/keys', data),
+  getKeyDetails: (downstreamId: string) => portalHttp.get<PortalKey>(`/portal/keys/${downstreamId}`),
+  rotateKeyById: (downstreamId: string, newDownstreamId: string) =>
+    portalHttp.post<{ success: boolean }>(`/portal/keys/${downstreamId}/rotate`, {
+      new_downstream_id: newDownstreamId
+    }),
+  setDefaultKey: (downstreamId: string) =>
+    portalHttp.put<{ success: boolean }>(`/portal/keys/${downstreamId}/default`),
+  deleteKey: (downstreamId: string) =>
+    portalHttp.delete<{ success: boolean }>(`/portal/keys/${downstreamId}`),
+
+  // Model groups (portal users can read groups and set their keys' group)
+  listModelGroups: () => portalHttp.get<{ groups: ModelGroup[] }>('/portal/model-groups'),
+  updateKeyModelGroup: (downstreamId: string, modelGroupId: string) =>
+    portalHttp.put<{ success: boolean }>(`/portal/keys/${downstreamId}/model-group`, {
+      model_group_id: modelGroupId
+    }),
 
   // Announcement
   getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement'),

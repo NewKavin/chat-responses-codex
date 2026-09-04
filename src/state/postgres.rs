@@ -2121,12 +2121,45 @@ CREATE TABLE IF NOT EXISTS portal_identities (
     PRIMARY KEY (provider, subject)
 );
 
+-- Model groups for managing allowed models per key
+CREATE TABLE IF NOT EXISTS model_groups (
+    id TEXT PRIMARY KEY CHECK (id ~ '^[a-z0-9-]+$'),
+    name TEXT NOT NULL,
+    description TEXT,
+    allowed_models JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Insert default model groups
+INSERT INTO model_groups (id, name, description, allowed_models) VALUES
+  ('basic', 'Basic Models', 'Cost-effective models for development and testing',
+   '["gpt-3.5-turbo", "claude-3-haiku"]'::jsonb),
+  ('premium', 'Premium Models', 'Advanced models for production workloads',
+   '["gpt-4", "gpt-4-turbo", "claude-3-opus", "claude-3.5-sonnet", "claude-3-sonnet"]'::jsonb),
+  ('all', 'All Models', 'Unrestricted access to all available models',
+   '["*"]'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS portal_user_downstreams (
     user_id       TEXT NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
     downstream_id TEXT NOT NULL,
     is_default    BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (user_id, downstream_id)
 );
+
+-- Add multi-key management columns
+ALTER TABLE portal_user_downstreams
+    ADD COLUMN IF NOT EXISTS label TEXT;
+ALTER TABLE portal_user_downstreams
+    ADD COLUMN IF NOT EXISTS model_group_id TEXT DEFAULT 'basic'
+    REFERENCES model_groups(id) ON DELETE SET DEFAULT;
+ALTER TABLE portal_user_downstreams
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+-- Add index for model_group_id lookups
+CREATE INDEX IF NOT EXISTS idx_portal_user_downstreams_model_group
+    ON portal_user_downstreams(model_group_id);
 
 CREATE TABLE IF NOT EXISTS portal_sessions (
     sid          TEXT PRIMARY KEY,

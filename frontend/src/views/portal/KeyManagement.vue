@@ -3,194 +3,224 @@
     <header class="crc-page-header">
       <div>
         <h1 class="crc-page-title">密钥管理</h1>
-        <p class="crc-page-description">查看当前下游密钥，或在需要时执行安全轮换。</p>
+        <p class="crc-page-description">管理您的下游访问密钥，支持多密钥配置。</p>
       </div>
+      <el-button type="primary" @click="showAddDialog = true">
+        <Plus :size="16" :stroke-width="2" style="margin-right: 6px" />添加密钥
+      </el-button>
     </header>
 
-    <section v-loading="loading" class="key-security-surface crc-surface">
-        <div class="key-security-head">
-          <div>
-            <p class="crc-eyebrow">VAULT // ACCESS KEY</p>
-            <h2 class="key-security-title">下游访问密钥</h2>
-          </div>
-          <span class="key-security-badge">
-            <ShieldCheck :size="13" :stroke-width="1.8" />AES GUARDED
-          </span>
-        </div>
-
-        <el-alert
-          type="info"
-          :closable="false"
-          class="helper-text"
-        >
-          这里显示的是您的完整秘钥，可用于配置客户端。如需更换秘钥，请点击"轮换秘钥"。
-        </el-alert>
-
-        <div class="key-display">
-          <span class="key-display__label">CURRENT KEY // 当前访问密钥</span>
-          <Fingerprint class="key-display__watermark" :size="84" :stroke-width="0.8" aria-hidden="true" />
-          <code v-if="keyPlaintext">{{ keyPlaintext }}</code>
-          <span v-else class="no-key">未设置密钥</span>
-          <div class="key-actions">
-            <el-tooltip content="复制密钥" placement="top">
-              <el-button
-                aria-label="复制密钥"
-                circle
-                :disabled="!keyPlaintext"
-                @click="copyKey(keyPlaintext)"
-              >
-                <Copy :size="15" :stroke-width="1.8" />
-              </el-button>
-            </el-tooltip>
-            <el-button type="warning" @click="handleRotate">
-              <RotateCcw :size="14" :stroke-width="1.8" style="margin-right: 6px" />轮换密钥
-            </el-button>
-            <el-button type="primary" plain @click="handleBindOidc">
-              绑定企业账号
-            </el-button>
-          </div>
-        </div>
-
-        <el-alert
-          type="warning"
-          :closable="false"
-          class="helper-text"
-        >
-          轮换秘钥后，旧秘钥将立即失效。新秘钥只会显示一次，请务必妥善保存。
-        </el-alert>
+    <!-- Loading State -->
+    <section v-if="loading" v-loading="true" class="key-list-surface crc-surface" style="min-height: 300px">
+      <p style="text-align: center; color: var(--crc-text-muted); padding: 60px 0">加载中...</p>
     </section>
 
+    <!-- Error State -->
+    <section v-else-if="error" class="key-list-surface crc-surface">
+      <el-alert type="error" :closable="false" show-icon>
+        <template #title>加载失败</template>
+        {{ error }}
+      </el-alert>
+      <el-button type="primary" @click="loadKeys" style="margin-top: 16px">
+        <RotateCw :size="16" :stroke-width="2" style="margin-right: 6px" />重试
+      </el-button>
+    </section>
+
+    <!-- Empty State -->
+    <section v-else-if="sortedKeys.length === 0" class="key-list-surface crc-surface empty-state">
+      <div class="empty-icon">
+        <KeyRound :size="48" :stroke-width="1.5" />
+      </div>
+      <h3>暂无密钥</h3>
+      <p>点击"添加密钥"按钮创建您的第一个访问密钥</p>
+      <el-button type="primary" @click="showAddDialog = true">
+        <Plus :size="16" :stroke-width="2" style="margin-right: 6px" />添加密钥
+      </el-button>
+    </section>
+
+    <!-- Keys Grid -->
+    <section v-else class="key-list-surface crc-surface">
+      <div class="key-grid">
+        <KeyCard
+          v-for="key in sortedKeys"
+          :key="key.downstream_id"
+          :key-data="key"
+          :model-groups="modelGroups"
+          @edit="handleEdit"
+          @rotate="handleRotate"
+          @delete="handleDelete"
+          @set-default="handleSetDefault"
+          @change-model-group="handleChangeModelGroup"
+        />
+      </div>
+      <footer class="key-count">
+        显示 {{ sortedKeys.length }} 个密钥
+      </footer>
+    </section>
+
+    <!-- Add Key Dialog -->
     <el-dialog
-      v-model="rotateDialogVisible"
-      class="rotate-key-dialog"
-      title="密钥轮换成功"
+      v-model="showAddDialog"
+      title="添加新密钥"
       width="min(500px, calc(100vw - 32px))"
     >
-      <el-alert type="success" :closable="false" show-icon>
-        <template #title>
-          新秘钥已生成，请立即保存！此秘钥只显示一次。
-        </template>
-      </el-alert>
-      <div class="new-key-container">
-        <code>{{ newKey }}</code>
-        <el-tooltip content="复制密钥" placement="top">
-          <el-button
-            aria-label="复制密钥"
-            circle
-            type="primary"
-            @click="copyFullKey(newKey)"
+      <el-form :model="newKeyForm" label-width="100px">
+        <el-form-item label="密钥 ID" required>
+          <el-input
+            v-model="newKeyForm.downstream_id"
+            placeholder="sk-..."
+          />
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-input
+            v-model="newKeyForm.label"
+            placeholder="为密钥添加备注标签"
+          />
+        </el-form-item>
+        <el-form-item label="模型分组">
+          <el-select
+            v-model="newKeyForm.model_group_id"
+            placeholder="选择模型分组（默认 basic）"
+            clearable
+            style="width: 100%"
           >
-            <Copy :size="15" :stroke-width="1.8" />
-          </el-button>
-        </el-tooltip>
-      </div>
-      <el-alert
-        type="warning"
-        :closable="false"
-        class="helper-text"
-      >
-        这是完整的秘钥，可用于门户登录。请立即复制并妥善保存，关闭后无法再次查看。
-      </el-alert>
+            <el-option
+              v-for="group in modelGroups"
+              :key="group.id"
+              :label="group.name"
+              :value="group.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
       <template #footer>
-        <el-button type="primary" @click="closeRotateDialog">我已保存</el-button>
+        <el-button @click="showAddDialog = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!newKeyForm.downstream_id"
+          @click="handleCreate"
+        >
+          添加密钥
+        </el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-const handleBindOidc = () => {
-  window.location.href = '/api/portal/oidc/start?intent=bind'
-}
+import { ref, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { Plus, RotateCw, KeyRound } from '@lucide/vue'
+import { portalApi, type ModelGroup, type PortalKey } from '@/api/portal'
+import KeyCard from '@/components/KeyCard.vue'
 
-import { ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { Copy, Fingerprint, RotateCcw, ShieldCheck } from '@lucide/vue'
-import { portalApi } from '@/api/portal'
-import { getCopyableKey } from '@/utils/keyUtils'
+const loading = ref(true)
+const error = ref<string | null>(null)
+const keys = ref<PortalKey[]>([])
+const showAddDialog = ref(false)
+const modelGroups = ref<ModelGroup[]>([])
+const newKeyForm = ref({
+  downstream_id: '',
+  label: '',
+  model_group_id: ''
+})
 
-const loading = ref(false)
-const keyPlaintext = ref<string | null>(null)
-const rotateDialogVisible = ref(false)
-const newKey = ref('')
+const sortedKeys = computed(() => {
+  return [...keys.value].sort((a, b) => {
+    if (a.is_default !== b.is_default) {
+      return a.is_default ? -1 : 1
+    }
+    return b.created_at - a.created_at
+  })
+})
 
-const loadData = async () => {
+const loadKeys = async () => {
   try {
     loading.value = true
-    const { data } = await portalApi.getKey()
-    keyPlaintext.value = data.plaintext_key
-  } catch (error) {
-    ElMessage.error('加载秘钥信息失败')
+    error.value = null
+    const { data } = await portalApi.listKeys()
+    keys.value = data
+  } catch (err: any) {
+    error.value = err.message || '加载密钥失败'
   } finally {
     loading.value = false
   }
 }
 
-const copyKey = async (key: unknown) => {
-  const copyableKey = getCopyableKey(key)
-  if (!copyableKey) {
-    ElMessage.warning('当前没有可复制的真实秘钥，请先轮换秘钥')
-    return
-  }
-
+const handleCreate = async () => {
   try {
-    await navigator.clipboard.writeText(copyableKey)
-    ElMessage.success('已复制到剪贴板')
-  } catch {
-    const textArea = document.createElement('textarea')
-    textArea.value = copyableKey
-    textArea.style.position = 'fixed'
-    textArea.style.left = '-9999px'
-    document.body.appendChild(textArea)
-    textArea.focus()
-    textArea.select()
-    try {
-      document.execCommand('copy')
-      ElMessage.success('已复制到剪贴板')
-    } catch {
-      ElMessage.error('复制失败，请手动复制')
-    }
-    document.body.removeChild(textArea)
+    await portalApi.createKey({
+      downstream_id: newKeyForm.value.downstream_id,
+      label: newKeyForm.value.label || undefined,
+      model_group_id: newKeyForm.value.model_group_id || 'basic'
+    })
+    ElMessage.success('密钥添加成功')
+    showAddDialog.value = false
+    newKeyForm.value = { downstream_id: '', label: '', model_group_id: '' }
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '添加密钥失败')
   }
 }
 
-const copyFullKey = async (key: string) => {
-  await copyKey(key)
+const handleEdit = async (_downstreamId: string, _newLabel: string) => {
+  // TODO: Implement edit when API available
+  await loadKeys()
 }
 
-const handleRotate = async () => {
+const handleRotate = async (downstreamId: string, newId: string) => {
   try {
-    await ElMessageBox.confirm(
-      '确定要轮换秘钥吗？轮换后旧秘钥将立即失效，请确保您已不再使用旧秘钥。',
-      '确认轮换',
-      {
-        type: 'warning',
-        confirmButtonText: '确定轮换',
-        cancelButtonText: '取消'
-      }
-    )
-
-    const { data } = await portalApi.rotateKey()
-    newKey.value = data.plaintext_key
-    keyPlaintext.value = data.plaintext_key
-    rotateDialogVisible.value = true
-    ElMessage.warning('请立即保存新秘钥，此秘钥只显示一次！')
-
-    loadData()
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error('轮换秘钥失败')
-    }
+    await portalApi.rotateKeyById(downstreamId, newId)
+    ElMessage.success('密钥轮换成功')
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '轮换密钥失败')
   }
 }
 
-const closeRotateDialog = () => {
-  rotateDialogVisible.value = false
-  newKey.value = ''
+const handleDelete = async (downstreamId: string) => {
+  try {
+    await portalApi.deleteKey(downstreamId)
+    ElMessage.success('密钥已删除')
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '删除密钥失败')
+  }
+}
+
+const handleSetDefault = async (downstreamId: string) => {
+  try {
+    await portalApi.setDefaultKey(downstreamId)
+    ElMessage.success('默认密钥已设置')
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '设置默认密钥失败')
+  }
+}
+
+const handleChangeModelGroup = async (downstreamId: string, modelGroupId: string) => {
+  try {
+    await portalApi.updateKeyModelGroup(downstreamId, modelGroupId)
+    ElMessage.success('模型分组已更新')
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '更新模型分组失败')
+    throw err
+  }
+}
+
+const loadModelGroups = async () => {
+  try {
+    const { data } = await portalApi.listModelGroups()
+    modelGroups.value = data.groups ?? []
+  } catch (err: any) {
+    console.warn('加载模型分组失败', err)
+  }
 }
 
 onMounted(() => {
-  loadData()
+  loadKeys()
+  loadModelGroups()
 })
 </script>
 
@@ -199,134 +229,80 @@ onMounted(() => {
   min-height: 100%;
 }
 
-.key-security-surface {
+.crc-page-header {
   display: flex;
-  flex-direction: column;
-  gap: 18px;
-  max-width: 880px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.key-list-surface {
+  max-width: 1200px;
   padding: 24px;
 }
 
-.key-security-head {
+.empty-state {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: center;
   gap: 16px;
+  padding: 80px 24px;
+  text-align: center;
 }
 
-.key-security-title {
-  margin: 6px 0 0;
-  color: var(--crc-text-strong);
-  font-family: var(--crc-font-display);
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.key-security-badge {
-  display: inline-flex;
-  padding: 6px 10px;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--crc-border);
-  border-radius: 999px;
-  color: var(--crc-accent);
-  background: var(--crc-accent-soft);
-  font-family: var(--crc-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-}
-
-.key-display {
-  position: relative;
-  display: grid;
-  align-items: center;
-  gap: 14px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding: 20px;
-  overflow: hidden;
-  border: 1px solid var(--crc-border-strong);
-  border-radius: var(--crc-radius);
-  background:
-    radial-gradient(ellipse 90% 130% at 100% 0%, var(--crc-accent-soft) 0%, transparent 55%),
-    var(--crc-canvas);
-}
-
-.key-display__watermark {
-  position: absolute;
-  right: 16px;
-  top: 50%;
-  color: var(--crc-accent);
-  opacity: 0.1;
-  pointer-events: none;
-  transform: translateY(-50%);
-}
-
-.key-display__label {
-  grid-column: 1 / -1;
-  color: var(--crc-text-subtle);
-  font-family: var(--crc-font-mono);
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-}
-
-.key-display code,
-.new-key-container code {
-  position: relative;
-  min-width: 0;
-  padding: 12px 14px;
-  border: 1px dashed var(--crc-border-strong);
-  border-radius: var(--crc-radius-sm);
-  color: var(--crc-text-strong);
-  background: var(--crc-surface);
-  font-family: var(--crc-font-mono);
-  font-size: 15px;
-  letter-spacing: 0.02em;
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-
-.key-actions {
-  position: relative;
+.empty-icon {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.no-key {
+  justify-content: center;
+  width: 96px;
+  height: 96px;
+  border: 2px solid var(--crc-border);
+  border-radius: 50%;
   color: var(--crc-text-muted);
-  font-style: italic;
-}
-
-.new-key-container {
-  display: grid;
-  align-items: center;
-  gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  margin: 20px 0;
-  padding: 16px;
-  border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius);
   background: var(--crc-canvas);
 }
 
-.helper-text {
+.empty-state h3 {
   margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.empty-state p {
+  margin: 0;
+  color: var(--crc-text-muted);
+  max-width: 400px;
+}
+
+.key-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+  margin-bottom: 24px;
+}
+
+.key-count {
+  padding-top: 16px;
+  border-top: 1px solid var(--crc-border);
+  color: var(--crc-text-subtle);
+  font-size: 14px;
+  text-align: center;
 }
 
 @media (max-width: 767px) {
-  .key-security-surface {
+  .crc-page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .key-list-surface {
     padding: 16px;
   }
 
-  .key-display,
-  .new-key-container {
+  .key-grid {
     grid-template-columns: 1fr;
-  }
-
-  .key-actions {
-    justify-content: flex-start;
   }
 }
 </style>

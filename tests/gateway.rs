@@ -12,6 +12,9 @@ mod chat;
 mod claude;
 #[path = "gateway/common.rs"]
 mod common;
+#[path = "common/oidc.rs"]
+#[allow(dead_code, unused_imports)]
+mod shared_oidc;
 #[path = "gateway/compatibility.rs"]
 mod compatibility;
 #[path = "gateway/dialect_matrix.rs"]
@@ -22,6 +25,8 @@ mod dialect_retry;
 mod images;
 #[path = "gateway/model_mappings.rs"]
 mod model_mappings;
+#[path = "gateway/model_permission_validation.rs"]
+mod model_permission_validation;
 #[path = "gateway/responses.rs"]
 mod responses;
 #[path = "gateway/responses/reasoning.rs"]

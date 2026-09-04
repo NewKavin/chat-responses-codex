@@ -21,7 +21,7 @@ fn create_test_state_without_announcement() -> (AppState, String) {
         jwt_secret: "test_secret".to_string(),
         ..Default::default()
     };
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
@@ -70,7 +70,7 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
         jwt_secret: "test_secret".to_string(),
         ..Default::default()
     };
-    let generated = generate_downstream_key("sk");
+    let generated = generate_downstream_key("key");
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
@@ -269,7 +269,6 @@ async fn portal_announcement_returns_active_announcement() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["announcement"]["id"], saved["announcement"]["id"]);

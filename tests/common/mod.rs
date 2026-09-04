@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, clippy::await_holding_lock)]
+
 use axum::Router;
 use chat_responses_codex::state::{AppConfig, AppState, PersistedState};
 use tempfile::TempDir;
