@@ -1155,16 +1155,11 @@ pub(super) async fn portal_list_model_groups(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Portal users may read the available model groups (to pick one for a key)
-    // but not manage them; group management stays admin-only.
-    // Require a portal session to read the group list (management stays admin-only).
-    if extract_user_id_from_session(&state, &headers).await.is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": {"message": "Unauthorized"}})),
-        )
-            .into_response();
-    }
+    // 提取用户 ID（修改：原来只检查了 session 存在性）
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let Some(store) = state.portal_store() else {
         return (
@@ -1174,7 +1169,8 @@ pub(super) async fn portal_list_model_groups(
             .into_response();
     };
 
-    match store.list_model_groups().await {
+    // 修改：调用新方法，只返回用户有权访问的分组
+    match store.list_user_accessible_model_groups(&user_id).await {
         Ok(groups) => (StatusCode::OK, Json(json!({ "groups": groups }))).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1219,6 +1215,30 @@ pub(super) async fn portal_update_key_model_group(
             }})),
         )
             .into_response();
+    }
+
+    // 新增：检查用户是否有权访问该分组
+    match store.user_can_access_model_group(&user_id, &payload.model_group_id).await {
+        Ok(true) => {},  // 有权限，继续
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": {
+                        "code": "model_group_forbidden",
+                        "message": format!("You do not have access to model group '{}'", payload.model_group_id)
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
     }
 
     match store

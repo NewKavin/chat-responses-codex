@@ -4201,7 +4201,6 @@ impl AppState {
                         UpstreamCandidate::new(upstream.id.clone(), upstream.name.clone(), protocol)
                             .with_models(upstream.route_models())
                             .with_priority(upstream.priority)
-                            .with_premium_models(upstream.premium_route_models())
                             .with_failure_count(upstream.failure_count)
                     })
                     .collect::<Vec<_>>()
@@ -7179,13 +7178,7 @@ impl AppState {
                         .iter()
                         .flat_map(|key| key.retained.iter().cloned())
                         .collect::<BTreeSet<_>>();
-                    upstream
-                        .premium_models
-                        .retain(|model| retained.contains(model));
-                    upstream.supported_models = retained
-                        .into_iter()
-                        .filter(|model| !upstream.premium_models.contains(model))
-                        .collect();
+                    upstream.supported_models = retained.into_iter().collect();
                     upstream.normalize_for_storage();
                     upstream
                         .validate_configuration()

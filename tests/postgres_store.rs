@@ -52,7 +52,7 @@ async fn reset_test_database(database_url: &str) {
         .batch_execute(
             "TRUNCATE TABLE response_history, usage_logs, dialect_profiles, \
              downstream_ip_allowlist, downstream_model_allowlist, downstreams, \
-             upstream_premium_models, upstream_supported_models, upstreams, \
+             upstream_supported_models, upstreams, \
              global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
         )
         .await

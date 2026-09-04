@@ -6784,21 +6784,7 @@ async fn process_gateway_request_inner(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut deprioritized_upstreams = Vec::new();
-            upstreams.retain(|upstream| {
-                let is_non_premium_request =
-                    !upstream.is_premium_model_request_with(&normalized_model, case_insensitive);
-                let should_deprioritize = upstream.protect_premium_quota
-                    && !upstream.premium_models.is_empty()
-                    && is_non_premium_request;
-                if should_deprioritize {
-                    deprioritized_upstreams.push(upstream.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            let total_candidate_count = upstreams.len() + deprioritized_upstreams.len();
+            let total_candidate_count = upstreams.len();
             let history_pinned_upstream = response_history_context
                 .as_ref()
                 .and_then(ResponseHistoryContext::continuation_upstream_id);
@@ -6825,7 +6811,6 @@ async fn process_gateway_request_inner(
             };
             let optional_capability_misses_by_upstream = upstreams
                 .iter()
-                .chain(deprioritized_upstreams.iter())
                 .map(|upstream| {
                     (
                         upstream.id.clone(),
@@ -6855,8 +6840,6 @@ async fn process_gateway_request_inner(
                 )
             };
             upstreams.sort_by_key(&ranking_key);
-            deprioritized_upstreams.sort_by_key(ranking_key);
-            upstreams.extend(deprioritized_upstreams);
             if !requested_features.optional.is_empty() {
                 upstreams.sort_by_key(|upstream| optional_capability_misses(upstream));
             }
@@ -6997,7 +6980,7 @@ async fn process_gateway_request_inner(
                 let minute_cost = runtime.minute_cost + request_cost;
                 let five_hour_cost = runtime.five_hour_cost + request_cost;
                 format!(
-                    "{}|{}|{:?}|in_flight={}|minute_cost={}/{}|five_hour_cost={}/{}|request_cost={}|protect_premium_quota={}|premium_match={}",
+                    "{}|{}|{:?}|in_flight={}|minute_cost={}/{}|five_hour_cost={}/{}|request_cost={}",
                     upstream.id,
                     upstream.name,
                     protocol,
@@ -7007,8 +6990,6 @@ async fn process_gateway_request_inner(
                     five_hour_cost,
                     upstream.request_quota_requests,
                     request_cost,
-                    upstream.protect_premium_quota,
-                    upstream.is_premium_model_request_with(&normalized_model, case_insensitive)
                 )
             })
             .collect::<Vec<_>>();

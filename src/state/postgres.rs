@@ -118,11 +118,8 @@ impl PostgresStateStore {
                 requests_per_minute: row.get::<_, i32>(10) as u32,
                 max_concurrency: row.get::<_, i32>(11) as u32,
                 priority: row.get::<_, i32>(12) as u32,
-                premium_models: Vec::new(),
-                premium_only: row.get::<_, bool>(13),
-                protect_premium_quota: row.get::<_, bool>(14),
-                active: row.get::<_, bool>(15),
-                failure_count: row.get::<_, i32>(16) as u32,
+                active: row.get::<_, bool>(13),
+                failure_count: row.get::<_, i32>(14) as u32,
                 auto_managed: row.get::<_, bool>(17),
                 managed_source: row.get::<_, Option<String>>(18),
                 last_synced_at: row.get::<_, i64>(19) as u64,
@@ -162,22 +159,6 @@ impl PostgresStateStore {
             let model_slug: String = row.get(1);
             if let Some(&index) = upstream_index.get(&upstream_id) {
                 upstreams[index].supported_models.push(model_slug);
-            }
-        }
-
-        for row in conn
-            .query(
-                "SELECT upstream_id, model_slug FROM upstream_premium_models \
-                 ORDER BY upstream_id, position, model_slug",
-                &[],
-            )
-            .await
-            .map_err(io_other)?
-        {
-            let upstream_id: String = row.get(0);
-            let model_slug: String = row.get(1);
-            if let Some(&index) = upstream_index.get(&upstream_id) {
-                upstreams[index].premium_models.push(model_slug);
             }
         }
 
@@ -1217,8 +1198,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &(upstream.requests_per_minute as i32),
             &(upstream.max_concurrency as i32),
             &(upstream.priority as i32),
-            &upstream.premium_only,
-            &upstream.protect_premium_quota,
             &upstream.active,
             &(upstream.failure_count as i32),
             &upstream.auto_managed,
@@ -1234,7 +1213,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &model_mappings_json,
             &model_dialect_presets_json,
         ];
-        const UPSTREAM_COLUMNS: [&str; 30] = [
+        const UPSTREAM_COLUMNS: [&str; 28] = [
             "id",
             "name",
             "base_url",
@@ -1249,8 +1228,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             "requests_per_minute",
             "max_concurrency",
             "priority",
-            "premium_only",
-            "protect_premium_quota",
             "active",
             "failure_count",
             "auto_managed",
@@ -1280,8 +1257,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 requests_per_minute = EXCLUDED.requests_per_minute,
                 max_concurrency = EXCLUDED.max_concurrency,
                 priority = EXCLUDED.priority,
-                premium_only = EXCLUDED.premium_only,
-                protect_premium_quota = EXCLUDED.protect_premium_quota,
                 active = EXCLUDED.active,
                 failure_count = EXCLUDED.failure_count,
                 auto_managed = EXCLUDED.auto_managed,
@@ -1323,16 +1298,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         )
         .await
         .map_err(io_other)?;
-        for (position, model_slug) in upstream.premium_models.iter().enumerate() {
-            let params: &[&(dyn ToSql + Sync)] = &[&upstream.id, &(position as i32), model_slug];
-            tx.execute(
-                "INSERT INTO upstream_premium_models (upstream_id, position, model_slug)
-                 VALUES ($1, $2, $3)",
-                params,
-            )
-            .await
-            .map_err(io_other)?;
-        }
     }
 
     Ok(())
@@ -2140,6 +2105,21 @@ INSERT INTO model_groups (id, name, description, allowed_models) VALUES
   ('all', 'All Models', 'Unrestricted access to all available models',
    '["*"]'::jsonb)
 ON CONFLICT (id) DO NOTHING;
+
+-- User access permissions for model groups
+CREATE TABLE IF NOT EXISTS portal_user_model_groups (
+  user_id TEXT NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  model_group_id TEXT NOT NULL REFERENCES model_groups(id) ON DELETE CASCADE,
+  granted_at TIMESTAMPTZ DEFAULT NOW(),
+  granted_by TEXT,
+  PRIMARY KEY (user_id, model_group_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_portal_user_model_groups_user
+ON portal_user_model_groups(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_portal_user_model_groups_group
+ON portal_user_model_groups(model_group_id);
 
 CREATE TABLE IF NOT EXISTS portal_user_downstreams (
     user_id       TEXT NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,

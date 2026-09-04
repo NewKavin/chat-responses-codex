@@ -174,7 +174,6 @@ impl UpstreamConfig {
         for model in self
             .supported_models
             .iter()
-            .chain(self.premium_models.iter())
         {
             let model = model.trim();
             if model.is_empty() {
@@ -208,10 +207,6 @@ impl UpstreamConfig {
 
     pub fn resolved_model_name_with(&self, model: &str, case_insensitive: bool) -> Option<String> {
         self.canonical_route_model(model, case_insensitive)
-    }
-
-    pub fn is_premium_model_request(&self, model: &str) -> bool {
-        self.is_premium_model_request_with(model, true)
     }
 
     /// T3.4: resolve the dialect preset for a specific runtime model slug.
@@ -252,61 +247,8 @@ impl UpstreamConfig {
         self.dialect_preset.as_deref()
     }
 
-    pub fn is_premium_model_request_with(&self, model: &str, case_insensitive: bool) -> bool {
-        if self.premium_models.is_empty() {
-            return false;
-        }
-
-        let model = model.trim();
-        if model.is_empty() {
-            return false;
-        }
-
-        let matches = |candidate: &str| {
-            self.premium_models.iter().any(|premium| {
-                let premium = premium.trim();
-                if case_insensitive {
-                    super::models_equivalent_with(premium, candidate, true)
-                        || super::codex_subagent_base_model(candidate)
-                            .is_some_and(|base| super::models_equivalent_with(premium, base, true))
-                } else {
-                    premium == candidate
-                        || super::codex_subagent_base_model(candidate)
-                            .is_some_and(|base| premium == base)
-                }
-            })
-        };
-
-        // Per-upstream model mappings rename the downstream view: premium is
-        // judged against the upstream's original spelling (3.3.3). Upstream A
-        // with premium_models ["gpt-4"] and mapping gpt-4 -> gpt-4-premium
-        // counts requests for "gpt-4-premium" as premium requests.
-        if let Some(resolved) = self.canonical_route_model(model, case_insensitive) {
-            if matches(&resolved) {
-                return true;
-            }
-        }
-        // Legacy fallback: upstreams that cannot resolve this request keep the
-        // raw-name comparison (quota-protection decisions are per-upstream).
-        matches(model)
-    }
     pub fn request_quota_window_seconds(&self) -> u64 {
         u64::from(self.request_quota_window_hours.max(1)).saturating_mul(60 * 60)
-    }
-
-    pub fn premium_route_models(&self) -> Vec<String> {
-        let mut models = Vec::new();
-        let mut seen = HashSet::new();
-        for premium in &self.premium_models {
-            let premium = premium.trim();
-            if premium.is_empty() {
-                continue;
-            }
-            if seen.insert(premium.to_string()) {
-                models.push(premium.to_string());
-            }
-        }
-        models
     }
 
     pub fn normalize_for_storage(&mut self) {
@@ -341,7 +283,6 @@ impl UpstreamConfig {
             self.supported_models =
                 normalized_string_list(std::mem::take(&mut self.supported_models));
         }
-        self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
         self.model_mappings = std::mem::take(&mut self.model_mappings)
             .into_iter()
             .map(|mapping| UpstreamModelMapping {
@@ -375,32 +316,6 @@ impl UpstreamConfig {
             );
         }
         self.validate_model_mappings()?;
-        if self.premium_models.is_empty() {
-            return Ok(());
-        }
-
-        let routable = self
-            .supported_models
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let unknown = self
-            .premium_models
-            .iter()
-            .map(|model| model.trim().to_string())
-            .filter(|model| !model.is_empty() && !routable.contains(model))
-            .collect::<Vec<_>>();
-
-        // Allow premium_models that are not yet in supported_models.
-        // The upstream may be configured with premium models before model discovery,
-        // or the premium model might match upstream route patterns.
-        if !unknown.is_empty() {
-            tracing::warn!(
-                "premium_models contain models not yet in supported_models: {}",
-                unknown.join(", ")
-            );
-        }
-
         Ok(())
     }
 

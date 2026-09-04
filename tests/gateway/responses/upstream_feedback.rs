@@ -675,9 +675,6 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 requests_per_minute: 60,
                 max_concurrency: 1, // Set to 1 to test that local config doesn't hard-reject
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -829,9 +826,6 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -963,9 +957,6 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1128,9 +1119,6 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1261,9 +1249,6 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1390,9 +1375,6 @@ async fn route_failure_observability_separates_upstream_500_from_downstream_503(
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1592,9 +1574,6 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1761,9 +1740,6 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 requests_per_minute: 60,
                 max_concurrency: 1, // Set to 1 to test that local config doesn't hard-reject
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1950,9 +1926,6 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -1974,9 +1947,6 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 1,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -2078,9 +2048,6 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,

@@ -30,8 +30,6 @@ pub struct UpstreamCandidate {
     pub protocol: UpstreamProtocol,
     pub models: Vec<String>,
     pub priority: u32,
-    pub premium_models: Vec<String>,
-    pub protect_premium_quota: bool,
     pub failure_count: u32,
 }
 
@@ -43,8 +41,6 @@ impl UpstreamCandidate {
             protocol,
             models: Vec::new(),
             priority: 0,
-            premium_models: Vec::new(),
-            protect_premium_quota: false,
             failure_count: 0,
         }
     }
@@ -63,46 +59,9 @@ impl UpstreamCandidate {
         self
     }
 
-    pub fn with_premium_models<I, S>(mut self, models: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.premium_models = models.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn with_protect_premium_quota(mut self, protect: bool) -> Self {
-        self.protect_premium_quota = protect;
-        self
-    }
-
     pub fn with_failure_count(mut self, failure_count: u32) -> Self {
         self.failure_count = failure_count;
         self
-    }
-
-    /// Check if this is a premium model for this upstream
-    pub fn is_premium_model(&self, model: &str) -> bool {
-        self.is_premium_model_with(model, true)
-    }
-
-    pub fn is_premium_model_with(&self, model: &str, case_insensitive: bool) -> bool {
-        !self.premium_models.is_empty()
-            && self.premium_models.iter().any(|candidate| {
-                crate::state::models_equivalent_with(candidate, model, case_insensitive)
-            })
-    }
-
-    /// Check if this upstream should be avoided for non-premium models
-    pub fn should_avoid_for_non_premium(&self, model: &str) -> bool {
-        self.should_avoid_for_non_premium_with(model, true)
-    }
-
-    pub fn should_avoid_for_non_premium_with(&self, model: &str, case_insensitive: bool) -> bool {
-        self.protect_premium_quota
-            && !self.premium_models.is_empty()
-            && !self.is_premium_model_with(model, case_insensitive)
     }
 }
 
@@ -148,38 +107,17 @@ pub fn select_upstream_with_model_matching(
         return Err(RouteError::ModelUnavailable(request.model.clone()));
     }
 
-    // Step 2: Separate into preferred and fallback groups
-    let (mut preferred, mut fallback): (Vec<_>, Vec<_>) =
-        supported.into_iter().partition(|candidate| {
-            !candidate.should_avoid_for_non_premium_with(&request.model, case_insensitive)
-        });
+    // Step 2: Sort by priority (higher first), then by failure count (lower first)
+    let mut preferred = supported;
+    preferred.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.failure_count.cmp(&b.failure_count))
+    });
 
-    // Step 3: Try preferred group first
-    if !preferred.is_empty() {
-        // Sort by priority (higher first), then by failure count (lower first)
-        preferred.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.failure_count.cmp(&b.failure_count))
-        });
-
-        // Find the first healthy upstream
-        if let Some(candidate) = preferred.iter().find(|c| c.failure_count < 3) {
-            return Ok(candidate.clone());
-        }
-    }
-
-    // Step 4: Fall back to protected upstreams if no preferred option
-    if !fallback.is_empty() {
-        fallback.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.failure_count.cmp(&b.failure_count))
-        });
-
-        if let Some(candidate) = fallback.iter().find(|c| c.failure_count < 3) {
-            return Ok(candidate.clone());
-        }
+    // Find the first healthy upstream
+    if let Some(candidate) = preferred.iter().find(|c| c.failure_count < 3) {
+        return Ok(candidate.clone());
     }
 
     // All upstreams are unhealthy

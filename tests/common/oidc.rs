@@ -80,8 +80,8 @@ pub async fn reset_portal_tables(database_url: &str) {
     client
         .batch_execute(
             "DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
-             portal_identities, portal_users, oauth_login_attempts, runtime_settings, \
-             model_groups \
+             portal_user_model_groups, portal_identities, portal_users, \
+             oauth_login_attempts, runtime_settings, model_groups \
              CASCADE",
         )
         .await

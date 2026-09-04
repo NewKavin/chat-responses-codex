@@ -1743,7 +1743,6 @@ async fn test_upstreams_create_accepts_premium_models_not_in_supported() {
         "protocol": "ChatCompletions",
         "supported_models": ["GLM-5"],
         "premium_models": ["glm-5.1"],
-        "protect_premium_quota": true,
         "active": true
     });
 

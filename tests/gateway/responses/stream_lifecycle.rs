@@ -282,9 +282,6 @@ async fn stream_disconnect_releases_runtime_state() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -412,9 +409,6 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1621,9 +1615,6 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1754,9 +1745,6 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -2121,9 +2109,6 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -2287,9 +2272,6 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -2645,9 +2627,6 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -2817,9 +2796,6 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()

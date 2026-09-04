@@ -63,9 +63,6 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -193,9 +190,6 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()

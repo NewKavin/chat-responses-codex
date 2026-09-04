@@ -990,6 +990,108 @@ impl PortalStore {
         Ok(())
     }
 
+    /// 列出用户有权访问的模型分组（basic 默认可见）。
+    pub async fn list_user_accessible_model_groups(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ModelGroup>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT mg.id, mg.name, mg.description, mg.allowed_models::text, \
+                        EXTRACT(EPOCH FROM mg.created_at)::bigint, \
+                        EXTRACT(EPOCH FROM mg.updated_at)::bigint \
+                 FROM model_groups mg \
+                 WHERE mg.id = 'basic' \
+                    OR EXISTS (
+                        SELECT 1 FROM portal_user_model_groups pumg \
+                        WHERE pumg.user_id = $1 AND pumg.model_group_id = mg.id
+                    ) \
+                 ORDER BY mg.id",
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let allowed_models_json: String = row.get(3);
+                let allowed_models: Vec<String> = serde_json::from_str(&allowed_models_json)
+                    .unwrap_or_default();
+
+                ModelGroup {
+                    id: row.get(0),
+                    name: row.get(1),
+                    description: row.get(2),
+                    allowed_models,
+                    created_at: row.get(4),
+                    updated_at: row.get(5),
+                }
+            })
+            .collect())
+    }
+
+    /// 检查用户是否有权访问指定分组。
+    pub async fn user_can_access_model_group(
+        &self,
+        user_id: &str,
+        model_group_id: &str,
+    ) -> Result<bool, PortalStoreError> {
+        if model_group_id == "basic" {
+            return Ok(true);
+        }
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM portal_user_model_groups \
+                 WHERE user_id = $1 AND model_group_id = $2",
+                &[&user_id, &model_group_id],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// 授予用户对分组的访问权限（管理员操作）。
+    pub async fn grant_user_model_group(
+        &self,
+        user_id: &str,
+        model_group_id: &str,
+        granted_by: Option<&str>,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO portal_user_model_groups (user_id, model_group_id, granted_by) \
+                 VALUES ($1, $2, $3) \
+                 ON CONFLICT (user_id, model_group_id) DO NOTHING",
+                &[&user_id, &model_group_id, &granted_by],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 撤销用户对分组的访问权限（管理员操作）。
+    pub async fn revoke_user_model_group(
+        &self,
+        user_id: &str,
+        model_group_id: &str,
+    ) -> Result<(), PortalStoreError> {
+        if model_group_id == "basic" {
+            return Err(PortalStoreError::Forbidden(
+                "cannot revoke basic group access".to_string(),
+            ));
+        }
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "DELETE FROM portal_user_model_groups \
+                 WHERE user_id = $1 AND model_group_id = $2",
+                &[&user_id, &model_group_id],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Get allowed models for a specific downstream key.
     /// Returns the allowed_models list from the key's model_group, or empty vec if no group assigned.
     pub async fn get_key_allowed_models(

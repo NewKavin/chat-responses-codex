@@ -10,8 +10,6 @@ fn test_avoid_premium_account_for_non_premium_model() {
         UpstreamProtocol::ChatCompletions,
     )
     .with_models(vec!["gpt-4", "gpt-3.5-turbo", "glm-5.1"])
-    .with_premium_models(vec!["glm-5.1"])
-    .with_protect_premium_quota(true)
     .with_priority(100);
 
     let regular_account = UpstreamCandidate::new(
@@ -41,8 +39,6 @@ fn test_use_premium_account_for_premium_model() {
         UpstreamProtocol::ChatCompletions,
     )
     .with_models(vec!["gpt-4", "glm-5.1"])
-    .with_premium_models(vec!["glm-5.1"])
-    .with_protect_premium_quota(true)
     .with_priority(100);
 
     let regular_account = UpstreamCandidate::new(
@@ -72,8 +68,6 @@ fn test_fallback_to_premium_when_no_other_option() {
         UpstreamProtocol::ChatCompletions,
     )
     .with_models(vec!["gpt-4", "glm-5.1"])
-    .with_premium_models(vec!["glm-5.1"])
-    .with_protect_premium_quota(true)
     .with_priority(100);
 
     let request = RouteRequest::new("gpt-4", UpstreamProtocol::ChatCompletions, false);

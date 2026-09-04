@@ -124,7 +124,6 @@ fn case_insensitive_model_identity_covers_key_premium_and_context_matching() {
         api_key: "key-a".into(),
         api_key_models: vec![mapping("key-a", &["GLM-4.5"])],
         supported_models: vec!["GLM-4.5".into()],
-        premium_models: vec!["GLM-4.5".into()],
         model_contexts: vec![ModelContextConfig {
             slug: "GLM-4.5".into(),
             context_limit: 128_000,
@@ -136,7 +135,6 @@ fn case_insensitive_model_identity_covers_key_premium_and_context_matching() {
     };
 
     assert_eq!(upstream.keys_for_model_with("glm-4.5", true), vec!["key-a"]);
-    assert!(upstream.is_premium_model_request_with("glm-4.5", true));
     assert_eq!(
         upstream
             .context_config_for_model_with("glm-4.5", true)
@@ -146,7 +144,6 @@ fn case_insensitive_model_identity_covers_key_premium_and_context_matching() {
     );
 
     assert!(upstream.keys_for_model_with("glm-4.5", false).is_empty());
-    assert!(!upstream.is_premium_model_request_with("glm-4.5", false));
     assert!(upstream
         .context_config_for_model_with("glm-4.5", false)
         .is_none());

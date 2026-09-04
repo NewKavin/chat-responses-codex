@@ -30,9 +30,6 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -55,9 +52,6 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -1696,9 +1690,6 @@ async fn downstream_chat_request_does_not_fall_back_to_primary_key_for_unmapped_
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 100,
-                    premium_models: vec!["glm-5.1".into()],
-                    premium_only: false,
-                    protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -1801,9 +1792,6 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         requests_per_minute: 60,
                         max_concurrency: 10,
                         priority: 999,
-                        premium_models: vec!["glm5.1".into()],
-                        premium_only: false,
-                        protect_premium_quota: true,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -1826,9 +1814,6 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         requests_per_minute: 60,
                         max_concurrency: 10,
                         priority: 1,
-                        premium_models: vec![],
-                        premium_only: false,
-                        protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -1928,9 +1913,6 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 999,
-                    premium_models: vec!["glm5.1".into()],
-                    premium_only: false,
-                    protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -2028,9 +2010,6 @@ async fn premium_only_model_routes_to_protected_upstream() {
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 100,
-                    premium_models: vec!["glm-5.1".into()],
-                    premium_only: false,
-                    protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -2189,9 +2168,6 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         requests_per_minute: 60,
                         max_concurrency: 10,
                         priority: 100,
-                        premium_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
-                        premium_only: false,
-                        protect_premium_quota: true,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -2213,9 +2189,6 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         requests_per_minute: 60,
                         max_concurrency: 10,
                         priority: 0,
-                        premium_models: vec![],
-                        premium_only: false,
-                        protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -2323,9 +2296,6 @@ async fn routing_rebalances_when_models_overlap() {
                         requests_per_minute: 20,
                         max_concurrency: 4,
                         priority: 0,
-                        premium_models: vec![],
-                        premium_only: false,
-                        protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -2347,9 +2317,6 @@ async fn routing_rebalances_when_models_overlap() {
                         requests_per_minute: 20,
                         max_concurrency: 4,
                         priority: 0,
-                        premium_models: vec![],
-                        premium_only: false,
-                        protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -2465,9 +2432,6 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         requests_per_minute: 20,
                         max_concurrency: 4,
                         priority: 0,
-                        premium_models: vec![],
-                        premium_only: false,
-                        protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
                         ..Default::default()
@@ -2489,9 +2453,6 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         requests_per_minute: 20,
                         max_concurrency: 4,
                         priority: 0,
-                        premium_models: vec![],
-                        premium_only: false,
-                        protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
                         ..Default::default()

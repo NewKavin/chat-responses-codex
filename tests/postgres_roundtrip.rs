@@ -57,9 +57,6 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "max_concurrency": 7,
                 "model_contexts": [],
                 "priority": 0,
-                "premium_models": [],
-                "premium_only": false,
-                "protect_premium_quota": false,
                 "active": true,
                 "failure_count": 0,
                 "default_model_context": null,
@@ -313,9 +310,6 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         requests_per_minute: 33,
         max_concurrency: 7,
         priority: 0,
-        premium_models: vec![],
-        premium_only: false,
-        protect_premium_quota: false,
         active: true,
         failure_count: 0,
         strip_nonstandard_chat_fields: NonstandardFieldPolicy::AlwaysStrip,
@@ -615,9 +609,6 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
         "requests_per_minute": 33,
         "max_concurrency": 7,
         "priority": 0,
-        "premium_models": [],
-        "premium_only": false,
-        "protect_premium_quota": false,
         "active": true,
         "failure_count": 0
     });
@@ -694,9 +685,6 @@ async fn postgres_roundtrip_preserves_model_mappings() {
         "requests_per_minute": 33,
         "max_concurrency": 7,
         "priority": 0,
-        "premium_models": [],
-        "premium_only": false,
-        "protect_premium_quota": false,
         "active": true,
         "failure_count": 0
     });
@@ -1504,9 +1492,6 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         requests_per_minute: 33,
         max_concurrency: 7,
         priority: 0,
-        premium_models: vec![],
-        premium_only: false,
-        protect_premium_quota: false,
         active: true,
         failure_count: 0,
         ..Default::default()
@@ -1636,9 +1621,6 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         requests_per_minute: 33,
         max_concurrency: 7,
         priority: 0,
-        premium_models: vec![],
-        premium_only: false,
-        protect_premium_quota: false,
         active: true,
         failure_count: 0,
         ..Default::default()
@@ -1756,7 +1738,6 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             protocol: UpstreamProtocol::Responses,
             protocols: vec![UpstreamProtocol::Responses],
             supported_models: vec!["Delete-Model".into()],
-            premium_models: vec!["Delete-Premium".into()],
             active: false,
             ..Default::default()
         })
@@ -1976,7 +1957,7 @@ async fn execute_pg_sql(database_url: &str, sql: &str) {
 async fn reset_test_database_async(database_url: &str) {
     execute_pg_sql(
         database_url,
-        "TRUNCATE TABLE response_history, usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings, model_aliases RESTART IDENTITY",
+        "TRUNCATE TABLE response_history, usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings, model_aliases RESTART IDENTITY",
     )
     .await;
 }
@@ -2071,7 +2052,7 @@ fn reset_test_database(database_url: &str) {
             "-v",
             "ON_ERROR_STOP=1",
             "-c",
-            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings, model_aliases RESTART IDENTITY",
+            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings, model_aliases RESTART IDENTITY",
         ])
         .output()
         .expect("psql should run");

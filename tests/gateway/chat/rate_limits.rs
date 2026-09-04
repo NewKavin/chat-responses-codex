@@ -29,9 +29,6 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 requests_per_minute: 1,
                 max_concurrency: 4,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -141,9 +138,6 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -166,9 +160,6 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -283,9 +274,6 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
                 requests_per_minute: 20,
                 max_concurrency: 4,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -394,9 +382,6 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
                 requests_per_minute: 20,
                 max_concurrency: 4,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -555,9 +540,6 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
                 requests_per_minute: 20,
                 max_concurrency: 4,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1275,9 +1257,6 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -1434,9 +1413,6 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
                 requests_per_minute: 20,
                 max_concurrency: 4,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()

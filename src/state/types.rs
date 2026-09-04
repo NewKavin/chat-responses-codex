@@ -967,12 +967,6 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub priority: u32,
     #[serde(default)]
-    pub premium_models: Vec<String>,
-    #[serde(default)]
-    pub premium_only: bool,
-    #[serde(default)]
-    pub protect_premium_quota: bool,
-    #[serde(default)]
     pub active: bool,
     #[serde(default)]
     pub failure_count: u32,
@@ -1038,9 +1032,6 @@ impl Default for UpstreamConfig {
             requests_per_minute: default_upstream_requests_per_minute(),
             max_concurrency: default_upstream_max_concurrency(),
             priority: 0,
-            premium_models: Vec::new(),
-            premium_only: false,
-            protect_premium_quota: false,
             active: false,
             failure_count: 0,
             auto_managed: false,

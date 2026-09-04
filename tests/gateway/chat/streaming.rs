@@ -2139,9 +2139,6 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3080,9 +3077,6 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 requests_per_minute: 60,
                 max_concurrency: 1, // Set to 1 to test that local config doesn't hard-reject
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3234,9 +3228,6 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3368,9 +3359,6 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3533,9 +3521,6 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3666,9 +3651,6 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3800,9 +3782,6 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -3943,9 +3922,6 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -4112,9 +4088,6 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 requests_per_minute: 60,
                 max_concurrency: 1, // Set to 1 to test that local config doesn't hard-reject
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -4301,9 +4274,6 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -4325,9 +4295,6 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     priority: 1,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -4444,9 +4411,6 @@ async fn stream_disconnect_releases_runtime_state() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -5138,9 +5102,6 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -6587,9 +6548,6 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -6720,9 +6678,6 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -6881,9 +6836,6 @@ async fn runtime_stream_idle_timeout_interrupts_later_hung_stream() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -7063,9 +7015,6 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -7256,9 +7205,6 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -7442,9 +7388,6 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -7614,9 +7557,6 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()

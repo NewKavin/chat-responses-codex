@@ -572,9 +572,6 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 requests_per_minute: 10_000,
                 max_concurrency: 20,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()

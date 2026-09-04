@@ -92,9 +92,6 @@ async fn build_state(address: String, config: AppConfig, max_concurrency: u32) -
                 requests_per_minute: 60,
                 max_concurrency,
                 priority: 0,
-                premium_models: vec![],
-                premium_only: false,
-                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
                 ..Default::default()

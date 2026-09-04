@@ -695,25 +695,7 @@ impl AppState {
                             })?;
                         upstream.priority = priority;
                     }
-                    if let Some(premium_models) =
-                        updates.get("premium_models").and_then(|v| v.as_array())
-                    {
-                        upstream.premium_models = premium_models
-                            .iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect();
-                    }
-                    if let Some(premium_only) =
-                        updates.get("premium_only").and_then(|v| v.as_bool())
-                    {
-                        upstream.premium_only = premium_only;
-                    }
-                    if let Some(protect_premium_quota) = updates
-                        .get("protect_premium_quota")
-                        .and_then(|v| v.as_bool())
-                    {
-                        upstream.protect_premium_quota = protect_premium_quota;
-                    }
+                    // premium_models, premium_only, protect_premium_quota fields removed
                     if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
                         upstream.active = active;
                     }

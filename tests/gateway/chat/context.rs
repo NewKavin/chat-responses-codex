@@ -1656,9 +1656,6 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
@@ -1681,9 +1678,6 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     priority: 0,
-                    premium_models: vec![],
-                    premium_only: false,
-                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                     ..Default::default()
