@@ -124,6 +124,10 @@ pub(super) struct RouteRetryPolicy {
     /// truncated to the remaining budget (then re-probed next round) rather
     /// than an immediate `WaitBudget` give-up.
     alignment_truncated_enabled: bool,
+    /// 2026-09-04: B3 门开关。默认 false 保持 B3 语义（纯 429/KeyQuota
+    /// 耗尽立即交还客户端，由 codex 按 Retry-After 重试）；true 时纯
+    /// 429 也纳入进程内等待预算，按 Retry-After 醒来继续真实打上游。
+    rate_limit_internal_retry_enabled: bool,
 }
 
 impl RouteRetryPolicy {
@@ -190,7 +194,16 @@ impl RouteRetryPolicy {
             budget_alignment_enabled,
             busy_max_rounds: busy_max_rounds.max(1),
             alignment_truncated_enabled,
+            rate_limit_internal_retry_enabled: false,
         }
+    }
+
+    /// Builder: open the B3 gate so pure upstream 429/KeyQuota exhaustion
+    /// also enters the in-gateway retry budget instead of being handed back
+    /// to the client immediately.
+    pub fn with_rate_limit_internal_retry(mut self, enabled: bool) -> Self {
+        self.rate_limit_internal_retry_enabled = enabled;
+        self
     }
 
     pub fn from_sources(_config: &AppConfig, runtime_settings: &RuntimeSettings) -> Self {
@@ -203,6 +216,9 @@ impl RouteRetryPolicy {
             runtime_settings.upstream_route_exhaustion_budget_alignment_enabled,
             runtime_settings.upstream_route_half_open_busy_max_rounds,
             runtime_settings.upstream_route_exhaustion_alignment_truncated_enabled,
+        )
+        .with_rate_limit_internal_retry(
+            runtime_settings.upstream_rate_limit_internal_retry_enabled,
         )
     }
 
@@ -261,11 +277,15 @@ impl RouteRetryPolicy {
             health_recovery.map(|r| r.class),
             budget.alignment_used,
         );
-        if client_retryable_rate_limit {
-            // A pure upstream rate-limit / key-quota exhaustion (429 family)
-            // is a client-side retry signal: codex honors Retry-After and
-            // keeps the task alive, so the gateway must not absorb the
-            // cooldown in-process (B3).
+        if client_retryable_rate_limit && !self.rate_limit_internal_retry_enabled {
+            // B3 (default): a pure upstream rate-limit / key-quota exhaustion
+            // (429 family) is a client-side retry signal — codex honors
+            // Retry-After and keeps the task alive, so the gateway must not
+            // absorb the cooldown in-process.
+            // With `upstream_rate_limit_internal_retry_enabled` the gate is
+            // opened: the request falls through to the ordinary wait budget,
+            // wakes on Retry-After and really hits the upstream again on the
+            // next round (intranet "fight for upstream resources" mode).
             return (None, None);
         }
         if busy_only {
@@ -509,6 +529,59 @@ mod tests {
             RouteRetryPolicy::from_sources(&config, &RuntimeSettings::from_app_config(&config))
                 .budget_alignment_enabled
         );
+    }
+
+    #[test]
+    fn rate_limit_internal_retry_switch_opens_b3_gate() {
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(1),
+        };
+        // B3 默认关闭：纯 429 立即放弃，不进入等待预算。
+        let closed = RouteRetryPolicy::new(true, Duration::from_secs(10), 3);
+        let (wait, reason) = closed.decide_with_reason(
+            &RouteRetryBudget::default(),
+            terminal,
+            None,
+            true, // client_retryable_rate_limit = 纯 429
+            false,
+            "b3-closed",
+        );
+        assert!(wait.is_none());
+        assert!(reason.is_none());
+
+        // 开关打开：同样输入落入普通等待预算，下一轮继续打上游。
+        let opened = closed.with_rate_limit_internal_retry(true);
+        let (wait, reason) = opened.decide_with_reason(
+            &RouteRetryBudget::default(),
+            terminal,
+            None,
+            true,
+            false,
+            "b3-open",
+        );
+        assert!(reason.is_none(), "opened gate must not give up at once");
+        let wait = wait.expect("opened gate must schedule a retry wait");
+        assert_eq!(wait.next_round, 2);
+        assert_eq!(wait.required_delay, Duration::from_secs(1));
+        assert!(!wait.busy);
+
+        // 开关打开也不绕过轮次预算：到 max_rounds 仍给 give-up reason。
+        let round_capped = RouteRetryBudget {
+            current_round: 3,
+            waited: Duration::from_secs(3),
+            alignment_used: false,
+            busy_rounds: 0,
+        };
+        let (wait, reason) = opened.decide_with_reason(
+            &round_capped,
+            terminal,
+            None,
+            true,
+            false,
+            "b3-open-round-cap",
+        );
+        assert!(wait.is_none());
+        assert_eq!(reason, Some(GiveUpReason::NoRecovery));
     }
 
     #[test]

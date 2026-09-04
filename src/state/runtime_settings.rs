@@ -31,6 +31,7 @@ use super::types::{
     default_upstream_retry_after_cap_seconds, default_upstream_retry_after_cooldown_cap_seconds,
     default_upstream_route_exhaustion_alignment_truncated_enabled,
     default_upstream_route_exhaustion_budget_alignment_enabled,
+    default_upstream_rate_limit_internal_retry_enabled,
     default_upstream_route_half_open_busy_max_rounds,
     default_upstream_route_health_enforcement_enabled,
     default_upstream_route_half_open_exclusive_window_ms,
@@ -102,6 +103,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "stream_max_skipped_bad_frames",
     "upstream_continuation_pin_escape_enabled",
     "upstream_route_exhaustion_retry_enabled",
+    "upstream_rate_limit_internal_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
     "upstream_route_exhaustion_budget_alignment_enabled",
@@ -287,6 +289,8 @@ pub struct RuntimeSettings {
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
+    #[serde(default = "default_upstream_rate_limit_internal_retry_enabled")]
+    pub upstream_rate_limit_internal_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
     #[serde(default = "default_upstream_route_exhaustion_budget_alignment_enabled")]
@@ -505,6 +509,8 @@ impl RuntimeSettings {
             upstream_continuation_pin_escape_enabled: config
                 .upstream_continuation_pin_escape_enabled,
             upstream_route_exhaustion_retry_enabled: config.upstream_route_exhaustion_retry_enabled,
+            upstream_rate_limit_internal_retry_enabled: config
+                .upstream_rate_limit_internal_retry_enabled,
             upstream_route_exhaustion_retry_max_wait_ms: config
                 .upstream_route_exhaustion_retry_max_wait_ms,
             upstream_route_exhaustion_retry_max_rounds: config
@@ -648,6 +654,8 @@ impl RuntimeSettings {
             self.upstream_continuation_pin_escape_enabled;
         config.upstream_route_exhaustion_retry_enabled =
             self.upstream_route_exhaustion_retry_enabled;
+        config.upstream_rate_limit_internal_retry_enabled =
+            self.upstream_rate_limit_internal_retry_enabled;
         config.upstream_route_exhaustion_retry_max_wait_ms =
             self.upstream_route_exhaustion_retry_max_wait_ms;
         config.upstream_route_exhaustion_retry_max_rounds =

@@ -231,8 +231,9 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus upstream_route_health_enforcement_enabled = 87 (route-health passthrough),
     // plus the 13 portal OIDC wiring keys = 100,
     // plus portal_oidc_userinfo_method and portal_oidc_token_path = 102,
-    // plus portal_oidc_uuid_field = 103.
-    assert_eq!(body["settings"].as_object().unwrap().len(), 103);
+    // plus portal_oidc_uuid_field = 103,
+    // plus upstream_rate_limit_internal_retry_enabled = 104 (B3 gate switch).
+    assert_eq!(body["settings"].as_object().unwrap().len(), 104);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }

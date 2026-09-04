@@ -55,6 +55,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_error_body_excerpt_enabled: false,
   upstream_error_body_excerpt_max_chars: 200,
   upstream_route_exhaustion_retry_enabled: true,
+  upstream_rate_limit_internal_retry_enabled: false,
   upstream_route_exhaustion_retry_max_wait_ms: 15_000,
   upstream_route_exhaustion_retry_max_rounds: 3,
   upstream_route_exhaustion_budget_alignment_enabled: true,
@@ -161,6 +162,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_error_body_excerpt_enabled',
   'upstream_error_body_excerpt_max_chars',
   'upstream_route_exhaustion_retry_enabled',
+  'upstream_rate_limit_internal_retry_enabled',
   'upstream_route_exhaustion_retry_max_wait_ms',
   'upstream_route_exhaustion_retry_max_rounds',
   'upstream_route_exhaustion_budget_alignment_enabled',
@@ -235,10 +237,10 @@ describe('runtime settings catalog', () => {
       'observability',
       'portal'
     ])
-    expect(runtimeSettingFields).toHaveLength(103)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(103)
+    expect(runtimeSettingFields).toHaveLength(104)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(104)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(90)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(91)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })

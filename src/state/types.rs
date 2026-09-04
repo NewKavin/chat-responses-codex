@@ -116,6 +116,12 @@ pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: u64 = 5 * 60;
 /// Retry-After arm.
 pub const DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_STEP: u32 = 2;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
+/// 2026-09-04: B3 门开关。纯上游 429/KeyQuota 耗尽时，B3 门默认把请求
+/// 立即交还客户端（codex 尊重 Retry-After，网关不吸收冷却）；置 true 后
+/// 网关把 429 族也纳入进程内等待预算，按 Retry-After 醒来继续真实打
+/// 上游，直到 max_wait/max_rounds 耗尽 —— 适合「强制抢占上游资源」的
+/// 内网形态。
+pub const DEFAULT_UPSTREAM_RATE_LIMIT_INTERNAL_RETRY_ENABLED: bool = false;
 /// Whether a continuation-pinned request may escape the pinned route once
 /// the constrained candidate set is exhausted (P2): relaxes the hard
 /// continuation contract, sanitizes the replayed history, and retries
@@ -627,6 +633,8 @@ pub struct AppConfig {
     #[serde(default = "default_upstream_continuation_pin_escape_enabled")]
     pub upstream_continuation_pin_escape_enabled: bool,
     pub upstream_route_exhaustion_retry_enabled: bool,
+    #[serde(default = "default_upstream_rate_limit_internal_retry_enabled")]
+    pub upstream_rate_limit_internal_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
     pub upstream_route_exhaustion_budget_alignment_enabled: bool,
@@ -793,6 +801,8 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_CONTINUATION_PIN_ESCAPE_ENABLED,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+            upstream_rate_limit_internal_retry_enabled:
+                DEFAULT_UPSTREAM_RATE_LIMIT_INTERNAL_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
             upstream_route_exhaustion_retry_max_rounds:
@@ -1648,6 +1658,10 @@ pub fn default_upstream_route_exhaustion_alignment_truncated_enabled() -> bool {
 
 pub fn default_upstream_transient_last_resort_probe_enabled() -> bool {
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED
+}
+
+pub fn default_upstream_rate_limit_internal_retry_enabled() -> bool {
+    DEFAULT_UPSTREAM_RATE_LIMIT_INTERNAL_RETRY_ENABLED
 }
 
 pub fn default_upstream_route_half_open_exclusive_window_ms() -> u64 {

@@ -970,6 +970,7 @@ export interface RuntimeSettings {
   upstream_error_body_excerpt_enabled: boolean
   upstream_error_body_excerpt_max_chars: number
   upstream_route_exhaustion_retry_enabled: boolean
+  upstream_rate_limit_internal_retry_enabled: boolean
   upstream_route_exhaustion_retry_max_wait_ms: number
   upstream_route_exhaustion_retry_max_rounds: number
   upstream_route_exhaustion_budget_alignment_enabled: boolean
