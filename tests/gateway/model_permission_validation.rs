@@ -271,3 +271,41 @@ async fn test_wildcard_allows_all_models() {
         "Wildcard should allow all models"
     );
 }
+
+#[tokio::test]
+async fn test_non_portal_key_skips_validation() {
+    let _guard = lock().lock();
+    let url = database_url().expect("OIDC_TEST_DATABASE_URL must be set");
+
+    if !ensure_database(&url).await {
+        return;
+    }
+
+    let state = load_state_from_database(&url).await;
+    let app = build_router(state.clone());
+
+    // A direct-config downstream key with NO portal binding must NOT be
+    // restricted by model groups (backward compatibility).
+    let downstream_id = "test_downstream_direct";
+    let secret = register_downstream(&state, downstream_id).await;
+
+    let request_path = std::env::var("GATEWAY_PROXY_PATH")
+        .unwrap_or_else(|_| "/v1/chat/completions".to_string());
+    let req = Request::builder()
+        .uri(&request_path)
+        .method("POST")
+        .header("Authorization", format!("Bearer {}", secret))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"model": "definitely-not-in-any-group", "messages": [{"role": "user", "content": "hi"}]})
+                .to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    // 403 would mean the permission check wrongly applied to an unbound key.
+    assert_ne!(
+        res.status(),
+        axum::http::StatusCode::FORBIDDEN,
+        "unbound (non-portal) downstream keys must skip model-group validation"
+    );
+}

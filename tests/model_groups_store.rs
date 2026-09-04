@@ -337,3 +337,63 @@ async fn test_allows_model_wildcard() {
     assert!(group.allows_model("any-model"));
     assert!(group.allows_model("another-model"));
 }
+
+#[tokio::test]
+async fn test_delete_group_resets_keys_to_basic() {
+    use chat_responses_codex::state::ModelGroup;
+
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal_store must exist");
+
+    let new_group = ModelGroup {
+        id: "to-delete-reset".to_string(),
+        name: "To Delete Reset".to_string(),
+        description: None,
+        allowed_models: vec!["model-reset-1".to_string()],
+        created_at: 0,
+        updated_at: 0,
+    };
+    store
+        .create_model_group(&new_group)
+        .await
+        .expect("Should create group");
+
+    // 创建一个用户和绑定，使用新分组
+    ensure_user(&store, "test-user-delete-reset").await;
+    store
+        .add_downstream_binding_with_label(
+            "test-user-delete-reset",
+            "key-delete-reset",
+            Some("Reset Key"),
+            Some("to-delete-reset"),
+        )
+        .await
+        .expect("Should add binding");
+
+    // 删除分组：FK ON DELETE SET DEFAULT 把绑定回退到 basic
+    store
+        .delete_model_group("to-delete-reset")
+        .await
+        .expect("Should delete group");
+
+    // 绑定仍存在，model_group_id 回退到 basic
+    let bindings = store
+        .list_downstream_bindings_with_labels("test-user-delete-reset")
+        .await
+        .expect("Should list bindings");
+    let binding = bindings
+        .iter()
+        .find(|b| b.downstream_id == "key-delete-reset")
+        .expect("binding should survive group deletion");
+    assert_eq!(binding.model_group_id, "basic");
+    assert_eq!(binding.label, "Reset Key");
+}
