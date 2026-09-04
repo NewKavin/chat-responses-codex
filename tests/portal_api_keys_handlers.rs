@@ -97,8 +97,7 @@ async fn test_list_keys_empty() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["keys"].as_array().unwrap().len(), 0);
-    assert_eq!(json["total"].as_i64().unwrap(), 0);
+    assert_eq!(json.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -167,8 +166,7 @@ async fn test_create_and_list_keys() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["total"].as_i64().unwrap(), 2);
-    let keys = json["keys"].as_array().unwrap();
+    let keys = json.as_array().unwrap();
     assert_eq!(keys.len(), 2);
 
     // Verify key1 details
@@ -263,8 +261,7 @@ async fn test_create_key() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["total"].as_i64().unwrap(), 1);
-    let keys = json["keys"].as_array().unwrap();
+    let keys = json.as_array().unwrap();
     assert_eq!(keys.len(), 1);
 
     let key = &keys[0];
@@ -435,7 +432,7 @@ async fn test_set_default_key() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let keys = json["keys"].as_array().unwrap();
+    let keys = json.as_array().unwrap();
     let key1 = keys.iter().find(|k| k["downstream_id"] == "key1").unwrap();
     let key2 = keys.iter().find(|k| k["downstream_id"] == "key2").unwrap();
 
@@ -528,7 +525,7 @@ async fn test_rotate_key() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let keys = json["keys"].as_array().unwrap();
+    let keys = json.as_array().unwrap();
 
     // Old key should be gone (or still present if it had usage)
     let _old_key = keys.iter().find(|k| k["downstream_id"] == "old-key-1");
@@ -623,8 +620,7 @@ async fn test_delete_key_success() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["total"].as_i64().unwrap(), 1);
-    let keys = json["keys"].as_array().unwrap();
+    let keys = json.as_array().unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0]["downstream_id"], "key1"); // Only key1 remains
 }
@@ -935,4 +931,83 @@ async fn test_update_key_model_group() {
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// ============================================================================
+// Bearer fallback: 工号+密钥 login has no OIDC cookie; the multi-key API must
+// accept the Bearer JWT (sub = employee_id / downstream id) and lazily
+// provision the portal account with the downstream bound as default key.
+// ============================================================================
+
+
+
+#[tokio::test]
+async fn test_list_keys_bearer_jwt_fallback_provisions_user() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return; // Skip test when database is unavailable
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let portal_store_opt = state.portal_store();
+    let store = portal_store_opt.as_ref().expect("portal_store must exist");
+
+    // Simulate the JWT produced by POST /api/portal/login for 工号+密钥 login.
+    let token = chat_responses_codex::auth::generate_admin_token(
+        "downstream-bearer-1",
+        &state.config.jwt_secret,
+    )
+    .expect("token must sign");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    // No cookie at all: the request carries only the Bearer token.
+    let req = Request::builder()
+        .uri("/api/portal/keys")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Response is a plain array containing the auto-bound default key.
+    let keys = json.as_array().expect("list keys must return an array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["downstream_id"], "downstream-bearer-1");
+    assert_eq!(keys[0]["is_default"], true);
+
+    // The downstream now owns a lazily provisioned portal account.
+    let owner = store
+        .find_user_id_by_downstream("downstream-bearer-1")
+        .await
+        .unwrap();
+    assert!(
+        owner.is_some(),
+        "bearer login must provision a portal user for the downstream"
+    );
+
+    // A second call is idempotent and still returns one key.
+    let req2 = Request::builder()
+        .uri("/api/portal/keys")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(response2.status(), StatusCode::OK);
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(json2.as_array().unwrap().len(), 1);
 }

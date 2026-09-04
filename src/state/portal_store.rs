@@ -632,6 +632,65 @@ impl PortalStore {
         Ok(row.map(|row| row.get(0)))
     }
 
+    /// Find the portal user that owns the given downstream binding, if any.
+    /// Downstream ids are unique per deployment, but the PK is
+    /// (user_id, downstream_id); when several users share a downstream this
+    /// returns the first owner (order by creation time).
+    pub async fn find_user_id_by_downstream(
+        &self,
+        downstream_id: &str,
+    ) -> Result<Option<String>, PortalStoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT user_id FROM portal_user_downstreams \
+                 WHERE downstream_id = $1 ORDER BY created_at LIMIT 1",
+                &[&downstream_id],
+            )
+            .await?;
+        Ok(row.map(|row| row.get(0)))
+    }
+
+    /// Lazily provision a portal account for a Bearer-authenticated downstream
+    /// (工号+密钥 login).  The downstream id is the login identity, so the
+    /// account is created on first use and the downstream is bound as its
+    /// default key.  Idempotent: returns the existing owner when the
+    /// downstream is already bound.
+    pub async fn ensure_user_for_downstream(
+        &self,
+        downstream_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<String, PortalStoreError> {
+        if let Some(user_id) = self.find_user_id_by_downstream(downstream_id).await? {
+            return Ok(user_id);
+        }
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email = format!("{downstream_id}@downstream.local");
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        transaction
+            .execute(
+                "INSERT INTO portal_users (id, email, display_name, username) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                &[&user_id, &email, &display_name, &downstream_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "INSERT INTO portal_user_downstreams \
+                   (user_id, downstream_id, is_default, label, model_group_id, created_at) \
+                 SELECT id, $1, TRUE, NULL, 'basic', NOW() FROM portal_users WHERE email = $2 \
+                 ON CONFLICT (user_id, downstream_id) DO NOTHING",
+                &[&downstream_id, &email],
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(self
+            .find_user_id_by_downstream(downstream_id)
+            .await?
+            .unwrap_or(user_id))
+    }
+
     pub async fn create_session(
         &self,
         sid_hash: &str,

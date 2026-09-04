@@ -783,19 +783,50 @@ async fn extract_downstream_id_from_bearer(
         .into_response())
 }
 
-/// Helper function to extract user_id from session cookie (for multi-key API)
+/// Helper function to extract user_id for the multi-key API.
+///
+/// OIDC session cookie 优先（与 `extract_downstream_id_from_bearer` 的
+/// cookie 优先设计一致）；无 cookie 时回落到 Bearer 身份：JWT 的 sub 即
+/// 工号（downstream id），把它映射到绑定该下游的门户用户，首次访问时
+/// 自动建档并绑定为默认 key。这样工号+密钥登录的用户也能使用密钥管理，
+/// 不会因为缺少 OIDC cookie 被 401 登出。
 async fn extract_user_id_from_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<String, Response> {
-    let cookie = crate::server::portal_oidc::session_cookie_value(headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": {"message": "Missing session cookie"}})),
-        )
-            .into_response()
-    })?;
+    if let Some(cookie) = crate::server::portal_oidc::session_cookie_value(headers) {
+        let Some(store) = state.portal_store() else {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Portal store not available"}})),
+            )
+                .into_response());
+        };
 
+        let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
+        let session = store
+            .find_session(&sid_hash)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": {"message": "Failed to verify session"}})),
+                )
+                    .into_response()
+            })?
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"message": "Invalid or expired session"}})),
+                )
+                    .into_response()
+            })?;
+
+        return Ok(session.user_id);
+    }
+
+    // Bearer 回退：工号+密钥登录产生的 JWT（或无 JWT 时的下游密钥）。
+    let downstream_id = extract_downstream_id_from_bearer(state, headers).await?;
     let Some(store) = state.portal_store() else {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -803,27 +834,20 @@ async fn extract_user_id_from_session(
         )
             .into_response());
     };
-
-    let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
-    let session = store
-        .find_session(&sid_hash)
+    let display_name = state
+        .downstream_config(&downstream_id)
         .await
-        .map_err(|_| {
+        .map(|downstream| downstream.name);
+    store
+        .ensure_user_for_downstream(&downstream_id, display_name.as_deref())
+        .await
+        .map_err(|error| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "Failed to verify session"}})),
+                Json(json!({"error": {"message": error.to_string()}})),
             )
                 .into_response()
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"message": "Invalid or expired session"}})),
-            )
-                .into_response()
-        })?;
-
-    Ok(session.user_id)
+        })
 }
 
 // ============================================================================
@@ -861,7 +885,9 @@ pub(super) async fn portal_list_keys(
             .into_response();
     };
 
-    // Call Task 2 methods
+    // Response shape matches the frontend contract and the feature docs:
+    // a plain array of keys (the previous {keys, total} wrapper was never
+    // consumed by the frontend and broke `[...data]` expansion on the page).
     let keys = match store.list_downstream_bindings_with_labels(&user_id).await {
         Ok(keys) => keys,
         Err(_) => {
@@ -873,22 +899,7 @@ pub(super) async fn portal_list_keys(
         }
     };
 
-    let total = match store.count_user_keys(&user_id).await {
-        Ok(count) => count,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "Failed to count keys"}})),
-            )
-                .into_response();
-        }
-    };
-
-    Json(json!({
-        "keys": keys,
-        "total": total
-    }))
-    .into_response()
+    Json(keys).into_response()
 }
 
 pub(super) async fn portal_create_key(
