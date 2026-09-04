@@ -1122,15 +1122,15 @@ pub(super) async fn portal_update_key_model_group(
     }
 
     match store
-        .update_downstream_label(
-            &user_id,
-            &downstream_id,
-            None,
-            Some(payload.model_group_id.as_str()),
-        )
+        .update_downstream_model_group(&user_id, &downstream_id, &payload.model_group_id)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(crate::state::PortalStoreError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "key_not_found", "message": "key not found"}})),
+        )
+            .into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": error.to_string()}})),

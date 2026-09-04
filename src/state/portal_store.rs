@@ -68,7 +68,7 @@ pub struct PortalSession {
     pub ip: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelGroup {
     pub id: String,
     pub name: String,
@@ -360,6 +360,30 @@ impl PortalStore {
                 &[&user_id, &downstream_id, &label, &model_group_id],
             )
             .await?;
+        Ok(())
+    }
+
+    /// Update only the model_group_id of an existing downstream binding,
+    /// preserving the label.  Returns NotFound when the binding does not
+    /// exist for this user.
+    pub async fn update_downstream_model_group(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        model_group_id: &str,
+    ) -> Result<(), PortalStoreError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .execute(
+                "UPDATE portal_user_downstreams \
+                 SET model_group_id = $3 \
+                 WHERE user_id = $1 AND downstream_id = $2",
+                &[&user_id, &downstream_id, &model_group_id],
+            )
+            .await?;
+        if rows == 0 {
+            return Err(PortalStoreError::NotFound);
+        }
         Ok(())
     }
 
