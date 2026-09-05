@@ -79,6 +79,7 @@ fn test_downstream(id: &str) -> chat_responses_codex::state::DownstreamConfig {
         hash: format!("hash-{id}"),
         active: true,
         model_allowlist: vec![],
+            model_group_id: None,
         ..Default::default()
     }
 }

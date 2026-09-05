@@ -141,6 +141,7 @@ impl StreamOnlyHarness {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![MODEL.into()],
+                    model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 0,
                     max_concurrency: 4,

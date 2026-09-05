@@ -101,6 +101,8 @@ async fn responses_feedback_harness(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -327,6 +329,8 @@ async fn explicit_concurrency_5xx_uses_account_recovery_and_healthy_routes() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -515,6 +519,8 @@ async fn semantic_output_blocks_concurrency_failover() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -686,6 +692,8 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -837,6 +845,8 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -968,6 +978,8 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 1,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1130,6 +1142,8 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1260,6 +1274,8 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1386,6 +1402,8 @@ async fn route_failure_observability_separates_upstream_500_from_downstream_503(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1585,6 +1603,8 @@ async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1751,6 +1771,8 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1959,6 +1981,8 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2067,6 +2091,8 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2309,6 +2335,8 @@ async fn common_mode_breaker_threshold_zero_disables_the_breaker_and_tries_all_r
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -2521,6 +2549,8 @@ async fn common_mode_breaker_single_key_failure_preserves_key_isolation() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -2783,6 +2813,8 @@ async fn common_mode_pool_harness(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2930,6 +2962,8 @@ async fn common_mode_same_host_502_does_not_trip_and_tries_all_routes() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: false,
                 max_concurrency: 10,
@@ -3344,6 +3378,8 @@ async fn common_mode_transient_streaming_mid_stream_failure_never_retries_same_r
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: false,
                 max_concurrency: 10,

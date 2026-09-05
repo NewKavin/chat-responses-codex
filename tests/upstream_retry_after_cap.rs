@@ -103,6 +103,7 @@ async fn build_state(address: String, config: AppConfig, max_concurrency: u32) -
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+            model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

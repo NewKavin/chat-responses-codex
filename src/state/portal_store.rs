@@ -589,6 +589,43 @@ impl PortalStore {
         Ok(())
     }
 
+    /// Add (or update) a binding, optionally pinning the model group.
+    /// Same semantics as `add_downstream_binding` plus `model_group_id`
+    /// (None keeps the previous group / default 'basic' on insert).
+    pub async fn upsert_downstream_binding_with_group(
+        &self,
+        user_id: &str,
+        downstream_id: &str,
+        is_default: bool,
+        model_group_id: Option<&str>,
+    ) -> Result<(), PortalStoreError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        let known = transaction
+            .query_opt("SELECT 1 FROM portal_users WHERE id = $1", &[&user_id])
+            .await?
+            .is_some();
+        if !known {
+            return Err(PortalStoreError::NotFound);
+        }
+        if is_default {
+            transaction
+                .execute(
+                    "UPDATE portal_user_downstreams SET is_default = FALSE WHERE user_id = $1",
+                    &[&user_id],
+                )
+                .await?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, model_group_id) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, downstream_id) DO UPDATE SET is_default = EXCLUDED.is_default, model_group_id = COALESCE(EXCLUDED.model_group_id, portal_user_downstreams.model_group_id)",
+                &[&user_id, &downstream_id, &is_default, &model_group_id],
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Remove a binding; when it was the default and bindings remain, another
     /// row is promoted so the user still has exactly one default.
     pub async fn remove_downstream_binding(
@@ -1138,17 +1175,18 @@ impl PortalStore {
             }
             // Binding found but model_group_id is NULL (created before the
             // columns existed): enforce the conservative default group.
+            // Fail closed: a missing basic group is an integrity error, not a
+            // reason to silently open the key to every model.
             Some(_) => {
                 let allowed_models_json: String = client
                     .query_one(
                         "SELECT allowed_models::text FROM model_groups WHERE id = 'basic'",
                         &[],
                     )
-                    .await
-                    .map(|row| row.get::<_, String>(0))
-                    .unwrap_or_else(|_| "[]".to_string());
+                    .await?
+                    .get::<_, String>(0);
                 let models: Vec<String> = serde_json::from_str(&allowed_models_json)
-                    .unwrap_or_default();
+                    .map_err(|e| PortalStoreError::Db(format!("invalid basic group models: {e}")))?;
                 Ok(models)
             }
             // No portal binding: this is a direct-config downstream key; no
@@ -1171,6 +1209,16 @@ fn parse_user_row(row: tokio_postgres::Row) -> PortalUser {
         provider: row.get(7),
         subject: row.get(8),
         binding_count: row.get(9),
+    }
+}
+
+// Implement the trait needed by DownstreamConfig::get_allowed_models()
+impl crate::state::types::HasGetModelGroupModels for PortalStore {
+    async fn get_model_group_models(&self, id: &str) -> Result<Vec<String>, String> {
+        match self.get_model_group(id).await {
+            Ok(group) => Ok(group.allowed_models),
+            Err(e) => Err(format!("Failed to get model group: {}", e)),
+        }
     }
 }
 

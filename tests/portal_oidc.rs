@@ -297,6 +297,7 @@ async fn seed_downstream(state: &AppState, id: &str) {
             hash: format!("hash-{id}"),
             active: true,
             model_allowlist: vec![],
+            model_group_id: None,
             ..Default::default()
         })
         .await
@@ -855,6 +856,7 @@ async fn legacy_bearer_login_is_untouched_by_oidc() {
             plaintext_key: Some("team-a".to_string()),
             active: true,
             model_allowlist: vec![],
+            model_group_id: None,
             ..Default::default()
         })
         .await
@@ -1026,6 +1028,7 @@ async fn bind_intent_attaches_identity_to_an_existing_key() {
         plaintext_key: Some(key.plaintext.clone()),
         active: true,
         model_allowlist: vec![],
+            model_group_id: None,
         ..Default::default()
     };
     downstream.plaintext_key = Some(key.plaintext.clone());
@@ -1082,6 +1085,7 @@ async fn bind_conflicts_when_identity_already_bound_to_another_key() {
             plaintext_key: Some(key.plaintext.clone()),
             active: true,
             model_allowlist: vec![],
+            model_group_id: None,
             ..Default::default()
         };
         let secret = key.plaintext.clone();
@@ -1582,6 +1586,7 @@ async fn file_mode_oidc_answers_503_and_legacy_login_still_works() {
             plaintext_key: Some(key.plaintext.clone()),
             active: true,
             model_allowlist: vec![],
+            model_group_id: None,
             ..Default::default()
         })
         .await;
@@ -1668,6 +1673,7 @@ async fn bind_works_with_legacy_jwt_login() {
         plaintext_key: Some(key.plaintext.clone()),
         active: true,
         model_allowlist: vec![],
+            model_group_id: None,
         ..Default::default()
     };
     let _ = downstream.plaintext_key.take();

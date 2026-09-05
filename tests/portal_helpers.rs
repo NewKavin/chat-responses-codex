@@ -47,6 +47,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
             model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
+            model_group_id: None,
             per_minute_limit: 100,
 
             rate_limit_enabled: true,
@@ -90,7 +91,8 @@ fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
+            model_allowlist: vec!["gpt-4".to_string()],
+            model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
             max_concurrency: 10,
@@ -351,6 +353,7 @@ async fn test_compute_request_quota_usage_returns_none_if_no_quota() {
         plaintext_key: None,
         plaintext_key_prefix: None,
         model_allowlist: vec![],
+            model_group_id: None,
         per_minute_limit: 100,
 
         rate_limit_enabled: true,
@@ -1539,6 +1542,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
             model_allowlist: vec![], // Empty allowlist
+            model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
             max_concurrency: 10,

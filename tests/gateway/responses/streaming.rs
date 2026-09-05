@@ -101,6 +101,8 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -262,6 +264,8 @@ async fn downstream_responses_stream_canonicalizes_domestic_chat_provider_eof_va
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -446,6 +450,8 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -650,6 +656,8 @@ async fn downstream_responses_stream_preserves_multiple_output_items_when_upstre
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -848,6 +856,8 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -1011,6 +1021,8 @@ async fn downstream_responses_stream_recovers_when_chat_upstream_first_event_is_
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1184,6 +1196,8 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -1381,6 +1395,8 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -1545,6 +1561,8 @@ async fn downstream_responses_stream_tolerates_empty_data_keepalive_frames() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1677,6 +1695,8 @@ async fn downstream_responses_stream_tolerates_chat_keepalive_and_empty_data_fra
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1881,6 +1901,8 @@ async fn fragmented_tool_call_without_index_id_yields_valid_done_arguments() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2066,6 +2088,8 @@ async fn run_fragmented_tool_call_stream(fragments: Vec<Value>) -> String {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

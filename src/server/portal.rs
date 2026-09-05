@@ -931,6 +931,34 @@ pub(super) async fn portal_create_key(
             .into_response();
     }
 
+    // The user may only create keys bound to groups they have been granted
+    // (mirrors the update path; prevents escalating to arbitrary groups).
+    match store.user_can_access_model_group(&user_id, model_group_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": {
+                        "code": "model_group_forbidden",
+                        "message": format!(
+                            "You do not have access to model group '{}'",
+                            model_group_id
+                        )
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response();
+        }
+    }
+
     if store
         .add_downstream_binding_with_label(
             &user_id,
@@ -1050,6 +1078,36 @@ pub(super) async fn portal_rotate_key_by_id(
     let was_default = old_key.is_default;
     let label = (!old_key.label.is_empty()).then_some(old_key.label.as_str());
     let model_group_id = (!old_key.model_group_id.is_empty()).then_some(old_key.model_group_id.as_str());
+
+    // Re-verify the old key's group is still accessible: a revoked grant must
+    // not be resurrected by rotating the key.
+    if let Some(group_id) = model_group_id {
+        match store.user_can_access_model_group(&user_id, group_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": {
+                            "code": "model_group_forbidden",
+                            "message": format!(
+                                "You do not have access to model group '{}'",
+                                group_id
+                            )
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": {"message": error.to_string()}})),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     // Add new key with same label and model_group_id
     if store
@@ -1172,6 +1230,85 @@ pub(super) async fn portal_list_model_groups(
     // 修改：调用新方法，只返回用户有权访问的分组
     match store.list_user_accessible_model_groups(&user_id).await {
         Ok(groups) => (StatusCode::OK, Json(json!({ "groups": groups }))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct UpdateKeyLabelRequest {
+    label: String,
+}
+
+/// PUT /api/portal/keys/{downstream_id}/label
+/// 更新密钥的显示标签（保留模型分组不变）。
+pub(super) async fn portal_update_key_label(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(downstream_id): axum::extract::Path<String>,
+    axum::Json(payload): axum::Json<UpdateKeyLabelRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "Portal store not available"}})),
+        )
+            .into_response();
+    };
+
+    // 校验密钥归属：必须是该用户绑定的密钥。
+    let keys = match store.list_downstream_bindings_with_labels(&user_id).await {
+        Ok(keys) => keys,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to list keys"}})),
+            )
+                .into_response();
+        }
+    };
+    let Some(key) = keys.iter().find(|k| k.downstream_id == downstream_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "Key not found"}})),
+        )
+            .into_response();
+    };
+
+    let new_label = payload.label.trim();
+    let normalized_label = if new_label.is_empty() {
+        None
+    } else {
+        Some(new_label)
+    };
+
+    // 保留当前分组，仅更新标签。
+    let current_group = if key.model_group_id.is_empty() {
+        None
+    } else {
+        Some(key.model_group_id.as_str())
+    };
+    match store
+        .update_downstream_label(&user_id, &downstream_id, normalized_label, current_group)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "downstream_id": downstream_id,
+                "label": normalized_label,
+                "model_group_id": key.model_group_id,
+            })),
+        )
+            .into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": error.to_string()}})),

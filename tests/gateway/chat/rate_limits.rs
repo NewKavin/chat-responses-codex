@@ -40,6 +40,8 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -172,6 +174,8 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -285,6 +289,8 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -393,6 +399,8 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -551,6 +559,8 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1268,6 +1278,8 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1424,6 +1436,8 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1509,6 +1523,8 @@ fn route_retry_downstream_config(downstream_key: &GeneratedDownstreamKey) -> Dow
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
         model_allowlist: vec!["gpt-4.1-mini".into()],
+        
+model_group_id: None,
         per_minute_limit: 60,
         rate_limit_enabled: true,
         max_concurrency: 10,

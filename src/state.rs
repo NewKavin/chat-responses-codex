@@ -207,8 +207,8 @@ pub use types::{
     DEFAULT_UPSTREAM_TRANSIENT_SAME_ROUTE_RETRY_ENABLED,
 };
 pub use usage::{
-    portal_model_is_allowed, CostUsage, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage,
-    TokenQuota,
+    model_list_allows, portal_model_is_allowed, CostUsage, DailyStats, ModelStats, PerMinuteUsage,
+    RequestQuotaUsage, TokenQuota,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -6215,13 +6215,37 @@ impl AppState {
         let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
         let alias_registry = self.model_alias_registry();
 
+        // Effective allowlist: model_group_id (if set) takes priority over
+        // model_allowlist; group lookup failure fails closed (empty result).
+        let effective_allowlist: Vec<String> = if downstream.model_group_id.is_some() {
+            match self.portal_store() {
+                Some(portal_store) => match downstream
+                    .get_allowed_models(portal_store.as_ref())
+                    .await
+                {
+                    Ok(models) => models,
+                    Err(e) => {
+                        tracing::warn!(
+                            downstream_id = %downstream.id,
+                            model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                            error = %e,
+                            "failed to resolve downstream model group for model list; exposing none"
+                        );
+                        return Vec::new();
+                    }
+                },
+                None => downstream.model_allowlist.clone(),
+            }
+        } else {
+            downstream.model_allowlist.clone()
+        };
+
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
             for entry in upstream.effective_downstream_models_detailed() {
                 let model = entry.model.as_str();
-                if downstream.model_allowlist.is_empty()
-                    || portal_model_is_allowed(&downstream.model_allowlist, &model)
+                if model_list_allows(effective_allowlist.as_slice(), &model)
                 {
                     // Admin-picked per-upstream mapping labels are exposed
                     // verbatim (the operator typed them); everything else

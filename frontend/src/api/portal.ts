@@ -128,6 +128,11 @@ export const portalApi = {
     portalHttp.put<{ success: boolean }>(`/portal/keys/${downstreamId}/model-group`, {
       model_group_id: modelGroupId
     }),
+  updateKeyLabel: (downstreamId: string, label: string) =>
+    portalHttp.put<{ downstream_id: string; label: string | null; model_group_id: string }>(
+      `/portal/keys/${downstreamId}/label`,
+      { label }
+    ),
 
   // Announcement
   getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement'),

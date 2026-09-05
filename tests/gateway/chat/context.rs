@@ -92,6 +92,8 @@ async fn context_limit_error_retries_once_with_reduced_max_tokens() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -205,6 +207,8 @@ async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() 
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -368,6 +372,8 @@ async fn explicit_context_wrappers_do_not_cool_route() {
                         plaintext_key: Some(downstream_key.plaintext.clone()),
                         plaintext_key_prefix: None,
                         model_allowlist: vec!["gpt-4.1-mini".into()],
+                        
+model_group_id: None,
                         rate_limit_enabled: false,
                         per_minute_limit: 60,
                         max_concurrency: 10,
@@ -567,6 +573,8 @@ async fn context_overflow_503_compacts_once_without_cooling_route() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
                     max_concurrency: 10,
@@ -771,6 +779,8 @@ async fn protected_context_minimum_returns_stable_context_error() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
                     max_concurrency: 10,
@@ -909,6 +919,8 @@ async fn generic_503_does_not_compact_history() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
                     max_concurrency: 10,
@@ -1091,6 +1103,8 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1270,6 +1284,8 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["MiniMax2.7".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1488,6 +1504,8 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1690,6 +1708,8 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,

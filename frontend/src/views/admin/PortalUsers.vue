@@ -119,6 +119,12 @@
     <el-dialog v-model="bindingsVisible" :title="`密钥绑定：${bindingsUser?.email ?? ''}`" width="560">
       <el-table :data="bindings" v-loading="bindingsLoading" stripe>
         <el-table-column prop="downstream_id" label="密钥" />
+        <el-table-column label="模型分组" min-width="140">
+          <template #default="{ row }">
+            <el-tag v-if="row.model_group_id" size="small" type="info">{{ groupName(row.model_group_id) }}</el-tag>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="默认" width="90" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.is_default" type="primary" size="small">默认</el-tag>
@@ -133,7 +139,7 @@
       </el-table>
 
       <div class="binding-form">
-        <el-select v-model="newBindingKey" placeholder="选择已存在的密钥" style="width: 240px" filterable>
+        <el-select v-model="newBindingKey" placeholder="选择已存在的密钥" style="width: 220px" filterable>
           <el-option
             v-for="key in availableKeys"
             :key="key.id"
@@ -141,8 +147,14 @@
             :value="key.id"
           />
         </el-select>
-        <el-checkbox v-model="newBindingDefault">设为默认</el-checkbox>
+        <el-select v-model="newBindingGroup" placeholder="模型分组" clearable style="width: 160px" filterable>
+          <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
+        </el-select>
+        <el-checkbox v-model="newBindingDefault">默认</el-checkbox>
         <el-button type="primary" :loading="bindingSaving" @click="addBinding">添加</el-button>
+      </div>
+      <div class="field-hint" style="margin-top: 8px">
+        不选模型分组时使用默认分组（basic）；也可对已有绑定重新指定分组（会更新该密钥的分组）。
       </div>
     </el-dialog>
   </div>
@@ -170,6 +182,7 @@ interface PortalUserRow {
 interface BindingRow {
   downstream_id: string
   is_default: boolean
+  model_group_id?: string
 }
 
 const users = ref<PortalUserRow[]>([])
@@ -184,6 +197,7 @@ const bindingsLoading = ref(false)
 const bindings = ref<BindingRow[]>([])
 const bindingsUser = ref<PortalUserRow | null>(null)
 const newBindingKey = ref('')
+const newBindingGroup = ref('')
 const newBindingDefault = ref(false)
 const bindingSaving = ref(false)
 const availableKeys = ref<Array<{ id: string; name: string }>>([])
@@ -317,6 +331,7 @@ const refreshBindings = async () => {
     const response = await adminApi.getPortalUserBindings(bindingsUser.value.id)
     bindings.value = response.data.items
     newBindingKey.value = ''
+    newBindingGroup.value = ''
     newBindingDefault.value = false
   } finally {
     bindingsLoading.value = false
@@ -327,7 +342,12 @@ const addBinding = async () => {
   if (!bindingsUser.value || !newBindingKey.value) return
   bindingSaving.value = true
   try {
-    await adminApi.addPortalUserBinding(bindingsUser.value.id, newBindingKey.value, newBindingDefault.value)
+    await adminApi.addPortalUserBinding(
+      bindingsUser.value.id,
+      newBindingKey.value,
+      newBindingDefault.value,
+      newBindingGroup.value || undefined
+    )
     ElMessage.success('已添加绑定')
     await refreshBindings()
   } finally {

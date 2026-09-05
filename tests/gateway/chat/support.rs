@@ -119,6 +119,8 @@ pub(super) async fn capture_single_chat_request_with_options(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.to_string()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

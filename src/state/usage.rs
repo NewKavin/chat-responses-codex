@@ -268,6 +268,20 @@ pub fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
         .any(|allowed| allowed == model)
 }
 
+/// Unified allowlist gate used by every model-permission path (config layer
+/// allowlists, model groups, `/v1/models` exposure):
+/// empty list = allow all; `"*"` = allow all; otherwise normalized matching
+/// (case-insensitive + codex subagent base-model passthrough).
+pub fn model_list_allows(allowlist: &[String], model: &str) -> bool {
+    if allowlist.is_empty() {
+        return true;
+    }
+    if allowlist.iter().any(|allowed| allowed == "*") {
+        return true;
+    }
+    portal_model_is_allowed(allowlist, model)
+}
+
 impl AppState {
     pub async fn compute_per_minute_usage(&self, downstream_id: &str) -> PerMinuteUsage {
         let now = unix_seconds();

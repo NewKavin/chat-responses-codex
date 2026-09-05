@@ -388,6 +388,7 @@ async fn run_matrix_cell(dialect: Dialect, scenario: Scenario) -> (String, Value
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.clone()],
+                model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

@@ -226,6 +226,7 @@ async fn persist_config_round_trips_through_postgres() {
             plaintext_key: Some(downstream_key.plaintext),
             plaintext_key_prefix: None,
             model_allowlist: vec![],
+            model_group_id: None,
             ip_allowlist: vec![],
             rate_limit_enabled: true,
             per_minute_limit: 60,

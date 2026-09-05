@@ -554,6 +554,45 @@
           <strong>{{ globalModelPool.length }}</strong> 个模型。
           勾选模型后，凡是支持该模型的上游账号都会被自动选中并保存。
         </div>
+
+        <!-- 批量操作工具栏 -->
+        <div class="global-fetch-toolbar">
+          <el-button size="small" @click="selectAllModels" data-test="select-all-button">
+            全选 ({{ globalModelPool.length }})
+          </el-button>
+          <el-button size="small" @click="invertSelection" data-test="invert-selection-button">
+            反选
+          </el-button>
+          <el-button size="small" @click="clearSelection" data-test="clear-selection-button">
+            清空
+          </el-button>
+
+          <el-divider direction="vertical" />
+
+          <el-input
+            v-model="globalFilterText"
+            size="small"
+            clearable
+            placeholder="筛选模型（支持正则）"
+            style="width: 200px"
+            data-test="global-model-filter"
+          />
+
+          <el-divider direction="vertical" />
+
+          <span style="color: var(--el-text-color-secondary); font-size: 13px;">预设组合：</span>
+          <el-button
+            v-for="group in builtinModelGroups"
+            :key="group.id"
+            size="small"
+            plain
+            @click="applyModelGroup(group)"
+            :data-test="`model-group-${group.id}`"
+          >
+            {{ group.name }}
+          </el-button>
+        </div>
+
         <el-form label-width="90px" class="global-model-form">
           <el-form-item label="选择模型">
             <el-select
@@ -566,7 +605,7 @@
               style="width: 100%"
             >
               <el-option
-                v-for="model in globalModelPool"
+                v-for="model in filteredModels"
                 :key="model"
                 :label="`${model}（${globalModelAccountCount(model)} 个账号支持）`"
                 :value="model"
@@ -1694,6 +1733,74 @@ const resetGlobalFetch = () => {
   globalUpstreamModels.value = {}
   globalProgress.value = { done: 0, total: 0 }
 }
+
+// 批量选择功能
+const selectAllModels = () => {
+  globalSelectedModels.value = [...globalModelPool.value]
+}
+
+const invertSelection = () => {
+  const selected = new Set(globalSelectedModels.value)
+  globalSelectedModels.value = globalModelPool.value.filter(m => !selected.has(m))
+}
+
+const clearSelection = () => {
+  globalSelectedModels.value = []
+}
+
+// 预设模型组
+interface ModelGroup {
+  id: string
+  name: string
+  pattern: string
+}
+
+const builtinModelGroups: ModelGroup[] = [
+  {
+    id: 'gpt',
+    name: 'GPT 系列',
+    pattern: '^gpt-'
+  },
+  {
+    id: 'claude',
+    name: 'Claude 系列',
+    pattern: '^claude-'
+  },
+  {
+    id: 'opensource',
+    name: '开源模型',
+    pattern: '^(llama|mistral|mixtral|qwen|deepseek)-'
+  }
+]
+
+const applyModelGroup = (group: ModelGroup) => {
+  const regex = new RegExp(group.pattern, 'i')
+  const groupModels = globalModelPool.value.filter(m => regex.test(m))
+  const selected = new Set(globalSelectedModels.value)
+  groupModels.forEach(m => selected.add(m))
+  globalSelectedModels.value = Array.from(selected)
+}
+
+// 筛选功能
+const globalFilterText = ref('')
+
+const filteredModels = computed(() => {
+  let models = globalModelPool.value
+
+  // 文本筛选（支持正则）
+  if (globalFilterText.value.trim()) {
+    try {
+      const regex = new RegExp(globalFilterText.value, 'i')
+      models = models.filter(m => regex.test(m))
+    } catch {
+      // 如果不是有效正则，fallback 到普通字符串匹配
+      const search = globalFilterText.value.toLowerCase()
+      models = models.filter(m => m.toLowerCase().includes(search))
+    }
+  }
+
+  return models
+})
 
 
 onMounted(() => {

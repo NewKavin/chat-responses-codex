@@ -186,6 +186,7 @@ impl DialectRetryFixture {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["opaque/model".into()],
+                    model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,

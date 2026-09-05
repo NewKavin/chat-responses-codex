@@ -2535,9 +2535,6 @@ const BATCH_UPDATE_UPSTREAM_ALLOWED_FIELDS: &[&str] = &[
     "request_quota_requests",
     "request_quota_5h",
     "requests_per_minute",
-    "premium_models",
-    "premium_only",
-    "protect_premium_quota",
     "strip_nonstandard_chat_fields",
     "dialect_preset",
     "model_dialect_presets",
@@ -3490,6 +3487,7 @@ pub(super) async fn admin_portal_user_bindings(
                     serde_json::json!({
                         "downstream_id": binding.downstream_id,
                         "is_default": binding.is_default,
+                        "model_group_id": binding.model_group_id,
                     })
                 })
                 .collect();
@@ -3507,6 +3505,8 @@ pub(super) async fn admin_portal_user_bindings(
 pub(super) struct BindBody {
     downstream_id: String,
     is_default: Option<bool>,
+    /// 绑定密钥时指定的模型分组；None 保持默认（basic 或既有分组）。
+    model_group_id: Option<String>,
 }
 
 pub(super) async fn admin_portal_user_bindings_post(
@@ -3529,11 +3529,27 @@ pub(super) async fn admin_portal_user_bindings_post(
         )
             .into_response();
     }
+    // 若指定了模型分组，校验分组存在。
+    if let Some(group_id) = &body.model_group_id {
+        if store.get_model_group(group_id).await.is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "group_not_found",
+                        "message": format!("model group '{group_id}' not found")
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
     match store
-        .add_downstream_binding(
+        .upsert_downstream_binding_with_group(
             &user_id,
             &body.downstream_id,
             body.is_default.unwrap_or(false),
+            body.model_group_id.as_deref(),
         )
         .await
     {
@@ -3543,6 +3559,7 @@ pub(super) async fn admin_portal_user_bindings_post(
                 "user_id": user_id,
                 "downstream_id": body.downstream_id,
                 "is_default": body.is_default.unwrap_or(false),
+                "model_group_id": body.model_group_id,
             })),
         )
             .into_response(),

@@ -121,6 +121,8 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -473,6 +475,8 @@ async fn downstream_responses_stream_replays_namespace_tool_calls() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -621,6 +625,8 @@ async fn verified_native_responses_route_preserves_hosted_tools_unchanged() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["opaque/model".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

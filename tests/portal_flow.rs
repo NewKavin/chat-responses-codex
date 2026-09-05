@@ -31,6 +31,7 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         plaintext_key: None,
         plaintext_key_prefix: None,
         model_allowlist: vec!["gpt-4".to_string()],
+            model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 100,
         max_concurrency: 10,

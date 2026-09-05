@@ -88,6 +88,8 @@ async fn capability_ineligible_responses_route_does_not_suppress_chat_fallback()
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -296,6 +298,8 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -587,6 +591,8 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -802,6 +808,8 @@ async fn chat_only_fallback_drops_unpinned_reasoning_and_preserves_tool_history(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1005,6 +1013,8 @@ async fn downstream_responses_bad_response_status_preserves_tools_without_retry(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -1152,6 +1162,8 @@ async fn chat_only_responses_required_hosted_tools_reject_before_dispatch() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["claude-haiku-4-5-20251001".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1314,6 +1326,8 @@ async fn chat_only_responses_optional_hosted_tool_reports_downgrade() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["opaque/model".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1457,6 +1471,8 @@ async fn encrypted_agent_message_fails_before_chat_fallback_hits_upstream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1601,6 +1617,8 @@ async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["deepseek-v4-flash".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1724,6 +1742,8 @@ async fn mapped_reasoning_effort_precedes_generic_normalization() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1930,6 +1950,8 @@ async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_p
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["claude-haiku-4-5-20251001".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2084,6 +2106,8 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2263,6 +2287,8 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2454,6 +2480,8 @@ async fn polluted_replayed_history_repairs_and_anomaly_carries_dispatch_attribut
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,

@@ -8,6 +8,7 @@ fn cost_downstream() -> DownstreamConfig {
         plaintext_key: None,
         plaintext_key_prefix: None,
         model_allowlist: Vec::new(),
+        model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
         max_concurrency: 10,

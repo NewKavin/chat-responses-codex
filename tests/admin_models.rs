@@ -137,6 +137,7 @@ fn models_harness() -> (axum::Router, AppState) {
                 plaintext_key: None,
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["deepseek-v4".into()],
+            model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,

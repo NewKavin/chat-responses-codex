@@ -74,6 +74,8 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -201,6 +203,8 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -805,6 +809,8 @@ async fn feedback_502_state(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,

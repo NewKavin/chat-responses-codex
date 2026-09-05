@@ -33,6 +33,7 @@ fn create_test_state() -> (AppState, String) {
             plaintext_key: Some(generated.plaintext.clone()),
             plaintext_key_prefix: None,
             model_allowlist: vec![],
+            model_group_id: None,
             ip_allowlist: vec![],
             max_concurrency: 10,
             per_minute_limit: 100,

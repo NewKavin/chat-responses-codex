@@ -78,6 +78,8 @@ async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["opaque-cap-model".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -207,6 +209,8 @@ async fn max_output_tokens_cap_zero_passes_through() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["opaque-pass-model".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,

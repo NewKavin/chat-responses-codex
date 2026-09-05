@@ -172,7 +172,7 @@ impl PostgresStateStore {
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
                  request_quota_requests, expires_at, active, billing_mode, \
                  input_token_price_per_million_cents, output_token_price_per_million_cents, \
-                 daily_cost_limit_cents, model_concurrency_groups \
+                 daily_cost_limit_cents, model_concurrency_groups, model_group_id \
                  FROM downstreams ORDER BY id",
                 &[],
             )
@@ -213,6 +213,7 @@ impl PostgresStateStore {
                             .ok()
                     })
                     .unwrap_or_default(),
+                model_group_id: row.get::<_, Option<String>>(18),
             });
         }
 
@@ -651,11 +652,6 @@ impl PostgresStateStore {
                          SELECT supported.model_slug
                          FROM upstream_supported_models supported
                          JOIN upstreams upstream ON upstream.id = supported.upstream_id
-                         WHERE upstream.active
-                         UNION
-                         SELECT premium.model_slug
-                         FROM upstream_premium_models premium
-                         JOIN upstreams upstream ON upstream.id = premium.upstream_id
                          WHERE upstream.active
                      ) route_models",
                     &[],
@@ -1366,9 +1362,10 @@ async fn sync_downstreams(
             &output_token_price_per_million_cents,
             &daily_cost_limit_cents,
             &model_concurrency_groups,
+            &downstream.model_group_id,
         ];
 
-        const DOWNSTREAM_COLUMNS: [&str; 18] = [
+        const DOWNSTREAM_COLUMNS: [&str; 19] = [
             "id",
             "name",
             "hash",
@@ -1387,6 +1384,7 @@ async fn sync_downstreams(
             "output_token_price_per_million_cents",
             "daily_cost_limit_cents",
             "model_concurrency_groups",
+            "model_group_id",
         ];
         const DOWNSTREAM_INSERT_CONFLICT: &str = "ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1405,7 +1403,8 @@ async fn sync_downstreams(
                 input_token_price_per_million_cents = EXCLUDED.input_token_price_per_million_cents,
                 output_token_price_per_million_cents = EXCLUDED.output_token_price_per_million_cents,
                 daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents,
-                model_concurrency_groups = EXCLUDED.model_concurrency_groups";
+                model_concurrency_groups = EXCLUDED.model_concurrency_groups,
+                model_group_id = EXCLUDED.model_group_id";
         debug_assert_eq!(DOWNSTREAM_COLUMNS.len(), params.len());
         let sql = insert_statement(
             "downstreams",
@@ -1812,12 +1811,6 @@ CREATE TABLE IF NOT EXISTS upstream_supported_models (
     PRIMARY KEY (upstream_id, model_slug)
 );
 
-CREATE TABLE IF NOT EXISTS upstream_premium_models (
-    upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    model_slug TEXT NOT NULL,
-    PRIMARY KEY (upstream_id, model_slug)
-);
 
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS request_quota_5h INTEGER NOT NULL DEFAULT 600;
@@ -1913,7 +1906,26 @@ ALTER TABLE downstreams
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS model_concurrency_groups JSONB NULL;
 ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS model_group_id TEXT NULL;
+ALTER TABLE downstreams
     DROP COLUMN IF EXISTS token_price_per_million_cents;
+
+-- Downstream model-group linkage: mirrors migrations/2026-09-05-add-downstream-model-group-id.sql
+-- so freshly initialized databases get the same FK and index as migrated ones.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_downstream_model_group'
+          AND conrelid = 'downstreams'::regclass
+    ) THEN
+        ALTER TABLE downstreams
+            ADD CONSTRAINT fk_downstream_model_group
+            FOREIGN KEY (model_group_id) REFERENCES model_groups(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_downstreams_model_group
+    ON downstreams(model_group_id);
 
 CREATE TABLE IF NOT EXISTS downstream_model_allowlist (
     downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE,

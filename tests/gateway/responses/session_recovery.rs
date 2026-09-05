@@ -204,6 +204,8 @@ async fn session_recovery_harness() -> SessionRecoveryHarness {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -840,6 +842,8 @@ async fn failover_recovery_harness() -> FailoverRecoveryHarness {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -1334,6 +1338,8 @@ async fn build_cross_account_harness() -> CrossAccountHarness {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![CROSS_ACCOUNT_MODEL.into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,

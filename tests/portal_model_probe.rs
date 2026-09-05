@@ -49,6 +49,7 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             plaintext_key: Some(generated.plaintext.clone()),
             plaintext_key_prefix: None,
             model_allowlist: vec!["gpt-4o".to_string()],
+            model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
             max_concurrency: 10,

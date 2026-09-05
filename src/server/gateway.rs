@@ -18,7 +18,7 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, portal_model_is_allowed, unix_millis, unix_seconds, AccountConcurrencyKey,
+    join_upstream_url, model_list_allows, unix_millis, unix_seconds, AccountConcurrencyKey,
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, DownstreamModelEntry,
     GlobalContextProfile, KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit,
@@ -2678,6 +2678,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/portal/keys/{downstream_id}/model-group",
             put(portal_update_key_model_group),
         )
+        .route(
+            "/api/portal/keys/{downstream_id}/label",
+            put(portal_update_key_label),
+        )
         // Frontend assets and SPA fallback (with static-only compression);
         // merged so the nested router's fallback becomes the app fallback.
         .merge(static_frontend_router())
@@ -3273,7 +3277,38 @@ async fn claude_count_tokens(
         Ok(model) => model,
         Err(error) => return error.into_anthropic_response(),
     };
-    if !portal_model_is_allowed(downstream.model_allowlist.as_slice(), model) {
+    // Resolve the effective allowlist (model_group_id takes priority over
+    // model_allowlist); group lookup failure fails closed.
+    let effective_allowlist: Vec<String> = if downstream.model_group_id.is_some() {
+        match state.portal_store() {
+            Some(portal_store) => match downstream.get_allowed_models(portal_store.as_ref()).await {
+                Ok(models) => models,
+                Err(e) => {
+                    tracing::error!(
+                        downstream_key_id = %downstream.id,
+                        model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                        error = %e,
+                        "failed to resolve downstream model group for count_tokens; failing closed"
+                    );
+                    return GatewayError::classified(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "model group resolution failed",
+                        "permission_error",
+                        "model_group_check_failed",
+                        "model_group_check_failed",
+                        None,
+                        None,
+                    )
+                    .into_anthropic_response();
+                }
+            },
+            None => downstream.model_allowlist.clone(),
+        }
+    } else {
+        downstream.model_allowlist.clone()
+    };
+
+    if !model_list_allows(effective_allowlist.as_slice(), model) {
         return GatewayError::gateway_forbidden("model not allowed", "gateway_model_not_allowed")
             .into_anthropic_response();
     }
@@ -5528,7 +5563,66 @@ async fn process_gateway_request_inner(
         }
     }
 
-    if !portal_model_is_allowed(downstream.model_allowlist.as_slice(), model) {
+    // Resolve the effective model allowlist: a configured model_group_id
+    // takes priority over the legacy model_allowlist (downstream-level model
+    // group management). Group lookup runs inside the request path, so a
+    // stale/missing group fails closed instead of silently widening access.
+    let effective_allowlist: Vec<String> = if downstream.model_group_id.is_some() {
+        match state.portal_store() {
+            Some(portal_store) => match downstream.get_allowed_models(portal_store.as_ref()).await {
+                Ok(models) => models,
+                Err(e) => {
+                    tracing::error!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream.id,
+                        model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                        error = %e,
+                        "failed to resolve downstream model group; failing closed"
+                    );
+                    let error = GatewayError::classified(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "model group resolution failed",
+                        "permission_error",
+                        "model_group_check_failed",
+                        "model_group_check_failed",
+                        None,
+                        None,
+                    );
+                    let _ = append_gateway_usage_log(
+                        &state,
+                        &request_id,
+                        &downstream.id,
+                        &downstream.name,
+                        "",
+                        None,
+                        request_path,
+                        model,
+                        inference_strength.as_deref(),
+                        user_agent.as_deref(),
+                        None,
+                        error.status_code(),
+                        Some(error.to_string()),
+                        Some(error.error_category().to_string()),
+                        0,
+                        0,
+                        0,
+                        started,
+                    )
+                    .await;
+                    active_request_guard.fail_and_finish(error.error_category());
+                    return Err(error);
+                }
+            },
+            // No portal store (file-backed mode): groups are unavailable, so
+            // fall back to the explicit allowlist rather than failing every
+            // request against a group that cannot be resolved.
+            None => downstream.model_allowlist.clone(),
+        }
+    } else {
+        downstream.model_allowlist.clone()
+    };
+
+    if !model_list_allows(effective_allowlist.as_slice(), model) {
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -5575,9 +5669,9 @@ async fn process_gateway_request_inner(
         {
             Ok(allowed_models) => {
                 let has_restriction = !allowed_models.is_empty();
-                let is_allowed = !has_restriction
-                    || allowed_models.contains(&"*".to_string())
-                    || allowed_models.iter().any(|allowed| allowed == model);
+                // Normalized matching (case-insensitive + subagent base-model
+                // passthrough), consistent with the config-layer allowlist.
+                let is_allowed = model_list_allows(&allowed_models, model);
 
                 if has_restriction && !is_allowed {
                     tracing::warn!(

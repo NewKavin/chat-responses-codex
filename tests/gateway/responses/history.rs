@@ -69,6 +69,8 @@ async fn run_versioned_v1_continuation_case(duplicate_exact_route: bool) -> (Sta
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,
@@ -259,6 +261,8 @@ async fn legacy_continuation_rejects_ambiguous_multi_protocol_upstream_before_di
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -354,6 +358,8 @@ async fn legacy_continuation_does_not_downgrade_reasoning_tool_history() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -514,6 +520,8 @@ async fn responses_private_continuation_keys_are_stripped_before_upstream_dispat
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -639,6 +647,8 @@ async fn context_compaction_preserves_unresolved_tool_pairs_and_recent_reasoning
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -877,6 +887,8 @@ async fn codex_responses_overflow_compacts_once_for_chat_upstream() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![model.into()],
+                    
+model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
                     max_concurrency: 10,
@@ -1126,6 +1138,8 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![exposed_model.into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1400,6 +1414,8 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1597,6 +1613,8 @@ async fn downstream_responses_unknown_previous_response_id_is_safe_and_categoriz
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -1731,6 +1749,8 @@ async fn response_history_is_isolated_by_downstream_key() {
         plaintext_key: Some(key.plaintext.clone()),
         plaintext_key_prefix: None,
         model_allowlist: vec!["opaque".into()],
+        
+model_group_id: None,
         per_minute_limit: 60,
         rate_limit_enabled: false,
         max_concurrency: 10,
@@ -1906,6 +1926,8 @@ async fn concurrent_windows_with_repeated_upstream_id_keep_separate_history() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["opaque".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: false,
                 max_concurrency: 10,
@@ -2098,6 +2120,8 @@ async fn native_responses_repeated_upstream_id_keeps_concurrent_windows_separate
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["opaque".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: false,
                 max_concurrency: 10,
@@ -2323,6 +2347,8 @@ async fn chat_only_high_fidelity_stage_is_skipped_after_three_identical_failures
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["claude-haiku-4-5-20251001".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -2588,6 +2614,8 @@ async fn downstream_responses_request_downgrades_developer_role_for_chat_upstrea
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -2732,6 +2760,8 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -2889,6 +2919,8 @@ async fn downstream_responses_request_with_explicit_hosted_tool_choice_is_reject
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -3042,6 +3074,8 @@ async fn downstream_responses_request_with_string_hosted_tool_choice_is_rejected
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -3198,6 +3232,8 @@ async fn downstream_responses_request_with_unknown_function_tool_choice_drops_to
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -3374,6 +3410,8 @@ async fn build_profile_switch_state(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![model.into()],
+                
+model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
                 max_concurrency: 10,

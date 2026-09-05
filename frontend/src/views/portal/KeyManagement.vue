@@ -163,9 +163,14 @@ const handleCreate = async () => {
   }
 }
 
-const handleEdit = async (_downstreamId: string, _newLabel: string) => {
-  // TODO: Implement edit when API available
-  await loadKeys()
+const handleEdit = async (downstreamId: string, newLabel: string) => {
+  try {
+    await portalApi.updateKeyLabel(downstreamId, newLabel.trim())
+    ElMessage.success('标签已更新')
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '更新标签失败')
+  }
 }
 
 const handleRotate = async (downstreamId: string, newId: string) => {

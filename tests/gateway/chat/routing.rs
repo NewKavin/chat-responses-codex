@@ -64,6 +64,8 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,
@@ -218,6 +220,8 @@ async fn downstream_chat_request_uses_key_mapped_to_requested_model() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["claude-3".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -376,6 +380,8 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -487,6 +493,8 @@ async fn persistent_credentials_failure_stays_502_after_route_cooldown() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -637,6 +645,8 @@ async fn protocol_mismatch_hint_skips_only_the_failed_protocol_on_next_request()
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![model.into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -807,6 +817,8 @@ async fn capacity_failure_cools_only_the_failed_key_route_for_later_requests() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["glm-5.2".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -975,6 +987,8 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![model.into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1168,6 +1182,8 @@ async fn feature_mismatch_hints_only_block_the_matching_effort_on_that_key() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![model.into()],
+                    
+model_group_id: None,
                     per_minute_limit: 200,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1387,6 +1403,8 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![model.into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1583,6 +1601,8 @@ async fn generic_500_attempts(same_route_retry_enabled: bool) -> Vec<String> {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["glm-5.2".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1701,6 +1721,8 @@ async fn downstream_chat_request_does_not_fall_back_to_primary_key_for_unmapped_
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["glm-5.1".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -1760,130 +1782,6 @@ async fn downstream_chat_request_does_not_fall_back_to_primary_key_for_unmapped_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_exists() {
-    with_proxy_env_cleared(|| async move {
-        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
-        let tempdir = tempdir().unwrap();
-        let state_path = tempdir.path().join("state.json");
-        let upstream_sss =
-            spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
-        let upstream_general =
-            spawn_recording_chat_upstream("general", "upstream-general-secret", hits.clone()).await;
-
-        let downstream_key = generate_downstream_key("gw");
-        let state = AppState::new(
-            PersistedState {
-                upstreams: std::sync::Arc::new(vec![
-                    UpstreamConfig {
-                        id: "sss".into(),
-                        name: "sss".into(),
-                        base_url: upstream_sss,
-                        api_key: "upstream-sss-secret".into(),
-                        protocol: UpstreamProtocol::ChatCompletions,
-                        protocols: vec![UpstreamProtocol::ChatCompletions],
-                        supported_models: vec!["glm5.1".into(), "deepseek".into()],
-
-                        default_model_context: None,
-
-                        model_contexts: vec![],
-                        request_quota_window_hours: 5,
-
-                        request_quota_requests: 600,
-                        requests_per_minute: 60,
-                        max_concurrency: 10,
-                        priority: 999,
-                        active: true,
-                        failure_count: 0,
-                        ..Default::default()
-                    },
-                    UpstreamConfig {
-                        id: "general".into(),
-                        name: "general".into(),
-                        base_url: upstream_general,
-                        api_key: "upstream-general-secret".into(),
-                        protocol: UpstreamProtocol::ChatCompletions,
-                        protocols: vec![UpstreamProtocol::ChatCompletions],
-                        supported_models: vec!["deepseek".into()],
-
-                        default_model_context: None,
-
-                        model_contexts: vec![],
-                        request_quota_window_hours: 5,
-
-                        request_quota_requests: 600,
-                        requests_per_minute: 60,
-                        max_concurrency: 10,
-                        priority: 1,
-                        active: true,
-                        failure_count: 0,
-                        ..Default::default()
-                    },
-                ]),
-                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
-                    id: "down-1".into(),
-                    name: "team-a".into(),
-                    hash: downstream_key.hash.clone(),
-                    plaintext_key: Some(downstream_key.plaintext.clone()),
-                    plaintext_key_prefix: None,
-                    model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
-                    per_minute_limit: 60,
-
-                    rate_limit_enabled: true,
-
-                    max_concurrency: 10,
-                    daily_token_limit: None,
-                    monthly_token_limit: None,
-                    input_token_price_per_million_cents: None,
-                    output_token_price_per_million_cents: None,
-                    daily_cost_limit_cents: None,
-                    request_quota_window_hours: None,
-                    request_quota_requests: None,
-                    ip_allowlist: vec![],
-                    expires_at: None,
-                    active: true,
-                    billing_mode: "request".into(),
-                    model_concurrency_groups: vec![],
-                }]),
-                usage_logs: vec![],
-                announcement: None,
-                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
-                runtime_settings: None,
-                model_aliases: vec![],
-            },
-            state_path,
-            AppConfig::default(),
-        );
-
-        let app = build_router(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header(
-                        header::AUTHORIZATION,
-                        format!("Bearer {}", downstream_key.plaintext),
-                    )
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "model": "deepseek",
-                            "messages": [{"role": "user", "content": "Hello"}]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(hits.lock().unwrap().as_slice(), &["general"]);
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alternative() {
     with_proxy_env_cleared(|| async move {
         let hits = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1923,7 +1821,9 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
+                    model_allowlist: vec!["deepseek".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
 
                     rate_limit_enabled: true,
@@ -1977,108 +1877,6 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(hits.lock().unwrap().as_slice(), &["sss"]);
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn premium_only_model_routes_to_protected_upstream() {
-    with_proxy_env_cleared(|| async move {
-        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
-        let tempdir = tempdir().unwrap();
-        let state_path = tempdir.path().join("state.json");
-        let upstream =
-            spawn_recording_chat_upstream("premium", "upstream-premium-secret", hits.clone()).await;
-
-        let downstream_key = generate_downstream_key("gw");
-        let state = AppState::new(
-            PersistedState {
-                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
-                    id: "premium".into(),
-                    name: "premium".into(),
-                    base_url: upstream,
-                    api_key: "upstream-premium-secret".into(),
-                    protocol: UpstreamProtocol::ChatCompletions,
-                    protocols: vec![UpstreamProtocol::ChatCompletions],
-                    supported_models: vec!["deepseek".into()],
-
-                    default_model_context: None,
-
-                    model_contexts: vec![],
-                    request_quota_window_hours: 5,
-                    request_quota_requests: 600,
-                    requests_per_minute: 60,
-                    max_concurrency: 10,
-                    priority: 100,
-                    active: true,
-                    failure_count: 0,
-                    ..Default::default()
-                }]),
-                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
-                    id: "down-1".into(),
-                    name: "team-a".into(),
-                    hash: downstream_key.hash.clone(),
-                    plaintext_key: Some(downstream_key.plaintext.clone()),
-                    plaintext_key_prefix: None,
-                    model_allowlist: vec!["glm-5.1".into()],
-                    per_minute_limit: 60,
-                    rate_limit_enabled: true,
-                    max_concurrency: 10,
-                    daily_token_limit: None,
-                    monthly_token_limit: None,
-                    input_token_price_per_million_cents: None,
-                    output_token_price_per_million_cents: None,
-                    daily_cost_limit_cents: None,
-                    request_quota_window_hours: None,
-                    request_quota_requests: None,
-                    ip_allowlist: vec![],
-                    expires_at: None,
-                    active: true,
-                    billing_mode: "request".into(),
-                    model_concurrency_groups: vec![],
-                }]),
-                usage_logs: vec![],
-                announcement: None,
-                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
-                runtime_settings: None,
-                model_aliases: vec![],
-            },
-            state_path,
-            AppConfig::default(),
-        );
-
-        let app = build_router(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header(
-                        header::AUTHORIZATION,
-                        format!("Bearer {}", downstream_key.plaintext),
-                    )
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "model": "glm-5.1",
-                            "messages": [{"role": "user", "content": "Hello"}]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body_text = String::from_utf8_lossy(&body);
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected response body: {body_text}"
-        );
-        assert_eq!(hits.lock().unwrap().as_slice(), &["premium"]);
     })
     .await;
 }
@@ -2201,6 +1999,8 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["MiniMax2.7".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -2329,6 +2129,8 @@ async fn routing_rebalances_when_models_overlap() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -2465,6 +2267,8 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec!["gpt-4.1-mini".into()],
+                    
+model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -2568,6 +2372,8 @@ fn priority_test_downstream(downstream_key: &GeneratedDownstreamKey) -> Downstre
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
         model_allowlist: vec!["gpt-4.1-mini".into()],
+        
+model_group_id: None,
         per_minute_limit: 60,
         rate_limit_enabled: true,
         max_concurrency: 10,

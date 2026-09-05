@@ -56,18 +56,32 @@
         <el-table-column v-if="isColumnVisible('name')" prop="name" label="名称" width="200" />
         <el-table-column
           v-if="isColumnVisible('available_models')"
-          label="可用模型"
+          label="模型权限"
           min-width="260"
         >
           <template #default="{ row }">
-            <el-tooltip
-              :content="row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型'"
-              placement="top"
-            >
-              <span class="model-list-cell">
-                {{ row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型' }}
+            <!-- 使用模型分组 -->
+            <div v-if="row.model_group_id" class="model-group-display">
+              <el-tag type="primary" size="small" style="margin-right: 8px;">
+                <Layers :size="12" style="margin-right: 4px; vertical-align: middle;" />
+                分组: {{ getModelGroupName(row.model_group_id) }}
+              </el-tag>
+              <span class="model-count-hint">
+                ({{ getModelGroupModelCount(row.model_group_id) }} 个模型)
               </span>
-            </el-tooltip>
+            </div>
+
+            <!-- 手动配置 -->
+            <div v-else>
+              <el-tooltip
+                :content="row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型'"
+                placement="top"
+              >
+                <span class="model-list-cell">
+                  {{ row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型' }}
+                </span>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
         <el-table-column v-if="isColumnVisible('key')" label="秘钥" width="220">
@@ -311,7 +325,74 @@
           </template>
         </template>
 
-        <el-form-item label="模型白名单">
+        <el-form-item label="模型权限管理">
+          <el-radio-group v-model="modelManagementMode">
+            <el-radio value="group">
+              使用模型分组（推荐）
+            </el-radio>
+            <el-radio value="manual">
+              手动配置模型列表
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
+
+        <!-- 使用模型分组 -->
+        <el-form-item v-if="modelManagementMode === 'group'" label="选择模型分组">
+          <el-select
+            v-model="form.model_group_id"
+            placeholder="选择一个模型分组"
+            clearable
+            filterable
+            style="width: 100%;"
+          >
+            <el-option
+              v-for="group in availableModelGroups"
+              :key="group.id"
+              :label="group.name"
+              :value="group.id"
+            >
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span>{{ group.name }}</span>
+                <el-tag size="small" type="info">
+                  {{ group.allowed_models.includes('*') ? '全部模型' : `${group.allowed_models.length} 个模型` }}
+                </el-tag>
+              </div>
+            </el-option>
+          </el-select>
+
+          <!-- 显示选中分组的模型列表预览 -->
+          <div v-if="form.model_group_id" class="group-preview">
+            <div class="preview-header">
+              <span>该分组允许的模型：</span>
+            </div>
+            <div class="preview-models">
+              <el-tag
+                v-for="model in getSelectedGroupModels()"
+                :key="model"
+                size="small"
+                type="success"
+                style="margin: 2px;"
+              >
+                {{ model }}
+              </el-tag>
+            </div>
+          </div>
+
+          <el-alert
+            title="提示"
+            type="success"
+            :closable="false"
+            style="margin-top: 8px;"
+          >
+            使用模型分组可以统一管理多个下游的模型权限。修改分组配置会自动影响所有使用该分组的下游。
+            <router-link to="/admin/model-groups" style="margin-left: 8px; color: var(--el-color-primary);">
+              管理模型分组 →
+            </router-link>
+          </el-alert>
+        </el-form-item>
+
+        <!-- 手动配置模型列表（原有方式） -->
+        <el-form-item v-else label="模型白名单">
           <el-select v-model="form.model_allowlist" multiple filterable allow-create placeholder="留空表示允许所有模型">
             <el-option v-for="model in availableModels" :key="model" :label="model" :value="model" />
           </el-select>
@@ -321,7 +402,7 @@
             :closable="false"
             class="helper-text"
           >
-            默认不限制模型，留空即可全部访问。
+            手动配置每个下游的模型列表。如需统一管理多个下游，推荐使用"模型分组"方式。
           </el-alert>
         </el-form-item>
         <el-form-item label="IP 白名单">
@@ -510,6 +591,7 @@ import {
   Coins,
   Copy,
   Gauge,
+  Layers,
   Plus,
   Search,
   Settings2,
@@ -519,6 +601,7 @@ import {
   Wallet
 } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
+import type { ModelGroup } from '@/api/portal'
 import { copyTextToClipboard } from '@/utils/clipboard'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { useTableColumnPreferences, type TableColumnDefinition } from '@/composables/useTableColumns'
@@ -562,6 +645,8 @@ const inputTokenPricePerMillion = ref<number | undefined>(undefined)
 const outputTokenPricePerMillion = ref<number | undefined>(undefined)
 const dailyCostLimit = ref<number | undefined>(undefined)
 const availableModels = ref<string[]>([])
+const availableModelGroups = ref<ModelGroup[]>([])
+const modelManagementMode = ref<'group' | 'manual'>('manual')
 const selectedRows = ref<DownstreamConfig[]>([])
 const batchDialogVisible = ref(false)
 const batchSubmitting = ref(false)
@@ -694,6 +779,27 @@ const copyKey = async (key: unknown) => {
   }
 }
 
+// 获取模型分组名称
+const getModelGroupName = (groupId: string) => {
+  const group = availableModelGroups.value.find(g => g.id === groupId)
+  return group?.name || groupId
+}
+
+// 获取模型分组的模型数量
+const getModelGroupModelCount = (groupId: string) => {
+  const group = availableModelGroups.value.find(g => g.id === groupId)
+  if (!group) return 0
+  if (group.allowed_models.includes('*')) return '∞'
+  return group.allowed_models.length
+}
+
+// 获取选中分组的模型列表
+const getSelectedGroupModels = () => {
+  if (!form.value.model_group_id) return []
+  const group = availableModelGroups.value.find(g => g.id === form.value.model_group_id)
+  return group?.allowed_models || []
+}
+
 const loadData = async () => {
   try {
     loading.value = true
@@ -746,6 +852,35 @@ const loadModels = async () => {
     ElMessage.error('加载模型列表失败')
   }
 }
+
+const loadModelGroups = async () => {
+  try {
+    const { data } = await adminApi.listModelGroups()
+    availableModelGroups.value = data.groups ?? []
+  } catch (error) {
+    console.error('加载模型分组失败:', error)
+  }
+}
+
+// 根据 form 的值初始化模式
+watch(() => form.value, (newForm) => {
+  if (newForm.model_group_id) {
+    modelManagementMode.value = 'group'
+  } else if (newForm.model_allowlist && newForm.model_allowlist.length > 0) {
+    modelManagementMode.value = 'manual'
+  } else {
+    modelManagementMode.value = 'manual'
+  }
+}, { immediate: true, deep: true })
+
+// 切换模式时清空另一个字段
+watch(modelManagementMode, (mode) => {
+  if (mode === 'group') {
+    form.value.model_allowlist = []
+  } else {
+    form.value.model_group_id = undefined
+  }
+})
 
 const loadRuntime = async () => {
   try {
@@ -1104,6 +1239,7 @@ const handleRuntimeVisibility = () => {
 onMounted(() => {
   loadData()
   loadModels()
+  loadModelGroups()
   loadRuntime()
   startRuntimeTimer()
   document.addEventListener('visibilitychange', handleRuntimeVisibility)
@@ -1406,6 +1542,36 @@ code {
 
 .row-actions :deep(.el-button + .el-button) {
   margin-left: 0;
+}
+
+.model-group-display {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.model-count-hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.group-preview {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 4px;
+}
+
+.preview-header {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 8px;
+}
+
+.preview-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 </style>

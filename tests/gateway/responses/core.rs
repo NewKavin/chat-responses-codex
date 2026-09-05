@@ -119,6 +119,7 @@ async fn downstream_responses_supports_configured_portal_models() {
                     .iter()
                     .map(|model| (*model).into())
                     .collect(),
+                model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -265,6 +266,8 @@ async fn codex_subagent_fast_preview_model_uses_authorized_base_route() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["glm-5.2".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -388,6 +391,8 @@ async fn downstream_responses_allows_function_call_success_with_zero_output_toke
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+                
+model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -520,6 +525,7 @@ async fn downstream_models_do_not_live_discover_an_empty_portal_catalog() {
                     .iter()
                     .map(|model| (*model).into())
                     .collect(),
+                model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -761,6 +767,8 @@ async fn empty_persisted_catalog_skips_discovery_but_preserves_legacy_request_ro
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec![],
+                
+model_group_id: None,
                 per_minute_limit: 60,
 
                 rate_limit_enabled: true,

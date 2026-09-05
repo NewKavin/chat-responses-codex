@@ -190,6 +190,8 @@ export interface DownstreamConfig {
   plaintext_key?: string
   plaintext_key_prefix?: string
   model_allowlist: string[]
+  /** Model group ID. If set, the downstream inherits allowed_models from the group. Priority: model_group_id > model_allowlist. */
+  model_group_id?: string
   rate_limit_enabled: boolean
   per_minute_limit: number
   max_concurrency: number

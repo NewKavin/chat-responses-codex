@@ -237,3 +237,115 @@ async fn test_portal_update_key_group_checks_permission() {
 
     assert_eq!(response2.status(), StatusCode::NO_CONTENT, "Should allow authorized group");
 }
+
+/// 测试：portal_create_key 不允许绑定未授权的分组（越权创建密钥）
+#[tokio::test]
+async fn test_portal_create_key_rejects_unauthorized_group() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = chat_responses_codex::state::AppState::load_from_database_url(
+        &url,
+        chat_responses_codex::state::AppConfig::default(),
+    )
+    .await
+    .expect("load state");
+
+    let store = state.portal_store().expect("portal store");
+
+    let user_id = "test-create-key-user";
+    let client = store.get_client().await.expect("get client");
+    client
+        .execute(
+            "INSERT INTO portal_users (id, email) VALUES ($1, $2)",
+            &[&user_id, &"create-key@example.com"],
+        )
+        .await
+        .unwrap();
+
+    let session_id = "create-key-session";
+    let sid_hash = {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(session_id.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+    client
+        .execute(
+            "INSERT INTO portal_sessions (sid, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')",
+            &[&sid_hash, &user_id],
+        )
+        .await
+        .unwrap();
+
+    let app = build_router(state.clone());
+
+    // 未授权 premium：创建绑定到 premium 的密钥必须 403（与更新路径一致）。
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/portal/keys")
+                .header("Cookie", format!("portal_session={}", session_id))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&json!({
+                        "downstream_id": "unauthorized-key-1",
+                        "model_group_id": "premium"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "Creating a key in an unauthorized group must be rejected"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "model_group_forbidden");
+
+    // 授权 premium 后创建成功。
+    store
+        .grant_user_model_group(user_id, "premium", None)
+        .await
+        .expect("grant premium");
+
+    let response2 = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/portal/keys")
+                .header("Cookie", format!("portal_session={}", session_id))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&json!({
+                        "downstream_id": "authorized-key-1",
+                        "model_group_id": "premium"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response2.status(),
+        StatusCode::CREATED,
+        "Creating a key in an authorized group must succeed"
+    );
+}

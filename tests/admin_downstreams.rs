@@ -43,6 +43,7 @@ fn create_test_state() -> AppState {
                 plaintext_key: None,
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".to_string()],
+            model_group_id: None,
                 per_minute_limit: 100,
 
                 rate_limit_enabled: true,
@@ -69,6 +70,7 @@ fn create_test_state() -> AppState {
                 plaintext_key: None,
                 plaintext_key_prefix: None,
                 model_allowlist: vec![],
+            model_group_id: None,
                 per_minute_limit: 50,
 
                 rate_limit_enabled: true,

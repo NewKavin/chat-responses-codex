@@ -28,6 +28,7 @@ async fn register_downstream(state: &AppState, downstream_id: &str) -> String {
         plaintext_key: Some(key.plaintext.clone()),
         active: true,
         model_allowlist: vec![],
+        model_group_id: None,
         ..Default::default()
     };
     downstream.plaintext_key = Some(key.plaintext.clone());

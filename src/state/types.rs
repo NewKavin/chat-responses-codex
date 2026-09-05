@@ -1133,6 +1133,10 @@ pub struct DownstreamConfig {
     pub plaintext_key_prefix: Option<String>,
     #[serde(default)]
     pub model_allowlist: Vec<String>,
+    /// Model group ID. If set, the downstream inherits allowed_models from the group.
+    /// Priority: model_group_id > model_allowlist (for backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_group_id: Option<String>,
     #[serde(default = "default_downstream_rate_limit_enabled")]
     pub rate_limit_enabled: bool,
     #[serde(default = "default_downstream_per_minute_limit")]
@@ -1187,6 +1191,7 @@ impl Default for DownstreamConfig {
             plaintext_key: None,
             plaintext_key_prefix: None,
             model_allowlist: Vec::new(),
+            model_group_id: None,
             rate_limit_enabled: default_downstream_rate_limit_enabled(),
             per_minute_limit: default_downstream_per_minute_limit(),
             max_concurrency: default_downstream_max_concurrency(),
@@ -1204,6 +1209,16 @@ impl Default for DownstreamConfig {
             model_concurrency_groups: Vec::new(),
         }
     }
+}
+
+/// Trait for types that can retrieve model group models.
+/// This abstraction allows DownstreamConfig to work with both real PortalStore
+/// and mock implementations in tests.
+pub trait HasGetModelGroupModels: Send + Sync {
+    fn get_model_group_models(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, String>> + Send;
 }
 
 impl DownstreamConfig {
@@ -1302,6 +1317,57 @@ impl DownstreamConfig {
             }
         }
         Ok(())
+    }
+
+    /// Get the allowed models for this downstream.
+    /// Priority: model_group_id (if set) > model_allowlist (fallback).
+    /// Returns the group's allowed_models if model_group_id is set and the group exists,
+    /// otherwise returns model_allowlist.
+    pub async fn get_allowed_models<S>(&self, portal_store: &S) -> Result<Vec<String>, String>
+    where
+        S: HasGetModelGroupModels,
+    {
+        // Priority 1: Use model_group_id if set
+        if let Some(group_id) = &self.model_group_id {
+            match portal_store.get_model_group_models(group_id).await {
+                Ok(models) => {
+                    tracing::debug!(
+                        downstream_id = %self.id,
+                        model_group_id = %group_id,
+                        models_count = models.len(),
+                        "Using model group for downstream"
+                    );
+                    return Ok(models);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        downstream_id = %self.id,
+                        model_group_id = %group_id,
+                        error = %e,
+                        "Model group not found, falling back to model_allowlist"
+                    );
+                    // Fall through to model_allowlist
+                }
+            }
+        }
+
+        // Priority 2: Fall back to model_allowlist
+        Ok(self.model_allowlist.clone())
+    }
+
+    /// Check if a specific model is allowed for this downstream.
+    /// Empty list means all models are allowed.
+    /// Supports "*" wildcard in allowed_models.
+    /// Matching is normalized (case-insensitive + codex subagent base-model
+    /// passthrough), consistent with the config-layer allowlist gate.
+    pub async fn allows_model<S>(&self, model: &str, portal_store: &S) -> bool
+    where
+        S: HasGetModelGroupModels,
+    {
+        match self.get_allowed_models(portal_store).await {
+            Ok(allowed) => crate::state::model_list_allows(&allowed, model),
+            Err(_) => false, // On error, deny access
+        }
     }
 
     /// Resolve the concurrency group for an already-normalized model name,
@@ -2019,5 +2085,188 @@ mod portal_oidc_config_tests {
     fn test_portal_oidc_token_path_default() {
         let config = AppConfig::default();
         assert_eq!(config.portal_oidc_token_path, "/token");
+    }
+}
+
+#[cfg(test)]
+mod downstream_model_group_tests {
+    use super::*;
+
+    // Mock PortalStore for testing (simplified version)
+    struct MockPortalStore {
+        groups: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    impl MockPortalStore {
+        fn new() -> Self {
+            Self {
+                groups: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with_group(mut self, id: &str, models: Vec<String>) -> Self {
+            self.groups.insert(id.to_string(), models);
+            self
+        }
+    }
+
+    impl super::HasGetModelGroupModels for MockPortalStore {
+        async fn get_model_group_models(&self, id: &str) -> Result<Vec<String>, String> {
+            self.groups
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("Model group '{}' not found", id))
+        }
+    }
+
+    /// RED: Test that downstream with model_group_id uses group's allowed_models
+    #[tokio::test]
+    async fn downstream_uses_model_group_allowed_models() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec![],
+            model_group_id: Some("basic-models".into()),
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new()
+            .with_group("basic-models", vec!["gpt-4".into(), "gpt-3.5-turbo".into()]);
+
+        let allowed_models = downstream.get_allowed_models(&mock_store).await.unwrap();
+
+        assert_eq!(allowed_models, vec!["gpt-4", "gpt-3.5-turbo"]);
+    }
+
+    /// RED: Test that model_group_id takes precedence over model_allowlist
+    #[tokio::test]
+    async fn model_group_id_takes_precedence_over_allowlist() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec!["claude-3".into()],
+            model_group_id: Some("premium-models".into()),
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new()
+            .with_group("premium-models", vec!["gpt-4".into()]);
+
+        let allowed_models = downstream.get_allowed_models(&mock_store).await.unwrap();
+
+        assert_eq!(allowed_models, vec!["gpt-4"]);
+        assert_ne!(allowed_models, vec!["claude-3"]);
+    }
+
+    /// RED: Test fallback to model_allowlist when model_group_id is None
+    #[tokio::test]
+    async fn falls_back_to_model_allowlist_when_no_group_id() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec!["claude-3".into(), "claude-2".into()],
+            model_group_id: None,
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new();
+
+        let allowed_models = downstream.get_allowed_models(&mock_store).await.unwrap();
+
+        assert_eq!(allowed_models, vec!["claude-3", "claude-2"]);
+    }
+
+    /// RED: Test fallback to model_allowlist when model group not found
+    #[tokio::test]
+    async fn falls_back_to_allowlist_when_group_not_found() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec!["fallback-model".into()],
+            model_group_id: Some("non-existent-group".into()),
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new();
+
+        let allowed_models = downstream.get_allowed_models(&mock_store).await.unwrap();
+
+        assert_eq!(allowed_models, vec!["fallback-model"]);
+    }
+
+    /// RED: Test allows_model checks group models
+    #[tokio::test]
+    async fn allows_model_checks_group_models() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec![],
+            model_group_id: Some("basic-models".into()),
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new()
+            .with_group("basic-models", vec!["gpt-4".into(), "gpt-3.5-turbo".into()]);
+
+        assert!(downstream.allows_model("gpt-4", &mock_store).await);
+        assert!(downstream.allows_model("gpt-3.5-turbo", &mock_store).await);
+        assert!(!downstream.allows_model("claude-3", &mock_store).await);
+    }
+
+    /// RED: Test allows_model handles wildcard "*"
+    #[tokio::test]
+    async fn allows_model_handles_wildcard() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec![],
+            model_group_id: Some("all-models".into()),
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new()
+            .with_group("all-models", vec!["*".into()]);
+
+        assert!(downstream.allows_model("gpt-4", &mock_store).await);
+        assert!(downstream.allows_model("claude-3", &mock_store).await);
+        assert!(downstream.allows_model("any-model", &mock_store).await);
+    }
+
+    /// RED: Test empty lists allow all models
+    #[tokio::test]
+    async fn empty_lists_allow_all_models() {
+        let downstream = DownstreamConfig {
+            id: "test-downstream".into(),
+            name: "Test Downstream".into(),
+            model_allowlist: vec![],
+            model_group_id: None,
+            ..Default::default()
+        };
+
+        let mock_store = MockPortalStore::new();
+
+        assert!(downstream.allows_model("any-model", &mock_store).await);
+        assert!(downstream.allows_model("gpt-4", &mock_store).await);
+    }
+}
+
+// Tests for downstream model group functionality
+#[cfg(test)]
+mod downstream_model_group_tests {
+    use super::*;
+    use crate::state::portal_store::ModelGroup;
+
+    #[test]
+    fn test_downstream_model_group_basic() {
+        // Simple synchronous test to verify test discovery works
+        let config = DownstreamConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            model_allowlist: vec!["gpt-4".to_string()],
+            model_group_id: None,
+            ..Default::default()
+        };
+
+        assert_eq!(config.id, "test");
     }
 }

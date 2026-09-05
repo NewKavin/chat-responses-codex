@@ -3,7 +3,7 @@ use crate::capabilities::{
     Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, DialectProfileKey, EvidenceState,
     RequestedFeatures, RuntimeCapabilityHints, UpstreamDialectProfile, WireProtocol,
 };
-use crate::state::PersistedState;
+use crate::state::{DownstreamConfig, PersistedState};
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::to_bytes;
 use axum::http::StatusCode;
@@ -1033,6 +1033,7 @@ async fn stream_completion_fixture(
         plaintext_key: None,
         plaintext_key_prefix: None,
         model_allowlist: vec![],
+        model_group_id: None,
         rate_limit_enabled: false,
         per_minute_limit: 1,
         max_concurrency: 1,
@@ -1505,6 +1506,7 @@ async fn gateway_uses_independent_local_slots_for_keys_on_one_upstream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["unit-account-model".into()],
+                model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
                 max_concurrency: 2,
@@ -1630,13 +1632,14 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
     let state = AppState::new(
         PersistedState {
             upstreams: Arc::new(vec![upstream]),
-            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+            downstreams: Arc::new(vec![DownstreamConfig {
                 id: "down-probe-reservation-retry".into(),
                 name: "probe reservation client".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["unit-probe-model".into()],
+                model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
                 max_concurrency: 2,
@@ -1760,13 +1763,14 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
     let state = AppState::new(
         PersistedState {
             upstreams: Arc::new(vec![upstream]),
-            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+            downstreams: Arc::new(vec![DownstreamConfig {
                 id: "down-reservation-capacity".into(),
                 name: "reservation capacity client".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["unit-probe-model".into()],
+                model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
                 max_concurrency: 2,
@@ -1863,13 +1867,14 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
 #[tokio::test]
 async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
     let directory = tempdir().unwrap();
-    let downstream = crate::state::DownstreamConfig {
+    let downstream = DownstreamConfig {
         id: "down-multi-account-recovery".into(),
         name: "multi-account recovery".into(),
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
         model_allowlist: vec![],
+        model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
         max_concurrency: 1,
@@ -2008,13 +2013,14 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
     let state = AppState::new(
         PersistedState {
             upstreams: Arc::new(upstreams.clone()),
-            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+            downstreams: Arc::new(vec![DownstreamConfig {
                 id: "down-coordination-failure".into(),
                 name: "coordination failure client".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["unit-coordination-model".into()],
+                model_group_id: None,
                 rate_limit_enabled: true,
                 per_minute_limit: 60,
                 max_concurrency: 2,
@@ -2548,6 +2554,7 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["unit-capacity-model".into()],
+                model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
                 max_concurrency: 2,
@@ -3194,13 +3201,14 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 failure_count: 3,
                 ..Default::default()
             }]),
-            downstreams: std::sync::Arc::new(vec![crate::state::DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".into()],
+                model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 1,

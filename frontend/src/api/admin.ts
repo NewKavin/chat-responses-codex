@@ -392,11 +392,20 @@ export const adminApi = {
   updatePortalUser: (id: string, data: { display_name?: string; username?: string; email?: string }) =>
     adminHttp.patch<{ id: string }>(`/admin/portal/users/${id}`, data),
   getPortalUserBindings: (id: string) =>
-    adminHttp.get<{ items: Array<{ downstream_id: string; is_default: boolean }> }>(
-      `/admin/portal/users/${id}/bindings`
-    ),
-  addPortalUserBinding: (id: string, downstream_id: string, is_default: boolean) =>
-    adminHttp.post(`/admin/portal/users/${id}/bindings`, { downstream_id, is_default }),
+    adminHttp.get<
+      { items: Array<{ downstream_id: string; is_default: boolean; model_group_id?: string }> }
+    >(`/admin/portal/users/${id}/bindings`),
+  addPortalUserBinding: (
+    id: string,
+    downstream_id: string,
+    is_default: boolean,
+    model_group_id?: string
+  ) =>
+    adminHttp.post(`/admin/portal/users/${id}/bindings`, {
+      downstream_id,
+      is_default,
+      model_group_id
+    }),
   deletePortalUserBinding: (id: string, downstream_id: string) =>
     adminHttp.delete(`/admin/portal/users/${id}/bindings/${downstream_id}`),
   getPortalUserModelGroups: (id: string) =>

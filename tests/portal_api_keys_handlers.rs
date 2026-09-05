@@ -493,7 +493,11 @@ async fn test_rotate_key() {
     .await
     .expect("Failed to create user");
 
-    // Add a key with label and set as default
+    // Add a key with label and set as default (user must hold the group)
+    store
+        .grant_user_model_group(&user.id, "premium", Some("admin"))
+        .await
+        .expect("grant premium");
     store.add_downstream_binding_with_label(&user.id, "old-key-1", Some("Production Key"), Some("premium"))
         .await
         .expect("Failed to add key");

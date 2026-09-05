@@ -583,6 +583,8 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+            model_group_id: None,
+
                 per_minute_limit: 10_000,
 
                 rate_limit_enabled: true,
@@ -748,6 +750,7 @@ async fn load_gateway_first_meaningful_event_baseline() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+            model_group_id: None,
                 per_minute_limit: 10_000,
                 rate_limit_enabled: true,
                 max_concurrency: TOTAL_REQUESTS as u32,
@@ -948,6 +951,7 @@ async fn load_gateway_first_meaningful_event() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
+            model_group_id: None,
                 per_minute_limit: 10_000,
                 rate_limit_enabled: true,
                 max_concurrency: TOTAL_REQUESTS as u32,
