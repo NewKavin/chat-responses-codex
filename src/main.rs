@@ -280,7 +280,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         deployment_timezone: env_or("TZ", "Asia/Shanghai"),
         usage_log_rotation_max_bytes: env_usize("USAGE_LOG_ROTATION_MAX_BYTES", 1_048_576).max(1),
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),
-        usage_log_retention_days: env_u64("USAGE_LOG_RETENTION_DAYS", 14),
+        usage_log_retention_days: env_u64("USAGE_LOG_RETENTION_DAYS", 5),
         upstream_rate_limit_default_retry_seconds: env_u64(
             "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS",
             30,

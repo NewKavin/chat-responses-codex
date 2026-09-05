@@ -689,7 +689,7 @@ impl Default for AppConfig {
             deployment_timezone: "Asia/Shanghai".into(),
             usage_log_rotation_max_bytes: 1_048_576,
             usage_log_archive_max_files: 10,
-            usage_log_retention_days: 14,
+            usage_log_retention_days: 5,
             upstream_rate_limit_default_retry_seconds: 30,
             upstream_rate_limit_retry_window_seconds: 300,
             upstream_rate_limit_retry_attempts: 3,
