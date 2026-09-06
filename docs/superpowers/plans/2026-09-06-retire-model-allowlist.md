@@ -1,6 +1,6 @@
 # 下线 `model_allowlist`，统一由模型分组接管 — 方案
 
-状态：待开发（2026-09-06 定稿，三项决策已拍板）
+状态：阶段 0–3 与一次性部署（M1/M2/M3、T10–T15）已实现；T16 删列删表留待下一版本
 前置：外部草案 `docs/investigations/model-allowlist-deprecation-plan.md` 已作废并删除，其 4 处错误的修正见附录 A
 
 ## 已拍板的三项决策
@@ -498,6 +498,31 @@ COMMIT;
 - W2：7 处 `portal_model_is_allowed` 直接调用点（admin.rs 模型探测、usage.rs 统计/上下文、log_queries.rs active_models、state.rs 可见性×3）统一改调 `model_list_allows`；RED→GREEN：`visible_models_wildcard_group_returns_all_upstream_models`（仅 all 组下游场景）
 - 回归：downstream_model_groups 15/15、gateway 452/452
 <!-- WRK W1 W2 END -->
+
+## 一次性部署执行状态（2026-09-07 更新）
+
+| 项 | 状态 / commit | 说明 |
+|---|---|---|
+| W1 通配符缺口 1（codex_exposed_models 认 `"*"`） | ✅ `6ceb4a7b` | RED→GREEN：`gateway_codex_catalog_wildcard_group_returns_all_upstream_models` |
+| W2 通配符缺口 2（7 处读路径改 `model_list_allows`） | ✅ `6ceb4a7b` | 含 admin 模型探测、usage 统计/上下文、active_models、scope=visible×3；门户配额/探测走 effective allowlist 天然通配 |
+| M1 阻塞项 2（占位种子修正） | ✅ `3324794f`（SCHEMA_SQL 带条件 UPDATE）+ `b26e3e8c`（migration 文件同步带条件） | 新库 `SCHEMA_SQL` 与既有库启动路径均为条件 UPDATE：仅内容仍是占位值时改写，运维手工调整不覆盖 |
+| M2 阻塞项 1（启动迁移） | ✅ `b26e3e8c`（`migrate_model_allowlist_to_groups` 进 `initialize_schema`）+ `065094b`（只处理未绑组行 + 表缺失跳过加固） | 幂等：只处理 `model_group_id IS NULL` 行；`downstream_model_allowlist` 表缺失时 warn 跳过 |
+| M3 启动迁移日志 | ✅ `b26e3e8c`（三种情况均有输出）+ `065094b`（统计改为**本次运行增量**）+ `9a17714`（INSERT…SELECT 守护测试修复）：`N downstreams -> all group, M auto groups created, K bound`） | 无变化时 `nothing to migrate`；表缺失时 `warn ... absent, skipping`；仍有未绑组时附加 warn |
+| T10 停写 | ✅ `8ce7d4cf` | PUT/单条忽略 `model_allowlist` 并 warn（200 不报错）；批量字段移除；`postgres.rs` 双写保留（回滚数据） |
+| T11 资格审定写分组 | ✅ `eafeaafc` | 三条防外溢规则齐备；组更新与快照同一事务（`replace_state_with_group_models`） |
+| T12 新建下游默认 deny-all | ✅ `c7205dea` | admin 创建 + 状态写入层（`insert_downstream`/`update_downstream`/`sync_downstreams`）统一兜底；DB 层 `NOT NULL` 后任何漏网 None 都落 deny-all（`065094b`） |
+| T13 前端下线 manual 模式 | ✅ `8d4d88d7` | Downstreams.vue 只显示分组；types 标 @deprecated；spec 与 redis smoke fixture 同步；门户四页面未动 |
+| T14 测试夹具 | ✅ `9ee0ec08` + `7a0968e`/`9a17714`/`9c743d9` | 全部显式 `model_allowlist` 夹具改 `..Default::default()`；以白名单语义为对象的**行为测试**保留显式字段（T16 前回退路径仍是事实源）：`gateway_manual_allowlist_still_enforced`、`downstream_without_model_group_uses_allowlist`、`downstream_with_invalid_group_falls_back_to_allowlist`、`admin_models_scope_visible...` 等 |
+| T15 权限兜底 | ✅ `065094b` + `9a17714`（portal_store 绑定级 NULL 落 basic） | 见下方“T15 实现说明”：启动步骤（非 SCHEMA_SQL）`migrate_downstream_group_fallback`，排序在迁移之后，DO 块幂等；删组后落 deny-all 且请求 403 |
+| T16 删字段/删表 | ⏸ 明确不做 | 表与双写保留为回滚路径，下个版本 |
+
+**T15 实现说明（对 §6.5 的一处修正）**：用户输入同时要求“权限兜底进 SCHEMA_SQL”与“排在 `migrate_model_allowlist_to_groups` 之后”。SCHEMA_SQL 是 `batch_execute` 的首条语句，二者不可兼得；本实现采用后者（正确性优先）：在 `initialize_schema` 中迁移之后追加 `migrate_downstream_group_fallback(&tx)`，SQL 为 DO 块包幂等判断（列 `SET DEFAULT 'deny-all'` + `SET NOT NULL`；外键存在且 `confdeltype='d'` 时跳过重建）。并在 `SET NOT NULL` 前补一条 fail-closed 的 `UPDATE downstreams SET model_group_id='deny-all' WHERE model_group_id IS NULL`。
+
+**已发现并修复的连锁问题**：
+- T15 的 `NOT NULL` 使“未绑组”形态从 DB 中消失，m2/m3/迁移/资格审定等造旧库数据的测试统一改为：先 `DROP NOT NULL` 再裸 SQL 插 NULL 行（模拟升级前旧库）；无条件组外的内存态用例（资格审定规则 1）改用 `add_downstream`。
+- `gateway/model_permission_validation.rs` 旧语义“无组 key 跳过校验”与新决策（未指定组=deny-all=403）冲突，已更新为 `test_non_portal_key_without_group_is_deny_all` 并断言 403；其余三例的 key 级组显式给 `all`，继续测绑定级闸门。
+
+
 **阶段 0 附注**：修复测试基建 `tests/common/oidc.rs`（reset 漏清 `downstreams` 表导致跨测试残留、HTTP 分组测试命中旧副本）；`tests/downstream_model_groups.rs` invalid-group 语义更新为「真实组→删除→FK SET NULL→回退 allowlist」（FK 禁止绑定不存在分组）；10/10 用例绿。
 
 ### 阶段 1
@@ -716,3 +741,40 @@ UPDATE downstreams SET model_group_id = NULL WHERE model_group_id LIKE 'auto-%' 
 4. 建议"组被删除时 `SET DEFAULT 'basic'`"。**不足**：`basic` 是占位数据（阶段 0 先修）；且真正的兜底需要 sentinel 组，因为 `model_list_allows` 把空列表当放行全部。
 
 草案漏掉的两处写路径：`state.rs:7230 apply_model_qualification`（功能写入）、以及 76 个测试文件的夹具改造工作量。
+
+
+## 模拟真实升级（2026-09-07 执行，完整证据见交付拉取记录）
+
+准备：`sim_upgrade` 库装入 `35b91817` 的旧 SCHEMA_SQL（前置补建 model_groups，
+因旧 schema 自带的 FK 位于建表之前，当年靠既有表绕过去）+ 占位种子 + 5 个下游
+（4 个未绑组：d-all 空白名单、d-shared-a/b 相同白名单、d-solo 独立白名单；1 个
+已绑 basic）。旧二进制在 rustc 1.95 下无法编译（35b91817 与当前依赖 rustls API
+不兼容），before 目录按旧读路径语义（空列表=全量上游、非空=allowlist、已绑组=组
+内容，显示小写排序）直接复算，已在报告注明。
+
+1) 新二进制第一次启动（迁移日志）：
+```
+INFO model allowlist migration: 1 downstreams -> all group, 2 auto groups created, 4 bound
+```
+2) 第二次/第三次启动（幂等日志）：
+```
+INFO model allowlist migration: nothing to migrate (all downstreams already grouped)
+```
+3) catalog-diff before/after（4/5 key 逐位无差异，唯一差异是 M1 预期）：
+```
+OK   All.txt (4 slugs unchanged)
+OK   Shared A.txt (2 slugs unchanged)
+OK   Shared B.txt (2 slugs unchanged)
+OK   Solo.txt (1 slugs unchanged)
+DIFF PreBound Basic.txt  (claude-3-haiku/gpt-3.5-turbo -> deepseek-v4-flash 系列/glm-5.3-flash/kimi-k3)
+```
+4) §2.3 校验查询：迁移前后有效模型集合 diff **0 行**；未绑组计数 **0**；
+   `model_group_id` `is_nullable=NO`、`column_default='deny-all'`；
+   `fk_downstream_model_group` `confdeltype=d`（ON DELETE SET DEFAULT）；
+   种子 basic/premium 已修正为真实模型，deny-all 组存在；shared 两个 key 共用
+   `auto-4671910a`，solo 独立 `auto-65b9a5fc`；`downstream_model_allowlist`
+   双写保留（回滚路径可用）。
+5) 绑 all 组 key 的 codex 目录 = 全量 4 个上游 slug（不是 `*` 一条）。
+
+全量验证：`cargo test` 2025 passed / 0 failed / 106 ignored（全绿）；
+frontend vitest 315 通过；clippy 无新增 warning（与改动前基线一致）。
