@@ -8511,13 +8511,13 @@ impl AppState {
                 {
                     downstream.request_quota_requests = None;
                 }
-                if let Some(model_allowlist) =
-                    updates.get("model_allowlist").and_then(|v| v.as_array())
-                {
-                    downstream.model_allowlist = model_allowlist
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
+                // T10：停写 model_allowlist（分组是唯一事实源）。老客户端
+                // 传该字段时忽略并告警，契约保持 200 不报错。
+                if updates.get("model_allowlist").is_some() {
+                    tracing::warn!(
+                        downstream_id = %downstream.id,
+                        "ignoring model_allowlist in update (model groups are the single source of truth)"
+                    );
                 }
                 if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
                     downstream.ip_allowlist = ip_allowlist

@@ -551,6 +551,54 @@ async fn test_downstreams_update_modifies_existing_downstream() {
     assert_eq!(downstream.per_minute_limit, 200);
 }
 
+/// T10：停写 model_allowlist——老客户端更新时传该字段必须 200 且不再写入。
+#[tokio::test]
+async fn test_downstreams_update_ignores_model_allowlist() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // 更新前 allowlist 为 ["gpt-4", "gpt-3.5-turbo"]（create_test_state fixture）
+    let updated_downstream = json!({
+        "name": "T10 Updated",
+        "model_allowlist": ["hacker-model"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&updated_downstream).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 老客户端契约：200 而不是报错
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 字段被忽略：allowlist 保持原值，未写入 hacker-model
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert_eq!(downstream.name, "T10 Updated", "non-allowlist fields still update");
+    assert!(
+        !downstream.model_allowlist.iter().any(|m| m == "hacker-model"),
+        "model_allowlist write must be ignored, got {:?}",
+        downstream.model_allowlist
+    );
+}
+
 #[tokio::test]
 async fn test_downstreams_update_preserves_key_hash() {
     let state = create_test_state();
