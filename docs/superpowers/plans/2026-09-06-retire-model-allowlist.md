@@ -9,6 +9,10 @@
 2. **`basic` / `premium` 的占位种子模型改成本部署真实模型**（阶段 0 执行，见 §3.0）。
 3. **`apply_model_qualification` 改为写入下游所绑分组的 `allowed_models`**，不再写 `model_allowlist`（阶段 3 T11，含共享组防外溢规则，见 §3.3）。
 
+## ⚠️ 阻塞项：通配符 bug 必须先修（新增，2026-09-06 核查发现）
+
+`codex_exposed_models`（`src/server/gateway.rs:2953`）与 `portal_model_is_allowed`（`src/state/usage.rs:247`）**都不认识 `"*"`**。方案 §3.2 的"空白名单挂 `all` 组"会把当前一批 Codex 正常可用的 key 全部打成启动报错。必须在**迁移 SQL 之前**修掉，详见 §1.6。
+
 ---
 
 ## 0. 结论先说
@@ -84,6 +88,51 @@ DB 模式实际走 `postgres.rs:616 downstream_usage_summary`，文件模式走 
 - 但 `ModelGroup::allows_model`（`portal_store.rs:83`）是 `Vec::contains` **精确匹配、大小写敏感**，目前只在测试里用。谁把它接到请求路径上就会引入不一致，开发时不要碰它。
 - `model_groups.id` 有 `CHECK (id ~ '^[a-z0-9-]+$')`：自动生成的组 id 必须小写；`allowed_models` 的**值**没有这个约束，要保留原始拼写。
 - **空列表 = 放行全部**这条语义有个坑：将来想表达"什么都不许"，不能用空数组，见 §3.4。
+
+### 1.6 通配符 `"*"` 的处理缺口（阻塞迁移）
+
+`model_list_allows`（`usage.rs:275`）认 `"*"`，但**它的两个下游消费者不认**：
+
+**缺口 1：`codex_exposed_models`（`gateway.rs:2953`）**
+
+它只判断 `allowlist.is_empty()`，不判断 `["*"]`。传入 `allowed_models = ["*"]` 的执行路径：
+
+```
+is_empty() = false            → 进非空分支（gateway.rs:3004）
+allowed_slugs = {"*": "*"}    → 拿 "*" 去和 upstream 模型逐个字面比对（:3021）
+upstream 无一匹配              → matched_allowlist_keys 为空
+未匹配的白名单项照原样 push     → exposed = ["*"]（:3032）
+```
+
+结果：`/v1/models?format=codex` 只返回一个名叫 `*` 的模型。`~/.codex/config.toml` 的 `model` 值不在目录里，**Codex 启动阶段直接报错**，请求到不了网关；子代理 `agents/default.toml` 同样加载失败。
+
+**缺口 2：`portal_model_is_allowed`（`usage.rs:247`）**
+
+函数体内没有 `"*"` 分支（只有 `is_empty()` 早返回），所以 `["*"]` 会被当成"只允许一个字面叫 `*` 的模型"。受影响的调用点：
+
+| 位置 | 症状 |
+|---|---|
+| `src/server/admin.rs:1263` | 模型探测 `models.retain(...)` 把所有模型过滤掉，探测结果全空 |
+| `src/state/usage.rs:573` | 模型统计为空 |
+| `src/state/usage.rs:650` | 上下文清单为空 |
+| `src/state/log_queries.rs:238` | `active_models` 恒为 0 |
+| `src/state.rs:6146` / `:6299` / `:6734` | 判定"未对任何下游暴露"，能力探测不排队、`scope=visible` 列表为空 |
+
+**为什么现在没炸**：目前 `all` 组只被 `portal_user_downstreams` 那层用，而那层走的是 `model_list_allows`（`gateway.rs:5675`），认 `"*"`。`downstreams.model_group_id` 侧还没有任何下游绑 `all`，所以缺口没被触发。**阶段 2 一迁移就会全面触发。**
+
+**修法**（进阶段 1，T3/T4 的一部分，必须在迁移前上线）：
+
+```rust
+// src/server/gateway.rs codex_exposed_models 开头
+// "*" 与空列表同义：放行全部（与 model_list_allows 的语义对齐）
+if allowlist.is_empty() || allowlist.iter().any(|allowed| allowed.trim() == "*") {
+    // 走现有的 is_empty() 分支逻辑
+}
+```
+
+`portal_model_is_allowed` 的调用点**统一改调 `model_list_allows`**（它内部会先处理 `"*"` 再委托给 `portal_model_is_allowed`），不要去改 `portal_model_is_allowed` 本身——它是"精确成员判定"语义，`admin.rs:1263` 之外还有别的语义依赖，改它风险更大。
+
+**RED 测试**：给某下游绑 `all` 组，断言 `/v1/models?format=codex` 返回**所有** active upstream 模型（不是一个 `*`）；断言门户配额、模型探测、`scope=visible` 三处同样返回全量。
 
 ---
 
@@ -429,6 +478,14 @@ COMMIT;
 **阶段 1 验收**：`downstream_model_groups` 12/12、`gateway` 452/452、capability/portal/quota 回归全绿；`cargo check --workspace` 通过。
 
 <!-- STAGE1 STATUS -->
+
+<!-- STAGE2 STATUS -->
+**阶段 2 状态**（✅ 已完成，等待用户确认）：
+| T8 | 迁移 SQL + 幂等性 | ✅ migration 已建、测试 RED→GREEN、生产已应用且重跑幂等 |
+| T8b | 生产迁移 | ✅ test→auto-3674bd18(22)、wsl→auto-4e0ab244(8)、NULL 行=0、组数 6 |
+| T9 | 目录 diff 脚本 | ✅ scripts/catalog-diff.sh；迁移前后零差异 |
+| §2.3 | 强制验收 | ✅ 目录 diff 无差异、config.toml 模型在 catalog、codex doctor 全绿 |
+<!-- STAGE2 STATUS END -->
 **阶段 0 附注**：修复测试基建 `tests/common/oidc.rs`（reset 漏清 `downstreams` 表导致跨测试残留、HTTP 分组测试命中旧副本）；`tests/downstream_model_groups.rs` invalid-group 语义更新为「真实组→删除→FK SET NULL→回退 allowlist」（FK 禁止绑定不存在分组）；10/10 用例绿。
 
 ### 阶段 1
@@ -437,11 +494,11 @@ COMMIT;
 |---|---|---|
 | T1 | `AppState::effective_model_allowlist` | 单测：无组回退白名单；有组返回组内容；组解析失败返回 Err；无 portal store 回退白名单 |
 | T2 | `gateway.rs:5570` / `:3282` / `state.rs:6220` 改调用 T1 | 既有测试保持绿；补一条"三处对同一 key 返回同一 allowlist"的一致性测试 |
-| T3 | **Codex 目录走分组**（`gateway.rs:3056`） | `tests/downstream_model_groups.rs` 加：绑组 key 请求 `/v1/models?format=codex`，`.models[].slug` 等于组内容 ∩ upstream 暴露；组解析失败返回 500 |
-| T4 | `portal_quota` / `portal_model_probe` 走分组 | `tests/portal_api.rs`：绑组 key 的 `model_allowlist` 字段返回组内容；组查不到时返回空数组 + 不 500 |
-| T5 | `compute_model_stats` / `compute_portal_model_context_limits` 走分组 | `tests/portal_api.rs` 或新文件：统计只含组内模型 |
-| T6 | `log_queries.rs` + `postgres.rs` 两套 usage summary 走分组 | `tests/troubleshooting.rs` / `tests/postgres_roundtrip.rs`：`total_models` / `active_models` 按组算 |
-| T7 | `state.rs:6145/6298/6733` 走分组 + 批量查询消 N+1 | `tests/capability_probe.rs`：绑组下游只对组内模型排探测；`/admin/models?scope=visible` 只列组内模型 |
+| T3 | **Codex 目录走分组**（`gateway.rs:3056`）+ **修通配符缺口 1**（`codex_exposed_models` 认 `"*"`，§1.6） | `tests/downstream_model_groups.rs` 加：绑组 key 请求 `/v1/models?format=codex`，`.models[].slug` 等于组内容 ∩ upstream 暴露；**绑 `all` 组返回全量模型而非单个 `*`**；组解析失败返回 500 |
+| T4 | `portal_quota` / `portal_model_probe` 走分组 + **修通配符缺口 2**（`admin.rs:1263` 改调 `model_list_allows`，§1.6） | `tests/portal_api.rs`：绑组 key 的 `model_allowlist` 字段返回组内容；**绑 `all` 组时探测/配额返回全量**；组查不到时返回空数组 + 不 500 |
+| T5 | `compute_model_stats` / `compute_portal_model_context_limits` 走分组 + 改调 `model_list_allows`（§1.6） | `tests/portal_api.rs` 或新文件：统计只含组内模型；绑 `all` 组时统计含全量 |
+| T6 | `log_queries.rs` + `postgres.rs` 两套 usage summary 走分组 + 改调 `model_list_allows`（§1.6） | `tests/troubleshooting.rs` / `tests/postgres_roundtrip.rs`：`total_models` / `active_models` 按组算；绑 `all` 组时 `active_models` 非 0 |
+| T7 | `state.rs:6145/6298/6733` 走分组 + 改调 `model_list_allows`（§1.6）+ 批量查询消 N+1 | `tests/capability_probe.rs`：绑组下游只对组内模型排探测；`/admin/models?scope=visible` 只列组内模型；绑 `all` 组时两处均为全量 |
 
 ### 阶段 2
 
@@ -491,6 +548,7 @@ cd frontend && rtk vitest run   # 前端
 | `basic` / `premium` 是占位模型 | 选中即封死所有真实模型；绑定级闸门已在用 | 阶段 0 改种子数据，**两处都改**（migration 修既有库、`SCHEMA_SQL` 修新库） |
 | 审定写入共享组 | 单个下游的审定改掉其他下游权限 | T11 的三条防外溢规则：未绑组 / 内置组 / 引用数 > 1 全部拒绝 |
 | 组查询从 3 处扩到 12 处 | 高频接口变慢、循环内 N+1 | `state.rs` 三处循环先批量查；压测 P99；必要时 10–30s TTL 缓存 + 写时失效 |
+| **`all` 组触发通配符缺口** | **Codex 目录只剩一个 `*`，客户端启动即报错；探测/统计/可见列表全空** | **§1.6 的两处修复必须在迁移 SQL 之前上线；T3–T7 每处都要有绑 `all` 组的断言** |
 | 迁移把不同拼写合并 | 组内容与原白名单字面不同 | 哈希按小写取、值留原拼写；用 §2.3 校验查询兜底 |
 | `apply_model_qualification` 仍写白名单 | 阶段 4 删字段后功能静默失效 | T11 必须做，不许跳 |
 | `SCHEMA_SQL` 改成 upsert | 每次启动覆盖运维手工调整的组内容 | 保持 `ON CONFLICT DO NOTHING` |
@@ -501,15 +559,39 @@ cd frontend && rtk vitest run   # 前端
 
 ---
 
+## 6.5 一次性部署（可选，替代 §7 的分批节奏）
+
+四阶段拆开是为了**回滚粒度**，不是技术依赖。要一次性上线的话，能合但有一条硬约束：
+
+| 原阶段 | 能否并入一次发布 | 约束 |
+|---|---|---|
+| 0 + 1 | 可以 | 种子数据与读路径改造无依赖 |
+| 2（迁移 SQL） | **代码上线之后才能跑** | 老代码不认识新读路径；且必须在 §1.6 修复上线后 |
+| 3 | 可以并入 | — |
+| 4 的 T14/T15 | 可以并入 | 改外键、统一测试夹具 |
+| 4 的 T16（删列删表） | **必须留独立窗口** | 删了就没有回滚数据 |
+
+合并后的部署序列：
+
+1. **一次发版**：阶段 0–4 的全部代码改动（含 §1.6 通配符修复），`model_allowlist` 字段与 `downstream_model_allowlist` 表**先留着**，`postgres.rs:1417-1433` 继续双写
+2. **跑迁移 SQL**：§2.3 前后对比校验 0 行 + 每个在用 key 的 Codex 目录 diff 通过
+3. **观察，确认无回滚需求后**再跑删表 migration（T16）
+
+第 3 步不能省。删表与代码同时上线，迁移校验一旦发现问题就没有回滚路径了。观察期可以从"2 周"压到你能接受的长度，但不能压到 0。
+
+---
+
 ## 7. 执行顺序
 
 1. 阶段 0：T0-1/T0-2/T0-3（migration + `SCHEMA_SQL` 两处种子、建 `deny-all`、备份、Codex 目录快照）
-2. 阶段 1：T1–T7（纯修 bug，独立发布，本身就有价值）
+2. 阶段 1：T1–T7（纯修 bug，独立发布，本身就有价值）。**T3/T4 里的 §1.6 通配符修复是迁移的前置，不许延后**
 3. 阶段 2：新代码上线**之后**跑迁移 SQL（T8–T9），带前后对比证据
 4. 观察 1 周
 5. 阶段 3：T10–T13（停写 + 前端下线）
 6. 观察 2 周
 7. 阶段 4：T14–T16（改外键指向 `deny-all` + 删表删字段）
+
+想压缩节奏见 §6.5。
 
 ---
 
