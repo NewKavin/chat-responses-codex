@@ -189,6 +189,7 @@ export interface DownstreamConfig {
   hash: string
   plaintext_key?: string
   plaintext_key_prefix?: string
+  /** @deprecated 模型分组是模型权限唯一事实源；此字段已停写，下个版本移除。 */
   model_allowlist: string[]
   /** Model group ID. If set, the downstream inherits allowed_models from the group. Priority: model_group_id > model_allowlist. */
   model_group_id?: string

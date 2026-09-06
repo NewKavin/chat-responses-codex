@@ -352,12 +352,29 @@ UPSTREAM_STATUS="$(curl -sS \
   --data-binary "$UPSTREAM_PAYLOAD")"
 assert_status 201 "$UPSTREAM_STATUS" "upstream creation"
 
+# T12/T13: model groups are the single source of truth - create a dedicated group and bind the downstream to it.
+SMOKE_GROUP_PAYLOAD="$(jq -nc '{
+  id: "smoke-group",
+  name: "Smoke group",
+  description: "Redis runtime smoke fixture",
+  allowed_models: ["smoke-model"]
+}')"
+SMOKE_GROUP_STATUS="$(curl -sS \
+  -o "${WORKDIR}/smoke-group-create.json" \
+  -w '%{http_code}' \
+  -X POST \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d "$SMOKE_GROUP_PAYLOAD" \
+  "$BASE_URL/api/admin/model-groups")" 
+assert_status 201 "$SMOKE_GROUP_STATUS" "smoke group creation"
+
 DOWNSTREAM_PAYLOAD="$(jq -nc \
   --argjson max_concurrency "$DOWNSTREAM_MAX_CONCURRENCY" \
   '{
     id: "smoke-downstream",
     name: "Redis smoke downstream",
-    model_allowlist: ["smoke-model"],
+    model_group_id: "smoke-group",
     rate_limit_enabled: true,
     per_minute_limit: 1000,
     max_concurrency: $max_concurrency,

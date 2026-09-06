@@ -71,17 +71,7 @@
               </span>
             </div>
 
-            <!-- 手动配置 -->
-            <div v-else>
-              <el-tooltip
-                :content="row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型'"
-                placement="top"
-              >
-                <span class="model-list-cell">
-                  {{ row.model_allowlist.length ? formatModelList(row.model_allowlist) : '全部模型' }}
-                </span>
-              </el-tooltip>
-            </div>
+
           </template>
         </el-table-column>
         <el-table-column v-if="isColumnVisible('key')" label="秘钥" width="220">
@@ -325,19 +315,8 @@
           </template>
         </template>
 
-        <el-form-item label="模型权限管理">
-          <el-radio-group v-model="modelManagementMode">
-            <el-radio value="group">
-              使用模型分组（推荐）
-            </el-radio>
-            <el-radio value="manual">
-              手动配置模型列表
-            </el-radio>
-          </el-radio-group>
-        </el-form-item>
-
-        <!-- 使用模型分组 -->
-        <el-form-item v-if="modelManagementMode === 'group'" label="选择模型分组">
+        <!-- 模型分组（唯一事实源） -->
+        <el-form-item label="选择模型分组">
           <el-select
             v-model="form.model_group_id"
             placeholder="选择一个模型分组"
@@ -391,20 +370,7 @@
           </el-alert>
         </el-form-item>
 
-        <!-- 手动配置模型列表（原有方式） -->
-        <el-form-item v-else label="模型白名单">
-          <el-select v-model="form.model_allowlist" multiple filterable allow-create placeholder="留空表示允许所有模型">
-            <el-option v-for="model in availableModels" :key="model" :label="model" :value="model" />
-          </el-select>
-          <el-alert
-            title="说明"
-            type="info"
-            :closable="false"
-            class="helper-text"
-          >
-            手动配置每个下游的模型列表。如需统一管理多个下游，推荐使用"模型分组"方式。
-          </el-alert>
-        </el-form-item>
+
         <el-form-item label="IP 白名单">
           <el-input v-model="ipAllowlistText" type="textarea" :rows="3" placeholder="每行一个 IP 或 CIDR&#10;例如: 10.0.0.1&#10;192.168.1.0/24" />
           <el-alert
@@ -646,7 +612,7 @@ const outputTokenPricePerMillion = ref<number | undefined>(undefined)
 const dailyCostLimit = ref<number | undefined>(undefined)
 const availableModels = ref<string[]>([])
 const availableModelGroups = ref<ModelGroup[]>([])
-const modelManagementMode = ref<'group' | 'manual'>('manual')
+
 const selectedRows = ref<DownstreamConfig[]>([])
 const batchDialogVisible = ref(false)
 const batchSubmitting = ref(false)
@@ -688,15 +654,12 @@ const filters = ref({
   search: ''
 })
 
-const formatModelList = (models: string[]) => models.length > 0 ? models.join(', ') : '-'
-
 // UI 层的「按金额」选项，提交时映射回后端的 token 模式。
 type BillingModeUI = 'request' | 'cost'
 const form = ref<Omit<Partial<DownstreamConfig>, 'billing_mode'> & { billing_mode?: BillingModeUI }>({
   id: '',
   name: '',
   hash: '',
-  model_allowlist: [],
   rate_limit_enabled: true,
   per_minute_limit: 100,
   max_concurrency: 10,
@@ -862,25 +825,7 @@ const loadModelGroups = async () => {
   }
 }
 
-// 根据 form 的值初始化模式
-watch(() => form.value, (newForm) => {
-  if (newForm.model_group_id) {
-    modelManagementMode.value = 'group'
-  } else if (newForm.model_allowlist && newForm.model_allowlist.length > 0) {
-    modelManagementMode.value = 'manual'
-  } else {
-    modelManagementMode.value = 'manual'
-  }
-}, { immediate: true, deep: true })
 
-// 切换模式时清空另一个字段
-watch(modelManagementMode, (mode) => {
-  if (mode === 'group') {
-    form.value.model_allowlist = []
-  } else {
-    form.value.model_group_id = undefined
-  }
-})
 
 const loadRuntime = async () => {
   try {
@@ -920,7 +865,6 @@ const handleCreate = () => {
     id: '',
     name: '',
     hash: '',
-    model_allowlist: [],
     rate_limit_enabled: true,
     per_minute_limit: 100,
     max_concurrency: 10,
