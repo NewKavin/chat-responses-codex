@@ -398,6 +398,9 @@ impl PortalStore {
         label: Option<&str>,
         model_group_id: Option<&str>,
     ) -> Result<(), PortalStoreError> {
+        // NULL 绑定组在读取语义里 fail-closed 落 basic；写入时就显式落 basic，
+        // 避免列里出现 NULL（list_downstream_bindings 按非空读）。
+        let model_group_id = model_group_id.unwrap_or("basic");
         let client = self.pool.get().await?;
         client
             .execute(
@@ -608,6 +611,8 @@ impl PortalStore {
         if !known {
             return Err(PortalStoreError::NotFound);
         }
+        // 同上：未指定分组时显式落 basic（fail-closed），列里不留 NULL。
+        let model_group_id = model_group_id.unwrap_or("basic");
         if is_default {
             transaction
                 .execute(

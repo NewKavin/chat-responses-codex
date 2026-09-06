@@ -3,7 +3,10 @@ use chat_responses_codex::routing::{
 };
 
 #[test]
-fn test_avoid_premium_account_for_non_premium_model() {
+fn test_priority_based_selection_picks_highest_priority_healthy_upstream() {
+    // 说明：premium 配额保护路由（“非 premium 模型避开 premium 账号”）已随
+    // 446385a3 下线，当前 select_upstream 按优先级+健康度选择；这里保留对
+    // “最高优先级且支持该模型”行为的覆盖。
     let premium_account = UpstreamCandidate::new(
         "premium",
         "Premium Account",
@@ -26,38 +29,18 @@ fn test_avoid_premium_account_for_non_premium_model() {
         &[premium_account.clone(), regular_account.clone()],
     );
 
-    // Should select regular account even though premium has higher priority
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().id, "regular");
-}
+    assert_eq!(result.unwrap().id, "premium");
 
-#[test]
-fn test_use_premium_account_for_premium_model() {
-    let premium_account = UpstreamCandidate::new(
-        "premium",
-        "Premium Account",
-        UpstreamProtocol::ChatCompletions,
-    )
-    .with_models(vec!["gpt-4", "glm-5.1"])
-    .with_priority(100);
-
-    let regular_account = UpstreamCandidate::new(
-        "regular",
-        "Regular Account",
-        UpstreamProtocol::ChatCompletions,
-    )
-    .with_models(vec!["gpt-4"])
-    .with_priority(50);
-
-    let request = RouteRequest::new("glm-5.1", UpstreamProtocol::ChatCompletions, false);
-    let result = select_upstream(
-        &request,
+    let request_glm = RouteRequest::new("glm-5.1", UpstreamProtocol::ChatCompletions, false);
+    let result_glm = select_upstream(
+        &request_glm,
         &[premium_account.clone(), regular_account.clone()],
     );
 
-    // Should select premium account for premium model
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap().id, "premium");
+    // glm-5.1 只有 premium 账号支持，仍选 premium
+    assert!(result_glm.is_ok());
+    assert_eq!(result_glm.unwrap().id, "premium");
 }
 
 #[test]

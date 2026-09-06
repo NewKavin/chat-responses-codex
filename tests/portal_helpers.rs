@@ -34,7 +34,15 @@ fn stable_today_noon() -> u64 {
 }
 
 /// Helper function to create a test AppState with usage logs
+/// （默认空 allowlist = 放行全部；需要过滤语义的测试显式传 allowlist）
 fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
+    create_test_state_with_logs_allowlist(logs, vec![])
+}
+
+fn create_test_state_with_logs_allowlist(
+    logs: Vec<UsageLog>,
+    allowlist: Vec<String>,
+) -> AppState {
     let config = AppConfig::default();
     let generated = generate_downstream_key("key");
 
@@ -46,6 +54,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
+            model_allowlist: allowlist,
             model_group_id: None,
             per_minute_limit: 100,
 
@@ -63,8 +72,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
-
-            model_concurrency_groups: vec![], ..Default::default()}]),
+            ..Default::default()}]),
         usage_logs: logs,
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1423,7 +1431,10 @@ async fn test_compute_model_stats_allowlist_filtering() {
         },
     ];
 
-    let state = create_test_state_with_logs(logs);
+    let state = create_test_state_with_logs_allowlist(
+        logs,
+        vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
+    );
     let snapshot = state.snapshot().await;
     let downstream = &snapshot.downstreams[0];
 

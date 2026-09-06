@@ -438,6 +438,7 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     hash: generated.hash,
                     plaintext_key: Some(generated.plaintext),
                     plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
                     model_group_id: None,
                     rate_limit_enabled: true,
                     per_minute_limit: 100,
@@ -453,10 +454,7 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     expires_at: None,
                     active: true,
                     billing_mode: "request".into(),
-
-                    model_concurrency_groups: vec![],
-                
-    ..Default::default()},
+                    ..Default::default()},
                 DownstreamConfig {
                     id: "downstream-3".to_string(),
                     name: "Other Downstream".to_string(),
@@ -519,7 +517,13 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
     );
 
     let snapshot = state.snapshot().await;
-    let summary = build_downstream_usage_summary(&snapshot, "downstream-2", now, &[]).unwrap();
+    let summary = build_downstream_usage_summary(
+        &snapshot,
+        "downstream-2",
+        now,
+        &["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
+    )
+    .unwrap();
 
     assert_eq!(summary.downstream_id, "downstream-2");
     assert_eq!(summary.today_tokens, 220);

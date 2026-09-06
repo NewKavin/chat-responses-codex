@@ -105,7 +105,7 @@ fn hand_written_insert_statements_have_balanced_columns_and_placeholders() {
     let source = include_str!("../src/state/postgres.rs");
     let mut search_from = 0usize;
     let mut checked = 0usize;
-    while let Some(relative) = source[search_from..].find("INSERT INTO") {
+    'outer: while let Some(relative) = source[search_from..].find("INSERT INTO") {
         let insert_start = search_from + relative;
         let Some(open_rel) = source[insert_start..].find('(') else {
             break;
@@ -121,6 +121,16 @@ fn hand_written_insert_statements_have_balanced_columns_and_placeholders() {
             if source[candidate + 1..].trim_start().starts_with("VALUES") {
                 close = Some(candidate);
                 break;
+            }
+            // INSERT ... SELECT 迁移语句（如 model_groups 迁移）不是手写
+            // VALUES 语句；发现 SELECT 后直接跳到本语句末尾，避免把远处的
+            // "VALUES ('default', $1, $2)" 误认成它的列清单。
+            if source[open..candidate].contains("SELECT DISTINCT") {
+                let Some(semi_rel) = source[candidate..].find(';') else {
+                    break;
+                };
+                search_from = candidate + semi_rel + 1;
+                continue 'outer;
             }
             cursor = candidate + 1;
         }

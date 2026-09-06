@@ -58,6 +58,10 @@ fn canonical_upstream_state() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
+            model_allowlist: vec![
+                "ZhipuAI/GLM-5".to_string(),
+                "MiniMax/MiniMax-M2.7".to_string(),
+            ],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -73,8 +77,6 @@ fn canonical_upstream_state() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
-
-            model_concurrency_groups: vec![],
     ..Default::default()}]),
         usage_logs: vec![
             UsageLog {
@@ -212,6 +214,7 @@ fn create_test_state() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
 
@@ -229,8 +232,6 @@ fn create_test_state() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
-
-            model_concurrency_groups: vec![],
     ..Default::default()}]),
         usage_logs: vec![
             UsageLog {
@@ -316,6 +317,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -331,8 +333,6 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
-
-            model_concurrency_groups: vec![],
     ..Default::default()}]),
         usage_logs: vec![
             UsageLog {

@@ -48,6 +48,8 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             hash: generated.hash.clone(),
             plaintext_key: Some(generated.plaintext.clone()),
             plaintext_key_prefix: None,
+            // 行为测试：探测只返回该下游 allowlist 内模型（T16 前回退路径仍生效）
+            model_allowlist: vec!["gpt-4o".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -63,8 +65,7 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             expires_at: None,
             active: true,
             billing_mode: "request".into(),
-
-            model_concurrency_groups: vec![], ..Default::default()}]),
+            ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
