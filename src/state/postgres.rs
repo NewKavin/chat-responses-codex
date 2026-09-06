@@ -330,9 +330,36 @@ impl PostgresStateStore {
     }
 
     pub async fn replace_state(&self, state: &PersistedState) -> io::Result<()> {
+        self.replace_state_with_group_models(state, None).await
+    }
+
+    /// T11: 与快照替换同一事务内更新模型分组的 allowed_models。
+    /// group_id 指向不存在的组时返回 NotFound（防静默丢失写入）。
+    pub async fn replace_state_with_group_models(
+        &self,
+        state: &PersistedState,
+        group_models: Option<(&str, &[String])>,
+    ) -> io::Result<()> {
         let mut conn = self.pool.get().await.map_err(io_other)?;
         let tx = conn.transaction().await.map_err(io_other)?;
         sync_config_tables(&tx, state).await?;
+        if let Some((group_id, allowed_models)) = group_models {
+            let models_json: serde_json::Value =
+                serde_json::to_value(allowed_models).map_err(io_other)?;
+            let updated = tx
+                .execute(
+                    "UPDATE model_groups SET allowed_models = $2::jsonb, updated_at = NOW() WHERE id = $1",
+                    &[&group_id, &models_json],
+                )
+                .await
+                .map_err(io_other)?;
+            if updated == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("model group not found: {group_id}"),
+                ));
+            }
+        }
         tx.commit().await.map_err(io_other)
     }
 

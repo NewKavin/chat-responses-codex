@@ -819,6 +819,18 @@ impl StateStore for PostgresStateStore {
         Box::pin(async move { self.replace_state(state).await })
     }
 
+    fn persist_config_with_group_models<'a>(
+        &'a self,
+        state: &'a PersistedState,
+        group_id: &'a str,
+        allowed_models: &'a [String],
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            self.replace_state_with_group_models(state, Some((group_id, allowed_models)))
+                .await
+        })
+    }
+
     fn load_capability_state<'a>(&'a self) -> StoreFuture<'a, io::Result<CapabilityStateDocument>> {
         Box::pin(async move { PostgresStateStore::load_capability_state(self).await })
     }
@@ -7272,9 +7284,10 @@ impl AppState {
         }
 
         let result = self
-            .mutate_persisted_state_io(move |state| {
-                let mut updated = HashSet::new();
-                for decision in &decisions {
+            .mutate_persisted_state_with_group_models(
+                move |state| {
+                    let mut updated = HashSet::new();
+                    for decision in &decisions {
                     if !updated.insert(decision.upstream_id.clone()) {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -7334,19 +7347,56 @@ impl AppState {
                         "qualification would remove the final routable model",
                     ));
                 }
+                // T11：资格审定结果写入下游所绑分组的 allowed_models，不再写
+                // model_allowlist。三条防外溢规则（全部可基于候选快照内存判定）：
+                //   1) 未绑组 → InvalidInput（不自动建组、不回退写 allowlist）
+                //   2) 内置组（all/basic/premium/deny-all）→ 拒绝，提示改绑专属组
+                //   3) 组被 2+ 下游引用 → 拒绝（避免单个下游的审定改掉别人的权限）
                 let downstream = Arc::make_mut(&mut state.downstreams)
                     .iter_mut()
                     .find(|value| value.id == downstream_id)
                     .ok_or_else(|| {
                         io::Error::new(io::ErrorKind::NotFound, "downstream not found")
                     })?;
-                downstream.model_allowlist = exposed.iter().cloned().collect();
 
-                Ok(ModelQualificationApplySummary {
-                    upstreams_updated: updated.len(),
-                    retained_models: exposed.len(),
-                })
-            })
+                let Some(group_id) = downstream.model_group_id.clone() else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "downstream is not bound to a model group; bind a dedicated group before qualifying",
+                    ));
+                };
+                if matches!(group_id.as_str(), "all" | "basic" | "premium" | "deny-all") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "model group '{group_id}' is a builtin group; rebind the downstream to a dedicated group before qualifying"
+                        ),
+                    ));
+                }
+                let referencing = state
+                    .downstreams
+                    .iter()
+                    .filter(|other| other.model_group_id.as_deref() == Some(group_id.as_str()))
+                    .count();
+                if referencing > 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "model group '{group_id}' is shared by {referencing} downstreams; rebind to a dedicated group before qualifying"
+                        ),
+                    ));
+                }
+
+                Ok((
+                    ModelQualificationApplySummary {
+                        upstreams_updated: updated.len(),
+                        retained_models: exposed.len(),
+                    },
+                    Some((group_id, exposed.iter().cloned().collect())),
+                ))
+            },
+            io::Error::other,
+        )
             .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams)
@@ -7356,6 +7406,65 @@ impl AppState {
     }
 
     async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>
+    where
+        F: FnOnce(&mut PersistedState) -> Result<T, E>,
+        M: Fn(io::Error) -> E,
+    {
+        self.mutate_persisted_state_inner(mutator, map_io).await
+    }
+
+    /// T11: 同 `mutate_persisted_state`，但 mutator 返回 `(T, Option<(group_id, models)>)`，
+    /// 组 allowed_models 更新与快照持久化放入同一事务。
+    async fn mutate_persisted_state_with_group_models<T, E, F, M>(
+        &self,
+        mutator: F,
+        map_io: M,
+    ) -> Result<T, E>
+    where
+        F: FnOnce(&mut PersistedState) -> Result<(T, Option<(String, Vec<String>)>), E>,
+        M: Fn(io::Error) -> E,
+    {
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let mut state = self.inner.lock().await;
+        let mut candidate_state = state.clone();
+        let (result, group_models) = mutator(&mut candidate_state)?;
+        if !downstream_plaintext_pairs_unchanged(&state.downstreams, &candidate_state.downstreams) {
+            validate_downstream_plaintext_pairs(&mut candidate_state);
+        }
+
+        match group_models {
+            Some((group_id, allowed_models)) => {
+                self.config_store
+                    .persist_config_with_group_models(
+                        &candidate_state,
+                        &group_id,
+                        &allowed_models,
+                    )
+                    .await
+                    .map_err(map_io)?;
+            }
+            None => {
+                self.config_store
+                    .persist_config(&candidate_state)
+                    .await
+                    .map_err(map_io)?;
+            }
+        }
+
+        state.upstreams = candidate_state.upstreams;
+        state.downstreams = candidate_state.downstreams;
+        state.announcement = candidate_state.announcement;
+        state.global_context_profiles = candidate_state.global_context_profiles;
+        state.runtime_settings = candidate_state.runtime_settings;
+
+        Ok(result)
+    }
+
+    async fn mutate_persisted_state_inner<T, E, F, M>(
+        &self,
+        mutator: F,
+        map_io: M,
+    ) -> Result<T, E>
     where
         F: FnOnce(&mut PersistedState) -> Result<T, E>,
         M: Fn(io::Error) -> E,

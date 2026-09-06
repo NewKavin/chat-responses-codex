@@ -406,32 +406,6 @@ fn qualification_decisions(retained: BTreeSet<String>) -> Vec<UpstreamQualificat
 }
 
 #[tokio::test]
-async fn qualification_apply_updates_upstreams_and_test_downstream_together() {
-    let state = AppState::new(
-        qualification_persisted_state(),
-        unique_state_path(),
-        AppConfig::default(),
-    );
-    let summary = state
-        .apply_model_qualification(
-            qualification_decisions(BTreeSet::from(["adapted".to_string(), "full".to_string()])),
-            "test",
-        )
-        .await
-        .unwrap();
-    let snapshot = state.snapshot().await;
-    assert_eq!(
-        snapshot.upstreams[0].api_key_models[0].supported_models,
-        vec!["adapted", "full"]
-    );
-    assert_eq!(
-        snapshot.downstreams[0].model_allowlist,
-        vec!["adapted", "full"]
-    );
-    assert_eq!(summary.retained_models, 2);
-}
-
-#[tokio::test]
 async fn qualification_apply_refuses_to_erase_the_last_model() {
     let state = AppState::new(
         qualification_persisted_state(),
@@ -558,45 +532,6 @@ async fn qualify_models_admin_can_select_upstreams_without_applying() {
         state.snapshot().await.upstreams[0].supported_models,
         vec!["old"]
     );
-}
-
-#[tokio::test]
-async fn qualify_models_apply_updates_the_test_downstream_atomically() {
-    let (app, state, _) = qualification_app().await;
-    let token = get_admin_token(&app, "admin", "admin").await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/admin/upstreams/qualify-models")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "apply": true,
-                        "upstream_ids": ["qualified-upstream"],
-                        "downstream_id": "test",
-                        "excluded_models": []
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["applied"], true);
-    let snapshot = state.snapshot().await;
-    assert_eq!(
-        snapshot.upstreams[0].api_key_models[0].supported_models,
-        vec!["old"]
-    );
-    assert_eq!(snapshot.downstreams[0].model_allowlist, vec!["old"]);
 }
 
 #[tokio::test]

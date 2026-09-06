@@ -21,6 +21,19 @@ pub trait StateStore: Send + Sync {
 
     fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>>;
 
+    /// T11: persist the config snapshot and, when supplied, rewrite the
+    /// allowed models of a model group in the SAME transaction. Default
+    /// implementation (file backend) ignores the group update — model groups
+    /// only exist in the portal database.
+    fn persist_config_with_group_models<'a>(
+        &'a self,
+        state: &'a PersistedState,
+        _group_id: &'a str,
+        _allowed_models: &'a [String],
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move { self.persist_config(state).await })
+    }
+
     fn load_capability_state<'a>(&'a self) -> StoreFuture<'a, io::Result<CapabilityStateDocument>> {
         Box::pin(async { Ok(CapabilityStateDocument::default()) })
     }
