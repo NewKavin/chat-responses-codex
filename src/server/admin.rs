@@ -2149,11 +2149,16 @@ pub(super) async fn admin_downstream_runtime(State(state): State<AppState>) -> i
 }
 
 /// Create a new downstream
-/// Create a new downstream
 pub(super) async fn admin_create_downstream(
     State(state): State<AppState>,
     Json(mut downstream): Json<DownstreamConfig>,
 ) -> impl IntoResponse {
+    // T12：新下游必须落在一个模型分组；未显式指定时使用 deny-all 哨兵组
+    // （拒绝一切直到管理员显式改绑），绝不回退到"无限制"。
+    if downstream.model_group_id.is_none() {
+        downstream.model_group_id = Some("deny-all".to_string());
+    }
+
     // Validate required fields
     if downstream.id.is_empty() {
         return (
