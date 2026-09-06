@@ -46,12 +46,21 @@
         </el-table-column>
         <el-table-column label="操作" width="170" align="center">
           <template #default="{ row }">
-            <el-button :icon="Pencil" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button
+              :icon="Pencil"
+              size="small"
+              :disabled="isSentinelGroup(row.id)"
+              :title="isSentinelGroup(row.id) ? 'all / deny-all 为系统哨兵组，不可编辑' : undefined"
+              @click="openEdit(row)"
+            >
+              编辑
+            </el-button>
             <el-button
               :icon="Trash2"
               size="small"
               type="danger"
-              :disabled="row.id === 'basic'"
+              :disabled="isBuiltinGroup(row.id)"
+              :title="isBuiltinGroup(row.id) ? '内置分组不可删除' : undefined"
               @click="handleDelete(row)"
             >
               删除
@@ -80,7 +89,7 @@
     <el-dialog v-model="deleteDialogVisible" title="确认删除分组" width="min(480px, calc(100vw - 32px))">
       <p>
         确定删除分组 <strong>{{ deletingGroup?.name }}</strong>（<code>{{ deletingGroup?.id }}</code>）吗？
-        使用该分组的密钥将回退到 <code>basic</code> 分组。
+        使用该分组的密钥将回退到 <code>deny-all</code> 分组（拒绝全部模型）。
       </p>
       <template #footer>
         <el-button @click="deleteDialogVisible = false">取消</el-button>
@@ -101,6 +110,15 @@ import ModelGroupForm from '@/components/admin/ModelGroupForm.vue'
 const groups = ref<ModelGroup[]>([])
 const loading = ref(false)
 const saving = ref(false)
+
+// T15 后 builtin 组是权限不变量：basic/premium 是业务组（可编辑不可删），
+// all/deny-all 是系统哨兵组（不可编辑也不可删，分别承载通配符与默认兜底）。
+const BUILTIN_GROUP_IDS = ['basic', 'premium', 'all', 'deny-all'] as const
+const SENTINEL_GROUP_IDS = ['all', 'deny-all'] as const
+const isBuiltinGroup = (id: string) =>
+  (BUILTIN_GROUP_IDS as readonly string[]).includes(id)
+const isSentinelGroup = (id: string) =>
+  (SENTINEL_GROUP_IDS as readonly string[]).includes(id)
 
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')

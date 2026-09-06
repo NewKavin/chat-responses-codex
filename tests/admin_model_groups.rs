@@ -216,3 +216,84 @@ async fn test_delete_model_group() {
     let res = app.clone().oneshot(delete_req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 }
+
+/// T15 后 four builtin groups are part of the permission invariants:
+/// basic/premium are business groups, all/deny-all are sentinels that MUST
+/// survive (deny-all 是 FK NOT NULL DEFAULT 的引用目标；all 是通配符迁移
+/// 语义的事实源)。四个都不可删除；all/deny-all 不可编辑。
+#[tokio::test]
+async fn test_builtin_sentinel_groups_are_protected() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    async fn delete_group(app: &axum::Router, token: &str, group_id: &str) -> StatusCode {
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/model-groups/{}", group_id))
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    // 四个内置组都删不掉
+    for group_id in ["basic", "premium", "all", "deny-all"] {
+        let status = delete_group(&app, &token, group_id).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "builtin group {group_id} must not be deletable"
+        );
+    }
+
+    async fn put_group(
+        app: &axum::Router,
+        token: &str,
+        group_id: &str,
+        allowed: &[&str],
+    ) -> StatusCode {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/admin/model-groups/{}", group_id))
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "name": group_id,
+                    "allowed_models": allowed
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    // sentinel 组不可改内容：all 必须保持 ["*"]、deny-all 必须保持拒全部
+    assert_eq!(
+        put_group(&app, &token, "all", &["*"]).await,
+        StatusCode::CONFLICT,
+        "all group must not be editable"
+    );
+    assert_eq!(
+        put_group(&app, &token, "deny-all", &["something"]).await,
+        StatusCode::CONFLICT,
+        "deny-all group must not be editable"
+    );
+
+    // 业务组 basic/premium 仍可编辑（M1 只修占位、不覆盖人工修改）
+    assert_eq!(
+        put_group(&app, &token, "premium", &["gpt-4o"]).await,
+        StatusCode::NO_CONTENT,
+        "premium is a business group and must stay editable"
+    );
+}

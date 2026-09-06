@@ -17,6 +17,23 @@ describe('admin ui structure', () => {
     expect(dashboard).not.toContain('hero-panel')
   })
 
+  it('protects builtin model groups in the group management page', () => {
+    const groups = source('views/admin/ModelGroupManagement.vue')
+
+    // T15：四个内置组都不可删除；all/deny-all 哨兵组不可编辑
+    expect(groups).toContain("const BUILTIN_GROUP_IDS = ['basic', 'premium', 'all', 'deny-all'] as const")
+    expect(groups).toContain("const SENTINEL_GROUP_IDS = ['all', 'deny-all'] as const")
+    expect(groups).toContain(':disabled="isBuiltinGroup(row.id)"')
+    expect(groups).toContain(':disabled="isSentinelGroup(row.id)"')
+    expect(groups).not.toContain(':disabled="row.id === \'basic\'"')
+    // 删除确认文案与 T15 的实际兜底行为一致（deny-all，不再是 basic）
+    expect(groups).toContain('回退到 <code>deny-all</code> 分组（拒绝全部模型）')
+    // 编辑弹窗仍能链接到分组管理页（“模型权限管理”入口可点）
+    const downstreams = source('views/admin/Downstreams.vue')
+    expect(downstreams).toContain('管理模型分组')
+    expect(downstreams).toContain('to="/admin/model-groups"')
+  })
+
   it('keeps model qualification and probe evidence in compact sections', () => {
     const adminProbe = source('views/admin/ModelProbe.vue')
     const board = source('components/ModelProbeBoard.vue')

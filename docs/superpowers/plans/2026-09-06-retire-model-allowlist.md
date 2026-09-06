@@ -520,6 +520,12 @@ COMMIT;
 
 **已发现并修复的连锁问题**：
 - T15 的 `NOT NULL` 使“未绑组”形态从 DB 中消失，m2/m3/迁移/资格审定等造旧库数据的测试统一改为：先 `DROP NOT NULL` 再裸 SQL 插 NULL 行（模拟升级前旧库）；无条件组外的内存态用例（资格审定规则 1）改用 `add_downstream`。
+- **T15 完备性补丁（2026-09-07 自检追加）**：`admin_delete_model_group` 原先只保护
+  `basic`，而 T15 后 `deny-all` 是 `model_group_id` `NOT NULL DEFAULT` 的 FK 引用目标、
+  `all` 是通配符语义的事实源——删掉任一会让权限兜底失效。现四个内置组
+  `basic/premium/all/deny-all` 都不可删除（API 403 / store Conflict），`all`/`deny-all`
+  不可编辑内容（API 409）；删除确认文案与 T15 实际兜底一致（deny-all）。前端删除/编辑
+  按钮对内置组禁用，并新增 vitest 断言（含「管理模型分组 →」入口可点）。
 - `gateway/model_permission_validation.rs` 旧语义“无组 key 跳过校验”与新决策（未指定组=deny-all=403）冲突，已更新为 `test_non_portal_key_without_group_is_deny_all` 并断言 403；其余三例的 key 级组显式给 `all`，继续测绑定级闸门。
 
 

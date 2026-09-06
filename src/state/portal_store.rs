@@ -981,6 +981,12 @@ impl PortalStore {
     }
 
     /// Update an existing model group.
+    /// T15 哨兵组：all 是通配符语义的事实源（必须保持 ["*"]），deny-all 是
+    /// FK NOT NULL DEFAULT 的引用目标（必须保持拒绝全部），二者不可编辑。
+    fn is_sentinel_group(id: &str) -> bool {
+        matches!(id, "all" | "deny-all")
+    }
+
     pub async fn update_model_group(
         &self,
         id: &str,
@@ -988,6 +994,11 @@ impl PortalStore {
         description: Option<&str>,
         allowed_models: Vec<String>,
     ) -> Result<(), PortalStoreError> {
+        if Self::is_sentinel_group(id) {
+            return Err(PortalStoreError::Conflict(
+                format!("cannot modify builtin sentinel group {id}"),
+            ));
+        }
         let client = self.pool.get().await?;
         let allowed_models_json = serde_json::to_value(&allowed_models)
             .map_err(|e| PortalStoreError::Db(e.to_string()))?;
@@ -1007,14 +1018,14 @@ impl PortalStore {
         Ok(())
     }
 
-    /// Delete a model group.  The `basic` group is protected (spec §3.1.4);
-    /// deleting any other group resets dependent keys to `basic` via the
-    /// `ON DELETE SET DEFAULT` foreign key.
+    /// Delete a model group.  All builtin groups are protected (basic/premium
+    /// 业务组、all/deny-all T15 哨兵组)；删除其他组时下游行经外键
+    /// `ON DELETE SET DEFAULT` 落 deny-all（T15 起不再是 basic）。
     pub async fn delete_model_group(&self, id: &str) -> Result<(), PortalStoreError> {
-        if id == "basic" {
-            return Err(PortalStoreError::Conflict(
-                "cannot delete basic group".to_string(),
-            ));
+        if matches!(id, "basic" | "premium" | "all" | "deny-all") {
+            return Err(PortalStoreError::Conflict(format!(
+                "cannot delete builtin model group {id}"
+            )));
         }
         let client = self.pool.get().await?;
         let rows = client

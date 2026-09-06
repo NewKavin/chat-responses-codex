@@ -3916,6 +3916,11 @@ pub(super) async fn admin_update_model_group(
             Json(json!({"error": {"code": "group_not_found", "message": "model group not found"}})),
         )
             .into_response(),
+        Err(crate::state::PortalStoreError::Conflict(message)) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"code": "group_protected", "message": message}})),
+        )
+            .into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": error.to_string()}})),
@@ -3936,10 +3941,12 @@ pub(super) async fn admin_delete_model_group(
             .into_response();
     };
 
-    if group_id == "basic" {
+    // 四个内置组（basic/premium/all/deny-all）均不可删；T15 起删组后行落
+    // deny-all，删掉 deny-all 会让 FK DEFAULT 引用悬挂、权限兜底失效。
+    if matches!(group_id.as_str(), "basic" | "premium" | "all" | "deny-all") {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": {"code": "cannot_delete_basic", "message": "cannot delete the basic group"}})),
+            Json(json!({"error": {"code": "group_protected", "message": format!("cannot delete builtin model group {group_id}")}})),
         )
             .into_response();
     }

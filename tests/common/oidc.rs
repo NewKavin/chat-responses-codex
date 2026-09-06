@@ -77,9 +77,13 @@ pub async fn reset_portal_tables(database_url: &str) {
     let client = connect(database_url)
         .await
         .expect("oidc test db must connect");
+    // 跨进程串行化 reset：cargo test 会并行跑多个 test binary 连同一个
+    // 测试库，并发 DROP TABLE 会互相等 AccessExclusiveLock 触发 deadlock。
+    // 会话级 advisory lock 保证同一时刻只有一个进程在整表重建。
     client
         .batch_execute(
-            "DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
+            "SELECT pg_advisory_lock(824615807); \
+             DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
              portal_user_model_groups, portal_identities, portal_users, \
              oauth_login_attempts, runtime_settings, model_groups \
              CASCADE",
@@ -109,7 +113,8 @@ pub async fn reset_portal_tables(database_url: &str) {
                position INTEGER NOT NULL, \
                model_slug TEXT NOT NULL, \
                PRIMARY KEY (downstream_id, model_slug) \
-             )",
+             ); \
+             SELECT pg_advisory_unlock(824615807)",
         )
         .await
         .expect("truncating gateway tables must succeed");
