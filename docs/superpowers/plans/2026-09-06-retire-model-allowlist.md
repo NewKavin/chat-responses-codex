@@ -413,6 +413,22 @@ COMMIT;
 | T0-2 | 同步 `postgres.rs` `SCHEMA_SQL` 种子 | ✅ SCHEMA_SQL 种子与 migration 一致；顺带修复 FK/索引块位于 `model_groups` 建表之前导致的 SCHEMA 初始化失败，并幂等清理残留 `model_group_id` 引用后再建 FK；`tests/model_groups_migration.rs` 断言 4 种子组 + deny-all 哨兵 + 真实模型（6 用例绿） |
 | T0-3 | 备份 + Codex 目录快照 | ✅ `pg_dump` 至 `~/backups/chat-responses-codex/20260906/`（196 行）；test/wsl 两 key `format=codex` 目录快照 332/95 字节落盘；门户 basic key 实跑 `deepseek-v4-flash` 会话 HTTP 200 |
 
+| # | 任务 | 验证 |
+|---|---|---|
+| T1-1 | Codex 目录用有效白名单 | ✅ `gateway_codex_catalog_matches_model_group` RED→GREEN |
+| T1-2 | 主路径 / count_tokens 收敛统一函数 | ✅ `effective_model_allowlist`，fail-closed |
+| T1-3 | `/v1/models` 目录 = 分组 ∩ 上游 | ✅ HTTP 测试覆盖 |
+| T1-4 | portal 配额字段降级 | ✅ 分组优先、失败降级 allowlist+warn |
+| T1-5 | probe 目录降级 | ✅ 同上 |
+| T1-6 | usage 统计/上下文限制降级 | ✅ 同上 |
+| T1-7 | log_queries 签名加参数 | ✅ `downstream_usage_summary` |
+| T1-8 | postgres DB 版 summary | ✅ `unnest($3)` 替代 allowlist 表 |
+| T1-9 | 三处批量聚合 | ✅ `effective_model_allowlist_map` 一次批量拉组（单测对照） |
+| T1-10 | gateway-core TODO | ✅ |
+
+**阶段 1 验收**：`downstream_model_groups` 12/12、`gateway` 452/452、capability/portal/quota 回归全绿；`cargo check --workspace` 通过。
+
+<!-- STAGE1 STATUS -->
 **阶段 0 附注**：修复测试基建 `tests/common/oidc.rs`（reset 漏清 `downstreams` 表导致跨测试残留、HTTP 分组测试命中旧副本）；`tests/downstream_model_groups.rs` invalid-group 语义更新为「真实组→删除→FK SET NULL→回退 allowlist」（FK 禁止绑定不存在分组）；10/10 用例绿。
 
 ### 阶段 1

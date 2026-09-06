@@ -381,6 +381,57 @@ async fn gateway_manual_allowlist_still_enforced() {
     assert_eq!(status, StatusCode::FORBIDDEN, "manual allowlist must still reject: {payload}");
 }
 
+/// 阶段 1：批量解析下游有效白名单与逐条解析结果一致（组优先、无组用白名单、组不存在回退）。
+#[tokio::test]
+async fn batch_effective_allowlist_matches_single_resolution() {
+    let _guard = common::oidc::lock().lock();
+    let url = match database_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
+            return;
+        }
+    };
+
+    common::oidc::reset_portal_tables(&url).await;
+    let state = load_state(&url).await;
+    setup_test_data(&state).await;
+
+    let snapshot = state.routing_snapshot().await;
+    let downstreams: Vec<DownstreamConfig> = snapshot.downstreams.to_vec();
+
+    // 批量版
+    let batch = state.effective_model_allowlist_map(&downstreams).await;
+    // 逐条版（对照）
+    let mut single = std::collections::HashMap::new();
+    for downstream in &downstreams {
+        let resolved = state
+            .effective_model_allowlist(downstream)
+            .await
+            .unwrap_or_else(|_| downstream.model_allowlist.clone());
+        single.insert(downstream.id.clone(), resolved);
+    }
+
+    assert_eq!(batch.len(), downstreams.len(), "batch map must cover all downstreams");
+    for downstream in &downstreams {
+        let batch_value = batch.get(&downstream.id).unwrap();
+        let single_value = single.get(&downstream.id).unwrap();
+        assert_eq!(
+            batch_value, single_value,
+            "batch resolution diverges for {}",
+            downstream.id
+        );
+    }
+
+    // 组优先语义抽查：downstream-with-group 应解析为组模型。
+    let grouped = batch.get("downstream-with-group").unwrap();
+    assert!(
+        grouped.contains(&"gpt-3.5-turbo".to_string()),
+        "grouped downstream should resolve group models, got {:?}",
+        grouped
+    );
+}
+
 /// 阶段 1：Codex 目录（/v1/models?format=codex）必须与模型分组一致，
 /// 而不是只读 model_allowlist（空白名单 = 全放行会暴露组外模型）。
 #[tokio::test]

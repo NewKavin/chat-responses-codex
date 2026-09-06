@@ -6143,22 +6143,10 @@ impl AppState {
             .refresh_interval_seconds;
         let mut jobs = Vec::<ProbeJob>::new();
         let mut queued = HashMap::<DialectProfileKey, usize>::new();
-        // 预解析所有下游的有效白名单（分组优先），避免每个模型 × 每个下游 N+1 查询。
-        let mut downstream_effective = HashMap::<String, Vec<String>>::new();
-        for downstream in routing.downstreams.iter().filter(|downstream| downstream.active) {
-            let allowlist = match self.effective_model_allowlist(downstream).await {
-                Ok(models) => models,
-                Err(error) => {
-                    tracing::warn!(
-                        downstream_id = %downstream.id,
-                        error = %error,
-                        "failed to resolve model group for probe reconciler; degrading to allowlist"
-                    );
-                    downstream.model_allowlist.clone()
-                }
-            };
-            downstream_effective.insert(downstream.id.clone(), allowlist);
-        }
+        // 预解析所有下游的有效白名单（分组优先），一次批量拉组，避免 N+1 查询。
+        let downstream_effective = self
+            .effective_model_allowlist_map(&routing.downstreams)
+            .await;
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
             for exposed in upstream.effective_downstream_models() {
                 let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
@@ -6250,6 +6238,55 @@ impl AppState {
 
     /// 按 id 解析下游的有效白名单；下游不存在时返回 None。
     /// 解析失败（组损坏等）降级为 allowlist，保证读路径不因组问题全挂。
+    /// 批量解析一组下游的有效白名单（分组优先）。
+    /// 组全量拉取一次（组数量级远小于下游数），循环内不再触发 SQL，
+    /// 避免下游数 × 上游模型数的 N+1；组查询整体失败时逐项降级回 allowlist。
+    pub async fn effective_model_allowlist_map(
+        &self,
+        downstreams: &[DownstreamConfig],
+    ) -> HashMap<String, Vec<String>> {
+        // 收集去重的 model_group_id，一次拉取全部组。
+        let group_ids: std::collections::HashSet<&str> = downstreams
+            .iter()
+            .filter_map(|downstream| downstream.model_group_id.as_deref())
+            .collect();
+        let mut group_models: HashMap<String, Vec<String>> = HashMap::new();
+        if !group_ids.is_empty() {
+            match self.portal_store() {
+                Some(store) => match store.list_model_groups().await {
+                    Ok(groups) => {
+                        for group in groups {
+                            if group_ids.contains(group.id.as_str()) {
+                                group_models.insert(group.id.clone(), group.allowed_models.clone());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to bulk-load model groups; degrading all grouped downstreams"
+                        );
+                    }
+                },
+                None => {}
+            }
+        }
+
+        let mut result = HashMap::with_capacity(downstreams.len());
+        for downstream in downstreams {
+            let effective = match downstream.model_group_id.as_deref() {
+                Some(group_id) => match group_models.get(group_id) {
+                    // 组存在：用组模型；组不存在：与 get_allowed_models 一致回退白名单。
+                    Some(models) => models.clone(),
+                    None => downstream.model_allowlist.clone(),
+                },
+                None => downstream.model_allowlist.clone(),
+            };
+            result.insert(downstream.id.clone(), effective);
+        }
+        result
+    }
+
     pub async fn effective_model_allowlist_opt(
         &self,
         downstream_id: &str,
@@ -6346,22 +6383,10 @@ impl AppState {
         let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
         let alias_registry = self.model_alias_registry();
 
-        // 预解析所有下游的有效白名单（分组优先），避免 N+1。
-        let mut downstream_effective = HashMap::<String, Vec<String>>::new();
-        for downstream in snapshot.downstreams.iter().filter(|downstream| downstream.active) {
-            let allowlist = match self.effective_model_allowlist(downstream).await {
-                Ok(models) => models,
-                Err(error) => {
-                    tracing::warn!(
-                        downstream_id = %downstream.id,
-                        error = %error,
-                        "failed to resolve model group for visible models; degrading to allowlist"
-                    );
-                    downstream.model_allowlist.clone()
-                }
-            };
-            downstream_effective.insert(downstream.id.clone(), allowlist);
-        }
+        // 预解析所有下游的有效白名单（分组优先），一次批量拉组，避免 N+1。
+        let downstream_effective = self
+            .effective_model_allowlist_map(&snapshot.downstreams)
+            .await;
 
         let mut seen = HashSet::new();
         let mut models = Vec::new();
