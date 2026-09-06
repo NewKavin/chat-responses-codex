@@ -1,4 +1,6 @@
 -- migrations/2026-09-06-fix-model-group-seeds.sql
+-- 注意：本文件已随代码在启动时自动执行（initialize_schema → migrate_*），
+-- 无需在 tar 包升级时手工运行；内容幂等，重复执行无害，仅作留档核对。
 -- 1) 建 sentinel 组 deny-all：组被删除 / 新建下游未指定权限档时的安全兜底。
 --    不能用空数组：model_list_allows(usage.rs:275) 把空列表当"放行全部"，
 --    所以"拒绝全部"必须用哨兵值 ["__none__"]。

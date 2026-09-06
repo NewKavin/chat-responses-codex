@@ -6000,6 +6000,12 @@ impl AppState {
     }
 
     pub async fn insert_downstream(&self, downstream: DownstreamConfig) -> io::Result<()> {
+        // T12/T15：新建下游未指定分组时落 deny-all 哨兵组（所有写入路径统一
+        // 兜底，不只在 admin HTTP 层；DB 层 model_group_id 已 NOT NULL）。
+        let mut downstream = downstream;
+        if downstream.model_group_id.is_none() {
+            downstream.model_group_id = Some("deny-all".to_string());
+        }
         self.mutate_persisted_state_io(|state| {
             Arc::make_mut(&mut state.downstreams).push(downstream);
             Ok(())
@@ -6022,6 +6028,9 @@ impl AppState {
 
             let mut downstream = downstream;
             downstream.id = downstream_id.to_string();
+            if downstream.model_group_id.is_none() {
+                downstream.model_group_id = Some("deny-all".to_string());
+            }
             *existing = downstream;
             Ok(true)
         })

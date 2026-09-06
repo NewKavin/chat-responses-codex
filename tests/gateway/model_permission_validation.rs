@@ -27,8 +27,9 @@ async fn register_downstream(state: &AppState, downstream_id: &str) -> String {
         hash: key.hash.clone(),
         plaintext_key: Some(key.plaintext.clone()),
         active: true,
-        model_allowlist: vec![],
-        model_group_id: None,
+        // key 级组用 all（放行到绑定级闸门）；本文件测的是绑定级闸门。
+        // T12/T15 后新建下游默认 deny-all，不再存在"无 key 级组"的形态。
+        model_group_id: Some("all".into()),
         ..Default::default()
     };
     downstream.plaintext_key = Some(key.plaintext.clone());
@@ -274,7 +275,7 @@ async fn test_wildcard_allows_all_models() {
 }
 
 #[tokio::test]
-async fn test_non_portal_key_skips_validation() {
+async fn test_non_portal_key_without_group_is_deny_all() {
     let _guard = lock().lock();
     let url = database_url().expect("OIDC_TEST_DATABASE_URL must be set");
 
@@ -285,10 +286,10 @@ async fn test_non_portal_key_skips_validation() {
     let state = load_state_from_database(&url).await;
     let app = build_router(state.clone());
 
-    // A direct-config downstream key with NO portal binding must NOT be
-    // restricted by model groups (backward compatibility).
+    // T12/T15：没有 portal 绑定、也没显式给 key 级分组的直连 key，
+    // 落 deny-all 哨兵组 → 任何模型 403（fail-closed，绝不静默放行）。
     let downstream_id = "test_downstream_direct";
-    let secret = register_downstream(&state, downstream_id).await;
+    let secret = register_downstream_without_group(&state, downstream_id).await;
 
     let request_path = std::env::var("GATEWAY_PROXY_PATH")
         .unwrap_or_else(|_| "/v1/chat/completions".to_string());
@@ -303,10 +304,26 @@ async fn test_non_portal_key_skips_validation() {
         ))
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
-    // 403 would mean the permission check wrongly applied to an unbound key.
-    assert_ne!(
+    assert_eq!(
         res.status(),
         axum::http::StatusCode::FORBIDDEN,
-        "unbound (non-portal) downstream keys must skip model-group validation"
+        "deny-all must reject every model for a key without explicit group"
     );
+}
+
+/// 与 register_downstream 相同，但故意不传 key 级组（落到 T12 默认 deny-all）。
+async fn register_downstream_without_group(state: &AppState, downstream_id: &str) -> String {
+    use chat_responses_codex::keys::generate_downstream_key;
+    let key = generate_downstream_key("sk");
+    let downstream = DownstreamConfig {
+        id: downstream_id.to_string(),
+        name: downstream_id.to_string(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        active: true,
+        model_group_id: None,
+        ..Default::default()
+    };
+    state.insert_downstream(downstream).await.expect("insert downstream");
+    key.plaintext
 }

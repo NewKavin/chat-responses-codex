@@ -943,6 +943,9 @@ impl PostgresStateStore {
         migrate_response_history_primary_key(&tx).await?;
         // 阶段 2/一次性部署：把历史 model_allowlist 迁到模型分组（幂等）。
         migrate_model_allowlist_to_groups(&tx).await?;
+        // T15 权限兜底：外键改 ON DELETE SET DEFAULT 'deny-all'、列 NOT NULL。
+        // 必须排在迁移之后（迁移把历史 NULL 填完，SET NOT NULL 才不会失败）。
+        migrate_downstream_group_fallback(&tx).await?;
         tx.commit().await.map_err(io_other)
     }
 }
@@ -1037,6 +1040,24 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
         return Ok(());
     }
 
+    // 本次运行前的库内总量（日志要的是增量，不是总量）
+    let before_all: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM downstreams WHERE model_group_id = 'all'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?
+        .get(0);
+    let before_auto: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM model_groups WHERE id LIKE 'auto-%'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?
+        .get(0);
+
     tx.batch_execute(
         r#"
         -- 临时表清理：保证同连接内可重复执行（幂等）
@@ -1052,7 +1073,8 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
             WHERE a.downstream_id = d.id AND TRIM(a.model_slug) <> ''
           );
 
-        -- 2. 非空白名单：按内容建组（保留原拼写，小写去重排序保证哈希稳定）
+        -- 2. 非空白名单：按内容建组（保留原拼写，小写去重排序保证哈希稳定）。
+        --    只处理未绑组下游：已绑下游的 allowlist 残留不得生成无人引用的组。
         CREATE TEMP TABLE _sets AS
         SELECT
           a.downstream_id,
@@ -1063,6 +1085,7 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
             ORDER BY LOWER(TRIM(m.model_slug))
           ) AS models
         FROM downstream_model_allowlist a
+        JOIN downstreams d ON d.id = a.downstream_id AND d.model_group_id IS NULL
         GROUP BY a.downstream_id;
 
         CREATE TEMP TABLE _keyed AS
@@ -1093,13 +1116,16 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
     .await
     .map_err(io_other)?;
 
-    // 迁移统计日志（M3）：绑定数、新建组数
-    let all_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM downstreams WHERE model_group_id = 'all'", &[])
+    // 迁移统计日志（M3）：必须是本次运行的增量，不是库内总量
+    let after_all: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM downstreams WHERE model_group_id = 'all'",
+            &[],
+        )
         .await
         .map_err(io_other)?
         .get(0);
-    let auto_count: i64 = tx
+    let after_auto: i64 = tx
         .query_one(
             "SELECT COUNT(*) FROM model_groups WHERE id LIKE 'auto-%'",
             &[],
@@ -1115,14 +1141,61 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
         .await
         .map_err(io_other)?
         .get(0);
+    let to_all = after_all - before_all;
+    let new_auto = after_auto - before_auto;
+    let bound = remaining - still_unbound;
     tracing::info!(
-        "model allowlist migration: {} downstreams -> all group, {} auto groups created, {} bound, {} unbound",
-        all_count,
-        auto_count,
-        remaining - still_unbound,
-        still_unbound,
+        "model allowlist migration: {} downstreams -> all group, {} auto groups created, {} bound",
+        to_all,
+        new_auto,
+        bound,
     );
+    if still_unbound > 0 {
+        tracing::warn!(
+            "model allowlist migration: {} downstreams still unbound after migration",
+            still_unbound,
+        );
+    }
     Ok(())
+}
+
+/// T15 权限兜底：下游 model_group_id 落到 sentinel 组 deny-all。
+/// - 列 DEFAULT 'deny-all' + NOT NULL：新建/未指定分组的行不会变成 NULL。
+/// - 外键改为 ON DELETE SET DEFAULT：组被删除时行落到 deny-all，绝不回退成
+///   NULL（NULL 会触发 model_allowlist 回退，空列表 = 放行全部 = 权限放大）。
+/// - 用 DO 块包幂等判断；排在 migrate_model_allowlist_to_groups 之后执行。
+/// - 额外保险：SET NOT NULL 前把任何剩余 NULL 补成 deny-all（fail-closed）。
+async fn migrate_downstream_group_fallback(tx: &Transaction<'_>) -> io::Result<()> {
+    tx.batch_execute(
+        r#"
+        -- 剩余 NULL 行先兜底到 deny-all（理论上迁移已填完；此句防 T16 删表后的
+        -- 重启路径，避免 SET NOT NULL 因残留 NULL 失败）
+        UPDATE downstreams SET model_group_id = 'deny-all'
+        WHERE model_group_id IS NULL;
+
+        DO $$
+        BEGIN
+            ALTER TABLE downstreams
+                ALTER COLUMN model_group_id SET DEFAULT 'deny-all';
+            ALTER TABLE downstreams
+                ALTER COLUMN model_group_id SET NOT NULL;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'fk_downstream_model_group'
+                  AND conrelid = 'downstreams'::regclass
+                  AND confdeltype = 'd'
+            ) THEN
+                ALTER TABLE downstreams DROP CONSTRAINT IF EXISTS fk_downstream_model_group;
+                ALTER TABLE downstreams
+                    ADD CONSTRAINT fk_downstream_model_group
+                    FOREIGN KEY (model_group_id) REFERENCES model_groups(id)
+                    ON DELETE SET DEFAULT;
+            END IF;
+        END $$;
+        "#,
+    )
+    .await
+    .map_err(io_other)
 }
 
 async fn migrate_dialect_profiles_primary_key(tx: &Transaction<'_>) -> io::Result<()> {
@@ -1513,7 +1586,9 @@ async fn sync_downstreams(
             &output_token_price_per_million_cents,
             &daily_cost_limit_cents,
             &model_concurrency_groups,
-            &downstream.model_group_id,
+            // T15：DB 层 model_group_id NOT NULL；任何漏网 None 都落 deny-all，
+            // 绝不写 NULL（NULL 会让读路径回退白名单，空列表 = 放行全部）。
+            &(downstream.model_group_id.as_deref().unwrap_or("deny-all")),
         ];
 
         const DOWNSTREAM_COLUMNS: [&str; 19] = [

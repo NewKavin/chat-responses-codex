@@ -90,13 +90,44 @@ pub async fn reset_portal_tables(database_url: &str) {
     // test helpers INSERT into them before load_state() rebuilds the schema,
     // so clear rows but keep the tables (also prevents stale downstreams
     // leaking across tests, which broke group resolution).
+    // 动态 TRUNCATE：个别测试（M3 表缺失路径）可能把 allowlist 表换成同名
+    // view 或删掉，reset 不能因此失败；随后确保真实表重新存在。
     client
         .batch_execute(
-            "TRUNCATE TABLE downstream_model_allowlist, downstreams, \
-             upstream_supported_models, upstreams CASCADE",
+            "DO $$ \
+             DECLARE t text; \
+             BEGIN \
+               FOREACH t IN ARRAY ARRAY['downstream_model_allowlist','downstreams','upstream_supported_models','upstreams'] \
+               LOOP \
+                 IF EXISTS (SELECT 1 FROM pg_class WHERE relname = t AND relnamespace = 'public'::regnamespace AND relkind = 'r') THEN \
+                   EXECUTE format('TRUNCATE TABLE %I CASCADE', t); \
+                 END IF; \
+               END LOOP; \
+             END $$; \
+             CREATE TABLE IF NOT EXISTS downstream_model_allowlist (\
+               downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE, \
+               position INTEGER NOT NULL, \
+               model_slug TEXT NOT NULL, \
+               PRIMARY KEY (downstream_id, model_slug) \
+             )",
         )
         .await
         .expect("truncating gateway tables must succeed");
+}
+
+/// 模拟升级前旧库：临时放开 downstreams.model_group_id 的 NOT NULL，
+/// 允许测试用裸 SQL 造“未绑组”的历史行（新代码自身不会再产生 NULL 行）。
+/// 幂等；下一次 AppState 初始化（T15 兜底步骤）会重新 SET NOT NULL。
+pub async fn relax_downstream_group_nullability(database_url: &str) {
+    let client = connect(database_url)
+        .await
+        .expect("oidc test db must connect");
+    client
+        .batch_execute(
+            "ALTER TABLE downstreams ALTER COLUMN model_group_id DROP NOT NULL",
+        )
+        .await
+        .expect("dropping NOT NULL must succeed");
 }
 
 fn split_admin(database_url: &str) -> (String, String) {

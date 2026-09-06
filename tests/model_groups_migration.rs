@@ -111,34 +111,37 @@ async fn test_migrate_allowlist_to_groups() {
     let store = portal_store_opt.as_ref().expect("portal_store must exist");
     let client = store.get_client().await.expect("Failed to get client");
 
-    // 造数据：3 个下游
+    // 造数据：4 个下游（全部未绑组，模拟升级前旧库）
     //  - ds-empty: 空白名单 -> all
     //  - ds-shared-a / ds-shared-b: 相同白名单 -> 共用 1 个 auto 组
     //  - ds-solo: 独立白名单 -> 独立 auto 组
-    // 用 insert_downstream 构造（默认值完整），绕过裸 SQL 的 NOT NULL 约束
+    // T15 后新代码不再产生 NULL 行，这里放开 NOT NULL 用裸 SQL 造历史数据。
+    client
+        .batch_execute("ALTER TABLE downstreams ALTER COLUMN model_group_id DROP NOT NULL")
+        .await
+        .unwrap();
     for id in ["ds-empty", "ds-shared-a", "ds-shared-b", "ds-solo"] {
-        let mut downstream = chat_responses_codex::state::DownstreamConfig::default();
-        downstream.id = id.to_string();
-        downstream.name = format!("{} name", id);
-        downstream.hash = format!("hash-{}", id);
-        state
-            .insert_downstream(downstream)
+        client
+            .execute(
+                "INSERT INTO downstreams (id, name, hash, per_minute_limit, active, model_group_id) VALUES ($1, $2, $3, 60, true, NULL)",
+                &[&id, &format!("{} name", id), &format!("hash-{}", id)],
+            )
             .await
-            .expect("insert downstream");
+            .expect("insert downstream row");
     }
     for (position, (id, models)) in [
-        (0, ("ds-shared-a", vec!["GLM-5.2", "gpt-5.5", "glm-5.2"])), // 含重复（大小写）
-        (1, ("ds-shared-b", vec!["glm-5.2", "gpt-5.5"])),
-        (2, ("ds-solo", vec!["grok-4.6", "qwen3.8-max"])),
+        ("ds-shared-a", vec!["GLM-5.2", "gpt-5.5", "glm-5.2"]), // 含重复（大小写）
+        ("ds-shared-b", vec!["glm-5.2", "gpt-5.5"]),
+        ("ds-solo", vec!["grok-4.6", "qwen3.8-max"]),
     ]
     .into_iter()
     .enumerate()
     {
-        for (pos, model) in models.1.into_iter().enumerate() {
+        for model in models {
             client
                 .execute(
                     "INSERT INTO downstream_model_allowlist (downstream_id, position, model_slug) VALUES ($1, $2, $3)",
-                    &[&models.0, &(pos as i32), &model],
+                    &[&id, &(position as i32), &model],
                 )
                 .await
                 .expect("insert allowlist row");
@@ -314,6 +317,7 @@ async fn test_schema_sql_fixes_placeholder_seeds_only() {
     );
 }
 
+#[tokio::test]
 async fn test_model_groups_has_initial_data() {
     let _guard = common::oidc::lock().lock();
     let url = database_url();

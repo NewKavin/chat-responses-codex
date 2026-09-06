@@ -5,7 +5,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use chat_responses_codex::keys::generate_downstream_key;
-use chat_responses_codex::state::{AppConfig, AppState, DownstreamConfig};
+use chat_responses_codex::state::{AppConfig, AppState};
 use tower::ServiceExt;
 
 fn database_url() -> String {
@@ -45,15 +45,20 @@ async fn startup_migration_binds_and_is_idempotent_and_skips_missing_table() {
     let store = state.portal_store().expect("portal_store must exist");
     let client = store.get_client().await.expect("get client");
 
-    // 未绑组 + 带白名单的下游
+    // 未绑组 + 带白名单的下游：T15 后新代码不会再产生 NULL 行，这里按
+    // 升级前旧库造数据（放开 NOT NULL + 裸 SQL）。
     let key_m2 = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "ds-m2-unbound".into();
-    ds.name = "M2 Unbound".into();
-    ds.hash = key_m2.hash.clone();
-    ds.plaintext_key = Some(key_m2.plaintext.clone());
-    ds.model_allowlist = vec!["alpha-model".to_string(), "beta-model".to_string()];
-    state.insert_downstream(ds).await.expect("insert downstream");
+    client
+        .batch_execute("ALTER TABLE downstreams ALTER COLUMN model_group_id DROP NOT NULL")
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO downstreams (id, name, hash, plaintext_key, per_minute_limit, active, model_group_id) VALUES ($1, $2, $3, $4, 60, true, NULL)",
+            &[&"ds-m2-unbound", &"M2 Unbound", &key_m2.hash, &Some(key_m2.plaintext.clone())],
+        )
+        .await
+        .unwrap();
     client
         .execute(
             "INSERT INTO downstream_model_allowlist (downstream_id, position, model_slug) VALUES ($1, $2, $3)",
@@ -142,13 +147,26 @@ async fn startup_migration_does_not_break_http_requests() {
     common::oidc::reset_portal_tables(&url).await;
     let state = load_state(&url).await;
     let key = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "ds-m2-http".into();
-    ds.name = "M2 HTTP".into();
-    ds.hash = key.hash.clone();
-    ds.plaintext_key = Some(key.plaintext.clone());
-    ds.model_allowlist = vec!["m2-model".to_string()];
-    state.insert_downstream(ds).await.expect("insert downstream");
+    let store = state.portal_store().expect("portal_store must exist");
+    let client = store.get_client().await.expect("get client");
+    client
+        .batch_execute("ALTER TABLE downstreams ALTER COLUMN model_group_id DROP NOT NULL")
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO downstreams (id, name, hash, plaintext_key, per_minute_limit, active, model_group_id) VALUES ($1, $2, $3, $4, 60, true, NULL)",
+            &[&"ds-m2-http", &"M2 HTTP", &key.hash, &Some(key.plaintext.clone())],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO downstream_model_allowlist (downstream_id, position, model_slug) VALUES ($1, $2, $3)",
+            &[&"ds-m2-http", &(1i32), &"m2-model"],
+        )
+        .await
+        .unwrap();
     drop(state);
     let state2 = load_state(&url).await;
     let app = chat_responses_codex::server::build_router(state2);

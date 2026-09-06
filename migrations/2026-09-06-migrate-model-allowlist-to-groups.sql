@@ -1,4 +1,6 @@
 -- migrations/2026-09-06-migrate-model-allowlist-to-groups.sql
+-- 注意：本文件已随代码在启动时自动执行（initialize_schema → migrate_*），
+-- 无需在 tar 包升级时手工运行；内容幂等，重复执行无害，仅作留档核对。
 -- 阶段 2：把历史 downstream.model_allowlist 迁移为模型分组。
 -- 幂等：可重复执行；只处理 model_group_id IS NULL 的下游。
 -- 分组策略：空白名单 → all；非空 → auto-<sha256(小写排序模型拼接)[..8]>（相同集合共用一组）。
@@ -29,6 +31,7 @@ SELECT
     ORDER BY LOWER(TRIM(m.model_slug))
   ) AS models
 FROM downstream_model_allowlist a
+JOIN downstreams d ON d.id = a.downstream_id AND d.model_group_id IS NULL
 GROUP BY a.downstream_id;
 
 CREATE TEMP TABLE _keyed AS

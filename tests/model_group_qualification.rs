@@ -160,9 +160,10 @@ async fn qualification_rejects_unbound_downstream() {
     }
     common::oidc::reset_portal_tables(&url).await;
     let state = load_state(&url).await;
-    let store = state.portal_store().expect("portal store must exist");
-    let client = store.get_client().await.expect("get client");
 
+    // T15 后 DB 层不会再产生未绑组行；此用例验证 apply 对"内存中未绑组"
+    // 的拒绝逻辑（文件模式 / 旧会话快照仍可能出现），故用仅内存的
+    // add_downstream 造数据，不落库。
     let key = generate_downstream_key("gw");
     let mut ds = DownstreamConfig::default();
     ds.id = "test".to_string();
@@ -171,7 +172,7 @@ async fn qualification_rejects_unbound_downstream() {
     ds.plaintext_key = Some(key.plaintext.clone());
     ds.model_allowlist = vec!["old".to_string()];
     ds.model_group_id = None; // unbound
-    state.insert_downstream(ds).await.expect("insert downstream");
+    state.add_downstream(ds).await.expect("add downstream in memory");
     insert_qualified_upstream(&state).await;
 
     let err = state
@@ -182,7 +183,6 @@ async fn qualification_rejects_unbound_downstream() {
         .await
         .expect_err("unbound downstream must be rejected");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    let _ = client;
 }
 
 /// 防外溢规则 2：内置组（all）→ InvalidInput，提示先改绑。
