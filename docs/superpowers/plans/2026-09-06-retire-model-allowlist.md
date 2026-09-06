@@ -9,9 +9,14 @@
 2. **`basic` / `premium` 的占位种子模型改成本部署真实模型**（阶段 0 执行，见 §3.0）。
 3. **`apply_model_qualification` 改为写入下游所绑分组的 `allowed_models`**，不再写 `model_allowlist`（阶段 3 T11，含共享组防外溢规则，见 §3.3）。
 
-## ⚠️ 阻塞项：通配符 bug 必须先修（新增，2026-09-06 核查发现）
+## ⚠️ 两个阻塞项（2026-09-06 核查发现）
 
-`codex_exposed_models`（`src/server/gateway.rs:2953`）与 `portal_model_is_allowed`（`src/state/usage.rs:247`）**都不认识 `"*"`**。方案 §3.2 的"空白名单挂 `all` 组"会把当前一批 Codex 正常可用的 key 全部打成启动报错。必须在**迁移 SQL 之前**修掉，详见 §1.6。
+1. **通配符 bug**：`codex_exposed_models`（`src/server/gateway.rs:2953`）与 `portal_model_is_allowed`（`src/state/usage.rs:247`）**都不认识 `"*"`**。§3.2 的"空白名单挂 `all` 组"会把当前一批 Codex 正常可用的 key 全部打成启动报错。必须在迁移生效**之前**修掉，详见 §1.6。
+2. **`migrations/*.sql` 没有执行器**：仓库里只有 `SCHEMA_SQL`（`postgres.rs:911 initialize_schema`）在启动时自动执行；`migrations/` 目录下的文件**全靠人工连 psql 跑**。内网 tar 包升级场景下没人会去手工执行，所以本次的两条迁移必须改成启动时自动跑，详见 §6.5。
+
+## 部署形态：内网 tar 包，一次性升级
+
+已确认的约束：**内网通过 tar 包升级，不具备"发版 → 手工跑 SQL → 再发版"的多窗口条件**。因此本方案按一次性部署组织，迁移逻辑内嵌到启动流程。§7 的分批节奏仅作为有运维窗口时的参考保留。
 
 ---
 
@@ -486,6 +491,13 @@ COMMIT;
 | T9 | 目录 diff 脚本 | ✅ scripts/catalog-diff.sh；迁移前后零差异 |
 | §2.3 | 强制验收 | ✅ 目录 diff 无差异、config.toml 模型在 catalog、codex doctor 全绿 |
 <!-- STAGE2 STATUS END -->
+
+<!-- WRK W1 W2 -->
+**W1/W2 通配符缺口修复（✅）**
+- W1：`codex_exposed_models` 认 `"*"`（与空列表同分支），RED→GREEN：`gateway_codex_catalog_wildcard_group_returns_all_upstream_models`
+- W2：7 处 `portal_model_is_allowed` 直接调用点（admin.rs 模型探测、usage.rs 统计/上下文、log_queries.rs active_models、state.rs 可见性×3）统一改调 `model_list_allows`；RED→GREEN：`visible_models_wildcard_group_returns_all_upstream_models`（仅 all 组下游场景）
+- 回归：downstream_model_groups 15/15、gateway 452/452
+<!-- WRK W1 W2 END -->
 **阶段 0 附注**：修复测试基建 `tests/common/oidc.rs`（reset 漏清 `downstreams` 表导致跨测试残留、HTTP 分组测试命中旧副本）；`tests/downstream_model_groups.rs` invalid-group 语义更新为「真实组→删除→FK SET NULL→回退 allowlist」（FK 禁止绑定不存在分组）；10/10 用例绿。
 
 ### 阶段 1
@@ -559,25 +571,117 @@ cd frontend && rtk vitest run   # 前端
 
 ---
 
-## 6.5 一次性部署（可选，替代 §7 的分批节奏）
+## 6.5 一次性部署（内网 tar 包，本方案采用）
 
-四阶段拆开是为了**回滚粒度**，不是技术依赖。要一次性上线的话，能合但有一条硬约束：
+### 6.5.1 为什么不能沿用 §7 的分批节奏
 
-| 原阶段 | 能否并入一次发布 | 约束 |
+§7 假设每个阶段之间有一次运维窗口去手工跑 SQL。内网只有 tar 包，起来就是新版本，没有中间态。而且 `migrations/*.sql` 全仓库无执行器：
+
+```
+grep -rn "migrations/" --include=*.rs --include=*.sh --include=Dockerfile* .
+→ 只有注释和测试引用，没有任何代码去读取并执行这些文件
+```
+
+`SCHEMA_SQL`（`postgres.rs:1788`，由 `initialize_schema` 在启动时 `batch_execute`）是唯一自动跑的 SQL。所以：**凡是希望内网升级后自动生效的 DDL/DML，都必须进 `SCHEMA_SQL` 或跟在它后面的启动步骤里。**
+
+### 6.5.2 迁移搬进启动流程
+
+在 `initialize_schema` 里，`SCHEMA_SQL` 之后追加一个幂等的迁移步骤（与既有的 `migrate_dialect_profiles_primary_key` / `migrate_response_history_primary_key` 同一层）：
+
+```rust
+// src/state/postgres.rs
+async fn initialize_schema(&self) -> io::Result<()> {
+    let mut conn = self.pool.get().await.map_err(io_other)?;
+    let tx = conn.transaction().await.map_err(io_other)?;
+    tx.batch_execute(SCHEMA_SQL).await.map_err(io_other)?;
+    migrate_dialect_profiles_primary_key(&tx).await?;
+    migrate_response_history_primary_key(&tx).await?;
+    migrate_model_allowlist_to_groups(&tx).await?;   // 新增
+    tx.commit().await.map_err(io_other)
+}
+```
+
+`migrate_model_allowlist_to_groups` 的内容就是 `migrations/2026-09-06-migrate-model-allowlist-to-groups.sql` 的 SQL（去掉 `BEGIN`/`COMMIT`，它跑在外层事务里），加两条防护：
+
+1. **幂等**：只处理 `model_group_id IS NULL` 的行，重启 N 次结果一致。
+2. **前置检查**：表 `downstream_model_allowlist` 不存在时直接跳过（阶段 4 删表后的重启路径）。
+
+`migrations/` 下的两个 `.sql` 文件保留，作为"已在启动时执行"的留档和给有运维窗口的部署手工核对用。文件头加一行注释说明这一点，避免有人重复执行（幂等所以重复执行也无害）。
+
+### 6.5.3 单次发布的内容清单
+
+| 组 | 内容 | 生效方式 |
 |---|---|---|
-| 0 + 1 | 可以 | 种子数据与读路径改造无依赖 |
-| 2（迁移 SQL） | **代码上线之后才能跑** | 老代码不认识新读路径；且必须在 §1.6 修复上线后 |
-| 3 | 可以并入 | — |
-| 4 的 T14/T15 | 可以并入 | 改外键、统一测试夹具 |
-| 4 的 T16（删列删表） | **必须留独立窗口** | 删了就没有回滚数据 |
+| A：种子与哨兵 | `deny-all` 组、`basic`/`premium` 真实模型 | 已在 `SCHEMA_SQL`（commit `3324794f`）。**但 `ON CONFLICT DO NOTHING` 只对新库生效**，既有库的 `basic`/`premium` 需要 §6.5.4 的 UPDATE |
+| B：通配符修复 | §1.6 的两处 | 代码，随版本生效 |
+| C：读路径走分组 | T1–T7 | 代码，随版本生效 |
+| D：迁移 | 空白名单 → `all`，非空 → `auto-<hash>` 组 | §6.5.2 启动时自动跑 |
+| E：停写 | T10–T13 | 代码，随版本生效 |
+| F：权限兜底 | 外键改 `ON DELETE SET DEFAULT 'deny-all'`、列 `NOT NULL` | 进 `SCHEMA_SQL`（用 `DO $$` 块包幂等判断，仿照 `postgres.rs:2106` 那段 FK 的写法） |
+| G：删列删表 | T16 | **不进本次发布** |
 
-合并后的部署序列：
+### 6.5.4 既有库的种子修正也要进 `SCHEMA_SQL`
 
-1. **一次发版**：阶段 0–4 的全部代码改动（含 §1.6 通配符修复），`model_allowlist` 字段与 `downstream_model_allowlist` 表**先留着**，`postgres.rs:1417-1433` 继续双写
-2. **跑迁移 SQL**：§2.3 前后对比校验 0 行 + 每个在用 key 的 Codex 目录 diff 通过
-3. **观察，确认无回滚需求后**再跑删表 migration（T16）
+`3324794f` 把种子加进了 `SCHEMA_SQL`，但那段是 `INSERT ... ON CONFLICT (id) DO NOTHING`。既有库里 `basic`/`premium` 已存在，`DO NOTHING` 会跳过，**占位模型不会被改掉**。
 
-第 3 步不能省。删表与代码同时上线，迁移校验一旦发现问题就没有回滚路径了。观察期可以从"2 周"压到你能接受的长度，但不能压到 0。
+所以要在 `SCHEMA_SQL` 里单独补一段一次性 UPDATE，用"只在内容仍是占位值时才改"来保证幂等且不覆盖运维后来的手工调整：
+
+```sql
+-- 一次性修正：仅当内容仍是初版占位模型时才替换为本部署真实模型。
+-- 运维手工改过之后这里不会再动（条件不成立）。
+UPDATE model_groups
+SET allowed_models = '["deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4-flash-free", "glm-5.3-flash", "kimi-k3"]'::jsonb,
+    name = 'Basic Models', updated_at = NOW()
+WHERE id = 'basic'
+  AND allowed_models = '["gpt-3.5-turbo", "claude-3-haiku"]'::jsonb;
+
+UPDATE model_groups
+SET allowed_models = '["glm-5.2", "glm-5.3", "deepseek-v4-pro", "deepseek-v4-pro-0813", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "grok-4.5", "grok-4.6", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "qwen3.8-max"]'::jsonb,
+    name = 'Premium Models', updated_at = NOW()
+WHERE id = 'premium'
+  AND allowed_models = '["gpt-4", "gpt-4-turbo", "claude-3-opus", "claude-3.5-sonnet", "claude-3-sonnet"]'::jsonb;
+```
+
+这一条同样要同步回 `migrations/2026-09-06-fix-model-group-seeds.sql`（当前那份是无条件 UPDATE，会覆盖运维调整，要改成带条件的版本）。
+
+### 6.5.5 升级步骤（运维视角）
+
+1. **备份**（唯一的人工前置，不能省）：
+   ```bash
+   docker exec chat-responses-codex-postgres pg_dump -U chat_responses_codex \
+     -d chat_responses_codex \
+     -t downstreams -t downstream_model_allowlist -t model_groups \
+     > /backup/pre-model-group-$(date +%F).sql
+   ```
+2. **升级前快照 Codex 目录**：`scripts/catalog-diff.sh snapshot before`
+3. **载入 tar 包重启**。启动日志里应看到迁移的 info 行（见 §6.5.6）。
+4. **升级后核对**：`scripts/catalog-diff.sh snapshot after && scripts/catalog-diff.sh diff`
+5. **跑校验查询**（§2.3），期望 0 行；`SELECT COUNT(*) FROM downstreams WHERE model_group_id IS NULL` 期望 0。
+6. 观察。删表（T16）留到下一个版本。
+
+### 6.5.6 启动迁移必须打日志
+
+内网没人盯着 SQL 输出，迁移结果只能靠日志。`migrate_model_allowlist_to_groups` 至少输出：
+
+```
+info: model allowlist migration: 12 downstreams → all group, 5 auto groups created, 23 downstreams bound
+info: model allowlist migration: nothing to migrate (all downstreams already grouped)
+warn: model allowlist migration: table downstream_model_allowlist absent, skipping
+```
+
+无变化时也要打一行，否则无法区分"跑了且无事可做"和"根本没跑"。
+
+### 6.5.7 回滚
+
+代码回滚 = 换回旧 tar 包。**数据不会自动回滚**：`model_group_id` 已经写上了。旧版本的行为是"组优先、组解析失败回退白名单"，而 `downstream_model_allowlist` 表本次不删、`postgres.rs:1417-1433` 继续双写，所以旧代码起来仍能按分组工作（分组表也在）。真要退回白名单语义：
+
+```sql
+UPDATE downstreams SET model_group_id = NULL WHERE model_group_id LIKE 'auto-%' OR model_group_id = 'all';
+```
+
+这条只清本次迁移写入的组绑定，手工绑定的 `basic`/`premium` 不动。执行完重启即恢复白名单语义。
+
+**这就是 T16 必须留到下个版本的原因**：表还在，才有这条退路。
 
 ---
 
@@ -591,7 +695,14 @@ cd frontend && rtk vitest run   # 前端
 6. 观察 2 周
 7. 阶段 4：T14–T16（改外键指向 `deny-all` + 删表删字段）
 
-想压缩节奏见 §6.5。
+### 内网 tar 包的实际顺序（本方案采用）
+
+上面的 1–7 是有运维窗口时的理想节奏。内网按 §6.5 走：
+
+**第一个 tar 包**：A（种子含既有库 UPDATE）+ B（通配符）+ C（读路径）+ D（启动时迁移）+ E（停写）+ F（权限兜底），一次上线。
+**第二个 tar 包**（观察后）：G（T16 删列删表）。
+
+两个包之间的观察期长度由你定，但不能是 0 —— 第一个包留着 `downstream_model_allowlist` 表就是为了保住 §6.5.7 的回滚路径。
 
 ---
 

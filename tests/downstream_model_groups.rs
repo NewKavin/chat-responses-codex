@@ -432,6 +432,175 @@ async fn batch_effective_allowlist_matches_single_resolution() {
     );
 }
 
+/// W1（通配符缺口）：下游绑 all 组（["*"）时 Codex 目录必须返回全部
+/// active upstream 模型，而不是只有一个字面叫 * 的模型。
+#[tokio::test]
+async fn gateway_codex_catalog_wildcard_group_returns_all_upstream_models() {
+    let _guard = common::oidc::lock().lock();
+    let Some((state, app, _key1, _key3, _key5)) = fresh_gateway_env().await else {
+        eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
+        return;
+    };
+
+    // 造一个绑 all 组的下游（all 组 allowed_models = ["*"）
+    let key6 = generate_downstream_key("gw");
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = "downstream-wildcard-all".into();
+    ds.name = "Wildcard All".into();
+    ds.hash = key6.hash.clone();
+    ds.plaintext_key = Some(key6.plaintext.clone());
+    ds.model_allowlist = vec![];
+    ds.model_group_id = Some("all".into());
+    state.insert_downstream(ds).await.expect("insert wildcard-all downstream");
+
+    // 直接走 HTTP：Codex 目录应包含全部 3 个 upstream 模型
+    let res = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/models?format=codex")
+                .header(header::AUTHORIZATION, format!("Bearer {}", key6.plaintext))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let slugs: Vec<String> = payload["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["slug"].as_str().map(String::from))
+        .collect();
+
+    // upstream 模型：gpt-3.5-turbo / claude-instant / manual-model-1
+    for expected in ["gpt-3.5-turbo", "claude-instant", "manual-model-1"] {
+        assert!(
+            slugs.contains(&expected.to_string()),
+            "wildcard group must expose upstream model {expected}, got {slugs:?}"
+        );
+    }
+    assert!(
+        !slugs.iter().any(|s| s == "*"),
+        "literal '*' must not appear in catalog, got {slugs:?}"
+    );
+}
+
+/// W2（通配符缺口）：绑 all 组的下游请求 OpenAI 风格 /v1/models
+/// 必须返回全部 active upstream 模型。portal_model_is_allowed 只做精确
+/// 成员判定，["*"] 会把它滤成空列表；应改走 model_list_allows。
+#[tokio::test]
+async fn gateway_openai_models_wildcard_group_returns_all_upstream_models() {
+    let _guard = common::oidc::lock().lock();
+    let Some((state, app, _key1, _key3, _key5)) = fresh_gateway_env().await else {
+        eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let key7 = generate_downstream_key("gw");
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = "downstream-wildcard-all-openai".into();
+    ds.name = "Wildcard All OpenAI".into();
+    ds.hash = key7.hash.clone();
+    ds.plaintext_key = Some(key7.plaintext.clone());
+    ds.model_allowlist = vec![];
+    ds.model_group_id = Some("all".into());
+    state.insert_downstream(ds).await.expect("insert downstream");
+
+    let res = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", key7.plaintext))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let ids: Vec<String> = payload["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect();
+
+    for expected in ["gpt-3.5-turbo", "claude-instant", "manual-model-1"] {
+        assert!(
+            ids.contains(&expected.to_string()),
+            "wildcard group must expose upstream model {expected}, got {ids:?}"
+        );
+    }
+    assert!(!ids.is_empty(), "catalog must not be emptied by wildcard group");
+}
+
+/// W2（通配符缺口）：scope=visible 的模型集合（downstream_visible_models）
+/// 对绑 all 组的下游必须包含全部 active upstream 模型。
+/// 场景刻意保持"仅 all 组下游存在"，避免其他下游的 allowlist 掩盖缺口。
+#[tokio::test]
+async fn visible_models_wildcard_group_returns_all_upstream_models() {
+    let _guard = common::oidc::lock().lock();
+    let url = match database_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
+            return;
+        }
+    };
+
+    common::oidc::reset_portal_tables(&url).await;
+    let state = load_state(&url).await;
+
+    // 只放一个绑 all 组的下游（all 种子组已在 SCHEMA_SQL 中）
+    let key8 = generate_downstream_key("gw");
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = "downstream-wildcard-visible".into();
+    ds.name = "Wildcard Visible".into();
+    ds.hash = key8.hash.clone();
+    ds.plaintext_key = Some(key8.plaintext.clone());
+    ds.model_allowlist = vec![];
+    ds.model_group_id = Some("all".into());
+    state.insert_downstream(ds).await.expect("insert downstream");
+
+    // 一个 active upstream，3 个模型
+    let _ = state
+        .insert_upstream(chat_responses_codex::state::UpstreamConfig {
+            id: "up-wildcard".into(),
+            name: "Wildcard Upstream".into(),
+            base_url: "http://127.0.0.1:9".into(),
+            api_key: "unused".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![
+                "gpt-3.5-turbo".into(),
+                "claude-instant".into(),
+                "manual-model-1".into(),
+            ],
+            active: true,
+            failure_count: 0,
+            ..Default::default()
+        })
+        .await;
+
+    let visible = state.downstream_visible_models().await;
+    for expected in ["gpt-3.5-turbo", "claude-instant", "manual-model-1"] {
+        assert!(
+            visible.contains(&expected.to_string()),
+            "wildcard group must expose upstream model {expected}, got {visible:?}"
+        );
+    }
+    assert!(!visible.is_empty(), "visible set must not be emptied by wildcard group");
+}
+
 /// 阶段 1：Codex 目录（/v1/models?format=codex）必须与模型分组一致，
 /// 而不是只读 model_allowlist（空白名单 = 全放行会暴露组外模型）。
 #[tokio::test]

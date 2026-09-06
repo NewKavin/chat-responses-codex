@@ -583,7 +583,7 @@ impl AppState {
                 continue;
             };
 
-            if !portal_model_is_allowed(&effective_allowlist, &model) {
+            if !model_list_allows(&effective_allowlist, &model) {
                 continue;
             }
 
@@ -672,7 +672,7 @@ impl AppState {
         };
 
         for model in allowlist {
-            if !portal_model_is_allowed(&effective_allowlist, &model) {
+            if !model_list_allows(&effective_allowlist, &model) {
                 continue;
             }
 

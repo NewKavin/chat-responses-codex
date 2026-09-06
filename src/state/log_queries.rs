@@ -235,7 +235,7 @@ pub fn build_downstream_usage_summary(
 
     let active_models = downstream_logs
         .iter()
-        .filter(|log| super::portal_model_is_allowed(effective_allowlist, &log.model))
+        .filter(|log| super::model_list_allows(effective_allowlist, &log.model))
         .map(|log| log.model.trim().to_ascii_lowercase())
         .collect::<HashSet<_>>()
         .len();

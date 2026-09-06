@@ -6154,8 +6154,7 @@ impl AppState {
                         && downstream_effective
                             .get(&downstream.id)
                             .is_some_and(|allowlist| {
-                                allowlist.is_empty()
-                                    || portal_model_is_allowed(allowlist, &exposed)
+                                crate::state::model_list_allows(allowlist, &exposed)
                             })
                 });
                 if !exposed_to_downstream {
@@ -6398,7 +6397,7 @@ impl AppState {
                         && downstream_effective
                             .get(&downstream.id)
                             .is_some_and(|allowlist| {
-                                allowlist.is_empty() || portal_model_is_allowed(allowlist, &model)
+                                crate::state::model_list_allows(allowlist, &model)
                             })
                 }) {
                     // Admin-picked per-upstream mapping labels are exposed
@@ -6846,9 +6845,7 @@ impl AppState {
 
         let mut queued = 0usize;
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
-            if !(effective_allowlist.is_empty()
-                || portal_model_is_allowed(&effective_allowlist, model))
-            {
+            if !crate::state::model_list_allows(&effective_allowlist, model) {
                 continue;
             }
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {

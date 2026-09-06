@@ -1,7 +1,7 @@
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    fetch_models_from_upstream_keys_concurrently, model_discovery_url, portal_model_is_allowed,
+    fetch_models_from_upstream_keys_concurrently, model_discovery_url,
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState,
     DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig,
     DownstreamUsageSummary, EnrichedUsageLog, FreekeySyncError, FreekeySyncItem,
@@ -1260,7 +1260,7 @@ pub(super) async fn build_model_probe_response(
             );
             let channel_id = route_id.clone();
             if let Some(allowlist) = allowlist {
-                models.retain(|model| portal_model_is_allowed(allowlist, model));
+                models.retain(|model| crate::state::model_list_allows(allowlist, model));
             }
 
             let status = if error.is_some() {

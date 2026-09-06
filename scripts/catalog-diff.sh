@@ -29,12 +29,22 @@ admin_token() {
 }
 
 # 列出所有在用下游（plaintext_key 非空、active）——直连数据库取明文 key
+# 支持两种连接方式：
+#   PG_CMD=docker   (默认) 通过 chat-responses-codex-postgres 容器执行 psql
+#   PG_CMD=url             使用 .env 的 DATABASE_URL 直连（容器网络外需可解析）
 list_keys() {
-  local pgurl
+  local pgurl user
   pgurl="$(env_get DATABASE_URL)"
-  [ -n "$pgurl" ] || { echo "DATABASE_URL missing in $ENV_FILE" >&2; exit 1; }
-  psql "$pgurl" -At -F $'\t' -c \
-    "SELECT d.id, d.plaintext_key, COALESCE(NULLIF(d.name,''), d.id) FROM downstreams d WHERE d.active AND d.plaintext_key IS NOT NULL AND d.plaintext_key <> '' ORDER BY d.id;"
+  user="$(env_get POSTGRES_USER)"
+  user="${user:-chat_responses_codex}"
+  local sql
+  sql="SELECT d.id, d.plaintext_key, COALESCE(NULLIF(d.name,''), d.id) FROM downstreams d WHERE d.active AND d.plaintext_key IS NOT NULL AND d.plaintext_key <> '' ORDER BY d.id;"
+  if [ "${PG_CMD:-docker}" = "docker" ]; then
+    docker exec chat-responses-codex-postgres psql -U "$user" -d chat_responses_codex -At -F $'\t' -c "$sql"
+  else
+    [ -n "$pgurl" ] || { echo "DATABASE_URL missing in $ENV_FILE" >&2; exit 1; }
+    psql "$pgurl" -At -F $'\t' -c "$sql"
+  fi
 }
 
 # 拉取一个 key 的 codex 目录（slug 一行一个，排序后输出）

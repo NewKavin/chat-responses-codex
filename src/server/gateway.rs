@@ -2992,7 +2992,8 @@ fn codex_exposed_models(
         grouped.into_values().map(|(display, _)| display).collect()
     };
 
-    if allowlist.is_empty() {
+    // “*” 通配 = 放行全部，与空列表同分支（否则字面 “*” 会作为唯一模型出现在目录里）。
+    if allowlist.is_empty() || allowlist.iter().any(|allowed| allowed.trim() == "*") {
         let slugs = upstreams
             .iter()
             .filter(|upstream| upstream.active)
