@@ -167,6 +167,7 @@ pub fn build_downstream_usage_summary(
     snapshot: &PersistedState,
     downstream_id: &str,
     now: u64,
+    effective_allowlist: &[String],
 ) -> io::Result<DownstreamUsageSummary> {
     let downstream = snapshot
         .downstreams
@@ -216,9 +217,8 @@ pub fn build_downstream_usage_summary(
         .filter_map(|log| log.total_cost_cents)
         .sum();
 
-    let total_models = if !downstream.model_allowlist.is_empty() {
-        downstream
-            .model_allowlist
+    let total_models = if !effective_allowlist.is_empty() {
+        effective_allowlist
             .iter()
             .map(|model| model.trim().to_ascii_lowercase())
             .collect::<HashSet<_>>()
@@ -235,7 +235,7 @@ pub fn build_downstream_usage_summary(
 
     let active_models = downstream_logs
         .iter()
-        .filter(|log| super::portal_model_is_allowed(&downstream.model_allowlist, &log.model))
+        .filter(|log| super::portal_model_is_allowed(effective_allowlist, &log.model))
         .map(|log| log.model.trim().to_ascii_lowercase())
         .collect::<HashSet<_>>()
         .len();
@@ -382,10 +382,16 @@ impl AppState {
             !pending.is_empty()
         };
 
+        // 解析有效白名单（分组优先），供 DB/内存两条路径保持一致口径。
+        let effective_allowlist = match self.effective_model_allowlist_opt(downstream_id).await {
+            Some(models) => models,
+            None => Vec::new(),
+        };
+
         if !has_pending_usage_logs {
             if let Some(summary) = self
                 .config_store
-                .downstream_usage_summary(downstream_id)
+                .downstream_usage_summary(downstream_id, &effective_allowlist)
                 .await?
             {
                 return Ok(summary);
@@ -394,6 +400,28 @@ impl AppState {
 
         let snapshot = self.snapshot().await;
         let now = unix_seconds();
-        build_downstream_usage_summary(&snapshot, downstream_id, now)
+        let downstream = snapshot
+            .downstreams
+            .iter()
+            .find(|d| d.id == downstream_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("downstream not found: {downstream_id}"),
+                )
+            })?;
+        // 阶段 1：统计口径与有效白名单一致（分组优先）；解析失败降级回 allowlist。
+        let effective_allowlist = match self.effective_model_allowlist(downstream).await {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(
+                    downstream_id = %downstream_id,
+                    error = %error,
+                    "failed to resolve model group for usage summary; degrading to allowlist"
+                );
+                downstream.model_allowlist.clone()
+            }
+        };
+        build_downstream_usage_summary(&snapshot, downstream_id, now, &effective_allowlist)
     }
 }

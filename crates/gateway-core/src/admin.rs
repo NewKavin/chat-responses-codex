@@ -236,6 +236,10 @@ impl DownstreamFormView {
     }
 
     pub fn from_downstream(downstream: &DownstreamConfig) -> Self {
+        // TODO(stage-2): retire model_allowlist. Once the downstream form is
+        // migrated to model-group selection, this field should be populated
+        // from the resolved group's allowed models (or removed entirely if
+        // the UI no longer exposes a raw model list).
         Self {
             action: format!("/admin/downstreams/{}", downstream.id),
             heading: "编辑下游密钥".to_string(),

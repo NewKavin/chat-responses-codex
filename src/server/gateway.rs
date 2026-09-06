@@ -3051,9 +3051,32 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     let verified_reasoning_levels =
         capability_verified_reasoning_levels_by_model(state, &snapshot.upstreams, case_insensitive);
 
+    // 有效白名单 = 模型分组优先（阶段 1：Codex 目录与分组一致）。
+    // 组已配置但解析失败时 fail-closed（权限相关目录，不允许回退成全放行）。
+    let effective_allowlist = match state.effective_model_allowlist(&downstream).await {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::error!(
+                downstream_key_id = %downstream.id,
+                model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                error = %error,
+                "failed to resolve model group for codex catalog; failing closed"
+            );
+            return GatewayError::classified(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "model group resolution failed",
+                "permission_error",
+                "model_group_check_failed",
+                "model_group_check_failed",
+                None,
+                None,
+            )
+            .into_response();
+        }
+    };
     let model_infos = codex_exposed_models(
         &snapshot.upstreams,
-        &downstream.model_allowlist,
+        &effective_allowlist,
         case_insensitive,
     )
         .into_iter()
@@ -3279,33 +3302,29 @@ async fn claude_count_tokens(
     };
     // Resolve the effective allowlist (model_group_id takes priority over
     // model_allowlist); group lookup failure fails closed.
-    let effective_allowlist: Vec<String> = if downstream.model_group_id.is_some() {
-        match state.portal_store() {
-            Some(portal_store) => match downstream.get_allowed_models(portal_store.as_ref()).await {
-                Ok(models) => models,
-                Err(e) => {
-                    tracing::error!(
-                        downstream_key_id = %downstream.id,
-                        model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
-                        error = %e,
-                        "failed to resolve downstream model group for count_tokens; failing closed"
-                    );
-                    return GatewayError::classified(
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        "model group resolution failed",
-                        "permission_error",
-                        "model_group_check_failed",
-                        "model_group_check_failed",
-                        None,
-                        None,
-                    )
-                    .into_anthropic_response();
-                }
-            },
-            None => downstream.model_allowlist.clone(),
+    let effective_allowlist: Vec<String> = match state
+        .effective_model_allowlist(&downstream)
+        .await
+    {
+        Ok(models) => models,
+        Err(e) => {
+            tracing::error!(
+                downstream_key_id = %downstream.id,
+                model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                error = %e,
+                "failed to resolve downstream model group for count_tokens; failing closed"
+            );
+            return GatewayError::classified(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "model group resolution failed",
+                "permission_error",
+                "model_group_check_failed",
+                "model_group_check_failed",
+                None,
+                None,
+            )
+            .into_anthropic_response();
         }
-    } else {
-        downstream.model_allowlist.clone()
     };
 
     if !model_list_allows(effective_allowlist.as_slice(), model) {
@@ -5567,59 +5586,52 @@ async fn process_gateway_request_inner(
     // takes priority over the legacy model_allowlist (downstream-level model
     // group management). Group lookup runs inside the request path, so a
     // stale/missing group fails closed instead of silently widening access.
-    let effective_allowlist: Vec<String> = if downstream.model_group_id.is_some() {
-        match state.portal_store() {
-            Some(portal_store) => match downstream.get_allowed_models(portal_store.as_ref()).await {
-                Ok(models) => models,
-                Err(e) => {
-                    tracing::error!(
-                        request_id = %request_id,
-                        downstream_key_id = %downstream.id,
-                        model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
-                        error = %e,
-                        "failed to resolve downstream model group; failing closed"
-                    );
-                    let error = GatewayError::classified(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "model group resolution failed",
-                        "permission_error",
-                        "model_group_check_failed",
-                        "model_group_check_failed",
-                        None,
-                        None,
-                    );
-                    let _ = append_gateway_usage_log(
-                        &state,
-                        &request_id,
-                        &downstream.id,
-                        &downstream.name,
-                        "",
-                        None,
-                        request_path,
-                        model,
-                        inference_strength.as_deref(),
-                        user_agent.as_deref(),
-                        None,
-                        error.status_code(),
-                        Some(error.to_string()),
-                        Some(error.error_category().to_string()),
-                        0,
-                        0,
-                        0,
-                        started,
-                    )
-                    .await;
-                    active_request_guard.fail_and_finish(error.error_category());
-                    return Err(error);
-                }
-            },
-            // No portal store (file-backed mode): groups are unavailable, so
-            // fall back to the explicit allowlist rather than failing every
-            // request against a group that cannot be resolved.
-            None => downstream.model_allowlist.clone(),
+    let effective_allowlist: Vec<String> = match state
+        .effective_model_allowlist(&downstream)
+        .await
+    {
+        Ok(models) => models,
+        Err(e) => {
+            tracing::error!(
+                request_id = %request_id,
+                downstream_key_id = %downstream.id,
+                model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                error = %e,
+                "failed to resolve downstream model group; failing closed"
+            );
+            let error = GatewayError::classified(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "model group resolution failed",
+                "permission_error",
+                "model_group_check_failed",
+                "model_group_check_failed",
+                None,
+                None,
+            );
+            let _ = append_gateway_usage_log(
+                &state,
+                &request_id,
+                &downstream.id,
+                &downstream.name,
+                "",
+                None,
+                request_path,
+                model,
+                inference_strength.as_deref(),
+                user_agent.as_deref(),
+                None,
+                error.status_code(),
+                Some(error.to_string()),
+                Some(error.error_category().to_string()),
+                0,
+                0,
+                0,
+                started,
+            )
+            .await;
+            active_request_guard.fail_and_finish(error.error_category());
+            return Err(error);
         }
-    } else {
-        downstream.model_allowlist.clone()
     };
 
     if !model_list_allows(effective_allowlist.as_slice(), model) {

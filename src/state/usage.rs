@@ -556,6 +556,19 @@ impl AppState {
                 .timestamp() as u64
         };
 
+        // 阶段 1：统计口径与有效白名单一致（分组优先）；解析失败降级回 allowlist。
+        let effective_allowlist = match self.effective_model_allowlist(downstream).await {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(
+                    downstream_key_id = %downstream.id,
+                    error = %error,
+                    "failed to resolve model group for model stats; degrading to allowlist"
+                );
+                downstream.model_allowlist.clone()
+            }
+        };
+
         let canonical_models = build_active_upstream_model_catalog(&snapshot);
 
         let mut model_logs: std::collections::HashMap<String, Vec<&UsageLog>> =
@@ -570,7 +583,7 @@ impl AppState {
                 continue;
             };
 
-            if !portal_model_is_allowed(&downstream.model_allowlist, &model) {
+            if !portal_model_is_allowed(&effective_allowlist, &model) {
                 continue;
             }
 
@@ -630,16 +643,28 @@ impl AppState {
         let snapshot = self.snapshot().await;
         let canonical_models = build_active_upstream_model_catalog(&snapshot);
 
+        // 阶段 1：上下文限制与有效白名单一致（分组优先）；解析失败降级回 allowlist。
+        let effective_allowlist = match self.effective_model_allowlist(downstream).await {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(
+                    downstream_key_id = %downstream.id,
+                    error = %error,
+                    "failed to resolve model group for context limits; degrading to allowlist"
+                );
+                downstream.model_allowlist.clone()
+            }
+        };
+
         let mut result: HashMap<String, ModelContextConfig> = HashMap::new();
 
-        let allowlist: Vec<String> = if downstream.model_allowlist.is_empty() {
+        let allowlist: Vec<String> = if effective_allowlist.is_empty() {
             canonical_models
                 .values()
                 .flat_map(|slugs| slugs.iter().cloned())
                 .collect()
         } else {
-            downstream
-                .model_allowlist
+            effective_allowlist
                 .iter()
                 .map(|slug| slug.trim().to_string())
                 .filter(|slug| !slug.is_empty())
@@ -647,7 +672,7 @@ impl AppState {
         };
 
         for model in allowlist {
-            if !portal_model_is_allowed(&downstream.model_allowlist, &model) {
+            if !portal_model_is_allowed(&effective_allowlist, &model) {
                 continue;
             }
 

@@ -616,6 +616,7 @@ impl PostgresStateStore {
     pub async fn downstream_usage_summary(
         &self,
         downstream_id: &str,
+        effective_allowlist: &[String],
     ) -> io::Result<Option<DownstreamUsageSummary>> {
         let conn = self.pool.get().await.map_err(io_other)?;
         let downstream_row = conn
@@ -631,17 +632,14 @@ impl PostgresStateStore {
                 format!("downstream not found: {downstream_id}"),
             ));
         }
-        let allowlist_count = conn
-            .query_one(
-                "SELECT COUNT(DISTINCT LOWER(TRIM(model_slug)))::BIGINT
-                 FROM downstream_model_allowlist
-                 WHERE downstream_id = $1
-                   AND TRIM(model_slug) <> ''",
-                &[&downstream_id],
-            )
-            .await
-            .map_err(io_other)?
-            .get::<_, i64>(0);
+        // 阶段 1：统计口径使用调用侧传入的有效白名单（分组优先），
+        // 不再直接查 downstream_model_allowlist 表（该表即将退役）。
+        let effective_clean: Vec<String> = effective_allowlist
+            .iter()
+            .filter(|model| !model.trim().is_empty())
+            .cloned()
+            .collect();
+        let allowlist_count = effective_clean.len() as i64;
         let total_models = if allowlist_count > 0 {
             i64_to_usize(allowlist_count)
         } else {
@@ -671,12 +669,11 @@ impl PostgresStateStore {
                        $2
                        OR EXISTS (
                            SELECT 1
-                           FROM downstream_model_allowlist allowlist
-                           WHERE allowlist.downstream_id = $1
-                             AND LOWER(TRIM(allowlist.model_slug)) = LOWER(TRIM(usage_logs.model))
+                           FROM unnest($3::text[]) AS allowed(model_slug)
+                           WHERE LOWER(TRIM(allowed.model_slug)) = LOWER(TRIM(usage_logs.model))
                        )
                    )",
-                &[&downstream_id, &allowlist_empty],
+                &[&downstream_id, &allowlist_empty, &effective_clean],
             )
             .await
             .map_err(io_other)?

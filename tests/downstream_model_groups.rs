@@ -381,6 +381,49 @@ async fn gateway_manual_allowlist_still_enforced() {
     assert_eq!(status, StatusCode::FORBIDDEN, "manual allowlist must still reject: {payload}");
 }
 
+/// 阶段 1：Codex 目录（/v1/models?format=codex）必须与模型分组一致，
+/// 而不是只读 model_allowlist（空白名单 = 全放行会暴露组外模型）。
+#[tokio::test]
+async fn gateway_codex_catalog_matches_model_group() {
+    let _guard = common::oidc::lock().lock();
+    let Some((_state, app, key1, _key3, _key5)) = fresh_gateway_env().await else {
+        eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let res = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/models?format=codex")
+                .header(header::AUTHORIZATION, format!("Bearer {}", key1))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let slugs: Vec<String> = payload["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["slug"].as_str().map(String::from))
+        .collect();
+
+    // group-basic = [gpt-3.5-turbo, claude-instant]；这两个必须在目录里。
+    assert!(slugs.contains(&"gpt-3.5-turbo".to_string()), "in-group model missing: {slugs:?}");
+    assert!(slugs.contains(&"claude-instant".to_string()), "in-group model missing: {slugs:?}");
+    // manual-model-1 不在组里（虽然上游支持、且 allowlist 为空=旧逻辑会全放行），必须不在目录里。
+    assert!(
+        !slugs.contains(&"manual-model-1".to_string()),
+        "out-of-group model leaked into codex catalog: {slugs:?}"
+    );
+}
+
 // ============================================================================
 // RED Phase Tests - These should FAIL initially
 // ============================================================================

@@ -302,6 +302,7 @@ impl StateStore for FileStateStore {
     fn downstream_usage_summary<'a>(
         &'a self,
         _downstream_id: &'a str,
+        _effective_allowlist: &'a [String],
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
         Box::pin(async { Ok(None) })
     }

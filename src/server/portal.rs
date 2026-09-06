@@ -217,6 +217,19 @@ pub(super) async fn portal_quota(
         }
     };
 
+    // 阶段 1：门户配额展示使用「有效模型白名单」（分组优先）；解析失败降级回 allowlist。
+    let effective_allowlist = match state.effective_model_allowlist(downstream).await {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::warn!(
+                downstream_key_id = %downstream.id,
+                error = %error,
+                "failed to resolve model group for portal quota; degrading to allowlist"
+            );
+            downstream.model_allowlist.clone()
+        }
+    };
+
     let per_minute_limit = state.compute_per_minute_usage(&downstream_id).await;
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let now = unix_seconds();
@@ -252,7 +265,7 @@ pub(super) async fn portal_quota(
         "cost_quota": {
             "daily": cost_daily,
         },
-        "model_allowlist": downstream.model_allowlist,
+        "model_allowlist": effective_allowlist,
         "ip_allowlist": downstream.ip_allowlist,
         "model_contexts": model_contexts_json,
     }))
@@ -493,9 +506,21 @@ pub(super) async fn portal_model_probe(
         }
     };
 
+    // 阶段 1：probe 目录与有效白名单一致（分组优先）；解析失败降级回 allowlist。
+    let effective_allowlist = match state.effective_model_allowlist(&downstream).await {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::warn!(
+                downstream_key_id = %downstream.id,
+                error = %error,
+                "failed to resolve model group for probe; degrading to allowlist"
+            );
+            downstream.model_allowlist.clone()
+        }
+    };
     let response = super::admin::build_model_probe_response(
         &state,
-        Some(downstream.model_allowlist.as_slice()),
+        Some(effective_allowlist.as_slice()),
     )
     .await;
 

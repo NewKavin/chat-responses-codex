@@ -873,8 +873,13 @@ impl StateStore for PostgresStateStore {
     fn downstream_usage_summary<'a>(
         &'a self,
         downstream_id: &'a str,
+        effective_allowlist: &'a [String],
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
-        Box::pin(async move { self.downstream_usage_summary(downstream_id).await })
+        let effective_allowlist = effective_allowlist.to_vec();
+        Box::pin(async move {
+            self.downstream_usage_summary(downstream_id, &effective_allowlist)
+                .await
+        })
     }
 
     fn downstream_daily_stats<'a>(
@@ -6138,12 +6143,32 @@ impl AppState {
             .refresh_interval_seconds;
         let mut jobs = Vec::<ProbeJob>::new();
         let mut queued = HashMap::<DialectProfileKey, usize>::new();
+        // 预解析所有下游的有效白名单（分组优先），避免每个模型 × 每个下游 N+1 查询。
+        let mut downstream_effective = HashMap::<String, Vec<String>>::new();
+        for downstream in routing.downstreams.iter().filter(|downstream| downstream.active) {
+            let allowlist = match self.effective_model_allowlist(downstream).await {
+                Ok(models) => models,
+                Err(error) => {
+                    tracing::warn!(
+                        downstream_id = %downstream.id,
+                        error = %error,
+                        "failed to resolve model group for probe reconciler; degrading to allowlist"
+                    );
+                    downstream.model_allowlist.clone()
+                }
+            };
+            downstream_effective.insert(downstream.id.clone(), allowlist);
+        }
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
             for exposed in upstream.effective_downstream_models() {
                 let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
                     downstream.active
-                        && (downstream.model_allowlist.is_empty()
-                            || portal_model_is_allowed(&downstream.model_allowlist, &exposed))
+                        && downstream_effective
+                            .get(&downstream.id)
+                            .is_some_and(|allowlist| {
+                                allowlist.is_empty()
+                                    || portal_model_is_allowed(allowlist, &exposed)
+                            })
                 });
                 if !exposed_to_downstream {
                     continue;
@@ -6207,6 +6232,46 @@ impl AppState {
         Ok(jobs)
     }
 
+    /// 解析下游的有效模型白名单：model_group_id 优先，回退 model_allowlist。
+    /// Err = 组已配置但解析失败，调用方按自己的语义决定 fail-closed 还是降级。
+    pub async fn effective_model_allowlist(
+        &self,
+        downstream: &DownstreamConfig,
+    ) -> Result<Vec<String>, String> {
+        if downstream.model_group_id.is_none() {
+            return Ok(downstream.model_allowlist.clone());
+        }
+        match self.portal_store() {
+            Some(store) => downstream.get_allowed_models(store.as_ref()).await,
+            // 文件模式：组不可用，回退白名单，不要让每个请求都失败
+            None => Ok(downstream.model_allowlist.clone()),
+        }
+    }
+
+    /// 按 id 解析下游的有效白名单；下游不存在时返回 None。
+    /// 解析失败（组损坏等）降级为 allowlist，保证读路径不因组问题全挂。
+    pub async fn effective_model_allowlist_opt(
+        &self,
+        downstream_id: &str,
+    ) -> Option<Vec<String>> {
+        let snapshot = self.routing_snapshot().await;
+        let downstream = snapshot
+            .downstreams
+            .iter()
+            .find(|downstream| downstream.id == downstream_id)?;
+        match self.effective_model_allowlist(downstream).await {
+            Ok(models) => Some(models),
+            Err(error) => {
+                tracing::warn!(
+                    downstream_id = %downstream_id,
+                    error = %error,
+                    "failed to resolve model group for read path; degrading to allowlist"
+                );
+                Some(downstream.model_allowlist.clone())
+            }
+        }
+    }
+
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
         let Some(downstream) = self.downstream_for_secret(secret).await else {
             return Vec::new();
@@ -6217,27 +6282,20 @@ impl AppState {
 
         // Effective allowlist: model_group_id (if set) takes priority over
         // model_allowlist; group lookup failure fails closed (empty result).
-        let effective_allowlist: Vec<String> = if downstream.model_group_id.is_some() {
-            match self.portal_store() {
-                Some(portal_store) => match downstream
-                    .get_allowed_models(portal_store.as_ref())
-                    .await
-                {
-                    Ok(models) => models,
-                    Err(e) => {
-                        tracing::warn!(
-                            downstream_id = %downstream.id,
-                            model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
-                            error = %e,
-                            "failed to resolve downstream model group for model list; exposing none"
-                        );
-                        return Vec::new();
-                    }
-                },
-                None => downstream.model_allowlist.clone(),
+        let effective_allowlist: Vec<String> = match self
+            .effective_model_allowlist(&downstream)
+            .await
+        {
+            Ok(models) => models,
+            Err(e) => {
+                tracing::warn!(
+                    downstream_id = %downstream.id,
+                    model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                    error = %e,
+                    "failed to resolve downstream model group for model list; exposing none"
+                );
+                return Vec::new();
             }
-        } else {
-            downstream.model_allowlist.clone()
         };
 
         let mut seen = HashSet::new();
@@ -6288,6 +6346,23 @@ impl AppState {
         let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
         let alias_registry = self.model_alias_registry();
 
+        // 预解析所有下游的有效白名单（分组优先），避免 N+1。
+        let mut downstream_effective = HashMap::<String, Vec<String>>::new();
+        for downstream in snapshot.downstreams.iter().filter(|downstream| downstream.active) {
+            let allowlist = match self.effective_model_allowlist(downstream).await {
+                Ok(models) => models,
+                Err(error) => {
+                    tracing::warn!(
+                        downstream_id = %downstream.id,
+                        error = %error,
+                        "failed to resolve model group for visible models; degrading to allowlist"
+                    );
+                    downstream.model_allowlist.clone()
+                }
+            };
+            downstream_effective.insert(downstream.id.clone(), allowlist);
+        }
+
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
@@ -6295,8 +6370,11 @@ impl AppState {
                 let model = entry.model.as_str();
                 if snapshot.downstreams.iter().any(|downstream| {
                     downstream.active
-                        && (downstream.model_allowlist.is_empty()
-                            || portal_model_is_allowed(&downstream.model_allowlist, &model))
+                        && downstream_effective
+                            .get(&downstream.id)
+                            .is_some_and(|allowlist| {
+                                allowlist.is_empty() || portal_model_is_allowed(allowlist, &model)
+                            })
                 }) {
                     // Admin-picked per-upstream mapping labels are exposed
                     // verbatim (see available_models_for_downstream).
@@ -6728,10 +6806,23 @@ impl AppState {
             return 0;
         };
 
+        // 有效白名单（分组优先）；解析失败降级回 allowlist（后台探测，不允许全挂）。
+        let effective_allowlist = match self.effective_model_allowlist(downstream).await {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(
+                    downstream_id = %downstream.id,
+                    error = %error,
+                    "failed to resolve model group for probe queue; degrading to allowlist"
+                );
+                downstream.model_allowlist.clone()
+            }
+        };
+
         let mut queued = 0usize;
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
-            if !(downstream.model_allowlist.is_empty()
-                || portal_model_is_allowed(&downstream.model_allowlist, model))
+            if !(effective_allowlist.is_empty()
+                || portal_model_is_allowed(&effective_allowlist, model))
             {
                 continue;
             }
