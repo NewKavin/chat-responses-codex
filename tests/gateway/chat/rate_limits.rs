@@ -39,8 +39,6 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
 
@@ -60,7 +58,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -173,8 +172,6 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
 
@@ -194,7 +191,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -288,8 +286,6 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
 
@@ -309,7 +305,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -398,8 +395,6 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -417,7 +412,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -558,8 +554,6 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -577,7 +571,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1277,8 +1272,6 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -1296,7 +1289,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1435,8 +1429,6 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -1454,7 +1446,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1522,8 +1515,6 @@ fn route_retry_downstream_config(downstream_key: &GeneratedDownstreamKey) -> Dow
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
-        model_allowlist: vec!["gpt-4.1-mini".into()],
-        
 model_group_id: None,
         per_minute_limit: 60,
         rate_limit_enabled: true,
@@ -1540,7 +1531,8 @@ model_group_id: None,
         active: true,
         billing_mode: "request".into(),
         model_concurrency_groups: vec![],
-    }
+    
+    ..Default::default()}
 }
 
 fn route_retry_request(downstream_key: &GeneratedDownstreamKey) -> Request<Body> {

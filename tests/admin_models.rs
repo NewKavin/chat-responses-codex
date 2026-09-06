@@ -136,7 +136,6 @@ fn models_harness() -> (axum::Router, AppState) {
                 hash: "unused".into(),
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["deepseek-v4".into()],
             model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -153,8 +152,7 @@ fn models_harness() -> (axum::Router, AppState) {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

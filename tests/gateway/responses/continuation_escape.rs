@@ -227,8 +227,6 @@ async fn build_escape_state(base_url: &str, escape_enabled: bool) -> EscapeHarne
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -246,7 +244,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

@@ -157,7 +157,6 @@ impl LearningHarness {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec![MODEL.into()],
                     model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 0,
@@ -175,7 +174,8 @@ impl LearningHarness {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(HashMap::new()),
@@ -955,7 +955,6 @@ async fn stream_only_learning_follower_429_has_one_final_exact_route_attempt() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -973,7 +972,8 @@ async fn stream_only_learning_follower_429_has_one_final_exact_route_attempt() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(HashMap::new()),
@@ -1136,7 +1136,6 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into(), OTHER_MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -1154,7 +1153,8 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(HashMap::new()),
@@ -1292,7 +1292,6 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -1310,7 +1309,8 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(HashMap::new()),
@@ -1504,7 +1504,6 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -1522,7 +1521,8 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(HashMap::new()),

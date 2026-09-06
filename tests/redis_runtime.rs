@@ -138,8 +138,7 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
-            model_group_id: None,
+        model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 1,
         max_concurrency: 1,
@@ -155,6 +154,7 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
         active: true,
         billing_mode: "request".into(),
         model_concurrency_groups: vec![],
+        ..Default::default()
     }
 }
 

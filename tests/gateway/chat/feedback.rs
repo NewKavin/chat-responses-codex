@@ -73,8 +73,6 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -92,7 +90,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -202,8 +201,6 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -221,7 +218,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -808,8 +806,6 @@ async fn feedback_502_state(
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".into()],
-                
 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -827,7 +823,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..PersistedState::default()
         },
         directory.path().join("state.json"),

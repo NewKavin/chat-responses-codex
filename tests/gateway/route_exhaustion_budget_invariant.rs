@@ -133,7 +133,6 @@ async fn exhaustion_harness(
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -151,7 +150,8 @@ async fn exhaustion_harness(
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
@@ -407,7 +407,6 @@ async fn concurrency_saturated_retry_after_is_not_cut_by_cooldown_cap() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -425,7 +424,8 @@ async fn concurrency_saturated_retry_after_is_not_cut_by_cooldown_cap() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
@@ -603,7 +603,6 @@ async fn shipped_default_config_waits_between_rounds_and_reports_honest_state() 
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![P13_MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -621,7 +620,8 @@ async fn shipped_default_config_waits_between_rounds_and_reports_honest_state() 
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),

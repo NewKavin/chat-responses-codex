@@ -1457,7 +1457,6 @@ fn startup_downstream() -> DownstreamConfig {
     DownstreamConfig {
         id: "down-startup".into(),
         name: "startup downstream".into(),
-        model_allowlist: vec!["glm-5.2".into()],
         model_group_id: None,
         active: true,
         ..serde_json::from_value(json!({
@@ -2853,7 +2852,6 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
                 hash: "hash".into(),
                 plaintext_key: Some("plain".into()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["Lab/Case-Sensitive".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2871,7 +2869,8 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

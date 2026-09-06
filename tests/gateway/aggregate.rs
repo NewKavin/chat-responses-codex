@@ -288,7 +288,6 @@ impl AggregateHarness {
             hash: downstream_key.hash.clone(),
             plaintext_key: Some(downstream_key.plaintext.clone()),
             plaintext_key_prefix: None,
-            model_allowlist: vec![MODEL.into()],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 60,
@@ -306,7 +305,8 @@ impl AggregateHarness {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        };
+        
+    ..Default::default()};
         let tempdir = tempdir().unwrap();
         let state = AppState::new(
             PersistedState {
@@ -479,7 +479,6 @@ fn downstream_config(
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
-        model_allowlist: vec![MODEL.into()],
         model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
@@ -496,7 +495,8 @@ fn downstream_config(
         active: true,
         billing_mode: "request".into(),
         model_concurrency_groups: vec![],
-    }
+    
+    ..Default::default()}
 }
 
 fn responses_request(downstream_key: &str, input: String) -> Request<Body> {

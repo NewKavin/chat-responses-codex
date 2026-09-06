@@ -19,7 +19,6 @@ async fn downstream_legacy_token_limit_is_no_longer_enforced() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                 per_minute_limit: 60,
 
@@ -39,7 +38,7 @@ async fn downstream_legacy_token_limit_is_no_longer_enforced() {
                 billing_mode: "token".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: vec![UsageLog {
                 id: "log-1".into(),
                 downstream_key_id: "down-1".into(),
@@ -99,7 +98,6 @@ async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhaust
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -118,7 +116,7 @@ async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhaust
                 billing_mode: "token".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: vec![UsageLog {
                 id: "log-cost-1".into(),
                 downstream_key_id: "down-cost".into(),
@@ -187,7 +185,6 @@ async fn downstream_request_rollback_is_exact_and_idempotent() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 2,
@@ -205,7 +202,7 @@ async fn downstream_request_rollback_is_exact_and_idempotent() {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    ..Default::default()};
 
     let first = state.reserve_downstream_request(&downstream).await.unwrap();
     let second = state.reserve_downstream_request(&downstream).await.unwrap();
@@ -253,7 +250,6 @@ async fn downstream_concurrency_release_is_idempotent_across_clones() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
@@ -271,7 +267,7 @@ async fn downstream_concurrency_release_is_idempotent_across_clones() {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    ..Default::default()};
 
     let lease = state
         .try_reserve_downstream_concurrency(&downstream, "test-model")
@@ -318,7 +314,6 @@ async fn stale_downstream_lease_does_not_release_recreated_capacity() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
@@ -336,7 +331,7 @@ async fn stale_downstream_lease_does_not_release_recreated_capacity() {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    ..Default::default()};
 
     let stale = state
         .try_reserve_downstream_concurrency(&downstream, "test-model")
@@ -379,7 +374,6 @@ async fn request_quota_usage_remaining_calculation() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -397,7 +391,7 @@ async fn request_quota_usage_remaining_calculation() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: (0..30)
                 .map(|i| UsageLog {
                     id: format!("log-{}", i),
@@ -461,7 +455,6 @@ async fn request_quota_usage_remaining_when_exhausted() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -479,7 +472,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: (0..15)
                 .map(|i| UsageLog {
                     id: format!("log-{}", i),
@@ -545,7 +538,6 @@ async fn downstream_request_mode_ignores_token_limits() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -563,7 +555,7 @@ async fn downstream_request_mode_ignores_token_limits() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: vec![UsageLog {
                 id: "log-1".into(),
                 downstream_key_id: "down-request".into(),
@@ -623,7 +615,6 @@ async fn downstream_token_mode_ignores_request_window_quota() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -641,7 +632,7 @@ async fn downstream_token_mode_ignores_request_window_quota() {
                 billing_mode: "token".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             // Two requests already sit inside the request window; token mode must
             // not apply the request-window quota (limit is 1).
             usage_logs: (0..2)
@@ -705,7 +696,6 @@ async fn downstream_cost_daily_window_slides_after_24h() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -723,7 +713,7 @@ async fn downstream_cost_daily_window_slides_after_24h() {
                 billing_mode: "token".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             // Consumption 25h ago has slid out of the 24h rolling window.
             usage_logs: vec![UsageLog {
                 id: "log-old".into(),
@@ -824,7 +814,6 @@ async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -842,7 +831,7 @@ async fn downstream_request_window_replay_excludes_rejected_and_rolled_back_logs
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: logs,
             ..PersistedState::default()
         },
@@ -924,7 +913,6 @@ async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -942,7 +930,7 @@ async fn downstream_request_window_replay_ignores_collapsed_duplicates() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: logs,
             ..PersistedState::default()
         },
@@ -992,7 +980,6 @@ async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 100,
@@ -1010,7 +997,7 @@ async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    ..Default::default()};
 
     let (first_reservation, first_lease) = state
         .reserve_downstream_admission(&downstream, "test-model")
@@ -1070,7 +1057,6 @@ fn c7_downstream(id: &str, max_concurrency: u32) -> DownstreamConfig {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 1000,
@@ -1087,7 +1073,7 @@ fn c7_downstream(id: &str, max_concurrency: u32) -> DownstreamConfig {
         active: true,
         billing_mode: "request".into(),
         model_concurrency_groups: vec![],
-    }
+    ..Default::default()}
 }
 
 fn c7_group(name: &str, patterns: &[&str], max_concurrency: u32) -> ModelConcurrencyGroup {

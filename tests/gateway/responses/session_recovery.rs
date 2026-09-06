@@ -203,8 +203,6 @@ async fn session_recovery_harness() -> SessionRecoveryHarness {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![model.into()],
-                
 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -222,7 +220,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..PersistedState::default()
         },
         directory.path().join("state.json"),
@@ -841,8 +840,6 @@ async fn failover_recovery_harness() -> FailoverRecoveryHarness {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![model.into()],
-                
 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -860,7 +857,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..PersistedState::default()
         },
         directory.path().join("state.json"),
@@ -1337,8 +1335,6 @@ async fn build_cross_account_harness() -> CrossAccountHarness {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![CROSS_ACCOUNT_MODEL.into()],
-                
 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -1356,7 +1352,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..PersistedState::default()
         },
         directory.path().join("state.json"),

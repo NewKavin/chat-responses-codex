@@ -7,7 +7,6 @@ fn cost_downstream() -> DownstreamConfig {
         hash: "hash".into(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: Vec::new(),
         model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
@@ -24,6 +23,7 @@ fn cost_downstream() -> DownstreamConfig {
         active: true,
         billing_mode: "token".into(),
         model_concurrency_groups: vec![],
+        ..Default::default()
     }
 }
 

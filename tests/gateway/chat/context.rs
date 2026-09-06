@@ -91,8 +91,6 @@ async fn context_limit_error_retries_once_with_reduced_max_tokens() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -108,7 +106,8 @@ model_group_id: None,
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -206,8 +205,6 @@ async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() 
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -225,7 +222,8 @@ model_group_id: None,
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -371,8 +369,6 @@ async fn explicit_context_wrappers_do_not_cool_route() {
                         hash: downstream_key.hash.clone(),
                         plaintext_key: Some(downstream_key.plaintext.clone()),
                         plaintext_key_prefix: None,
-                        model_allowlist: vec!["gpt-4.1-mini".into()],
-                        
 model_group_id: None,
                         rate_limit_enabled: false,
                         per_minute_limit: 60,
@@ -390,7 +386,8 @@ model_group_id: None,
                         billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                    }]),
+                    
+    ..Default::default()}]),
                     usage_logs: vec![],
                     announcement: None,
                     global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -572,8 +569,6 @@ async fn context_overflow_503_compacts_once_without_cooling_route() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
@@ -591,7 +586,8 @@ model_group_id: None,
                     billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 ..PersistedState::default()
             },
             directory.path().join("state.json"),
@@ -778,8 +774,6 @@ async fn protected_context_minimum_returns_stable_context_error() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
@@ -797,7 +791,8 @@ model_group_id: None,
                     billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 ..PersistedState::default()
             },
             directory.path().join("state.json"),
@@ -918,8 +913,6 @@ async fn generic_503_does_not_compact_history() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
@@ -937,7 +930,8 @@ model_group_id: None,
                     billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1102,8 +1096,6 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -1119,7 +1111,8 @@ model_group_id: None,
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1283,8 +1276,6 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["MiniMax2.7".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -1302,7 +1293,8 @@ model_group_id: None,
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1503,8 +1495,6 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -1520,7 +1510,8 @@ model_group_id: None,
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1707,8 +1698,6 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
 
@@ -1728,7 +1717,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

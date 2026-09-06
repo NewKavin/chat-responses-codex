@@ -63,7 +63,6 @@ async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_ha
                 hash: authoritative_hash,
                 plaintext_key: Some(stored_plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 rate_limit_enabled: true,
                 per_minute_limit: 60,
@@ -81,7 +80,8 @@ async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_ha
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..Default::default()
         },
         unique_state_path(),
@@ -114,7 +114,6 @@ async fn app_state_clears_invalid_plaintext_before_mutation_persistence_and_publ
             hash: authoritative_hash,
             plaintext_key: Some(stored_plaintext.clone()),
             plaintext_key_prefix: None,
-            model_allowlist: vec![],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 60,
@@ -132,7 +131,8 @@ async fn app_state_clears_invalid_plaintext_before_mutation_persistence_and_publ
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        })
+        
+    ..Default::default()})
         .await
         .unwrap();
 
@@ -163,7 +163,6 @@ async fn legacy_add_downstream_clears_invalid_plaintext_before_publication() {
             hash: authoritative_hash,
             plaintext_key: Some(stored_plaintext.clone()),
             plaintext_key_prefix: None,
-            model_allowlist: vec![],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 60,
@@ -181,7 +180,8 @@ async fn legacy_add_downstream_clears_invalid_plaintext_before_publication() {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        })
+        
+    ..Default::default()})
         .await
         .unwrap();
 
@@ -438,7 +438,6 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     hash: generated.hash,
                     plaintext_key: Some(generated.plaintext),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
                     model_group_id: None,
                     rate_limit_enabled: true,
                     per_minute_limit: 100,
@@ -456,14 +455,14 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                },
+                
+    ..Default::default()},
                 DownstreamConfig {
                     id: "downstream-3".to_string(),
                     name: "Other Downstream".to_string(),
                     hash: "hash-3".to_string(),
                     plaintext_key: None,
                     plaintext_key_prefix: None,
-                    model_allowlist: vec![],
             model_group_id: None,
                     rate_limit_enabled: true,
                     per_minute_limit: 100,
@@ -481,7 +480,8 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                },
+                
+    ..Default::default()},
             ]),
             usage_logs: vec![
                 usage_log(
@@ -519,7 +519,7 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
     );
 
     let snapshot = state.snapshot().await;
-    let summary = build_downstream_usage_summary(&snapshot, "downstream-2", now).unwrap();
+    let summary = build_downstream_usage_summary(&snapshot, "downstream-2", now, &[]).unwrap();
 
     assert_eq!(summary.downstream_id, "downstream-2");
     assert_eq!(summary.today_tokens, 220);
@@ -561,7 +561,6 @@ async fn failed_local_downstream_removal_keeps_runtime_windows() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 1,
@@ -579,7 +578,8 @@ async fn failed_local_downstream_removal_keeps_runtime_windows() {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    
+    ..Default::default()};
     let state = AppState::new_with_store(
         PersistedState {
             downstreams: Arc::new(vec![downstream.clone()]),
@@ -691,6 +691,7 @@ impl StateStore for QueryStore {
     fn downstream_usage_summary<'a>(
         &'a self,
         _downstream_id: &'a str,
+        _effective_allowlist: &'a [String],
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
         let summary = self.summary.clone();
         Box::pin(async move { Ok(Some(summary)) })
@@ -956,7 +957,6 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 hash: generate_downstream_key("pending").hash,
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["GLM-5".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -974,7 +974,8 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
@@ -1031,7 +1032,6 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 hash: generate_downstream_key("pending").hash,
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["GLM-5".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -1049,7 +1049,8 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
@@ -1109,7 +1110,6 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
                 hash: generate_downstream_key("sk").hash,
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
                 rate_limit_enabled: true,
                 per_minute_limit: 10,
@@ -1127,7 +1127,8 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
                 billing_mode: "token".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![UsageLog {
                 id: "log-lookup".to_string(),
                 downstream_key_id: "ds-lookup".to_string(),

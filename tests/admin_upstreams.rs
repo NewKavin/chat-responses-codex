@@ -360,7 +360,6 @@ fn qualification_persisted_state() -> PersistedState {
             hash: String::new(),
             plaintext_key: None,
             plaintext_key_prefix: None,
-            model_allowlist: vec!["old".to_string()],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 60,
@@ -378,7 +377,7 @@ fn qualification_persisted_state() -> PersistedState {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         ..Default::default()
     }
 }
@@ -434,9 +433,10 @@ async fn qualification_apply_refuses_an_empty_decision_set() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    assert_eq!(
-        state.snapshot().await.downstreams[0].model_allowlist,
-        vec!["old"]
+    // T11/T14: apply 失败不得回写旧路径字段（model_allowlist 已停写）。
+    assert!(
+        state.snapshot().await.downstreams[0].model_allowlist.is_empty(),
+        "failed apply must not write to model_allowlist"
     );
 }
 
@@ -562,7 +562,11 @@ async fn qualify_models_exclusions_cannot_erase_the_final_route() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams[0].supported_models, vec!["old"]);
-    assert_eq!(snapshot.downstreams[0].model_allowlist, vec!["old"]);
+    // T11/T14: allowlist 已停写，期望保持 Default（无回写副作用）。
+    assert!(
+        snapshot.downstreams[0].model_allowlist.is_empty(),
+        "failed apply must not write to model_allowlist"
+    );
 }
 
 #[tokio::test]

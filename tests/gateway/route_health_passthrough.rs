@@ -111,7 +111,6 @@ async fn harness(enforcement_enabled: bool) -> (Router, AppState, String, Arc<At
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -129,7 +128,8 @@ async fn harness(enforcement_enabled: bool) -> (Router, AppState, String, Arc<At
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),

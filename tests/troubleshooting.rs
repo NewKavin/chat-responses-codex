@@ -127,7 +127,6 @@ async fn app_with_reasoning_capable_upstream(
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -145,7 +144,8 @@ async fn app_with_reasoning_capable_upstream(
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -265,7 +265,6 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
                 hash: generated.hash,
                 plaintext_key: Some(generated.plaintext),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["vision-model".into()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -283,7 +282,8 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -381,7 +381,6 @@ fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> 
             hash: generated.hash,
             plaintext_key: None,
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -399,7 +398,8 @@ fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> 
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -444,7 +444,6 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -462,7 +461,8 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -506,7 +506,6 @@ fn app_with_two_downstreams_and_config(
                 hash: first.hash,
                 plaintext_key: Some(first.plaintext),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -524,14 +523,14 @@ fn app_with_two_downstreams_and_config(
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            },
+            
+    ..Default::default()},
             DownstreamConfig {
                 id: "other".to_string(),
                 name: "Other".to_string(),
                 hash: second.hash,
                 plaintext_key: Some(second.plaintext),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -549,7 +548,8 @@ fn app_with_two_downstreams_and_config(
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            },
+            
+    ..Default::default()},
         ]),
         usage_logs: vec![],
         announcement: None,
@@ -580,7 +580,6 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -598,7 +597,8 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1288,7 +1288,6 @@ fn app_with_model_state() -> (axum::Router, String, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -1306,7 +1305,8 @@ fn app_with_model_state() -> (axum::Router, String, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1351,7 +1351,6 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -1369,7 +1368,8 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1418,7 +1418,6 @@ fn app_with_priority_ranked_chat_upstreams(
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["GLM-5.1".to_string()],
             model_group_id: None,
             per_minute_limit: 60,
             rate_limit_enabled: true,
@@ -1436,7 +1435,8 @@ fn app_with_priority_ranked_chat_upstreams(
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+        
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

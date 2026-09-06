@@ -48,7 +48,6 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             hash: generated.hash.clone(),
             plaintext_key: Some(generated.plaintext.clone()),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4o".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -65,8 +64,7 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             active: true,
             billing_mode: "request".into(),
 
-            model_concurrency_groups: vec![],
-        }]),
+            model_concurrency_groups: vec![], ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

@@ -125,7 +125,6 @@ impl DelayedStreamFixture {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4".into()],
                     model_group_id: None,
                     per_minute_limit: 999,
                     rate_limit_enabled: false,
@@ -143,7 +142,8 @@ impl DelayedStreamFixture {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 ..Default::default()
             },
             tempdir.path().to_path_buf(),
@@ -367,7 +367,6 @@ impl DelayedStreamFixture {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4".into()],
                     model_group_id: None,
                     per_minute_limit: 999,
                     rate_limit_enabled: false,
@@ -385,7 +384,8 @@ impl DelayedStreamFixture {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 ..Default::default()
             },
             tempdir.path().to_path_buf(),

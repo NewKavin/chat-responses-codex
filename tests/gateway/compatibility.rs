@@ -26,7 +26,6 @@ async fn basic_models_payload(uri: &str) -> Value {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -44,7 +43,8 @@ async fn basic_models_payload(uri: &str) -> Value {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -110,7 +110,6 @@ async fn case_variant_models_payload(uri: &str, case_insensitive: bool) -> Value
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -128,7 +127,8 @@ async fn case_variant_models_payload(uri: &str, case_insensitive: bool) -> Value
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..PersistedState::default()
         },
         state_path,
@@ -278,7 +278,6 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -296,7 +295,8 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

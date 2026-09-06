@@ -42,7 +42,6 @@ fn create_test_state() -> AppState {
                 hash: "hash1".to_string(),
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
                 per_minute_limit: 100,
 
@@ -61,15 +60,13 @@ fn create_test_state() -> AppState {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            },
+                model_concurrency_groups: vec![], ..Default::default()},
             DownstreamConfig {
                 id: "downstream-2".to_string(),
                 name: "Test Downstream 2".to_string(),
                 hash: "hash2".to_string(),
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 50,
 
@@ -88,8 +85,7 @@ fn create_test_state() -> AppState {
                 active: false,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            },
+                model_concurrency_groups: vec![], ..Default::default()},
         ]),
         usage_logs: vec![],
         announcement: None,

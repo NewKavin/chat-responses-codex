@@ -30,8 +30,6 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -47,8 +45,8 @@ model_group_id: None,
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
-
-                model_concurrency_groups: vec![],
+                model_allowlist: vec!["glm-5.2".into()],
+                ..Default::default()
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -165,8 +163,6 @@ async fn missing_model_with_valid_key_is_logged_as_invalid_request() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -184,7 +180,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -282,8 +279,6 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-5.1-ca".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -301,7 +296,8 @@ model_group_id: None,
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -425,8 +421,6 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["glm-5.2".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -442,7 +436,8 @@ model_group_id: None,
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -606,8 +601,6 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["glm-5.2".into()],
-                    
 model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -623,7 +616,8 @@ model_group_id: None,
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 ..Default::default()
             },
             tempdir.path().join("state.json"),
@@ -1853,8 +1847,6 @@ async fn chat_to_responses_dispatch_anomaly_carries_dispatch_attribution() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![model.into()],
-                
 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: false,
@@ -1872,7 +1864,8 @@ model_group_id: None,
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

@@ -321,7 +321,6 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
-        model_allowlist: vec!["GLM-4.1-mini".into()],
             model_group_id: None,
         per_minute_limit: 42,
 
@@ -340,8 +339,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         active: true,
         billing_mode: "request".into(),
 
-        model_concurrency_groups: vec![],
-    };
+        model_concurrency_groups: vec![], ..Default::default()};
     let log = UsageLog {
         id: "log-1".into(),
         downstream_key_id: downstream.id.clone(),
@@ -1504,7 +1502,6 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
-        model_allowlist: vec!["GLM-4.1-mini".into()],
             model_group_id: None,
         per_minute_limit: 42,
         rate_limit_enabled: true,
@@ -1521,8 +1518,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         active: true,
         billing_mode: "request".into(),
 
-        model_concurrency_groups: vec![],
-    };
+        model_concurrency_groups: vec![], ..Default::default()};
     let log = UsageLog {
         id: format!("log-{suffix}"),
         downstream_key_id: downstream.id.clone(),
@@ -1634,7 +1630,6 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
-        model_allowlist: vec!["GLM-4.1-mini".into()],
             model_group_id: None,
         per_minute_limit: 42,
         rate_limit_enabled: true,
@@ -1651,8 +1646,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         active: true,
         billing_mode: "request".into(),
 
-        model_concurrency_groups: vec![],
-    };
+        model_concurrency_groups: vec![], ..Default::default()};
     let log = UsageLog {
         id: format!("log-{suffix}"),
         downstream_key_id: downstream.id.clone(),
@@ -1753,7 +1747,6 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             hash: downstream_key.hash,
             plaintext_key: Some(downstream_key.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["Delete-Model".into()],
             model_group_id: None,
             ip_allowlist: vec!["127.0.0.1".into()],
             rate_limit_enabled: true,
@@ -1770,8 +1763,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             active: true,
             billing_mode: "request".into(),
 
-            model_concurrency_groups: vec![],
-        })
+            model_concurrency_groups: vec![], ..Default::default()})
         .await
         .expect("should persist delete fixture downstream");
     state

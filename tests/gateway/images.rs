@@ -75,7 +75,6 @@ async fn downstream_chat_image_detail_is_downgraded_when_route_lacks_it() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -93,7 +92,8 @@ async fn downstream_chat_image_detail_is_downgraded_when_route_lacks_it() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -269,7 +269,6 @@ async fn downstream_responses_image_detail_is_downgraded_when_route_lacks_it() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -287,7 +286,8 @@ async fn downstream_responses_image_detail_is_downgraded_when_route_lacks_it() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -439,7 +439,6 @@ async fn downstream_chat_file_id_requires_native_file_capability_before_routing(
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -457,7 +456,8 @@ async fn downstream_chat_file_id_requires_native_file_capability_before_routing(
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

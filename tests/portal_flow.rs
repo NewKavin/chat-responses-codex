@@ -30,7 +30,6 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         hash: hash.clone(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 100,
@@ -48,7 +47,7 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    ..Default::default()};
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),

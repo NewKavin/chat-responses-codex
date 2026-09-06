@@ -1601,7 +1601,6 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
                     hash: "unused".into(),
                     plaintext_key: None,
                     plaintext_key_prefix: None,
-                    model_allowlist: Vec::new(),
                     model_group_id: None,
 
                     rate_limit_enabled: false,
@@ -1620,7 +1619,7 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 ..PersistedState::default()
             },
             tempdir.path().join("state.json"),
@@ -1715,7 +1714,6 @@ async fn probe_service_runtime_concurrency_setting_bounds_global_concurrency() {
                     hash: "unused".into(),
                     plaintext_key: None,
                     plaintext_key_prefix: None,
-                    model_allowlist: Vec::new(),
                     model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
@@ -1733,7 +1731,7 @@ async fn probe_service_runtime_concurrency_setting_bounds_global_concurrency() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 ..PersistedState::default()
             },
             tempdir.path().join("state.json"),
@@ -1899,7 +1897,6 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
                     hash: "unused".into(),
                     plaintext_key: None,
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["periodic-model".into()],
             model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
@@ -1917,7 +1914,7 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
@@ -2057,7 +2054,6 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                     hash: "unused".into(),
                     plaintext_key: None,
                     plaintext_key_prefix: None,
-                    model_allowlist: vec![model.into()],
             model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 60,
@@ -2075,7 +2071,7 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
@@ -4058,7 +4054,6 @@ async fn normal_gateway_request_never_launches_a_probe() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -4076,7 +4071,7 @@ async fn normal_gateway_request_never_launches_a_probe() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4155,7 +4150,6 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -4173,7 +4167,7 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4259,7 +4253,6 @@ async fn recognized_field_level_5xx_with_request_evidence_queues_future_probe() 
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -4277,7 +4270,7 @@ async fn recognized_field_level_5xx_with_request_evidence_queues_future_probe() 
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

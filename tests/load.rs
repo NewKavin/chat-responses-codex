@@ -582,7 +582,6 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
 
                 per_minute_limit: 10_000,
@@ -603,7 +602,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -749,7 +748,6 @@ async fn load_gateway_first_meaningful_event_baseline() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                 per_minute_limit: 10_000,
                 rate_limit_enabled: true,
@@ -767,7 +765,7 @@ async fn load_gateway_first_meaningful_event_baseline() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -950,7 +948,6 @@ async fn load_gateway_first_meaningful_event() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
             model_group_id: None,
                 per_minute_limit: 10_000,
                 rate_limit_enabled: true,
@@ -968,7 +965,7 @@ async fn load_gateway_first_meaningful_event() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

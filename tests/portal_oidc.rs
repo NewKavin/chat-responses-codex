@@ -251,6 +251,7 @@ struct FlowResult {
 
 async fn oidc_gateway(
     idp: &MockIdp,
+    #[allow(clippy::field_reassign_with_default)] // fixture builder
     configure: impl Fn(&mut AppConfig),
 ) -> (axum::Router, AppState) {
     let url = common::oidc::database_url().expect("pg configured");
@@ -296,7 +297,6 @@ async fn seed_downstream(state: &AppState, id: &str) {
             name: id.to_string(),
             hash: format!("hash-{id}"),
             active: true,
-            model_allowlist: vec![],
             model_group_id: None,
             ..Default::default()
         })
@@ -446,6 +446,7 @@ async fn login_flow_with_explicit_endpoints_skips_discovery() {
         return;
     }
     let idp = MockIdpBuilder::default().start().await;
+    #[allow(clippy::field_reassign_with_default)] // fixture builder
     let mut config = AppConfig::default();
     config.portal_oidc_client_id = "client-id".to_string();
     config.portal_oidc_client_secret = "client-secret".to_string();
@@ -794,7 +795,7 @@ async fn session_cookie_unlocks_portal_and_disabling_user_kills_it_immediately()
 
     // An unknown cookie is refused.
     assert_eq!(
-        overview_with_cookie(&router, &"bogus-session-value").await,
+        overview_with_cookie(&router, "bogus-session-value").await,
         StatusCode::UNAUTHORIZED
     );
 
@@ -855,7 +856,6 @@ async fn legacy_bearer_login_is_untouched_by_oidc() {
             hash: legacy_hash,
             plaintext_key: Some("team-a".to_string()),
             active: true,
-            model_allowlist: vec![],
             model_group_id: None,
             ..Default::default()
         })
@@ -1027,7 +1027,6 @@ async fn bind_intent_attaches_identity_to_an_existing_key() {
         hash: key.hash,
         plaintext_key: Some(key.plaintext.clone()),
         active: true,
-        model_allowlist: vec![],
             model_group_id: None,
         ..Default::default()
     };
@@ -1084,7 +1083,6 @@ async fn bind_conflicts_when_identity_already_bound_to_another_key() {
             hash: key.hash,
             plaintext_key: Some(key.plaintext.clone()),
             active: true,
-            model_allowlist: vec![],
             model_group_id: None,
             ..Default::default()
         };
@@ -1523,6 +1521,7 @@ async fn disabled_oidc_hides_start_endpoint() {
 async fn file_mode_router() -> (axum::Router, AppState) {
     use tempfile::TempDir;
     let directory = TempDir::new().unwrap();
+    #[allow(clippy::field_reassign_with_default)] // fixture builder
     let mut config = AppConfig::default();
     config.portal_oidc_client_id = "client-id".to_string();
     config.portal_oidc_client_secret = "client-secret".to_string();
@@ -1585,7 +1584,6 @@ async fn file_mode_oidc_answers_503_and_legacy_login_still_works() {
             hash: key.hash,
             plaintext_key: Some(key.plaintext.clone()),
             active: true,
-            model_allowlist: vec![],
             model_group_id: None,
             ..Default::default()
         })
@@ -1672,7 +1670,6 @@ async fn bind_works_with_legacy_jwt_login() {
         hash: key.hash,
         plaintext_key: Some(key.plaintext.clone()),
         active: true,
-        model_allowlist: vec![],
             model_group_id: None,
         ..Default::default()
     };
@@ -2261,7 +2258,7 @@ async fn admin_patch_rejects_subject_edit_and_email_conflict() {
         .create_user_with_identity("user@example.com", None, None, "oidc", "sub-u")
         .await
         .unwrap();
-    let other = store
+    let _other = store
         .create_user_with_identity("other@example.com", None, None, "oidc", "sub-v")
         .await
         .unwrap();

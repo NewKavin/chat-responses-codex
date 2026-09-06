@@ -31,7 +31,6 @@ fn create_test_state_without_announcement() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec![],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 100,
@@ -49,7 +48,7 @@ fn create_test_state_without_announcement() -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -81,7 +80,6 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec![],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 100,
@@ -99,7 +97,7 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: Some(AnnouncementConfig {
             id: "draft-ann".to_string(),

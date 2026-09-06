@@ -46,7 +46,6 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
 
@@ -65,8 +64,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             active: true,
             billing_mode: "request".into(),
 
-            model_concurrency_groups: vec![],
-        }]),
+            model_concurrency_groups: vec![], ..Default::default()}]),
         usage_logs: logs,
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -91,7 +89,6 @@ fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -108,8 +105,7 @@ fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             active: true,
             billing_mode: "token".into(),
 
-            model_concurrency_groups: vec![],
-        }]),
+            model_concurrency_groups: vec![], ..Default::default()}]),
         usage_logs: logs,
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -352,7 +348,6 @@ async fn test_compute_request_quota_usage_returns_none_if_no_quota() {
         hash: "hash2".to_string(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         per_minute_limit: 100,
 
@@ -371,8 +366,7 @@ async fn test_compute_request_quota_usage_returns_none_if_no_quota() {
         active: true,
         billing_mode: "request".into(),
 
-        model_concurrency_groups: vec![],
-    };
+        model_concurrency_groups: vec![], ..Default::default()};
 
     let usage = state.compute_request_quota_usage(&downstream).await;
 
@@ -721,7 +715,7 @@ async fn test_compute_cost_usage_matches_summary_path() {
 
     let state = create_cost_state_with_logs(logs);
     let snapshot = state.snapshot().await;
-    let summary = build_downstream_usage_summary(&snapshot, "downstream-1", now).unwrap();
+    let summary = build_downstream_usage_summary(&snapshot, "downstream-1", now, &[]).unwrap();
     let quota = state.compute_cost_usage("downstream-1", now).await;
 
     assert_eq!(

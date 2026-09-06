@@ -55,7 +55,6 @@ async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
             model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
@@ -73,7 +72,7 @@ async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
         billing_mode: "request".into(),
 
         model_concurrency_groups: vec![],
-    };
+    ..Default::default()};
     let state = AppState::new(
         PersistedState {
             downstreams: Arc::new(vec![downstream.clone()]),

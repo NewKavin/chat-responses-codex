@@ -58,10 +58,6 @@ fn canonical_upstream_state() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec![
-                "ZhipuAI/GLM-5".to_string(),
-                "MiniMax/MiniMax-M2.7".to_string(),
-            ],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -79,7 +75,7 @@ fn canonical_upstream_state() -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -216,7 +212,6 @@ fn create_test_state() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
 
@@ -236,7 +231,7 @@ fn create_test_state() -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -321,7 +316,6 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -339,7 +333,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![
             UsageLog {
                 id: "log-a".to_string(),
@@ -450,7 +444,6 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -468,7 +461,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs,
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1317,7 +1310,6 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: Some("key-abcd1234...efgh5678".to_string()),
-            model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -1334,7 +1326,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             active: true,
             billing_mode: "request".into(),
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1655,10 +1647,6 @@ fn create_state_with_context_limits() -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec![
-                "ZhipuAI/GLM-5".to_string(),
-                "MiniMax/MiniMax-M2.7".to_string(),
-            ],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -1676,7 +1664,7 @@ fn create_state_with_context_limits() -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1760,7 +1748,6 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
             per_minute_limit: 100,
             rate_limit_enabled: true,
@@ -1778,7 +1765,7 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![UsageLog {
             id: "tz-log-1".to_string(),
             downstream_key_id: "downstream-1".to_string(),
@@ -1981,7 +1968,6 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 100,
@@ -1999,7 +1985,7 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
             billing_mode: "token".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![UsageLog {
             id: "cost-log-1".to_string(),
             downstream_key_id: "downstream-cost".to_string(),
@@ -2086,7 +2072,6 @@ async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
             hash: generated.hash,
             plaintext_key: Some(generated.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec!["gpt-4".to_string()],
             model_group_id: None,
             rate_limit_enabled: true,
             per_minute_limit: 100,
@@ -2104,7 +2089,7 @@ async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
             billing_mode: "token".into(),
 
             model_concurrency_groups: vec![],
-        }]),
+    ..Default::default()}]),
         usage_logs: vec![UsageLog {
             id: "cost-log-1".to_string(),
             downstream_key_id: "downstream-cost".to_string(),

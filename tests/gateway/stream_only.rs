@@ -140,7 +140,6 @@ impl StreamOnlyHarness {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec![MODEL.into()],
                     model_group_id: None,
                     rate_limit_enabled: false,
                     per_minute_limit: 0,
@@ -158,7 +157,8 @@ impl StreamOnlyHarness {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(HashMap::new()),

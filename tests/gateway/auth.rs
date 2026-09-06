@@ -14,7 +14,6 @@ async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() 
                 hash: authoritative_hash,
                 plaintext_key: Some(stored_plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -32,7 +31,8 @@ async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() 
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..Default::default()
         },
         tempdir().unwrap().path().join("state.json"),
@@ -99,7 +99,6 @@ async fn direct_hash_update_clears_mismatched_stored_plaintext() {
                 hash: original.hash,
                 plaintext_key: Some(original.plaintext),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -117,7 +116,8 @@ async fn direct_hash_update_clears_mismatched_stored_plaintext() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..Default::default()
         },
         tempdir().unwrap().path().join("state.json"),
@@ -145,7 +145,6 @@ async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() 
                 hash: original.hash,
                 plaintext_key: Some(original.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -163,7 +162,8 @@ async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() 
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..Default::default()
         },
         tempdir().unwrap().path().join("state.json"),
@@ -281,7 +281,6 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -299,7 +298,8 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -409,7 +409,6 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
 
@@ -429,7 +428,8 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -569,7 +569,6 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -587,7 +586,8 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -636,7 +636,6 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -654,7 +653,8 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

@@ -173,7 +173,6 @@ async fn fast_fail_harness(
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -191,7 +190,8 @@ async fn fast_fail_harness(
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
@@ -432,7 +432,6 @@ async fn mixed_local_gate_and_upstream_rejection_reports_composition() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -449,7 +448,8 @@ async fn mixed_local_gate_and_upstream_rejection_reports_composition() {
                 active: true,
                 billing_mode: "request".into(),
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
@@ -894,7 +894,6 @@ async fn saturated_account_falls_back_to_a_sibling_account() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![MODEL.into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 60,
@@ -911,7 +910,8 @@ async fn saturated_account_falls_back_to_a_sibling_account() {
                 active: true,
                 billing_mode: "request".into(),
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: Arc::new(std::collections::HashMap::new()),

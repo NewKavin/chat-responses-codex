@@ -1917,7 +1917,6 @@ async fn required_image_never_routes_to_text_only_candidate() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -1935,7 +1934,8 @@ async fn required_image_never_routes_to_text_only_candidate() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2028,7 +2028,6 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2046,7 +2045,8 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2162,7 +2162,6 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -2180,7 +2179,8 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2279,7 +2279,6 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -2297,7 +2296,8 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2416,7 +2416,6 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -2434,7 +2433,8 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2566,7 +2566,6 @@ async fn catalog_witness_considers_every_supported_protocol() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -2584,7 +2583,8 @@ async fn catalog_witness_considers_every_supported_protocol() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2737,7 +2737,6 @@ async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2755,7 +2754,8 @@ async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2952,7 +2952,6 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["opaque/model".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2970,7 +2969,8 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),

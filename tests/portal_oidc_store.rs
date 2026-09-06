@@ -4,6 +4,7 @@ use chat_responses_codex::state::AppConfig;
 use std::str::FromStr;
 use tokio_postgres::{Config, NoTls};
 
+#[allow(dead_code)]
 fn database_url() -> String {
     common::oidc::database_url()
         .expect("OIDC_TEST_DATABASE_URL unset; tests should skip before reaching here")
@@ -78,7 +79,6 @@ fn test_downstream(id: &str) -> chat_responses_codex::state::DownstreamConfig {
         name: id.to_string(),
         hash: format!("hash-{id}"),
         active: true,
-        model_allowlist: vec![],
             model_group_id: None,
         ..Default::default()
     }
@@ -412,13 +412,12 @@ async fn disabling_user_purges_sessions_immediately() {
     // re-enable clears the disabled flag but the session is gone for good
     assert!(store.set_user_disabled(&user.id, false).await.unwrap());
     assert!(
-        store
+        !store
             .find_user_by_identity("oidc", "sub-a")
             .await
             .unwrap()
             .unwrap()
             .disabled
-            == false
     );
 }
 

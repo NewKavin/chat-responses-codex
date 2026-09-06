@@ -387,7 +387,6 @@ async fn run_matrix_cell(dialect: Dialect, scenario: Scenario) -> (String, Value
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec![model.clone()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -405,7 +404,8 @@ async fn run_matrix_cell(dialect: Dialect, scenario: Scenario) -> (String, Value
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             ..Default::default()
         },
         tempdir.path().join("state.json"),

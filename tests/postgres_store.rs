@@ -225,7 +225,6 @@ async fn persist_config_round_trips_through_postgres() {
             hash: downstream_key.hash,
             plaintext_key: Some(downstream_key.plaintext),
             plaintext_key_prefix: None,
-            model_allowlist: vec![],
             model_group_id: None,
             ip_allowlist: vec![],
             rate_limit_enabled: true,
@@ -243,7 +242,7 @@ async fn persist_config_round_trips_through_postgres() {
             billing_mode: Default::default(),
 
             model_concurrency_groups: vec![],
-        })
+    ..Default::default()})
         .await
         .expect("should persist downstream");
 

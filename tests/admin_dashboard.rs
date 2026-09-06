@@ -81,7 +81,6 @@ fn create_test_state() -> AppState {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["GLM-5".to_string(), "DeepSeek-R1".to_string()],
             model_group_id: None,
                 per_minute_limit: 100,
                 rate_limit_enabled: true,
@@ -98,15 +97,13 @@ fn create_test_state() -> AppState {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            },
+                model_concurrency_groups: vec![], ..Default::default()},
             DownstreamConfig {
                 id: "downstream-2".to_string(),
                 name: "Team Beta".to_string(),
                 hash: generate_downstream_key("beta").hash,
                 plaintext_key: None,
                 plaintext_key_prefix: None,
-                model_allowlist: vec![],
             model_group_id: None,
                 per_minute_limit: 100,
                 rate_limit_enabled: true,
@@ -123,8 +120,7 @@ fn create_test_state() -> AppState {
                 active: false,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            },
+                model_concurrency_groups: vec![], ..Default::default()},
         ]),
         usage_logs: vec![
             UsageLog {
@@ -662,7 +658,6 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 hash: downstream_alpha.hash.clone(),
                 plaintext_key: Some(downstream_alpha.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["GLM-5".to_string()],
             model_group_id: None,
                 per_minute_limit: 100,
                 rate_limit_enabled: true,
@@ -679,15 +674,13 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            },
+                model_concurrency_groups: vec![], ..Default::default()},
             DownstreamConfig {
                 id: "downstream-beta".to_string(),
                 name: "Team Beta".to_string(),
                 hash: downstream_beta.hash.clone(),
                 plaintext_key: Some(downstream_beta.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["DeepSeek-R1".to_string()],
             model_group_id: None,
                 per_minute_limit: 100,
                 rate_limit_enabled: true,
@@ -704,8 +697,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            },
+                model_concurrency_groups: vec![], ..Default::default()},
         ]),
         usage_logs: vec![
             UsageLog {

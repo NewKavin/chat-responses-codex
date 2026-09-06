@@ -1032,7 +1032,6 @@ async fn stream_completion_fixture(
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
         model_group_id: None,
         rate_limit_enabled: false,
         per_minute_limit: 1,
@@ -1049,8 +1048,7 @@ async fn stream_completion_fixture(
         active: true,
         billing_mode: "request".into(),
 
-        model_concurrency_groups: vec![],
-    };
+        model_concurrency_groups: vec![], ..Default::default()};
     let downstream_lease = state
         .try_reserve_downstream_concurrency(&downstream, "test-model")
         .await
@@ -1505,7 +1503,6 @@ async fn gateway_uses_independent_local_slots_for_keys_on_one_upstream() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["unit-account-model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -1522,8 +1519,7 @@ async fn gateway_uses_independent_local_slots_for_keys_on_one_upstream() {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..Default::default()
         },
         directory.path().join("state.json"),
@@ -1638,7 +1634,6 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["unit-probe-model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -1655,8 +1650,7 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..Default::default()
         },
         directory.path().join("state.json"),
@@ -1769,7 +1763,6 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["unit-probe-model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -1786,8 +1779,7 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..Default::default()
         },
         directory.path().join("state.json"),
@@ -1873,7 +1865,6 @@ async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
         hash: String::new(),
         plaintext_key: None,
         plaintext_key_prefix: None,
-        model_allowlist: vec![],
         model_group_id: None,
         rate_limit_enabled: true,
         per_minute_limit: 60,
@@ -1890,8 +1881,7 @@ async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
         active: true,
         billing_mode: "request".into(),
 
-        model_concurrency_groups: vec![],
-    };
+        model_concurrency_groups: vec![], ..Default::default()};
     let state = AppState::new(
         PersistedState {
             downstreams: Arc::new(vec![downstream.clone()]),
@@ -2019,7 +2009,6 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["unit-coordination-model".into()],
                 model_group_id: None,
                 rate_limit_enabled: true,
                 per_minute_limit: 60,
@@ -2036,8 +2025,7 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..Default::default()
         },
         directory.path().join("state.json"),
@@ -2553,7 +2541,6 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["unit-capacity-model".into()],
                 model_group_id: None,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
@@ -2570,8 +2557,7 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..Default::default()
         },
         dir.path().join("state.json"),
@@ -3207,7 +3193,6 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -3224,8 +3209,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![],
-            }]),
+                model_concurrency_groups: vec![], ..Default::default()}]),
             ..Default::default()
         },
         tempdir.path().join("state.json"),

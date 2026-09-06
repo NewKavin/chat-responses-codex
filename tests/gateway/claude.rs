@@ -300,7 +300,6 @@ impl ClaudeResponsesThinkingFixture {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["opaque-public".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -318,7 +317,8 @@ impl ClaudeResponsesThinkingFixture {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -785,7 +785,6 @@ impl ClaudeThinkingFixture {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["opaque-public".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -803,7 +802,8 @@ impl ClaudeThinkingFixture {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1151,7 +1151,6 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["claude-allowed".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -1167,8 +1166,8 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
                 expires_at: None,
                 active: true,
                 billing_mode: "request".into(),
-
-                model_concurrency_groups: vec![],
+                model_allowlist: vec!["claude-sonnet-5".into()],
+                ..Default::default()
             }]),
             usage_logs: vec![],
             announcement: None,
@@ -1325,7 +1324,6 @@ async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstre
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -1343,7 +1341,8 @@ async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstre
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1541,7 +1540,6 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -1559,7 +1557,8 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1683,7 +1682,6 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -1701,7 +1699,8 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1863,7 +1862,6 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -1881,7 +1879,8 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2039,7 +2038,6 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -2055,7 +2053,8 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2221,7 +2220,6 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -2237,7 +2235,8 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
                     expires_at: None,
                     active: true,
                 billing_mode: "request".into(), model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
     announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2403,7 +2402,6 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
                     model_group_id: None,
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
@@ -2421,7 +2419,8 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
                     billing_mode: "request".into(),
 
                     model_concurrency_groups: vec![],
-                }]),
+                
+    ..Default::default()}]),
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2712,7 +2711,6 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["deepseek-r1".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2730,7 +2728,8 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2824,7 +2823,6 @@ async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["claude-compat".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2842,7 +2840,8 @@ async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2967,7 +2966,6 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
                 model_group_id: None,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
@@ -2985,7 +2983,8 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
                 billing_mode: "request".into(),
 
                 model_concurrency_groups: vec![],
-            }]),
+            
+    ..Default::default()}]),
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
