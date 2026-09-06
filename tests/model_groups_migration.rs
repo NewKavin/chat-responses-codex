@@ -90,6 +90,165 @@ async fn test_model_groups_has_correct_columns() {
     assert!(column_names.contains(&"updated_at".to_string()));
 }
 
+fn migration_sql() -> String {
+    std::fs::read_to_string("migrations/2026-09-06-migrate-model-allowlist-to-groups.sql")
+        .expect("migration file must exist")
+}
+
+#[tokio::test]
+async fn test_migrate_allowlist_to_groups() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return; // Skip test when database is unavailable
+    }
+
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let portal_store_opt = state.portal_store();
+    let store = portal_store_opt.as_ref().expect("portal_store must exist");
+    let client = store.get_client().await.expect("Failed to get client");
+
+    // 造数据：3 个下游
+    //  - ds-empty: 空白名单 -> all
+    //  - ds-shared-a / ds-shared-b: 相同白名单 -> 共用 1 个 auto 组
+    //  - ds-solo: 独立白名单 -> 独立 auto 组
+    // 用 insert_downstream 构造（默认值完整），绕过裸 SQL 的 NOT NULL 约束
+    for id in ["ds-empty", "ds-shared-a", "ds-shared-b", "ds-solo"] {
+        let mut downstream = chat_responses_codex::state::DownstreamConfig::default();
+        downstream.id = id.to_string();
+        downstream.name = format!("{} name", id);
+        downstream.hash = format!("hash-{}", id);
+        state
+            .insert_downstream(downstream)
+            .await
+            .expect("insert downstream");
+    }
+    for (position, (id, models)) in [
+        (0, ("ds-shared-a", vec!["GLM-5.2", "gpt-5.5", "glm-5.2"])), // 含重复（大小写）
+        (1, ("ds-shared-b", vec!["glm-5.2", "gpt-5.5"])),
+        (2, ("ds-solo", vec!["grok-4.6", "qwen3.8-max"])),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (pos, model) in models.1.into_iter().enumerate() {
+            client
+                .execute(
+                    "INSERT INTO downstream_model_allowlist (downstream_id, position, model_slug) VALUES ($1, $2, $3)",
+                    &[&models.0, &(pos as i32), &model],
+                )
+                .await
+                .expect("insert allowlist row");
+        }
+    }
+    // ds-empty 无 allowlist 行
+
+    // 运行迁移 SQL
+    client
+        .batch_execute(&migration_sql())
+        .await
+        .expect("migration must run cleanly");
+
+    // 断言 1：所有下游都有分组
+    let rows = client
+        .query(
+            "SELECT id, model_group_id FROM downstreams ORDER BY id",
+            &[],
+        )
+        .await
+        .unwrap();
+    let bindings: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| (row.get(0), row.get::<_, String>(1)))
+        .collect();
+    assert_eq!(bindings.len(), 4, "all downstreams present");
+    for (_, group_id) in &bindings {
+        assert!(!group_id.is_empty(), "every downstream must be bound");
+    }
+    let group_of = |id: &str| {
+        bindings
+            .iter()
+            .find(|(did, _)| did == id)
+            .map(|(_, g)| g.clone())
+            .unwrap()
+    };
+
+    // 断言 2：空名单 -> all；相同白名单共享组；独立组不同
+    assert_eq!(group_of("ds-empty"), "all", "empty allowlist -> all");
+    assert_eq!(
+        group_of("ds-shared-a"),
+        group_of("ds-shared-b"),
+        "same model set must share one auto group"
+    );
+    assert_ne!(
+        group_of("ds-shared-a"),
+        group_of("ds-solo"),
+        "different sets must not share a group"
+    );
+
+    // 断言 3：auto 组 id 前缀 + 模型内容（保留原拼写、去重）
+    let shared_group = group_of("ds-shared-a");
+    assert!(
+        shared_group.starts_with("auto-"),
+        "auto group id prefix, got {}",
+        shared_group
+    );
+    let row = client
+        .query(
+            "SELECT allowed_models::text FROM model_groups WHERE id = $1",
+            &[&shared_group],
+        )
+        .await
+        .unwrap();
+    let allowed: serde_json::Value = serde_json::from_str(&row[0].get::<_, String>(0)).unwrap();
+    let models: Vec<String> = allowed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        models,
+        vec!["GLM-5.2", "gpt-5.5"],
+        "original spelling preserved, duplicates deduped by lowercase"
+    );
+
+    // 断言 4：新增组数 = 2 个 auto + all 已存在 = 共 3 组相关
+    let group_count = client
+        .query(
+            "SELECT COUNT(*) FROM model_groups WHERE id LIKE 'auto-%'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let auto_count: i64 = group_count[0].get(0);
+    assert_eq!(auto_count, 2, "two distinct auto groups");
+
+    // 幂等：重跑一次，结果不变
+    client
+        .batch_execute(&migration_sql())
+        .await
+        .expect("migration must be idempotent");
+    let rows2 = client
+        .query("SELECT id, model_group_id FROM downstreams ORDER BY id", &[])
+        .await
+        .unwrap();
+    let bindings2: Vec<(String, String)> = rows2
+        .iter()
+        .map(|row| (row.get(0), row.get::<_, String>(1)))
+        .collect();
+    assert_eq!(bindings, bindings2, "re-run must not change bindings");
+    let auto_count2: i64 = client
+        .query("SELECT COUNT(*) FROM model_groups WHERE id LIKE 'auto-%'", &[])
+        .await
+        .unwrap()[0]
+        .get(0);
+    assert_eq!(auto_count, auto_count2, "re-run must not add groups");
+}
+
 #[tokio::test]
 async fn test_model_groups_has_initial_data() {
     let _guard = common::oidc::lock().lock();
