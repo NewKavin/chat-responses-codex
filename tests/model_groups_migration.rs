@@ -249,7 +249,71 @@ async fn test_migrate_allowlist_to_groups() {
     assert_eq!(auto_count, auto_count2, "re-run must not add groups");
 }
 
+/// M1（阻塞项 2）：既有库的 basic/premium 占位种子必须被 SCHEMA_SQL 的
+/// 带条件 UPDATE 修正；运维手工调整过的内容不得被覆盖。
 #[tokio::test]
+async fn test_schema_sql_fixes_placeholder_seeds_only() {
+    let _guard = common::oidc::lock().lock();
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return; // Skip test when database is unavailable
+    }
+
+    // --- 场景 1：basic/premium 仍是初版占位值，启动初始化应修正 ---
+    common::oidc::reset_portal_tables(&url).await;
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal_store must exist");
+    let client = store.get_client().await.expect("get client");
+
+    let basic_sql = "UPDATE model_groups SET allowed_models = '[\"gpt-3.5-turbo\", \"claude-3-haiku\"]'::jsonb, name = 'Basic Models' WHERE id = 'basic'";
+    let premium_sql = "UPDATE model_groups SET allowed_models = '[\"gpt-4\", \"gpt-4-turbo\", \"claude-3-opus\", \"claude-3.5-sonnet\", \"claude-3-sonnet\"]'::jsonb, name = 'Premium Models' WHERE id = 'premium'";
+    client.execute(basic_sql, &[]).await.unwrap();
+    client.execute(premium_sql, &[]).await.unwrap();
+
+    drop(state);
+    let state2 = load_state(&url).await;
+    let store2 = state2.portal_store().expect("portal_store must exist");
+    let client2 = store2.get_client().await.expect("get client");
+
+    let basic: String = client2
+        .query_one("SELECT allowed_models::text FROM model_groups WHERE id = 'basic'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        basic.contains("deepseek-v4-flash") && !basic.contains("gpt-3.5-turbo"),
+        "placeholder basic must be fixed, got {basic}"
+    );
+    let premium: String = client2
+        .query_one("SELECT allowed_models::text FROM model_groups WHERE id = 'premium'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        premium.contains("claude-opus-5") && !premium.contains("gpt-4"),
+        "placeholder premium must be fixed, got {premium}"
+    );
+
+    // --- 场景 2：运维手工调整过，不得覆盖 ---
+    let custom_sql = "UPDATE model_groups SET allowed_models = '[\"custom-op-model\"]'::jsonb, name = 'Custom Basic' WHERE id = 'basic'";
+    client2.execute(custom_sql, &[]).await.unwrap();
+
+    drop(state2);
+    let state3 = load_state(&url).await;
+    let store3 = state3.portal_store().expect("portal_store must exist");
+    let client3 = store3.get_client().await.expect("get client");
+    let custom: String = client3
+        .query_one("SELECT allowed_models::text FROM model_groups WHERE id = 'basic'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        custom.contains("custom-op-model"),
+        "operator-adjusted basic must be preserved, got {custom}"
+    );
+}
+
 async fn test_model_groups_has_initial_data() {
     let _guard = common::oidc::lock().lock();
     let url = database_url();

@@ -914,6 +914,8 @@ impl PostgresStateStore {
         tx.batch_execute(SCHEMA_SQL).await.map_err(io_other)?;
         migrate_dialect_profiles_primary_key(&tx).await?;
         migrate_response_history_primary_key(&tx).await?;
+        // 阶段 2/一次性部署：把历史 model_allowlist 迁到模型分组（幂等）。
+        migrate_model_allowlist_to_groups(&tx).await?;
         tx.commit().await.map_err(io_other)
     }
 }
@@ -969,6 +971,131 @@ async fn migrate_response_history_primary_key(tx: &Transaction<'_>) -> io::Resul
     ))
     .await
     .map_err(io_other)
+}
+
+/// 启动时把历史 downstream.model_allowlist 迁移到模型分组（一次性部署关键步骤）。
+/// 幂等：只处理 model_group_id IS NULL 的下游；重跑结果一致（临时表先 DROP）。
+/// 前置防护：downstream_model_allowlist 表不存在时（下个版本删表后的重启）直接跳过。
+/// 日志（M3）：三种情况都有输出，无变化时也打一行，便于区分"跑了且无事"与"根本没跑"。
+async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<()> {
+    // 表不存在 → 跳过（下个版本删表路径）
+    let has_table = tx
+        .query_opt(
+            "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'downstream_model_allowlist'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?
+        .is_some();
+    if !has_table {
+        tracing::warn!(
+            "model allowlist migration: table downstream_model_allowlist absent, skipping"
+        );
+        return Ok(());
+    }
+
+    // 剩余未绑组下游数（无变化时日志退化为 nothing to migrate）
+    let remaining: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM downstreams WHERE model_group_id IS NULL",
+            &[],
+        )
+        .await
+        .map_err(io_other)?
+        .get(0);
+    if remaining == 0 {
+        tracing::info!(
+            "model allowlist migration: nothing to migrate (all downstreams already grouped)"
+        );
+        return Ok(());
+    }
+
+    tx.batch_execute(
+        r#"
+        -- 临时表清理：保证同连接内可重复执行（幂等）
+        DROP TABLE IF EXISTS _sets;
+        DROP TABLE IF EXISTS _keyed;
+
+        -- 1. 空白名单 → all
+        UPDATE downstreams d
+        SET model_group_id = 'all'
+        WHERE d.model_group_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM downstream_model_allowlist a
+            WHERE a.downstream_id = d.id AND TRIM(a.model_slug) <> ''
+          );
+
+        -- 2. 非空白名单：按内容建组（保留原拼写，小写去重排序保证哈希稳定）
+        CREATE TEMP TABLE _sets AS
+        SELECT
+          a.downstream_id,
+          ARRAY(
+            SELECT DISTINCT ON (LOWER(TRIM(m.model_slug))) TRIM(m.model_slug)
+            FROM downstream_model_allowlist m
+            WHERE m.downstream_id = a.downstream_id AND TRIM(m.model_slug) <> ''
+            ORDER BY LOWER(TRIM(m.model_slug))
+          ) AS models
+        FROM downstream_model_allowlist a
+        GROUP BY a.downstream_id;
+
+        CREATE TEMP TABLE _keyed AS
+        SELECT
+          downstream_id,
+          models,
+          'auto-' || SUBSTRING(
+            ENCODE(SHA256(CONVERT_TO(LOWER(ARRAY_TO_STRING(models, ',')), 'UTF8')), 'hex'), 1, 8
+          ) AS gid
+        FROM _sets
+        WHERE CARDINALITY(models) > 0;
+
+        INSERT INTO model_groups (id, name, description, allowed_models)
+        SELECT DISTINCT
+          k.gid,
+          '迁移分组 ' || k.gid,
+          '由 model_allowlist 自动迁移（' || CARDINALITY(k.models) || ' 个模型）',
+          TO_JSONB(k.models)
+        FROM _keyed k
+        ON CONFLICT (id) DO NOTHING;
+
+        UPDATE downstreams d
+        SET model_group_id = k.gid
+        FROM _keyed k
+        WHERE d.id = k.downstream_id AND d.model_group_id IS NULL;
+        "#,
+    )
+    .await
+    .map_err(io_other)?;
+
+    // 迁移统计日志（M3）：绑定数、新建组数
+    let all_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM downstreams WHERE model_group_id = 'all'", &[])
+        .await
+        .map_err(io_other)?
+        .get(0);
+    let auto_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM model_groups WHERE id LIKE 'auto-%'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?
+        .get(0);
+    let still_unbound: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM downstreams WHERE model_group_id IS NULL",
+            &[],
+        )
+        .await
+        .map_err(io_other)?
+        .get(0);
+    tracing::info!(
+        "model allowlist migration: {} downstreams -> all group, {} auto groups created, {} bound, {} unbound",
+        all_count,
+        auto_count,
+        remaining - still_unbound,
+        still_unbound,
+    );
+    Ok(())
 }
 
 async fn migrate_dialect_profiles_primary_key(tx: &Transaction<'_>) -> io::Result<()> {
@@ -2102,6 +2229,23 @@ INSERT INTO model_groups (id, name, description, allowed_models) VALUES
   ('all', 'All Models', 'Unrestricted access to all available models',
    '["*"]'::jsonb)
 ON CONFLICT (id) DO NOTHING;
+
+-- Fix legacy placeholder seeds on existing databases (M1):
+-- only rewrite when content is still the original placeholder value, so
+-- operator adjustments made after deploy are never clobbered; idempotent.
+UPDATE model_groups
+SET allowed_models = '["deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4-flash-free", "glm-5.3-flash", "kimi-k3"]'::jsonb,
+    name = 'Basic Models',
+    updated_at = NOW()
+WHERE id = 'basic'
+  AND allowed_models = '["gpt-3.5-turbo", "claude-3-haiku"]'::jsonb;
+
+UPDATE model_groups
+SET allowed_models = '["glm-5.2", "glm-5.3", "deepseek-v4-pro", "deepseek-v4-pro-0813", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "grok-4.5", "grok-4.6", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "qwen3.8-max"]'::jsonb,
+    name = 'Premium Models',
+    updated_at = NOW()
+WHERE id = 'premium'
+  AND allowed_models = '["gpt-4", "gpt-4-turbo", "claude-3-opus", "claude-3.5-sonnet", "claude-3-sonnet"]'::jsonb;
 
 -- Downstream model-group linkage: mirrors migrations/2026-09-05-add-downstream-model-group-id.sql
 -- so freshly initialized databases get the same FK and index as migrated ones.

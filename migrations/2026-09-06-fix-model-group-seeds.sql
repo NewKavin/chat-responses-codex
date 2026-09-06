@@ -13,18 +13,21 @@ VALUES ('deny-all', 'Deny All', 'Sentinel group that denies every model (safety 
         '["__none__"]'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 
--- 2. basic：性价比档，全部为 active upstream 真实模型
+-- 2. basic：性价比档，全部为 active upstream 真实模型。
+--    带条件 UPDATE：仅当内容仍是初版占位值时修正，不覆盖运维后续手工调整。
 UPDATE model_groups
 SET name = 'Basic Models',
     description = 'Cost-effective models for development and testing',
     allowed_models = '["deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4-flash-free", "glm-5.3-flash", "kimi-k3"]'::jsonb
-WHERE id = 'basic';
+WHERE id = 'basic'
+  AND allowed_models = '["gpt-3.5-turbo", "claude-3-haiku"]'::jsonb;
 
--- 3. premium：旗舰档，全部为 active upstream 真实模型
+-- 3. premium：旗舰档，全部为 active upstream 真实模型（条件同 basic）
 UPDATE model_groups
 SET name = 'Premium Models',
     description = 'Advanced models for production workloads',
     allowed_models = '["glm-5.2", "glm-5.3", "deepseek-v4-pro", "deepseek-v4-pro-0813", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "grok-4.5", "grok-4.6", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "qwen3.8-max"]'::jsonb
-WHERE id = 'premium';
+WHERE id = 'premium'
+  AND allowed_models = '["gpt-4", "gpt-4-turbo", "claude-3-opus", "claude-3.5-sonnet", "claude-3-sonnet"]'::jsonb;
 
 COMMIT;
