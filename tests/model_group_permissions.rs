@@ -69,10 +69,10 @@ async fn test_model_permission_allows_basic_model() {
         .await
         .expect("Should get allowed models");
 
-    // basic 分组应该包含种子数据中的 claude-3-haiku
+    // M1：basic 分组种子已是本部署真实模型（占位 claude-3-haiku 已退役）
     assert!(
-        allowed.contains(&"claude-3-haiku".to_string()),
-        "Basic group should allow Haiku model"
+        allowed.contains(&"deepseek-v4-flash".to_string()),
+        "Basic group should allow real seed model deepseek-v4-flash"
     );
 }
 
