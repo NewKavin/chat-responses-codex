@@ -127,19 +127,13 @@
       title="轮换密钥"
       width="min(500px, calc(100vw - 32px))"
     >
-      <p>请输入新的密钥 ID 来替换当前密钥。旧密钥将立即失效。</p>
-      <el-input
-        v-model="newKeyId"
-        placeholder="输入新密钥 ID (例如: sk-xxxxx)"
-        style="margin-top: 16px"
-      />
+      <p>
+        将为您生成一把全新的密钥（新的密钥 ID 与密钥本体，均由服务端自动生成）。
+        旧密钥立即失效；新密钥只展示一次，请妥善保存。
+      </p>
       <template #footer>
         <el-button @click="showRotateDialog = false">取消</el-button>
-        <el-button
-          type="primary"
-          :disabled="!newKeyId || loading"
-          @click="handleRotate"
-        >
+        <el-button type="primary" :disabled="loading" @click="handleRotate">
           确认轮换
         </el-button>
       </template>
@@ -221,7 +215,7 @@ interface Props {
   keyData: PortalKey
   modelGroups: ModelGroup[]
   onEdit: (downstreamId: string, newLabel: string) => Promise<void>
-  onRotate: (downstreamId: string, newId: string) => Promise<void>
+  onRotate: (downstreamId: string) => Promise<void>
   onDelete: (downstreamId: string) => Promise<void>
   onSetDefault: (downstreamId: string) => Promise<void>
   onChangeModelGroup: (downstreamId: string, modelGroupId: string) => Promise<void>
@@ -237,7 +231,6 @@ const showRotateDialog = ref(false)
 const showDeleteDialog = ref(false)
 const showGroupDialog = ref(false)
 const selectedGroupId = ref('')
-const newKeyId = ref('')
 
 const maskedKeyId = computed(() => {
   const id = props.keyData.downstream_id
@@ -323,9 +316,8 @@ const handleRotate = async () => {
   loading.value = true
   error.value = null
   try {
-    await props.onRotate(props.keyData.downstream_id, newKeyId.value)
+    await props.onRotate(props.keyData.downstream_id)
     showRotateDialog.value = false
-    newKeyId.value = ''
   } catch (err: any) {
     error.value = err.message || '操作失败'
   } finally {

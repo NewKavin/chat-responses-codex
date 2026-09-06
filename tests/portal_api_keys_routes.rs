@@ -74,14 +74,14 @@ async fn test_keys_routes_registered() {
         (
             Method::POST,
             "/api/portal/keys",
-            Some(r#"{"downstream_id": "sk-test", "label": "Test Key"}"#),
+            Some(r#"{"label": "Test Key"}"#),
         ),
         (Method::GET, "/api/portal/keys/sk-test123", None),
         (Method::DELETE, "/api/portal/keys/sk-test123", None),
         (
             Method::POST,
             "/api/portal/keys/sk-test123/rotate",
-            Some(r#"{"new_downstream_id": "sk-rotated456"}"#),
+            Some(r#"{}"#),
         ),
         (Method::PUT, "/api/portal/keys/sk-test123/default", None),
         (Method::PUT, "/api/portal/keys/sk-test123/model-group", None),

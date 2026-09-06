@@ -65,12 +65,6 @@
       width="min(500px, calc(100vw - 32px))"
     >
       <el-form :model="newKeyForm" label-width="100px">
-        <el-form-item label="密钥 ID" required>
-          <el-input
-            v-model="newKeyForm.downstream_id"
-            placeholder="sk-..."
-          />
-        </el-form-item>
         <el-form-item label="标签">
           <el-input
             v-model="newKeyForm.label"
@@ -95,13 +89,39 @@
       </el-form>
       <template #footer>
         <el-button @click="showAddDialog = false">取消</el-button>
-        <el-button
-          type="primary"
-          :disabled="!newKeyForm.downstream_id"
-          @click="handleCreate"
-        >
+        <el-button type="primary" @click="handleCreate">
           添加密钥
         </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Server-generated secret (shown exactly once, cannot be re-read) -->
+    <el-dialog
+      v-model="showSecretDialog"
+      title="密钥已生成"
+      width="min(540px, calc(100vw - 32px))"
+    >
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="密钥只显示这一次，请立即复制保存。关闭后无法再次查看完整密钥。"
+      />
+      <div class="secret-box" style="margin-top: 16px">
+        <div class="secret-row">
+          <span class="secret-label">密钥 ID</span>
+          <code>{{ newKeySecret?.downstream_id }}</code>
+        </div>
+        <div class="secret-row">
+          <span class="secret-label">密钥</span>
+          <code>{{ newKeySecret?.plaintext_key }}</code>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="copySecret">
+          <Copy :size="14" style="margin-right: 6px" />复制密钥
+        </el-button>
+        <el-button @click="showSecretDialog = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -110,7 +130,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus, RotateCw, KeyRound } from '@lucide/vue'
+import { Plus, RotateCw, KeyRound, Copy } from '@lucide/vue'
 import { portalApi, type ModelGroup, type PortalKey } from '@/api/portal'
 import KeyCard from '@/components/KeyCard.vue'
 
@@ -120,10 +140,12 @@ const keys = ref<PortalKey[]>([])
 const showAddDialog = ref(false)
 const modelGroups = ref<ModelGroup[]>([])
 const newKeyForm = ref({
-  downstream_id: '',
   label: '',
   model_group_id: ''
 })
+const showSecretDialog = ref(false)
+// 密钥本体只由服务端在创建/轮换时返回一次
+const newKeySecret = ref<{ downstream_id: string; plaintext_key: string } | null>(null)
 
 const sortedKeys = computed(() => {
   return [...keys.value].sort((a, b) => {
@@ -149,17 +171,46 @@ const loadKeys = async () => {
 
 const handleCreate = async () => {
   try {
-    await portalApi.createKey({
-      downstream_id: newKeyForm.value.downstream_id,
+    const { data } = await portalApi.createKey({
       label: newKeyForm.value.label || undefined,
       model_group_id: newKeyForm.value.model_group_id || 'basic'
     })
     ElMessage.success('密钥添加成功')
     showAddDialog.value = false
-    newKeyForm.value = { downstream_id: '', label: '', model_group_id: '' }
+    newKeyForm.value = { label: '', model_group_id: '' }
+    showSecret(data)
     await loadKeys()
   } catch (err: any) {
     ElMessage.error(err.message || '添加密钥失败')
+  }
+}
+
+const handleRotate = async (downstreamId: string) => {
+  try {
+    // 新密钥 ID 与密钥本体都由服务端生成
+    const { data } = await portalApi.rotateKeyById(downstreamId)
+    ElMessage.success('密钥轮换成功')
+    showSecret(data)
+    await loadKeys()
+  } catch (err: any) {
+    ElMessage.error(err.message || '轮换密钥失败')
+  }
+}
+
+const showSecret = (secret: { downstream_id: string; plaintext_key: string }) => {
+  newKeySecret.value = secret
+  showSecretDialog.value = true
+}
+
+const copySecret = async () => {
+  if (!newKeySecret.value) return
+  try {
+    await navigator.clipboard.writeText(
+      `密钥 ID: ${newKeySecret.value.downstream_id}\n密钥: ${newKeySecret.value.plaintext_key}`
+    )
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
   }
 }
 
@@ -170,16 +221,6 @@ const handleEdit = async (downstreamId: string, newLabel: string) => {
     await loadKeys()
   } catch (err: any) {
     ElMessage.error(err.message || '更新标签失败')
-  }
-}
-
-const handleRotate = async (downstreamId: string, newId: string) => {
-  try {
-    await portalApi.rotateKeyById(downstreamId, newId)
-    ElMessage.success('密钥轮换成功')
-    await loadKeys()
-  } catch (err: any) {
-    ElMessage.error(err.message || '轮换密钥失败')
   }
 }
 

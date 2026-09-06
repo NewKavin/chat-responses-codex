@@ -1,7 +1,9 @@
 use crate::keys::generate_downstream_key;
 use crate::state::{
-    unix_seconds, AppState, DownstreamConcurrencySnapshot, EnrichedUsageLog, UsageLogQuery,
+    unix_seconds, AppState, DownstreamConcurrencySnapshot, DownstreamConfig, EnrichedUsageLog,
+    UsageLogQuery,
 };
+use uuid::Uuid;
 use axum::extract::{Json, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -878,15 +880,10 @@ async fn extract_user_id_from_session(
 // Request/Response types
 #[derive(Deserialize)]
 pub(super) struct CreateKeyRequest {
-    downstream_id: String,
     label: Option<String>,
     model_group_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub(super) struct RotateKeyRequest {
-    new_downstream_id: String,
-}
 
 pub(super) async fn portal_list_keys(
     State(state): State<AppState>,
@@ -984,16 +981,43 @@ pub(super) async fn portal_create_key(
         }
     }
 
+    // 密钥 ID/密钥本体都由服务端生成（用户不需要也不应该填 ID）。
+    let generated = generate_downstream_key("portal");
+    let new_id = format!("portal-{}", Uuid::new_v4().simple());
+
+    // 门户密钥的权限由绑定级分组管控；key 级必须放行（T12 默认 deny-all
+    // 会挡住一切请求），故显式落 all 组。
+    let downstream = DownstreamConfig {
+        id: new_id.clone(),
+        name: payload
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("Portal Key {}", &new_id[7..19])),
+        hash: generated.hash.clone(),
+        plaintext_key: Some(generated.plaintext.clone()),
+        active: true,
+        model_group_id: Some("all".to_string()),
+        ..Default::default()
+    };
+    if let Err(error) = state.insert_downstream(downstream).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": format!("Failed to create key: {error}")}})),
+        )
+            .into_response();
+    }
+
     if store
         .add_downstream_binding_with_label(
             &user_id,
-            &payload.downstream_id,
+            &new_id,
             payload.label.as_deref(),
             Some(model_group_id),
         )
         .await
         .is_err()
     {
+        let _ = state.remove_downstream(&new_id).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": "Failed to create key"}})),
@@ -1004,8 +1028,11 @@ pub(super) async fn portal_create_key(
     (
         StatusCode::CREATED,
         Json(json!({
-            "downstream_id": payload.downstream_id,
+            "success": true,
+            "downstream_id": new_id,
+            "label": payload.label,
             "model_group_id": model_group_id,
+            "plaintext_key": generated.plaintext,
         })),
     )
         .into_response()
@@ -1061,7 +1088,6 @@ pub(super) async fn portal_rotate_key_by_id(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(old_downstream_id): axum::extract::Path<String>,
-    Json(payload): Json<RotateKeyRequest>,
 ) -> impl IntoResponse {
     // Extract user_id from session cookie
     let user_id = match extract_user_id_from_session(&state, &headers).await {
@@ -1101,7 +1127,6 @@ pub(super) async fn portal_rotate_key_by_id(
     };
 
     let was_default = old_key.is_default;
-    let label = (!old_key.label.is_empty()).then_some(old_key.label.as_str());
     let model_group_id = (!old_key.model_group_id.is_empty()).then_some(old_key.model_group_id.as_str());
 
     // Re-verify the old key's group is still accessible: a revoked grant must
@@ -1134,17 +1159,34 @@ pub(super) async fn portal_rotate_key_by_id(
         }
     }
 
-    // Add new key with same label and model_group_id
-    if store
-        .add_downstream_binding_with_label(
-            &user_id,
-            &payload.new_downstream_id,
-            label,
-            model_group_id,
+    // 新密钥由服务端生成（新 ID + 新 secret），保留 label 与绑定级分组。
+    let label: Option<&str> = (!old_key.label.is_empty()).then_some(old_key.label.as_str());
+    let generated = generate_downstream_key("portal");
+    let new_id = format!("portal-{}", Uuid::new_v4().simple());
+
+    let downstream = DownstreamConfig {
+        id: new_id.clone(),
+        name: label.unwrap_or("Portal Key").to_string(),
+        hash: generated.hash.clone(),
+        plaintext_key: Some(generated.plaintext.clone()),
+        active: true,
+        model_group_id: Some("all".to_string()),
+        ..Default::default()
+    };
+    if let Err(error) = state.insert_downstream(downstream).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": format!("Failed to create key: {error}")}})),
         )
+            .into_response();
+    }
+
+    if store
+        .add_downstream_binding_with_label(&user_id, &new_id, label, model_group_id)
         .await
         .is_err()
     {
+        let _ = state.remove_downstream(&new_id).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": "Failed to add new key"}})),
@@ -1153,7 +1195,7 @@ pub(super) async fn portal_rotate_key_by_id(
     }
 
     // If old key was default, set new key as default
-    if was_default && store.set_default_key(&user_id, &payload.new_downstream_id).await.is_err() {
+    if was_default && store.set_default_key(&user_id, &new_id).await.is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": "Failed to set new key as default"}})),
@@ -1161,10 +1203,19 @@ pub(super) async fn portal_rotate_key_by_id(
             .into_response();
     }
 
-    // Try to delete old key (best effort)
+    // 删除旧绑定 + 旧 downstream：旧 secret 立即失效（仅删绑定不够，
+    // 无绑定的 key 级 all 仍会放行）。
     let _ = store.remove_downstream_binding_safe(&user_id, &old_downstream_id).await;
+    let _ = state.remove_downstream(&old_downstream_id).await;
 
-    StatusCode::NO_CONTENT.into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "downstream_id": new_id,
+            "plaintext_key": generated.plaintext,
+        })),
+    )
+        .into_response()
 }
 
 pub(super) async fn portal_set_default_key(

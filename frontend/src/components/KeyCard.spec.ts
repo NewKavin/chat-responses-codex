@@ -127,21 +127,21 @@ describe('KeyCard', () => {
     expect(mockHandlers.onDelete).toHaveBeenCalledWith('sk-test123abc')
   })
 
-  it('shows rotate dialog with input', async () => {
+  it('shows rotate dialog without id input and calls onRotate with only the key id', async () => {
     const wrapper = render()
 
     const rotateButton = wrapper.find('[aria-label="Rotate key"]')
     await rotateButton.trigger('click')
 
-    expect(wrapper.text()).toMatch(/输入新的密钥/)
-
-    const input = wrapper.find('input[placeholder*="新密钥"]')
-    await input.setValue('sk-newkey456')
+    // 新密钥 ID 由服务端生成，用户不再填写
+    expect(wrapper.text()).toMatch(/全新的密钥/)
+    expect(wrapper.text()).not.toMatch(/输入新的密钥/)
+    expect(wrapper.find('input[placeholder*="新密钥"]').exists()).toBe(false)
 
     const confirmButton = wrapper.findAll('button').find(btn => btn.text().includes('确认'))
     await confirmButton?.trigger('click')
 
-    expect(mockHandlers.onRotate).toHaveBeenCalledWith('sk-test123abc', 'sk-newkey456')
+    expect(mockHandlers.onRotate).toHaveBeenCalledWith('sk-test123abc')
   })
 
   it('shows loading state during operation', async () => {

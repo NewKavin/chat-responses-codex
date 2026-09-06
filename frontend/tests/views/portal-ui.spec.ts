@@ -23,6 +23,21 @@ describe('portal ui structure', () => {
     expect(details).toContain('quota-detail-section')
   })
 
+  it('auto-generates portal key ids server-side (no user-filled key id)', () => {
+    const keys = source('KeyManagement')
+    const card = componentSource('KeyCard')
+
+    // 用户不再填写“密钥 ID”：创建表单与轮换输入框都已移除
+    expect(keys).not.toContain('newKeyForm.downstream_id')
+    expect(keys).not.toContain("placeholder=\"sk-...\"")
+    expect(card).not.toContain('newKeyId')
+    // 服务端生成后一次性回显新密钥
+    expect(keys).toContain('portalApi.createKey({')
+    expect(keys).toContain('plaintext_key')
+    expect(keys).toContain('密钥只显示这一次')
+    expect(card).not.toContain('请输入新的密钥 ID')
+  })
+
   it('uses a compact history toolbar and stable chart surfaces', () => {
     const history = source('UsageHistory')
 

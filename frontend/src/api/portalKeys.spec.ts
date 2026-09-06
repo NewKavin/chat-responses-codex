@@ -48,10 +48,11 @@ describe('Portal Keys API', () => {
   })
 
   describe('createKey', () => {
-    it('posts correct data for key creation', async () => {
-      const post = vi.spyOn(portalHttp, 'post').mockResolvedValue({ data: { success: true } })
+    it('posts correct data for key creation (id is server-generated)', async () => {
+      const post = vi.spyOn(portalHttp, 'post').mockResolvedValue({
+        data: { success: true, downstream_id: 'portal-x', plaintext_key: 'sk-x' }
+      })
       const request = {
-        downstream_id: 'new-key',
         label: 'New Key',
         model_group_id: 'prod'
       }
@@ -62,10 +63,10 @@ describe('Portal Keys API', () => {
     })
 
     it('posts minimal data when optional fields omitted', async () => {
-      const post = vi.spyOn(portalHttp, 'post').mockResolvedValue({ data: { success: true } })
-      const request = {
-        downstream_id: 'minimal-key'
-      }
+      const post = vi.spyOn(portalHttp, 'post').mockResolvedValue({
+        data: { success: true, downstream_id: 'portal-x', plaintext_key: 'sk-x' }
+      })
+      const request = {}
 
       await portalApi.createKey(request)
 
@@ -95,14 +96,14 @@ describe('Portal Keys API', () => {
   })
 
   describe('rotateKeyById', () => {
-    it('posts rotation request with new downstream_id', async () => {
-      const post = vi.spyOn(portalHttp, 'post').mockResolvedValue({ data: { success: true } })
-
-      await portalApi.rotateKeyById('old-key', 'new-key')
-
-      expect(post).toHaveBeenCalledWith('/portal/keys/old-key/rotate', {
-        new_downstream_id: 'new-key'
+    it('posts rotation request without client-supplied id', async () => {
+      const post = vi.spyOn(portalHttp, 'post').mockResolvedValue({
+        data: { downstream_id: 'portal-new', plaintext_key: 'sk-new' }
       })
+
+      await portalApi.rotateKeyById('old-key')
+
+      expect(post).toHaveBeenCalledWith('/portal/keys/old-key/rotate', {})
     })
   })
 

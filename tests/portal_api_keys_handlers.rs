@@ -247,7 +247,7 @@ async fn test_create_key() {
     // Build the app
     let app = chat_responses_codex::server::build_router(state.clone());
 
-    // Call POST /api/portal/keys
+    // 密钥 ID 由服务端生成：请求体不需要（也不应该）传 downstream_id
     let req = Request::builder()
         .uri("/api/portal/keys")
         .method("POST")
@@ -255,7 +255,6 @@ async fn test_create_key() {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({
-                "downstream_id": "new-key-1",
                 "label": "Test Key",
                 "model_group_id": "basic"
             }))
@@ -265,8 +264,16 @@ async fn test_create_key() {
 
     let response = app.clone().oneshot(req).await.unwrap();
 
-    // GREEN: Expect 201 CREATED
+    // GREEN: Expect 201 CREATED，且一次性返回新密钥本体
     assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let created_id = created["downstream_id"].as_str().unwrap().to_string();
+    let created_secret = created["plaintext_key"].as_str().unwrap().to_string();
+    assert!(created_id.starts_with("portal-"), "id must be server-generated: {created_id}");
+    assert!(!created_secret.is_empty(), "plaintext_key must be returned once");
 
     // Verify key was created by listing keys
     let req = Request::builder()
@@ -288,7 +295,7 @@ async fn test_create_key() {
     assert_eq!(keys.len(), 1);
 
     let key = &keys[0];
-    assert_eq!(key["downstream_id"], "new-key-1");
+    assert_eq!(key["downstream_id"], created_id);
     assert_eq!(key["label"], "Test Key");
     assert_eq!(key["model_group_id"], "basic");
 }
@@ -517,24 +524,30 @@ async fn test_rotate_key() {
     // Build the app
     let app = chat_responses_codex::server::build_router(state.clone());
 
-    // Rotate the key
+    // 新密钥 ID 由服务端生成：请求体不需要（也不应该）传 new_downstream_id
     let req = Request::builder()
         .uri("/api/portal/keys/old-key-1/rotate")
         .method("POST")
         .header(header::COOKIE, format!("portal_session={}", raw_sid))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "new_downstream_id": "new-key-1"
-            }))
-            .unwrap(),
+            serde_json::to_vec(&serde_json::json!({})).unwrap(),
         ))
         .unwrap();
 
     let response = app.clone().oneshot(req).await.unwrap();
 
-    // GREEN: Expect 204 NO_CONTENT
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // GREEN: 轮换返回新密钥本体（200 + plaintext_key）
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rotated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let new_id = rotated["downstream_id"].as_str().unwrap().to_string();
+    let new_secret = rotated["plaintext_key"].as_str().unwrap().to_string();
+    assert!(new_id.starts_with("portal-"), "id must be server-generated: {new_id}");
+    assert!(!new_secret.is_empty(), "plaintext_key must be returned once");
+    assert_ne!(new_id, "old-key-1");
 
     // Verify rotation: new key exists with same label/model_group/default status
     let req = Request::builder()
@@ -554,11 +567,14 @@ async fn test_rotate_key() {
 
     let keys = json.as_array().unwrap();
 
-    // Old key should be gone (or still present if it had usage)
-    let _old_key = keys.iter().find(|k| k["downstream_id"] == "old-key-1");
+    // Old key should be gone
+    assert!(
+        keys.iter().all(|k| k["downstream_id"] != "old-key-1"),
+        "old key binding must be removed after rotation"
+    );
 
-    // New key should exist
-    let new_key = keys.iter().find(|k| k["downstream_id"] == "new-key-1").unwrap();
+    // New key should exist with the server-generated id
+    let new_key = keys.iter().find(|k| k["downstream_id"] == new_id).unwrap();
     assert_eq!(new_key["label"], "Production Key");
     assert_eq!(new_key["model_group_id"], "premium");
     assert_eq!(new_key["is_default"], true); // Preserved default status

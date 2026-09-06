@@ -31,13 +31,8 @@ export interface ModelGroup {
 }
 
 export interface CreateKeyRequest {
-  downstream_id: string
   label?: string
   model_group_id?: string
-}
-
-export interface RotateKeyRequest {
-  new_downstream_id: string
 }
 
 export interface AnnouncementResponse {
@@ -111,12 +106,17 @@ export const portalApi = {
 
   // Multi-Key Management
   listKeys: () => portalHttp.get<PortalKey[]>('/portal/keys'),
-  createKey: (data: CreateKeyRequest) => portalHttp.post<{ success: boolean }>('/portal/keys', data),
+  createKey: (data: CreateKeyRequest) =>
+    portalHttp.post<{ success: boolean; downstream_id: string; plaintext_key: string }>(
+      '/portal/keys',
+      data
+    ),
   getKeyDetails: (downstreamId: string) => portalHttp.get<PortalKey>(`/portal/keys/${downstreamId}`),
-  rotateKeyById: (downstreamId: string, newDownstreamId: string) =>
-    portalHttp.post<{ success: boolean }>(`/portal/keys/${downstreamId}/rotate`, {
-      new_downstream_id: newDownstreamId
-    }),
+  rotateKeyById: (downstreamId: string) =>
+    portalHttp.post<{ downstream_id: string; plaintext_key: string }>(
+      `/portal/keys/${downstreamId}/rotate`,
+      {}
+    ),
   setDefaultKey: (downstreamId: string) =>
     portalHttp.put<{ success: boolean }>(`/portal/keys/${downstreamId}/default`),
   deleteKey: (downstreamId: string) =>
