@@ -153,7 +153,7 @@ fn models_harness() -> (axum::Router, AppState) {
                 active: true,
                 billing_mode: "request".into(),
 
-                model_concurrency_groups: vec![], ..Default::default()}]),
+                ..Default::default()}]),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
