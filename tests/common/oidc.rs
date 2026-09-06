@@ -86,6 +86,17 @@ pub async fn reset_portal_tables(database_url: &str) {
         )
         .await
         .expect("dropping legacy portal tables must succeed");
+    // Downstream/upstream tables are part of the gateway core schema and some
+    // test helpers INSERT into them before load_state() rebuilds the schema,
+    // so clear rows but keep the tables (also prevents stale downstreams
+    // leaking across tests, which broke group resolution).
+    client
+        .batch_execute(
+            "TRUNCATE TABLE downstream_model_allowlist, downstreams, \
+             upstream_supported_models, upstreams CASCADE",
+        )
+        .await
+        .expect("truncating gateway tables must succeed");
 }
 
 fn split_admin(database_url: &str) -> (String, String) {

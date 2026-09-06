@@ -106,7 +106,7 @@ async fn test_model_groups_has_initial_data() {
     let store = portal_store_opt.as_ref().expect("portal_store must exist");
     let client = store.get_client().await.expect("Failed to get client");
 
-    // 验证初始数据存在
+    // 验证初始数据存在：四个种子组（deny-all / basic / premium / all）
     let rows = client
         .query(
             "SELECT id, name, allowed_models::text FROM model_groups ORDER BY id",
@@ -115,9 +115,10 @@ async fn test_model_groups_has_initial_data() {
         .await
         .expect("Failed to query initial data");
 
-    assert!(rows.len() >= 3, "Should have at least 3 initial groups");
+    assert!(rows.len() >= 4, "Should have at least 4 initial groups (incl. deny-all)");
 
     let ids: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+    assert!(ids.contains(&"deny-all".to_string()), "Should have 'deny-all' group");
     assert!(ids.contains(&"basic".to_string()), "Should have 'basic' group");
     assert!(ids.contains(&"premium".to_string()), "Should have 'premium' group");
     assert!(ids.contains(&"all".to_string()), "Should have 'all' group");
@@ -130,6 +131,67 @@ async fn test_model_groups_has_initial_data() {
     assert!(all_row.is_some());
     let allowed_models: String = all_row.unwrap().get(2);
     assert!(allowed_models.contains("*"), "'all' group should have wildcard");
+
+    // 验证 deny-all 是哨兵组（["__none__"]，不能是空数组）
+    let deny_row = rows.iter().find(|r| {
+        let id: String = r.get(0);
+        id == "deny-all"
+    });
+    assert!(deny_row.is_some());
+    let deny_models: String = deny_row.unwrap().get(2);
+    assert!(
+        deny_models.contains("__none__"),
+        "deny-all must use sentinel model '__none__', got {deny_models}"
+    );
+    assert!(
+        !deny_models.contains("null") && !deny_models.contains("[]"),
+        "deny-all must NOT be an empty list (empty = allow all), got {deny_models}"
+    );
+
+    // 验证 basic / premium 使用本部署真实模型（与 migrations/2026-09-06-fix-model-group-seeds.sql 一致）
+    let basic_row = rows.iter().find(|r| {
+        let id: String = r.get(0);
+        id == "basic"
+    });
+    let basic_models: String = basic_row.unwrap().get(2);
+    for expected in [
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-0731",
+        "deepseek-v4-flash-free",
+        "glm-5.3-flash",
+        "kimi-k3",
+    ] {
+        assert!(
+            basic_models.contains(expected),
+            "basic group should include real model '{expected}', got {basic_models}"
+        );
+    }
+    assert!(
+        !basic_models.contains("gpt-3.5-turbo"),
+        "basic group must not keep placeholder model, got {basic_models}"
+    );
+
+    let premium_row = rows.iter().find(|r| {
+        let id: String = r.get(0);
+        id == "premium"
+    });
+    let premium_models: String = premium_row.unwrap().get(2);
+    for expected in [
+        "glm-5.2",
+        "gpt-5.5",
+        "claude-opus-5",
+        "grok-4.6",
+        "qwen3.8-max",
+    ] {
+        assert!(
+            premium_models.contains(expected),
+            "premium group should include real model '{expected}', got {premium_models}"
+        );
+    }
+    assert!(
+        !premium_models.contains("gpt-4"),
+        "premium group must not keep placeholder model, got {premium_models}"
+    );
 }
 
 #[tokio::test]

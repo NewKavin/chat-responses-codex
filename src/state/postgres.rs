@@ -1910,23 +1910,6 @@ ALTER TABLE downstreams
 ALTER TABLE downstreams
     DROP COLUMN IF EXISTS token_price_per_million_cents;
 
--- Downstream model-group linkage: mirrors migrations/2026-09-05-add-downstream-model-group-id.sql
--- so freshly initialized databases get the same FK and index as migrated ones.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'fk_downstream_model_group'
-          AND conrelid = 'downstreams'::regclass
-    ) THEN
-        ALTER TABLE downstreams
-            ADD CONSTRAINT fk_downstream_model_group
-            FOREIGN KEY (model_group_id) REFERENCES model_groups(id) ON DELETE SET NULL;
-    END IF;
-END $$;
-CREATE INDEX IF NOT EXISTS idx_downstreams_model_group
-    ON downstreams(model_group_id);
-
 CREATE TABLE IF NOT EXISTS downstream_model_allowlist (
     downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
@@ -2107,15 +2090,47 @@ CREATE TABLE IF NOT EXISTS model_groups (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Insert default model groups
+-- Insert default model groups.
+-- WARNING: keep in sync with migrations/2026-09-06-fix-model-group-seeds.sql.
+-- Seeds use real models of this deployment; new databases get the same four
+-- groups as migrated ones. ON CONFLICT DO NOTHING stays: ad-hoc operator
+-- adjustments must survive restarts.
 INSERT INTO model_groups (id, name, description, allowed_models) VALUES
+  ('deny-all', 'Deny All', 'Sentinel group that denies every model (safety fallback)',
+   '["__none__"]'::jsonb),
   ('basic', 'Basic Models', 'Cost-effective models for development and testing',
-   '["gpt-3.5-turbo", "claude-3-haiku"]'::jsonb),
+   '["deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4-flash-free", "glm-5.3-flash", "kimi-k3"]'::jsonb),
   ('premium', 'Premium Models', 'Advanced models for production workloads',
-   '["gpt-4", "gpt-4-turbo", "claude-3-opus", "claude-3.5-sonnet", "claude-3-sonnet"]'::jsonb),
+   '["glm-5.2", "glm-5.3", "deepseek-v4-pro", "deepseek-v4-pro-0813", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "grok-4.5", "grok-4.6", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "qwen3.8-max"]'::jsonb),
   ('all', 'All Models', 'Unrestricted access to all available models',
    '["*"]'::jsonb)
 ON CONFLICT (id) DO NOTHING;
+
+-- Downstream model-group linkage: mirrors migrations/2026-09-05-add-downstream-model-group-id.sql
+-- so freshly initialized databases get the same FK and index as migrated ones.
+-- NOTE: must run AFTER model_groups exists (this is the first FK referencing it).
+-- Stale references to dropped groups (e.g. where the group table was reset)
+-- are nulled first so adding the FK cannot fail; stage-2 migration will bind
+-- every downstream to a real group afterwards.
+UPDATE downstreams
+SET model_group_id = NULL
+WHERE model_group_id IS NOT NULL
+  AND model_group_id NOT IN (SELECT id FROM model_groups);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_downstream_model_group'
+          AND conrelid = 'downstreams'::regclass
+    ) THEN
+        ALTER TABLE downstreams
+            ADD CONSTRAINT fk_downstream_model_group
+            FOREIGN KEY (model_group_id) REFERENCES model_groups(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_downstreams_model_group
+    ON downstreams(model_group_id);
 
 -- User access permissions for model groups
 CREATE TABLE IF NOT EXISTS portal_user_model_groups (

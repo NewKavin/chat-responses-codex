@@ -30,6 +30,14 @@ async fn setup_test_data(state: &AppState) {
     // Create test model groups
     let model_groups = vec![
         ModelGroup {
+            id: "group-delete-me".into(),
+            name: "Group Delete Me".into(),
+            description: Some("Temp group deleted during tests".into()),
+            allowed_models: vec!["temp-model".into()],
+            created_at: 1234567890,
+            updated_at: 1234567890,
+        },
+        ModelGroup {
             id: "group-basic".into(),
             name: "Basic Models".into(),
             description: Some("Basic tier models".into()),
@@ -88,7 +96,7 @@ async fn setup_test_data(state: &AppState) {
             plaintext_key: Some("test-key-2".into()),
             plaintext_key_prefix: None,
             model_allowlist: vec!["fallback-model".into()],
-            model_group_id: Some("non-existent-group".into()),
+            model_group_id: Some("group-delete-me".into()),
             rate_limit_enabled: true,
             per_minute_limit: 100,
             max_concurrency: 10,
@@ -299,7 +307,6 @@ async fn gateway_http_enforces_downstream_model_group() {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
     };
-
     // /v1/models 列表必须按分组过滤：只出现 group-basic 的模型。
     let (status, ids) = models_request(&app, &key1).await;
     assert_eq!(status, StatusCode::OK);
@@ -488,20 +495,37 @@ async fn downstream_with_invalid_group_falls_back_to_allowlist() {
     let state = load_state(&url).await;
     setup_test_data(&state).await;
 
+    let portal_store = state.portal_store().expect("Portal store required");
+
+    // 组存在时：使用分组模型（FK 保证不会绑定不存在的组）。
     let snapshot = state.routing_snapshot().await;
     let downstream = snapshot
         .downstreams
         .iter()
         .find(|d| d.id == "downstream-with-invalid-group")
         .expect("Downstream should exist");
-
-    let portal_store = state.portal_store().expect("Portal store required");
     let allowed_models = downstream
         .get_allowed_models(&*portal_store)
         .await
         .unwrap();
+    assert_eq!(allowed_models.len(), 1);
+    assert!(allowed_models.contains(&"temp-model".to_string()));
 
-    // Should fall back to model_allowlist
+    // 删除组后（FK ON DELETE SET NULL）：回退到 model_allowlist。
+    portal_store
+        .delete_model_group("group-delete-me")
+        .await
+        .expect("delete group should succeed");
+    let snapshot = state.routing_snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-with-invalid-group")
+        .expect("Downstream should exist");
+    let allowed_models = downstream
+        .get_allowed_models(&*portal_store)
+        .await
+        .unwrap();
     assert_eq!(allowed_models.len(), 1);
     assert!(allowed_models.contains(&"fallback-model".to_string()));
 }
