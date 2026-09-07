@@ -154,6 +154,7 @@ fn catalog_state(
                 plaintext_key_prefix: None,
                 model_allowlist,
                 model_group_id: None,
+                is_portal_key: false,
                 rate_limit_enabled: false,
                 per_minute_limit: 0,
                 max_concurrency: 0,

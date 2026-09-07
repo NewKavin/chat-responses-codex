@@ -997,6 +997,8 @@ pub(super) async fn portal_create_key(
         plaintext_key: Some(generated.plaintext.clone()),
         active: true,
         model_group_id: Some("all".to_string()),
+        // 门户自建密钥账号：管理员视角隐藏
+        is_portal_key: true,
         ..Default::default()
     };
     if let Err(error) = state.insert_downstream(downstream).await {
@@ -1171,6 +1173,8 @@ pub(super) async fn portal_rotate_key_by_id(
         plaintext_key: Some(generated.plaintext.clone()),
         active: true,
         model_group_id: Some("all".to_string()),
+        // 门户自建密钥账号：管理员视角隐藏
+        is_portal_key: true,
         ..Default::default()
     };
     if let Err(error) = state.insert_downstream(downstream).await {

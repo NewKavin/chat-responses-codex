@@ -1137,6 +1137,9 @@ pub struct DownstreamConfig {
     /// Priority: model_group_id > model_allowlist (for backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_group_id: Option<String>,
+    /// 门户用户自建密钥账号：管理员视角隐藏、不可管理（列表/更新/删除/批量/运行时全过滤）。
+    #[serde(default)]
+    pub is_portal_key: bool,
     #[serde(default = "default_downstream_rate_limit_enabled")]
     pub rate_limit_enabled: bool,
     #[serde(default = "default_downstream_per_minute_limit")]
@@ -1192,6 +1195,7 @@ impl Default for DownstreamConfig {
             plaintext_key_prefix: None,
             model_allowlist: Vec::new(),
             model_group_id: None,
+            is_portal_key: false,
             rate_limit_enabled: default_downstream_rate_limit_enabled(),
             per_minute_limit: default_downstream_per_minute_limit(),
             max_concurrency: default_downstream_max_concurrency(),

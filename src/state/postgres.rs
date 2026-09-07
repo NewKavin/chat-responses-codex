@@ -172,7 +172,7 @@ impl PostgresStateStore {
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
                  request_quota_requests, expires_at, active, billing_mode, \
                  input_token_price_per_million_cents, output_token_price_per_million_cents, \
-                 daily_cost_limit_cents, model_concurrency_groups, model_group_id \
+                 daily_cost_limit_cents, model_concurrency_groups, model_group_id, is_portal_key \
                  FROM downstreams ORDER BY id",
                 &[],
             )
@@ -214,6 +214,7 @@ impl PostgresStateStore {
                     })
                     .unwrap_or_default(),
                 model_group_id: row.get::<_, Option<String>>(18),
+                is_portal_key: row.get::<_, bool>(19),
             });
         }
 
@@ -1589,9 +1590,11 @@ async fn sync_downstreams(
             // T15：DB 层 model_group_id NOT NULL；任何漏网 None 都落 deny-all，
             // 绝不写 NULL（NULL 会让读路径回退白名单，空列表 = 放行全部）。
             &(downstream.model_group_id.as_deref().unwrap_or("deny-all")),
+            // 门户自建密钥行：对管理员隐藏
+            &downstream.is_portal_key,
         ];
 
-        const DOWNSTREAM_COLUMNS: [&str; 19] = [
+        const DOWNSTREAM_COLUMNS: [&str; 20] = [
             "id",
             "name",
             "hash",
@@ -1611,6 +1614,7 @@ async fn sync_downstreams(
             "daily_cost_limit_cents",
             "model_concurrency_groups",
             "model_group_id",
+            "is_portal_key",
         ];
         const DOWNSTREAM_INSERT_CONFLICT: &str = "ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1630,7 +1634,8 @@ async fn sync_downstreams(
                 output_token_price_per_million_cents = EXCLUDED.output_token_price_per_million_cents,
                 daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents,
                 model_concurrency_groups = EXCLUDED.model_concurrency_groups,
-                model_group_id = EXCLUDED.model_group_id";
+                model_group_id = EXCLUDED.model_group_id,
+                is_portal_key = EXCLUDED.is_portal_key";
         debug_assert_eq!(DOWNSTREAM_COLUMNS.len(), params.len());
         let sql = insert_statement(
             "downstreams",
@@ -2133,6 +2138,11 @@ ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS model_concurrency_groups JSONB NULL;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS model_group_id TEXT NULL;
+ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS is_portal_key BOOLEAN NOT NULL DEFAULT FALSE;
+-- 存量门户自建密钥一次性标记（幂等）：新格式 key-% 前缀，以及历史 'Portal Key %' 命名
+UPDATE downstreams SET is_portal_key = TRUE
+WHERE (id LIKE 'key-%' OR name LIKE 'Portal Key %') AND NOT is_portal_key;
 ALTER TABLE downstreams
     DROP COLUMN IF EXISTS token_price_per_million_cents;
 

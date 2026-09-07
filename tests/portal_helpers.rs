@@ -1548,6 +1548,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             plaintext_key_prefix: None,
             model_allowlist: vec![], // Empty allowlist
             model_group_id: None,
+            is_portal_key: false,
             per_minute_limit: 100,
             rate_limit_enabled: true,
             max_concurrency: 10,

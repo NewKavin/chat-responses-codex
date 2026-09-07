@@ -1193,3 +1193,111 @@ async fn test_list_keys_bearer_disabled_user_rejected() {
     let response2 = app.clone().oneshot(req2).await.unwrap();
     assert_eq!(response2.status(), StatusCode::FORBIDDEN);
 }
+
+// ============================================================================
+// 门户自建密钥对管理员完全隐藏（不是“多了一个账号”）
+// ============================================================================
+
+#[tokio::test]
+async fn test_portal_keys_are_hidden_from_admin_downstreams() {
+    let _guard = common::oidc::lock().await;
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal_store must exist");
+
+    // 门户用户 + 会话
+    let user = store
+        .create_user_with_identity("portal-hidden@example.com", None, None, "google", "portal_hidden_1")
+        .await
+        .expect("create user");
+    let raw_sid = "portal_hidden_session";
+    let sid_hash = sha256_hex(raw_sid.as_bytes());
+    let now = chat_responses_codex::state::unix_seconds() as i64;
+    store
+        .create_session(&sid_hash, &user.id, now + 3600, None, None)
+        .await
+        .expect("create session");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let admin_token = get_admin_token(&app).await;
+
+    // 门户用户创建一把密钥
+    let req = Request::builder()
+        .uri("/api/portal/keys")
+        .method("POST")
+        .header(header::COOKIE, format!("portal_session={}", raw_sid))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({"label": "My Key"})).unwrap(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let portal_key_id = created["downstream_id"].as_str().unwrap().to_string();
+
+    // 管理员下游列表：不得出现门户密钥
+    let req = Request::builder()
+        .uri("/api/admin/downstreams")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let items: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let ids: Vec<String> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !ids.contains(&portal_key_id),
+        "portal key must not appear in admin downstream list: {ids:?}"
+    );
+
+    // 管理员不能删除门户密钥（管理员视角该资源不存在）
+    let req = Request::builder()
+        .uri(format!("/api/admin/downstreams/{}", portal_key_id))
+        .method("DELETE")
+        .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "admin must not be able to delete a portal key"
+    );
+}
+
+async fn get_admin_token(app: &axum::Router) -> String {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/admin/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"username": "admin", "password": "admin"}).to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    json["token"].as_str().unwrap().to_string()
+}

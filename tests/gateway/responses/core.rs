@@ -120,6 +120,7 @@ async fn downstream_responses_supports_configured_portal_models() {
                     .map(|model| (*model).into())
                     .collect(),
                 model_group_id: None,
+                is_portal_key: false,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,
@@ -524,6 +525,7 @@ async fn downstream_models_do_not_live_discover_an_empty_portal_catalog() {
                     .map(|model| (*model).into())
                     .collect(),
                 model_group_id: None,
+                is_portal_key: false,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

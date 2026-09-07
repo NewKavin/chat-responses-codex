@@ -1692,6 +1692,7 @@ async fn downstream_chat_completions_supports_configured_portal_models() {
                     .map(|model| (*model).into())
                     .collect(),
                 model_group_id: None,
+                is_portal_key: false,
                 per_minute_limit: 60,
                 rate_limit_enabled: true,
                 max_concurrency: 10,

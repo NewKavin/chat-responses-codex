@@ -2076,6 +2076,8 @@ pub(super) async fn admin_list_downstreams(
     let snapshot = state.snapshot().await;
 
     let mut downstreams = snapshot.downstreams.as_ref().clone();
+    // 门户自建密钥账号（is_portal_key）不进入管理员下游列表
+    downstreams.retain(|d| !d.is_portal_key);
 
     // Filter by status
     if let Some(status) = params.get("status") {
@@ -2137,8 +2139,18 @@ pub(super) async fn admin_downstream_runtime(State(state): State<AppState>) -> i
         .first()
         .map(|(_, snapshot)| snapshot.updated_at)
         .unwrap_or_else(unix_seconds);
+    // 门户自建密钥账号不进入管理员运行时视图
+    let portal_key_ids: std::collections::HashSet<String> = state
+        .snapshot()
+        .await
+        .downstreams
+        .iter()
+        .filter(|d| d.is_portal_key)
+        .map(|d| d.id.clone())
+        .collect();
     let items = snapshots
         .into_iter()
+        .filter(|(downstream_id, _)| !portal_key_ids.contains(downstream_id))
         .map(|(downstream_id, concurrency)| DownstreamRuntimeItem {
             downstream_id,
             concurrency,
@@ -2418,6 +2430,16 @@ pub(super) async fn admin_update_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
+        // 门户自建密钥账号对管理员隐藏：视为不存在
+        if downstream.is_portal_key {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": { "message": format!("Downstream '{}' not found", id) }
+                })),
+            )
+                .into_response();
+        }
         // Apply updates (preserve hash).
         if let Some(updates_object) = updates.as_object() {
             if let Err(message) = apply_downstream_updates(&mut downstream, updates_object) {
@@ -2786,6 +2808,11 @@ pub(super) async fn admin_batch_update_downstreams(
             failed.push(json!({ "id": id, "error": "not found" }));
             continue;
         };
+        // 门户自建密钥账号对管理员隐藏
+        if downstream.is_portal_key {
+            failed.push(json!({ "id": id, "error": "not found" }));
+            continue;
+        }
         if let Err(message) = apply_downstream_updates(&mut downstream, update_object) {
             failed.push(json!({ "id": id, "error": message }));
             continue;
@@ -2872,6 +2899,22 @@ pub(super) async fn admin_delete_downstream(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // 门户自建密钥账号对管理员隐藏：不可删除
+    if state
+        .snapshot()
+        .await
+        .downstreams
+        .iter()
+        .any(|d| d.id == id && d.is_portal_key)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": { "message": format!("Downstream '{}' not found", id) }
+            })),
+        )
+            .into_response();
+    }
     match state.remove_downstream(&id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
@@ -2903,6 +2946,16 @@ pub(super) async fn admin_toggle_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
+        // 门户自建密钥账号对管理员隐藏：视为不存在
+        if downstream.is_portal_key {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": { "message": format!("Downstream '{}' not found", id) }
+                })),
+            )
+                .into_response();
+        }
         downstream.active = !downstream.active;
         let new_status = downstream.active;
 
