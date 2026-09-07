@@ -520,6 +520,20 @@ COMMIT;
 
 **已发现并修复的连锁问题**：
 - T15 的 `NOT NULL` 使“未绑组”形态从 DB 中消失，m2/m3/迁移/资格审定等造旧库数据的测试统一改为：先 `DROP NOT NULL` 再裸 SQL 插 NULL 行（模拟升级前旧库）；无条件组外的内存态用例（资格审定规则 1）改用 `add_downstream`。
+- **跨进程测试竞态修复（2026-09-07，`92a32e1e`）**：`lock()` 原本只有进程内
+  Mutex，cargo 并行跑多个 test binary 连同一测试库时，一个 binary 的
+  reset（DROP model_groups CASCADE）会让另一个 binary 的 add binding 报
+  `Db("db error")`（T15 的 NOT NULL + FK SET DEFAULT 把竞态从静默变显式）。
+  65498b79 的 reset 内 advisory lock 只覆盖 DROP 窗口。现改为**测试体级组合守卫**：
+  `tests/common/oidc.rs` 的 `lock().await` 持进程内 tokio Mutex + 会话级
+  pg_advisory_lock（guard 持同一个专用连接，Drop 关连接即释放锁），
+  reset 内部 lock/unlock 对移除；157 处调用点迁移，同步 `#[test]`
+  用 `rt.block_on(common::oidc::lock())`。验证：并发复现命令两侧全绿，
+  `rtk cargo test` 全量连跑两次均为 2026 passed / 106 ignored / 86 suites。
+- **模型分组页可解释性（2026-09-07，`a457f55c`）**：内置组按钮禁用无说明；
+  组名加身份标签（内置 / 系统哨兵 / 迁移生成），禁用按钮包 el-tooltip
+  （外层 span）说明原因，页面顶部 el-alert 说明四个内置分组作用与 auto-*
+  来源；未放开任何禁用条件（T15 权限不变量）。vitest 加断言验证文案。
 - **T15 完备性补丁（2026-09-07 自检追加）**：`admin_delete_model_group` 原先只保护
   `basic`，而 T15 后 `deny-all` 是 `model_group_id` `NOT NULL DEFAULT` 的 FK 引用目标、
   `all` 是通配符语义的事实源——删掉任一会让权限兜底失效。现四个内置组
