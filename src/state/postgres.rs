@@ -1168,21 +1168,24 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
 /// - 用 DO 块包幂等判断；排在 migrate_model_allowlist_to_groups 之后执行。
 /// - 额外保险：SET NOT NULL 前把任何剩余 NULL 补成 deny-all（fail-closed）。
 /// 存量门户自建密钥标记（幂等）：
-/// 1) 新格式 key-% 前缀，或历史 'Portal Key %' 命名；
-/// 2) 历史门户行（portal-*/sk-<32hex>、用户自填 label）：key 级组 all 且
-///    存在 portal_user_downstreams 绑定即门户自建密钥。
+/// key 级组 all 且满足任一门户特征：key-% / portal-% / sk-<32hex> /
+/// 'Portal Key %' 命名 / 存在 portal_user_downstreams 绑定。
 /// 必须在 SCHEMA_SQL 之后（portal_user_downstreams 已建）执行。
 async fn migrate_portal_key_markers(tx: &Transaction<'_>) -> io::Result<()> {
     tx.batch_execute(
         r#"
         UPDATE downstreams SET is_portal_key = TRUE
-        WHERE (id LIKE 'key-%' OR name LIKE 'Portal Key %') AND NOT is_portal_key;
-        UPDATE downstreams SET is_portal_key = TRUE
         WHERE NOT is_portal_key
           AND model_group_id = 'all'
-          AND EXISTS (
-            SELECT 1 FROM portal_user_downstreams b
-            WHERE b.downstream_id = downstreams.id
+          AND (
+            id LIKE 'key-%'
+            OR id LIKE 'portal-%'
+            OR id ~ '^sk-[0-9a-f]{32}$'
+            OR name LIKE 'Portal Key %'
+            OR EXISTS (
+              SELECT 1 FROM portal_user_downstreams b
+              WHERE b.downstream_id = downstreams.id
+            )
           );
         "#,
     )

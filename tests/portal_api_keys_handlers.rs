@@ -1301,3 +1301,49 @@ async fn get_admin_token(app: &axum::Router) -> String {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     json["token"].as_str().unwrap().to_string()
 }
+
+#[tokio::test]
+async fn test_legacy_portal_keys_are_marked_hidden_on_startup() {
+    let _guard = common::oidc::lock().await;
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    // 第一次加载（建表），然后裸插“历史门户行”：key 级组 all、无绑定
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal_store must exist");
+    let client = store.get_client().await.expect("get client");
+    for (id, name) in [
+        ("portal-00000000000000000000000000000000", "via legacy portal"),
+        ("sk-11111111111111111111111111111111", "legacy self label"),
+    ] {
+        client
+            .execute(
+                "INSERT INTO downstreams (id, name, hash, plaintext_key, per_minute_limit, active, model_group_id) \
+                 VALUES ($1, $2, 'unused', 'unused', 60, true, 'all')",
+                &[&id, &name],
+            )
+            .await
+            .expect("insert legacy portal row");
+    }
+    drop(state);
+
+    // 第二次加载触发 migrate_portal_key_markers
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal_store must exist");
+    let client = store.get_client().await.expect("get client");
+    for id in [
+        "portal-00000000000000000000000000000000",
+        "sk-11111111111111111111111111111111",
+    ] {
+        let marked: bool = client
+            .query_one("SELECT is_portal_key FROM downstreams WHERE id = $1", &[&id])
+            .await
+            .expect("query marker")
+            .get(0);
+        assert!(marked, "legacy portal row {id} must be marked is_portal_key");
+    }
+}
