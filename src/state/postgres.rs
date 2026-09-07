@@ -947,6 +947,7 @@ impl PostgresStateStore {
         // T15 权限兜底：外键改 ON DELETE SET DEFAULT 'deny-all'、列 NOT NULL。
         // 必须排在迁移之后（迁移把历史 NULL 填完，SET NOT NULL 才不会失败）。
         migrate_downstream_group_fallback(&tx).await?;
+        migrate_portal_key_markers(&tx).await?;
         tx.commit().await.map_err(io_other)
     }
 }
@@ -1166,6 +1167,29 @@ async fn migrate_model_allowlist_to_groups(tx: &Transaction<'_>) -> io::Result<(
 ///   NULL（NULL 会触发 model_allowlist 回退，空列表 = 放行全部 = 权限放大）。
 /// - 用 DO 块包幂等判断；排在 migrate_model_allowlist_to_groups 之后执行。
 /// - 额外保险：SET NOT NULL 前把任何剩余 NULL 补成 deny-all（fail-closed）。
+/// 存量门户自建密钥标记（幂等）：
+/// 1) 新格式 key-% 前缀，或历史 'Portal Key %' 命名；
+/// 2) 历史门户行（portal-*/sk-<32hex>、用户自填 label）：key 级组 all 且
+///    存在 portal_user_downstreams 绑定即门户自建密钥。
+/// 必须在 SCHEMA_SQL 之后（portal_user_downstreams 已建）执行。
+async fn migrate_portal_key_markers(tx: &Transaction<'_>) -> io::Result<()> {
+    tx.batch_execute(
+        r#"
+        UPDATE downstreams SET is_portal_key = TRUE
+        WHERE (id LIKE 'key-%' OR name LIKE 'Portal Key %') AND NOT is_portal_key;
+        UPDATE downstreams SET is_portal_key = TRUE
+        WHERE NOT is_portal_key
+          AND model_group_id = 'all'
+          AND EXISTS (
+            SELECT 1 FROM portal_user_downstreams b
+            WHERE b.downstream_id = downstreams.id
+          );
+        "#,
+    )
+    .await
+    .map_err(io_other)
+}
+
 async fn migrate_downstream_group_fallback(tx: &Transaction<'_>) -> io::Result<()> {
     tx.batch_execute(
         r#"
@@ -2140,9 +2164,6 @@ ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS model_group_id TEXT NULL;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS is_portal_key BOOLEAN NOT NULL DEFAULT FALSE;
--- 存量门户自建密钥一次性标记（幂等）：新格式 key-% 前缀，以及历史 'Portal Key %' 命名
-UPDATE downstreams SET is_portal_key = TRUE
-WHERE (id LIKE 'key-%' OR name LIKE 'Portal Key %') AND NOT is_portal_key;
 ALTER TABLE downstreams
     DROP COLUMN IF EXISTS token_price_per_million_cents;
 
