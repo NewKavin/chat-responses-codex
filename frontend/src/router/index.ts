@@ -59,10 +59,9 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '上游管理' }
     },
     {
+      // 下游管理已并入门户用户管理（portal-users），保留旧路径重定向
       path: '/admin/downstreams',
-      name: 'AdminDownstreams',
-      component: () => import('@/views/admin/Downstreams.vue'),
-      meta: { requiresAuth: true, title: '下游管理' }
+      redirect: '/admin/portal-users'
     },
     {
       path: '/admin/logs',

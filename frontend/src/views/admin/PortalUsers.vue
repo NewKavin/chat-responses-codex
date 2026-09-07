@@ -116,13 +116,66 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="bindingsVisible" :title="`密钥绑定：${bindingsUser?.email ?? ''}`" width="560">
-      <el-table :data="bindings" v-loading="bindingsLoading" stripe>
-        <el-table-column prop="downstream_id" label="密钥" />
-        <el-table-column label="模型分组" min-width="140">
+    <el-dialog v-model="bindingsVisible" :title="`密钥与账户：${bindingsUser?.email ?? ''}`" width="940">
+      <div class="binding-toolbar" style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px">
+        <span class="muted">已选 {{ batchSelection.length }} 个密钥</span>
+        <el-select v-model="batchGroup" placeholder="批量改分组" clearable style="width: 150px" filterable>
+          <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
+        </el-select>
+        <el-button size="small" :disabled="!batchSelection.length || !batchGroup" @click="batchApplyGroup">
+          应用分组
+        </el-button>
+        <el-button size="small" type="success" plain :disabled="!batchSelection.length" @click="batchToggleActive(true)">
+          批量启用
+        </el-button>
+        <el-button size="small" type="warning" plain :disabled="!batchSelection.length" @click="batchToggleActive(false)">
+          批量禁用
+        </el-button>
+        <el-button size="small" type="primary" plain :disabled="!batchSelection.length" @click="openBatchLimits">
+          批量改限额
+        </el-button>
+        <el-button size="small" @click="refreshBindings">刷新</el-button>
+      </div>
+      <el-table
+        :data="bindings"
+        v-loading="bindingsLoading"
+        stripe
+        @selection-change="batchSelection = $event"
+      >
+        <el-table-column type="selection" width="46" />
+        <el-table-column prop="downstream_id" label="密钥" min-width="180" show-overflow-tooltip />
+        <el-table-column label="名称" min-width="120" show-overflow-tooltip>
           <template #default="{ row }">
-            <el-tag v-if="row.model_group_id" size="small" type="info">{{ groupName(row.model_group_id) }}</el-tag>
+            {{ rowConfig(row)?.name ?? '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="rowConfig(row)?.active !== undefined" :type="rowConfig(row)?.active ? 'success' : 'danger'" size="small">
+              {{ rowConfig(row)?.active ? '启用' : '禁用' }}
+            </el-tag>
             <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="限额概要" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="muted">
+              {{ rowConfig(row)?.per_minute_limit ?? '—' }} req/min ·
+              {{ rowConfig(row)?.billing_mode ?? '—' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="模型分组" min-width="170">
+          <template #default="{ row }">
+            <el-select
+              v-model="row.model_group_id"
+              size="small"
+              filterable
+              style="width: 140px"
+              @change="updateBindingGroup(row)"
+            >
+              <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
+            </el-select>
           </template>
         </el-table-column>
         <el-table-column label="默认" width="90" align="center">
@@ -131,8 +184,15 @@
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" align="center">
+        <el-table-column label="操作" width="140" align="center">
           <template #default="{ row }">
+            <el-button
+              size="small"
+              :disabled="!rowConfig(row) || rowConfig(row)?.is_portal_key"
+              @click="openEditConfig(row)"
+            >
+              编辑
+            </el-button>
             <el-button size="small" type="danger" plain @click="removeBinding(row)">解绑</el-button>
           </template>
         </el-table-column>
@@ -155,7 +215,62 @@
       </div>
       <div class="field-hint" style="margin-top: 8px">
         不选模型分组时使用默认分组（basic）；也可对已有绑定重新指定分组（会更新该密钥的分组）。
+        门户用户自建的密钥账户配置由系统管理，编辑按钮对其禁用；批量操作作用于当前选中的密钥。
       </div>
+    </el-dialog>
+
+    <el-dialog v-model="editConfigVisible" :title="`编辑密钥账户配置：${editConfigKeyId}`" width="480">
+      <el-form label-width="130px">
+        <el-form-item label="名称">
+          <el-input v-model="editConfigForm.name" placeholder="账户名称" />
+        </el-form-item>
+        <el-form-item label="每分钟限额">
+          <el-input-number v-model="editConfigForm.per_minute_limit" :min="1" :step="10" />
+        </el-form-item>
+        <el-form-item label="最大并发">
+          <el-input-number v-model="editConfigForm.max_concurrency" :min="1" />
+        </el-form-item>
+        <el-form-item label="每日 Token 限额">
+          <el-input-number v-model="editConfigForm.daily_token_limit" :min="0" :step="10000" />
+        </el-form-item>
+        <el-form-item label="计费模式">
+          <el-select v-model="editConfigForm.billing_mode">
+            <el-option label="按请求计费" value="request" />
+            <el-option label="按 Token 计费" value="token" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="过期时间">
+          <el-date-picker v-model="editConfigForm.expires_at" type="datetime" value-format="x" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editConfigVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editConfigSaving" @click="saveEditConfig">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="batchLimitsVisible" title="批量修改密钥限额" width="480">
+      <el-form label-width="130px">
+        <el-form-item label="每分钟限额">
+          <el-input-number v-model="batchLimitsForm.per_minute_limit" :min="1" :step="10" />
+        </el-form-item>
+        <el-form-item label="最大并发">
+          <el-input-number v-model="batchLimitsForm.max_concurrency" :min="1" />
+        </el-form-item>
+        <el-form-item label="每日 Token 限额">
+          <el-input-number v-model="batchLimitsForm.daily_token_limit" :min="0" :step="10000" />
+        </el-form-item>
+        <el-form-item label="计费模式">
+          <el-select v-model="batchLimitsForm.billing_mode">
+            <el-option label="按请求计费" value="request" />
+            <el-option label="按 Token 计费" value="token" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchLimitsVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchLimitsSaving" @click="saveBatchLimits">保存</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -183,6 +298,18 @@ interface BindingRow {
   downstream_id: string
   is_default: boolean
   model_group_id?: string
+}
+
+interface AccountConfig {
+  id: string
+  name: string
+  active?: boolean
+  is_portal_key?: boolean
+  per_minute_limit?: number
+  max_concurrency?: number
+  daily_token_limit?: number | null
+  expires_at?: number | null
+  billing_mode?: string
 }
 
 const users = ref<PortalUserRow[]>([])
@@ -322,6 +449,22 @@ const openBindings = async (row: PortalUserRow) => {
     id: d.id,
     name: d.name
   }))
+  accountConfigs.value = {}
+  for (const d of downstreams.data as unknown as Array<Record<string, unknown>>) {
+    const id = String(d.id ?? '')
+    if (!id) continue
+    accountConfigs.value[id] = {
+      id,
+      name: typeof d.name === 'string' && d.name.trim() ? d.name : id,
+      active: typeof d.active === 'boolean' ? d.active : undefined,
+      is_portal_key: Boolean(d.is_portal_key),
+      per_minute_limit: typeof d.per_minute_limit === 'number' ? d.per_minute_limit : undefined,
+      max_concurrency: typeof d.max_concurrency === 'number' ? d.max_concurrency : undefined,
+      daily_token_limit: typeof d.daily_token_limit === 'number' ? d.daily_token_limit : undefined,
+      expires_at: typeof d.expires_at === 'number' ? d.expires_at : undefined,
+      billing_mode: typeof d.billing_mode === 'string' ? d.billing_mode : undefined
+    }
+  }
 }
 
 const refreshBindings = async () => {
@@ -355,12 +498,147 @@ const addBinding = async () => {
   }
 }
 
+const updateBindingGroup = async (row: BindingRow) => {
+  if (!bindingsUser.value) return
+  try {
+    await adminApi.updatePortalUserBinding(bindingsUser.value.id, row.downstream_id, {
+      model_group_id: row.model_group_id
+    })
+    ElMessage.success('绑定分组已保存')
+    await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '保存失败')
+    await refreshBindings()
+  }
+}
+
 const removeBinding = async (row: BindingRow) => {
   if (!bindingsUser.value) return
   await ElMessageBox.confirm(`解绑密钥 ${row.downstream_id}？`, '确认')
   await adminApi.deletePortalUserBinding(bindingsUser.value.id, row.downstream_id)
   ElMessage.success('已解绑')
   await refreshBindings()
+}
+
+// ---- 合并自下游管理：密钥账户配置与批量编辑 ----
+const accountConfigs = ref<Record<string, AccountConfig>>({})
+const batchSelection = ref<BindingRow[]>([])
+const batchGroup = ref('')
+const editConfigVisible = ref(false)
+const editConfigKeyId = ref('')
+const editConfigSaving = ref(false)
+const editConfigForm = ref({
+  name: '',
+  per_minute_limit: 60,
+  max_concurrency: 10,
+  daily_token_limit: undefined as number | undefined,
+  expires_at: undefined as number | undefined,
+  billing_mode: 'request'
+})
+const batchLimitsVisible = ref(false)
+const batchLimitsSaving = ref(false)
+const batchLimitsForm = ref({
+  per_minute_limit: 60,
+  max_concurrency: 10,
+  daily_token_limit: undefined as number | undefined,
+  billing_mode: 'request'
+})
+
+const rowConfig = (row: BindingRow) => accountConfigs.value[row.downstream_id]
+
+const openEditConfig = (row: BindingRow) => {
+  const config = rowConfig(row)
+  if (!config || config.is_portal_key) return
+  editConfigKeyId.value = row.downstream_id
+  editConfigForm.value = {
+    name: config.name ?? row.downstream_id,
+    per_minute_limit: config.per_minute_limit ?? 60,
+    max_concurrency: config.max_concurrency ?? 10,
+    daily_token_limit: config.daily_token_limit ?? undefined,
+    expires_at: config.expires_at ?? undefined,
+    billing_mode: config.billing_mode ?? 'request'
+  }
+  editConfigVisible.value = true
+}
+
+const saveEditConfig = async () => {
+  editConfigSaving.value = true
+  try {
+    await adminApi.updateDownstream(editConfigKeyId.value, {
+      name: editConfigForm.value.name.trim() || editConfigKeyId.value,
+      per_minute_limit: editConfigForm.value.per_minute_limit,
+      max_concurrency: editConfigForm.value.max_concurrency,
+      daily_token_limit: editConfigForm.value.daily_token_limit,
+      expires_at: editConfigForm.value.expires_at,
+      billing_mode: editConfigForm.value.billing_mode as 'token' | 'request'
+    })
+    ElMessage.success('账户配置已保存')
+    editConfigVisible.value = false
+    await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '保存失败')
+  } finally {
+    editConfigSaving.value = false
+  }
+}
+
+const batchKeyIds = () => Array.from(new Set(batchSelection.value.map(r => r.downstream_id)))
+
+const batchApplyGroup = async () => {
+  if (!batchGroup.value) return
+  const ids = batchKeyIds()
+  if (!ids.length) return
+  try {
+    await adminApi.batchUpdateDownstreams(ids, { model_group_id: batchGroup.value })
+    ElMessage.success(`已更新 ${ids.length} 个密钥的分组`)
+    batchGroup.value = ''
+    await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '批量更新失败')
+  }
+}
+
+const batchToggleActive = async (active: boolean) => {
+  const ids = batchKeyIds()
+  if (!ids.length) return
+  try {
+    await adminApi.batchUpdateDownstreams(ids, { active })
+    ElMessage.success(active ? '已批量启用' : '已批量禁用')
+    await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '批量更新失败')
+  }
+}
+
+const openBatchLimits = () => {
+  batchLimitsForm.value = {
+    per_minute_limit: 60,
+    max_concurrency: 10,
+    daily_token_limit: undefined,
+    billing_mode: 'request'
+  }
+  batchLimitsVisible.value = true
+}
+
+const saveBatchLimits = async () => {
+  const ids = batchKeyIds()
+  if (!ids.length) return
+  batchLimitsSaving.value = true
+  try {
+    await adminApi.batchUpdateDownstreams(ids, {
+      per_minute_limit: batchLimitsForm.value.per_minute_limit,
+      max_concurrency: batchLimitsForm.value.max_concurrency,
+      daily_token_limit: batchLimitsForm.value.daily_token_limit,
+      billing_mode: batchLimitsForm.value.billing_mode as 'token' | 'request'
+    })
+    ElMessage.success(`已更新 ${ids.length} 个密钥的限额`)
+    batchLimitsVisible.value = false
+    await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '批量更新失败')
+  } finally {
+    batchLimitsSaving.value = false
+  }
 }
 
 onMounted(() => {

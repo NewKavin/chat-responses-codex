@@ -34,6 +34,43 @@ describe('admin ui structure', () => {
     expect(downstreams).toContain('to="/admin/model-groups"')
   })
 
+  it('merges downstream management into portal user management', () => {
+    const users = source('views/admin/PortalUsers.vue')
+    const app = source('App.vue')
+    const router = source('router/index.ts')
+
+    // 门户用户页承载密钥账户管理：批量编辑能力保留
+    expect(users).toContain('batchUpdateDownstreams')
+    expect(users).toContain('batchSelection')
+    expect(users).toContain('批量启用')
+    expect(users).toContain('批量禁用')
+    expect(users).toContain('批量改限额')
+    expect(users).toContain('openEditConfig')
+    expect(users).toContain('accountConfigs')
+    expect(users).toContain('type="selection"')
+    // 绑定分组可保存（内联下拉 + PUT）
+    expect(users).toContain('updateBindingGroup')
+    expect(users).toContain('updatePortalUserBinding')
+    expect(users).toContain('绑定分组已保存')
+    // 取消独立下游管理页签：菜单移除，旧路径重定向到门户用户
+    expect(app).not.toContain('下游管理')
+    expect(router).toContain("path: '/admin/downstreams'")
+    expect(router).toContain("redirect: '/admin/portal-users'")
+  })
+
+  it('derives model-group candidates from model mappings first', () => {
+    const form = source('components/admin/ModelGroupForm.vue')
+
+    // 候选来源：模型映射目标（alias aliases + upstream model_mappings.downstream_model）优先，
+    // 未配置映射的原始模型名兜底
+    expect(form).toContain('getModelAliases()')
+    expect(form).toContain('mappedTargets')
+    expect(form).toContain('mappedOriginals')
+    expect(form).toContain('downstream_model')
+    expect(form).toContain('model_mappings')
+    expect(form).toContain('mappedTargets.has(raw)')
+  })
+
   it('explains builtin/sentinel/auto group protections in the groups page', () => {
     const groups = source('views/admin/ModelGroupManagement.vue')
 

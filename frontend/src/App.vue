@@ -32,7 +32,6 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  KeyRound,
   LayoutDashboard,
   Megaphone,
   Radar,
@@ -69,7 +68,6 @@ const adminNavItems: AppNavItem[] = [
   { path: '/admin/dashboard', label: '控制台总览', icon: LayoutDashboard, group: '概览' },
   { path: '/admin/model-probe', label: '模型探测', icon: Radar, group: '概览' },
   { path: '/admin/upstreams', label: '上游管理', icon: SatelliteDish, group: '资源管理' },
-  { path: '/admin/downstreams', label: '下游管理', icon: KeyRound, group: '资源管理' },
   { path: '/admin/model-aliases', label: '模型映射', icon: ArrowRightLeft, group: '资源管理' },
   { path: '/admin/model-groups', label: '模型分组', icon: Layers, group: '资源管理' },
   { path: '/admin/logs', label: '运行日志', icon: ScrollText, group: '运维' },

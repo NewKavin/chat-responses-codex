@@ -78,18 +78,50 @@ const availableModelOptions = computed(() => {
 
 const loadModelCandidates = async () => {
   try {
-    const [modelsResp, upstreamsResp] = await Promise.all([
+    const [modelsResp, upstreamsResp, aliasesResp] = await Promise.all([
       adminApi.getModels(),
-      adminApi.getUpstreams()
+      adminApi.getUpstreams(),
+      adminApi.getModelAliases()
     ])
-    const set = new Set<string>()
-    for (const model of modelsResp.data.models ?? []) {
-      if (model && model.trim()) set.add(model.trim())
+
+    // 模型映射目标优先：全局别名的 aliases（映射目标） + 上游
+    // model_mappings 的 downstream_model（映射目标）
+    const mappedTargets = new Set<string>()
+    // 已被映射的原始模型名：全局别名 canonical + 上游 mapping 的 upstream_model
+    const mappedOriginals = new Set<string>()
+    for (const rule of aliasesResp.data.model_aliases ?? []) {
+      for (const alias of rule.aliases ?? []) {
+        if (alias && alias.trim()) mappedTargets.add(alias.trim())
+      }
+      if (rule.canonical && rule.canonical.trim()) {
+        mappedOriginals.add(rule.canonical.trim())
+      }
     }
     for (const upstream of upstreamsResp.data ?? []) {
-      for (const model of upstream.supported_models ?? []) {
-        if (model && model.trim()) set.add(model.trim())
+      for (const mapping of upstream.model_mappings ?? []) {
+        if (mapping?.downstream_model && mapping.downstream_model.trim()) {
+          mappedTargets.add(mapping.downstream_model.trim())
+        }
+        if (mapping?.upstream_model && mapping.upstream_model.trim()) {
+          mappedOriginals.add(mapping.upstream_model.trim())
+        }
       }
+    }
+
+    // 候选 = 映射目标 ∪ 未配置任何映射的原始模型名
+    const set = new Set<string>(mappedTargets)
+    const rawModels: string[] = [
+      ...(modelsResp.data.models ?? []),
+      ...(upstreamsResp.data ?? []).flatMap(u => u.supported_models ?? [])
+    ]
+    for (const rawModel of rawModels) {
+      const raw = typeof rawModel === 'string' ? rawModel.trim() : ''
+      if (!raw) continue
+      // 已有映射的原始模型不再直接列出（用映射目标代替）
+      if (mappedOriginals.has(raw)) continue
+      // 已是映射目标的名称也跳过（避免与映射目标重复）
+      if (mappedTargets.has(raw)) continue
+      set.add(raw)
     }
     modelCandidates.value = Array.from(set).sort()
   } catch {

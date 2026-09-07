@@ -10,7 +10,7 @@
         </p>
         <div class="overview-hero__chips">
           <span class="overview-hero__chip">
-            <span class="crc-pulse-dot" aria-hidden="true"></span>LIVE // 5S REFRESH
+            <span class="crc-pulse-dot" aria-hidden="true"></span>LIVE // 15S REFRESH
           </span>
           <span class="overview-hero__chip">
             <KeyRound :size="11" :stroke-width="2" aria-hidden="true" />SCOPE // DOWNSTREAM KEY
@@ -409,7 +409,10 @@ let refreshTimer: number | null = null
 const loadOverview = async () => {
   try {
     const { data: payload } = await portalApi.getOverview()
-    data.value = payload
+    // 局部静默刷新：数据未变化就不重新赋值（避免整页重渲染造成跳动）
+    if (JSON.stringify(payload) !== JSON.stringify(data.value)) {
+      data.value = payload
+    }
   } catch (error) {
     data.value = {
       ...data.value,
@@ -475,7 +478,7 @@ onMounted(() => {
   loadQuotaDetail()
   refreshTimer = window.setInterval(() => {
     loadOverview()
-  }, 5000)
+  }, 15000)
 })
 
 onUnmounted(() => {
@@ -1128,5 +1131,14 @@ onUnmounted(() => {
   .overview-runtime-panel {
     padding: 16px 0;
   }
+}
+
+/* 局部刷新防跳动：数字等宽 + 平滑过渡 */
+.overview-hero strong,
+.overview-summary-cards strong,
+.overview-runtime-card__value,
+.quota-summary-value-row strong {
+  font-variant-numeric: tabular-nums;
+  transition: color 0.8s ease;
 }
 </style>

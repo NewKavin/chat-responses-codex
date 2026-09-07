@@ -23,6 +23,17 @@ describe('portal ui structure', () => {
     expect(details).toContain('quota-detail-section')
   })
 
+  it('refreshes overview data quietly without layout jumps', () => {
+    const overview = source('Overview')
+
+    // 轮询 15s + 深比较：数据没变化就不重新赋值（避免整页重渲染跳动）
+    expect(overview).toContain('LIVE // 15S REFRESH')
+    expect(overview).toContain('}, 15000)')
+    expect(overview).toContain('JSON.stringify(payload) !== JSON.stringify(data.value)')
+    // 数字等宽 + 平滑过渡：位数变化不再引起容器宽度/高度跳动
+    expect(overview).toContain('font-variant-numeric: tabular-nums')
+  })
+
   it('surfaces backend errors on portal data loading', () => {
     for (const page of ['QuotaDetails', 'UsageHistory', 'Overview']) {
       const src = source(page)

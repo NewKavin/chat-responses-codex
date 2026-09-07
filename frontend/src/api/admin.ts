@@ -401,6 +401,13 @@ export const adminApi = {
     adminHttp.get<
       { items: Array<{ downstream_id: string; is_default: boolean; model_group_id?: string }> }
     >(`/admin/portal/users/${id}/bindings`),
+  /** 修改绑定级模型分组（绑定分组可保存；失败透出后端原因） */
+  updatePortalUserBinding: (
+    userId: string,
+    downstreamId: string,
+    updates: { model_group_id?: string; is_default?: boolean }
+  ) =>
+    adminHttp.put(`/admin/portal/users/${userId}/bindings/${downstreamId}`, updates),
   addPortalUserBinding: (
     id: string,
     downstream_id: string,
