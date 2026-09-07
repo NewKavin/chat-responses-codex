@@ -6,6 +6,7 @@ import type { ModelGroup, PortalKey } from '@/api/portal'
 
 const mockKey: PortalKey = {
   downstream_id: 'sk-test123abc',
+  plaintext_key: 'sk-test456',
   label: 'Test Key',
   model_group_id: 'default',
   created_at: Date.now() / 1000 - 86400 * 2, // 2 days ago
@@ -55,7 +56,7 @@ describe('KeyCard', () => {
   it('renders key information correctly', () => {
     const wrapper = render()
 
-    expect(wrapper.text()).toContain('sk-***23abc')
+    expect(wrapper.text()).toContain('sk-test123abc')
     expect(wrapper.text()).toContain('Test Key')
     expect(wrapper.text()).toContain('1,234')
     expect(wrapper.text()).toContain('2 days ago')
@@ -68,11 +69,12 @@ describe('KeyCard', () => {
     expect(wrapper.text()).toContain('DEFAULT')
   })
 
-  it('masks key ID correctly', () => {
+  it('shows full key id and secret, one per row', () => {
     const wrapper = render()
 
-    expect(wrapper.text()).toContain('sk-***23abc')
-    expect(wrapper.text()).not.toContain('sk-test123abc')
+    expect(wrapper.text()).toContain('sk-test123abc')
+    expect(wrapper.text()).toContain('sk-test456')
+    expect(wrapper.text()).not.toContain('***')
   })
 
   it('enables label editing', async () => {
@@ -102,6 +104,20 @@ describe('KeyCard', () => {
     await copyButton.trigger('click')
 
     expect(writeText).toHaveBeenCalledWith('sk-test123abc')
+  })
+
+  it('copies key secret to clipboard on demand', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', {
+      clipboard: { writeText },
+    })
+
+    const wrapper = render()
+
+    const copyButton = wrapper.find('[aria-label="Copy key"]')
+    await copyButton.trigger('click')
+
+    expect(writeText).toHaveBeenCalledWith('sk-test456')
   })
 
   it('calls onSetDefault when set default button clicked', async () => {

@@ -2,8 +2,8 @@
   <div class="key-card">
     <div class="key-card-header">
       <div class="key-card-info">
-        <div class="key-id-row">
-          <code class="key-id">{{ maskedKeyId }}</code>
+        <div class="key-copy-row">
+          <code class="key-id">{{ keyData.downstream_id }}</code>
           <el-tooltip content="复制密钥 ID" placement="top">
             <el-button
               aria-label="Copy key ID"
@@ -17,6 +17,23 @@
           <span v-if="keyData.is_default" class="default-badge">
             <Star :size="11" :stroke-width="2" />DEFAULT
           </span>
+        </div>
+
+        <div class="key-copy-row">
+          <code class="key-secret">{{ keyData.plaintext_key || '—' }}</code>
+          <el-tooltip
+            :content="keyData.plaintext_key ? '复制密钥' : '密钥不可用'"
+            placement="top"
+          >
+            <el-button
+              aria-label="Copy key"
+              circle
+              size="small"
+              @click="handleCopySecret"
+            >
+              <Copy :size="14" :stroke-width="1.8" />
+            </el-button>
+          </el-tooltip>
         </div>
 
         <div class="key-label-row">
@@ -129,7 +146,7 @@
     >
       <p>
         将为您生成一把全新的密钥（新的密钥 ID 与密钥本体，均由服务端自动生成）。
-        旧密钥立即失效；新密钥只展示一次，请妥善保存。
+        旧密钥立即失效；新密钥生成后可在卡片上随时查看并复制。
       </p>
       <template #footer>
         <el-button @click="showRotateDialog = false">取消</el-button>
@@ -232,12 +249,6 @@ const showDeleteDialog = ref(false)
 const showGroupDialog = ref(false)
 const selectedGroupId = ref('')
 
-const maskedKeyId = computed(() => {
-  const id = props.keyData.downstream_id
-  if (id.length <= 10) return id
-  return `${id.slice(0, 3)}***${id.slice(-5)}`
-})
-
 const formattedTime = computed(() => {
   const seconds = Date.now() / 1000 - props.keyData.created_at
   const minutes = Math.floor(seconds / 60)
@@ -280,6 +291,18 @@ const handleEditSave = async () => {
 const handleCopy = async () => {
   try {
     await navigator.clipboard.writeText(props.keyData.downstream_id)
+  } catch (err) {
+    error.value = '复制失败'
+  }
+}
+
+const handleCopySecret = async () => {
+  if (!props.keyData.plaintext_key) {
+    error.value = '密钥不可用'
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(props.keyData.plaintext_key)
   } catch (err) {
     error.value = '复制失败'
   }
@@ -371,10 +394,17 @@ const handleDelete = async () => {
   gap: 10px;
 }
 
-.key-id-row {
+.key-copy-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.key-secret {
+  font-family: var(--crc-mono-font, ui-monospace, monospace);
+  word-break: break-all;
+  user-select: all;
 }
 
 .key-id {

@@ -102,24 +102,42 @@
       width="min(540px, calc(100vw - 32px))"
     >
       <el-alert
-        type="warning"
+        type="success"
         :closable="false"
         show-icon
-        title="密钥只显示这一次，请立即复制保存。关闭后无法再次查看完整密钥。"
+        title="密钥已生成；后续可随时在密钥卡片上查看并复制，无需现在保存。"
       />
       <div class="secret-box" style="margin-top: 16px">
         <div class="secret-row">
           <span class="secret-label">密钥 ID</span>
           <code>{{ newKeySecret?.downstream_id }}</code>
+          <el-button
+            aria-label="Copy key ID"
+            circle
+            size="small"
+            text
+            @click="copyRow(newKeySecret?.downstream_id)"
+          >
+            <Copy :size="14" :stroke-width="1.8" />
+          </el-button>
         </div>
         <div class="secret-row">
           <span class="secret-label">密钥</span>
           <code>{{ newKeySecret?.plaintext_key }}</code>
+          <el-button
+            aria-label="Copy secret"
+            circle
+            size="small"
+            text
+            @click="copyRow(newKeySecret?.plaintext_key)"
+          >
+            <Copy :size="14" :stroke-width="1.8" />
+          </el-button>
         </div>
       </div>
       <template #footer>
         <el-button type="primary" @click="copySecret">
-          <Copy :size="14" style="margin-right: 6px" />复制密钥
+          <Copy :size="14" style="margin-right: 6px" />复制全部
         </el-button>
         <el-button @click="showSecretDialog = false">关闭</el-button>
       </template>
@@ -200,6 +218,16 @@ const handleRotate = async (downstreamId: string) => {
 const showSecret = (secret: { downstream_id: string; plaintext_key: string }) => {
   newKeySecret.value = secret
   showSecretDialog.value = true
+}
+
+const copyRow = async (value: string | undefined) => {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
+  }
 }
 
 const copySecret = async () => {
@@ -325,7 +353,8 @@ onMounted(() => {
 .key-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+  /* 一行一行：每张密钥卡占一整行 */
+  grid-template-columns: 1fr;
   margin-bottom: 24px;
 }
 

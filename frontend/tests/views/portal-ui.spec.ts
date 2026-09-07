@@ -31,11 +31,17 @@ describe('portal ui structure', () => {
     expect(keys).not.toContain('newKeyForm.downstream_id')
     expect(keys).not.toContain("placeholder=\"sk-...\"")
     expect(card).not.toContain('newKeyId')
-    // 服务端生成后一次性回显新密钥
+    // 服务端生成密钥；正文随时可回看/复制（不是一次性）
     expect(keys).toContain('portalApi.createKey({')
     expect(keys).toContain('plaintext_key')
-    expect(keys).toContain('密钥只显示这一次')
+    expect(keys).toContain('可随时在密钥卡片上查看并复制')
+    expect(keys).toContain('复制全部')
     expect(card).not.toContain('请输入新的密钥 ID')
+    // 卡片一行一行：完整 ID 一行、密钥一行，各自带复制按钮
+    expect(card).toContain('key-copy-row')
+    expect(card).toContain('aria-label="Copy key"')
+    expect(card).not.toContain('maskedKeyId')
+    expect(card).not.toContain('***')
   })
 
   it('uses a compact history toolbar and stable chart surfaces', () => {

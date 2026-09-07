@@ -13,6 +13,8 @@ import type {
 // Multi-key management types
 export interface PortalKey {
   downstream_id: string
+  /** 密钥明文：创建/轮换时返回，之后列表接口可随时回看（仅绑定 owner 可见） */
+  plaintext_key?: string
   label: string
   model_group_id: string
   model_group_name?: string | null

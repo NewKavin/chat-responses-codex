@@ -272,8 +272,11 @@ async fn test_create_key() {
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let created_id = created["downstream_id"].as_str().unwrap().to_string();
     let created_secret = created["plaintext_key"].as_str().unwrap().to_string();
-    assert!(created_id.starts_with("portal-"), "id must be server-generated: {created_id}");
-    assert!(!created_secret.is_empty(), "plaintext_key must be returned once");
+    assert!(created_id.starts_with("sk-"), "id must use sk- prefix: {created_id}");
+    assert!(
+        created_secret.starts_with("sk-"),
+        "secret must use sk- prefix, got {created_secret}"
+    );
 
     // Verify key was created by listing keys
     let req = Request::builder()
@@ -298,6 +301,8 @@ async fn test_create_key() {
     assert_eq!(key["downstream_id"], created_id);
     assert_eq!(key["label"], "Test Key");
     assert_eq!(key["model_group_id"], "basic");
+    // 明文可随时回看：列表接口返回 plaintext_key（用户自己密钥）
+    assert_eq!(key["plaintext_key"], created_secret);
 }
 
 // ============================================================================
@@ -545,8 +550,11 @@ async fn test_rotate_key() {
     let rotated: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let new_id = rotated["downstream_id"].as_str().unwrap().to_string();
     let new_secret = rotated["plaintext_key"].as_str().unwrap().to_string();
-    assert!(new_id.starts_with("portal-"), "id must be server-generated: {new_id}");
-    assert!(!new_secret.is_empty(), "plaintext_key must be returned once");
+    assert!(new_id.starts_with("sk-"), "id must use sk- prefix: {new_id}");
+    assert!(
+        new_secret.starts_with("sk-"),
+        "secret must use sk- prefix, got {new_secret}"
+    );
     assert_ne!(new_id, "old-key-1");
 
     // Verify rotation: new key exists with same label/model_group/default status
@@ -578,6 +586,8 @@ async fn test_rotate_key() {
     assert_eq!(new_key["label"], "Production Key");
     assert_eq!(new_key["model_group_id"], "premium");
     assert_eq!(new_key["is_default"], true); // Preserved default status
+    // 明文可随时回看：轮换后的新 secret 也能从列表拿到
+    assert_eq!(new_key["plaintext_key"], new_secret);
 }
 
 // ============================================================================

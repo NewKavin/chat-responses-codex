@@ -69,6 +69,7 @@ fn test_portal_downstream_binding_with_label_struct() {
         model_group_name: Some("Advanced Models".to_string()),
         created_at: 1725350400,
         usage_count: 42,
+        plaintext_key: Some("sk-test-secret".to_string()),
     };
 
     assert_eq!(binding_with_label.downstream_id, "test-key-1");
@@ -78,4 +79,5 @@ fn test_portal_downstream_binding_with_label_struct() {
     assert_eq!(binding_with_label.model_group_name.as_deref(), Some("Advanced Models"));
     assert_eq!(binding_with_label.created_at, 1725350400);
     assert_eq!(binding_with_label.usage_count, 42);
+    assert_eq!(binding_with_label.plaintext_key.as_deref(), Some("sk-test-secret"));
 }

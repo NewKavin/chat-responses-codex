@@ -982,8 +982,8 @@ pub(super) async fn portal_create_key(
     }
 
     // 密钥 ID/密钥本体都由服务端生成（用户不需要也不应该填 ID）。
-    let generated = generate_downstream_key("portal");
-    let new_id = format!("portal-{}", Uuid::new_v4().simple());
+    let generated = generate_downstream_key("sk");
+    let new_id = format!("sk-{}", Uuid::new_v4().simple());
 
     // 门户密钥的权限由绑定级分组管控；key 级必须放行（T12 默认 deny-all
     // 会挡住一切请求），故显式落 all 组。
@@ -1161,8 +1161,8 @@ pub(super) async fn portal_rotate_key_by_id(
 
     // 新密钥由服务端生成（新 ID + 新 secret），保留 label 与绑定级分组。
     let label: Option<&str> = (!old_key.label.is_empty()).then_some(old_key.label.as_str());
-    let generated = generate_downstream_key("portal");
-    let new_id = format!("portal-{}", Uuid::new_v4().simple());
+    let generated = generate_downstream_key("sk");
+    let new_id = format!("sk-{}", Uuid::new_v4().simple());
 
     let downstream = DownstreamConfig {
         id: new_id.clone(),

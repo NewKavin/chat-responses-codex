@@ -53,6 +53,7 @@ pub struct PortalDownstreamBindingWithLabel {
     pub model_group_name: Option<String>,  // 模型分组名称
     pub created_at: i64,  // Unix timestamp
     pub usage_count: i64,  // 使用次数（从 response_history 统计）
+    pub plaintext_key: Option<String>,  // 密钥明文（仅对绑定 owner 可见，可随时回看/复制）
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,12 +354,14 @@ impl PortalStore {
                         COALESCE(d.model_group_id, 'basic') AS model_group_id, \
                         mg.name AS model_group_name, \
                         EXTRACT(EPOCH FROM COALESCE(d.created_at, NOW()))::bigint AS created_at, \
-                        COALESCE(COUNT(r.response_id), 0) AS usage_count \
+                        COALESCE(COUNT(r.response_id), 0) AS usage_count, \
+                        dd.plaintext_key AS plaintext_key \
                  FROM portal_user_downstreams d \
                  LEFT JOIN model_groups mg ON COALESCE(d.model_group_id, 'basic') = mg.id \
+                 LEFT JOIN downstreams dd ON dd.id = d.downstream_id \
                  LEFT JOIN response_history r ON d.downstream_id = r.downstream_key_id \
                  WHERE d.user_id = $1 \
-                 GROUP BY d.downstream_id, d.is_default, d.label, COALESCE(d.model_group_id, 'basic'), mg.name, d.created_at \
+                 GROUP BY d.downstream_id, d.is_default, d.label, COALESCE(d.model_group_id, 'basic'), mg.name, d.created_at, dd.plaintext_key \
                  ORDER BY d.is_default DESC, d.created_at DESC",
                 &[&user_id],
             )
@@ -373,6 +376,7 @@ impl PortalStore {
                 model_group_name: row.get(4),
                 created_at: row.get(5),
                 usage_count: row.get(6),
+                plaintext_key: row.get(7),
             })
             .collect())
     }
