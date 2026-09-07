@@ -291,6 +291,12 @@ adminHttp.interceptors.response.use(
       localStorage.removeItem('admin_token')
       window.location.hash = '#/admin/login'
     }
+    // 后端统一返回 {error:{message}}：把具体原因透出到 error.message，
+    // 页面 ElMessage 直接展示（不再吞成固定“操作失败”）
+    const backendMessage: unknown = error.response?.data?.error?.message
+    if (typeof backendMessage === 'string' && backendMessage.trim()) {
+      error.message = backendMessage
+    }
     return Promise.reject(error)
   }
 )

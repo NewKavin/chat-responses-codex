@@ -52,6 +52,18 @@ describe('admin ui structure', () => {
     expect(groups).toContain('model_allowlist 迁移自动生成')
   })
 
+  it('surfaces backend error messages for account enable/disable and save', () => {
+    const api = source('api/admin.ts')
+    const upstream = source('views/admin/Upstreams.vue')
+    const downstream = source('views/admin/Downstreams.vue')
+
+    // adminHttp 拦截器把 {error:{message}} 规范化到 error.message
+    expect(api).toContain('error.response?.data?.error?.message')
+    // 上游启用/禁用、下游保存/启停不再吞成固定“操作失败”
+    expect(upstream).toContain("(error as any)?.message || '操作失败'")
+    expect(downstream).toContain("(error as any)?.message || '操作失败'")
+  })
+
   it('keeps model qualification and probe evidence in compact sections', () => {
     const adminProbe = source('views/admin/ModelProbe.vue')
     const board = source('components/ModelProbeBoard.vue')

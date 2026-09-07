@@ -1330,7 +1330,7 @@ const handleSubmit = async () => {
     if (error.response?.status === 409) {
       ElMessage.error('创建冲突，请重试')
     } else {
-      ElMessage.error('操作失败')
+      ElMessage.error((error as any)?.message || '操作失败')
     }
   } finally {
     clearDefaultContext.value = false
