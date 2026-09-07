@@ -52,6 +52,22 @@ describe('admin ui structure', () => {
     expect(users).toContain('updateBindingGroup')
     expect(users).toContain('updatePortalUserBinding')
     expect(users).toContain('绑定分组已保存')
+    // 合并自下游管理的完整配置能力：限速/配额/并发组/Token/成本/IP/过期
+    expect(users).toContain('rate_limit_enabled')
+    expect(users).toContain('ip_allowlist')
+    expect(users).toContain('daily_cost_limit_cents')
+    expect(users).toContain('request_quota_window_hours')
+    expect(users).toContain('request_quota_requests')
+    expect(users).toContain('monthly_token_limit')
+    expect(users).toContain('model_concurrency_groups')
+    expect(users).toContain('input_token_price_per_million_cents')
+    expect(users).toContain('output_token_price_per_million_cents')
+    // 管理端不再新建/轮换密钥（用户在门户自建）；但仍可绑定存量密钥（含 legacy key-xxx 登录密钥）
+    expect(users).not.toContain('rotateDownstream')
+    expect(users).not.toContain('createDownstream')
+    expect(users).toContain('addBinding')
+    expect(users).toContain('newBindingKey')
+    expect(users).toContain('legacy')
     // 取消独立下游管理页签：菜单移除，旧路径重定向到门户用户
     expect(app).not.toContain('下游管理')
     expect(router).toContain("path: '/admin/downstreams'")

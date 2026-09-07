@@ -143,10 +143,13 @@
         @selection-change="batchSelection = $event"
       >
         <el-table-column type="selection" width="46" />
-        <el-table-column prop="downstream_id" label="密钥" min-width="180" show-overflow-tooltip />
-        <el-table-column label="名称" min-width="120" show-overflow-tooltip>
+        <el-table-column label="名称 / 密钥" min-width="240">
           <template #default="{ row }">
-            {{ rowConfig(row)?.name ?? '—' }}
+            <div>
+              {{ rowConfig(row)?.name ?? '—' }}
+              <el-tag v-if="isLegacyKey(row.downstream_id)" size="small" type="info" class="legacy-tag">旧版</el-tag>
+            </div>
+            <div class="key-id">{{ row.downstream_id }}</div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="80" align="center">
@@ -214,33 +217,89 @@
         <el-button type="primary" :loading="bindingSaving" @click="addBinding">添加</el-button>
       </div>
       <div class="field-hint" style="margin-top: 8px">
-        不选模型分组时使用默认分组（basic）；也可对已有绑定重新指定分组（会更新该密钥的分组）。
-        门户用户自建的密钥账户配置由系统管理，编辑按钮对其禁用；批量操作作用于当前选中的密钥。
+        密钥可由管理员在此绑定（含 legacy key-xxx 登录密钥），也可由门户用户自行创建后自动出现；
+        对已有绑定可重新指定分组（会更新该密钥的分组）。门户自建密钥（sk-）的账户配置由系统管理，
+        编辑按钮对其禁用；批量操作作用于当前选中的密钥。
       </div>
     </el-dialog>
 
-    <el-dialog v-model="editConfigVisible" :title="`编辑密钥账户配置：${editConfigKeyId}`" width="480">
-      <el-form label-width="130px">
-        <el-form-item label="名称">
+    <el-dialog v-model="editConfigVisible" :title="`编辑密钥账户配置：${editConfigKeyName}`" width="680">
+      <el-form label-width="150px">
+        <el-form-item label="账户名称">
           <el-input v-model="editConfigForm.name" placeholder="账户名称" />
         </el-form-item>
-        <el-form-item label="每分钟限额">
-          <el-input-number v-model="editConfigForm.per_minute_limit" :min="1" :step="10" />
+        <el-form-item label="启用">
+          <el-switch v-model="editConfigForm.active" />
         </el-form-item>
-        <el-form-item label="最大并发">
-          <el-input-number v-model="editConfigForm.max_concurrency" :min="1" />
+
+        <el-divider content-position="left">限速与配额</el-divider>
+        <el-form-item label="启用限速">
+          <el-switch v-model="editConfigForm.rate_limit_enabled" />
         </el-form-item>
+        <template v-if="editConfigForm.rate_limit_enabled">
+          <el-form-item label="每分钟请求数">
+            <el-input-number v-model="editConfigForm.per_minute_limit" :min="1" :max="10000" />
+          </el-form-item>
+          <el-form-item label="配额窗口（小时）">
+            <el-input-number v-model="editConfigForm.request_quota_window_hours" :min="1" :max="168" />
+          </el-form-item>
+          <el-form-item label="窗口请求次数">
+            <el-input-number v-model="editConfigForm.request_quota_requests" :min="1" :max="1000000" />
+          </el-form-item>
+          <el-form-item label="最大并发">
+            <el-input-number v-model="editConfigForm.max_concurrency" :min="1" />
+          </el-form-item>
+        </template>
+
+        <el-divider content-position="left">Token 限额</el-divider>
         <el-form-item label="每日 Token 限额">
           <el-input-number v-model="editConfigForm.daily_token_limit" :min="0" :step="10000" />
         </el-form-item>
+        <el-form-item label="每月 Token 限额">
+          <el-input-number v-model="editConfigForm.monthly_token_limit" :min="0" :step="100000" />
+        </el-form-item>
+
+        <el-divider content-position="left">计费</el-divider>
         <el-form-item label="计费模式">
-          <el-select v-model="editConfigForm.billing_mode">
-            <el-option label="按请求计费" value="request" />
-            <el-option label="按 Token 计费" value="token" />
-          </el-select>
+          <el-radio-group v-model="editConfigForm.billing_mode">
+            <el-radio-button value="request">按请求</el-radio-button>
+            <el-radio-button value="token">按金额（日限额）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <template v-if="editConfigForm.billing_mode === 'token'">
+          <el-form-item label="输入单价（元/M）">
+            <el-input-number v-model="editConfigForm.input_token_price_per_million" :min="0.01" :max="1000000" :step="0.1" :precision="2" />
+          </el-form-item>
+          <el-form-item label="输出单价（元/M）">
+            <el-input-number v-model="editConfigForm.output_token_price_per_million" :min="0.01" :max="1000000" :step="0.1" :precision="2" />
+          </el-form-item>
+          <el-form-item label="每日金额上限（元）">
+            <el-input-number v-model="editConfigForm.daily_cost_limit" :min="0.01" :max="100000000" :step="1" :precision="2" />
+          </el-form-item>
+          <el-form-item>
+            <div class="field-hint">消耗 = 输入 T × 输入单价 + 输出 T × 输出单价，滚动 24h 从每日上限扣除。</div>
+          </el-form-item>
+        </template>
+
+        <el-divider content-position="left">访问控制</el-divider>
+        <el-form-item label="IP 白名单">
+          <el-input v-model="editConfigForm.ip_allowlist_text" type="textarea" :rows="3" placeholder="每行一个 IP 或 CIDR，留空表示不限制" />
         </el-form-item>
         <el-form-item label="过期时间">
           <el-date-picker v-model="editConfigForm.expires_at" type="datetime" value-format="x" style="width: 100%" />
+        </el-form-item>
+
+        <el-divider content-position="left">模型并发组（可选）</el-divider>
+        <el-form-item v-for="(group, index) in editConcurrencyGroups" :key="index" :label="`组 ${index + 1}`">
+          <div class="cg-row">
+            <el-input v-model="group.name" placeholder="组名" style="width: 110px" />
+            <el-input v-model="group.matchText" placeholder="模型匹配（逗号/换行分隔，支持 *）" />
+            <el-input-number v-model="group.max_concurrency" :min="1" style="width: 110px" />
+            <el-button size="small" type="danger" plain @click="removeEditConcurrencyGroup(index)">移除</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item>
+          <el-button size="small" @click="addEditConcurrencyGroup">+ 添加并发组</el-button>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -249,10 +308,19 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="batchLimitsVisible" title="批量修改密钥限额" width="480">
-      <el-form label-width="130px">
-        <el-form-item label="每分钟限额">
-          <el-input-number v-model="batchLimitsForm.per_minute_limit" :min="1" :step="10" />
+    <el-dialog v-model="batchLimitsVisible" title="批量修改密钥限额" width="620">
+      <el-alert type="info" :closable="false" class="helper-text">
+        已选 {{ batchSelection.length }} 个密钥。本表字段以当前填写值为准统一写入所选密钥。
+      </el-alert>
+      <el-form label-width="150px" style="margin-top: 14px">
+        <el-form-item label="每分钟请求数">
+          <el-input-number v-model="batchLimitsForm.per_minute_limit" :min="1" :max="10000" />
+        </el-form-item>
+        <el-form-item label="配额窗口（小时）">
+          <el-input-number v-model="batchLimitsForm.request_quota_window_hours" :min="1" :max="168" />
+        </el-form-item>
+        <el-form-item label="窗口请求次数">
+          <el-input-number v-model="batchLimitsForm.request_quota_requests" :min="1" :max="1000000" />
         </el-form-item>
         <el-form-item label="最大并发">
           <el-input-number v-model="batchLimitsForm.max_concurrency" :min="1" />
@@ -260,12 +328,26 @@
         <el-form-item label="每日 Token 限额">
           <el-input-number v-model="batchLimitsForm.daily_token_limit" :min="0" :step="10000" />
         </el-form-item>
-        <el-form-item label="计费模式">
-          <el-select v-model="batchLimitsForm.billing_mode">
-            <el-option label="按请求计费" value="request" />
-            <el-option label="按 Token 计费" value="token" />
-          </el-select>
+        <el-form-item label="每月 Token 限额">
+          <el-input-number v-model="batchLimitsForm.monthly_token_limit" :min="0" :step="100000" />
         </el-form-item>
+        <el-form-item label="计费模式">
+          <el-radio-group v-model="batchLimitsForm.billing_mode">
+            <el-radio-button value="request">按请求</el-radio-button>
+            <el-radio-button value="token">按金额（日限额）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <template v-if="batchLimitsForm.billing_mode === 'token'">
+          <el-form-item label="输入单价（元/M）">
+            <el-input-number v-model="batchLimitsForm.input_token_price_per_million" :min="0.01" :max="1000000" :step="0.1" :precision="2" />
+          </el-form-item>
+          <el-form-item label="输出单价（元/M）">
+            <el-input-number v-model="batchLimitsForm.output_token_price_per_million" :min="0.01" :max="1000000" :step="0.1" :precision="2" />
+          </el-form-item>
+          <el-form-item label="每日金额上限（元）">
+            <el-input-number v-model="batchLimitsForm.daily_cost_limit" :min="0.01" :max="100000000" :step="1" :precision="2" />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="batchLimitsVisible = false">取消</el-button>
@@ -276,7 +358,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { Search } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
@@ -305,11 +387,20 @@ interface AccountConfig {
   name: string
   active?: boolean
   is_portal_key?: boolean
+  rate_limit_enabled?: boolean
   per_minute_limit?: number
   max_concurrency?: number
+  request_quota_window_hours?: number
+  request_quota_requests?: number
   daily_token_limit?: number | null
-  expires_at?: number | null
+  monthly_token_limit?: number | null
   billing_mode?: string
+  input_token_price_per_million_cents?: number | null
+  output_token_price_per_million_cents?: number | null
+  daily_cost_limit_cents?: number | null
+  ip_allowlist?: string[]
+  expires_at?: number | null
+  model_concurrency_groups?: Array<{ name: string; match: string[]; max_concurrency: number }>
 }
 
 const users = ref<PortalUserRow[]>([])
@@ -458,11 +549,22 @@ const openBindings = async (row: PortalUserRow) => {
       name: typeof d.name === 'string' && d.name.trim() ? d.name : id,
       active: typeof d.active === 'boolean' ? d.active : undefined,
       is_portal_key: Boolean(d.is_portal_key),
+      rate_limit_enabled: typeof d.rate_limit_enabled === 'boolean' ? d.rate_limit_enabled : undefined,
       per_minute_limit: typeof d.per_minute_limit === 'number' ? d.per_minute_limit : undefined,
       max_concurrency: typeof d.max_concurrency === 'number' ? d.max_concurrency : undefined,
+      request_quota_window_hours: typeof d.request_quota_window_hours === 'number' ? d.request_quota_window_hours : undefined,
+      request_quota_requests: typeof d.request_quota_requests === 'number' ? d.request_quota_requests : undefined,
       daily_token_limit: typeof d.daily_token_limit === 'number' ? d.daily_token_limit : undefined,
+      monthly_token_limit: typeof d.monthly_token_limit === 'number' ? d.monthly_token_limit : undefined,
+      billing_mode: typeof d.billing_mode === 'string' ? d.billing_mode : undefined,
+      input_token_price_per_million_cents: typeof d.input_token_price_per_million_cents === 'number' ? d.input_token_price_per_million_cents : undefined,
+      output_token_price_per_million_cents: typeof d.output_token_price_per_million_cents === 'number' ? d.output_token_price_per_million_cents : undefined,
+      daily_cost_limit_cents: typeof d.daily_cost_limit_cents === 'number' ? d.daily_cost_limit_cents : undefined,
+      ip_allowlist: Array.isArray(d.ip_allowlist) ? (d.ip_allowlist as string[]) : [],
       expires_at: typeof d.expires_at === 'number' ? d.expires_at : undefined,
-      billing_mode: typeof d.billing_mode === 'string' ? d.billing_mode : undefined
+      model_concurrency_groups: Array.isArray(d.model_concurrency_groups)
+        ? (d.model_concurrency_groups as Array<{ name: string; match: string[]; max_concurrency: number }>)
+        : []
     }
   }
 }
@@ -529,20 +631,78 @@ const editConfigKeyId = ref('')
 const editConfigSaving = ref(false)
 const editConfigForm = ref({
   name: '',
+  active: true,
+  rate_limit_enabled: true,
   per_minute_limit: 60,
   max_concurrency: 10,
+  request_quota_window_hours: 5,
+  request_quota_requests: 600,
   daily_token_limit: undefined as number | undefined,
-  expires_at: undefined as number | undefined,
-  billing_mode: 'request'
+  monthly_token_limit: undefined as number | undefined,
+  billing_mode: 'request' as 'request' | 'token',
+  input_token_price_per_million: undefined as number | undefined,
+  output_token_price_per_million: undefined as number | undefined,
+  daily_cost_limit: undefined as number | undefined,
+  ip_allowlist_text: '',
+  expires_at: undefined as number | undefined
 })
+const editConcurrencyGroups = ref<Array<{ name: string; matchText: string; max_concurrency: number }>>([])
 const batchLimitsVisible = ref(false)
 const batchLimitsSaving = ref(false)
 const batchLimitsForm = ref({
   per_minute_limit: 60,
   max_concurrency: 10,
+  request_quota_window_hours: 5,
+  request_quota_requests: 600,
   daily_token_limit: undefined as number | undefined,
-  billing_mode: 'request'
+  monthly_token_limit: undefined as number | undefined,
+  billing_mode: 'request' as 'request' | 'token',
+  input_token_price_per_million: undefined as number | undefined,
+  output_token_price_per_million: undefined as number | undefined,
+  daily_cost_limit: undefined as number | undefined
 })
+
+const isLegacyKey = (id: string) => id.startsWith('key-') || id.startsWith('portal-')
+
+const rowConfigRef = (id: string) => accountConfigs.value[id]
+const editConfigKeyName = computed(() => {
+  return rowConfigRef(editConfigKeyId.value)?.name ?? editConfigKeyId.value
+})
+
+const addEditConcurrencyGroup = () => {
+  editConcurrencyGroups.value.push({ name: '', matchText: '', max_concurrency: 4 })
+}
+const removeEditConcurrencyGroup = (index: number) => {
+  editConcurrencyGroups.value.splice(index, 1)
+}
+const buildEditConcurrencyGroups = ():
+  | Array<{ name: string; match: string[]; max_concurrency: number }>
+  | null => {
+  const groups: Array<{ name: string; match: string[]; max_concurrency: number }> = []
+  const seen = new Set<string>()
+  for (const group of editConcurrencyGroups.value) {
+    const name = group.name.trim()
+    if (!name) {
+      ElMessage.error('并发组名不能为空')
+      return null
+    }
+    if (seen.has(name)) {
+      ElMessage.error(`并发组名重复：${name}`)
+      return null
+    }
+    seen.add(name)
+    const match = group.matchText
+      .split(/[,，\n]/)
+      .map(item => item.trim())
+      .filter(Boolean)
+    if (!match.length) {
+      ElMessage.error(`并发组 ${name} 至少需要一个模型匹配`)
+      return null
+    }
+    groups.push({ name, match, max_concurrency: group.max_concurrency })
+  }
+  return groups
+}
 
 const rowConfig = (row: BindingRow) => accountConfigs.value[row.downstream_id]
 
@@ -550,28 +710,81 @@ const openEditConfig = (row: BindingRow) => {
   const config = rowConfig(row)
   if (!config || config.is_portal_key) return
   editConfigKeyId.value = row.downstream_id
+  const isCost = config.billing_mode === 'token'
   editConfigForm.value = {
     name: config.name ?? row.downstream_id,
+    active: config.active ?? true,
+    rate_limit_enabled: config.rate_limit_enabled ?? true,
     per_minute_limit: config.per_minute_limit ?? 60,
     max_concurrency: config.max_concurrency ?? 10,
+    request_quota_window_hours: config.request_quota_window_hours || 5,
+    request_quota_requests: config.request_quota_requests || 600,
     daily_token_limit: config.daily_token_limit ?? undefined,
-    expires_at: config.expires_at ?? undefined,
-    billing_mode: config.billing_mode ?? 'request'
+    monthly_token_limit: config.monthly_token_limit ?? undefined,
+    billing_mode: (config.billing_mode as 'request' | 'token') ?? 'request',
+    input_token_price_per_million:
+      isCost && config.input_token_price_per_million_cents
+        ? config.input_token_price_per_million_cents / 100
+        : undefined,
+    output_token_price_per_million:
+      isCost && config.output_token_price_per_million_cents
+        ? config.output_token_price_per_million_cents / 100
+        : undefined,
+    daily_cost_limit:
+      isCost && config.daily_cost_limit_cents ? config.daily_cost_limit_cents / 100 : undefined,
+    ip_allowlist_text: (config.ip_allowlist || []).join('\n'),
+    expires_at: config.expires_at ?? undefined
   }
+  editConcurrencyGroups.value = (config.model_concurrency_groups || []).map(group => ({
+    name: group.name,
+    matchText: (group.match || []).join(', '),
+    max_concurrency: group.max_concurrency
+  }))
   editConfigVisible.value = true
 }
 
 const saveEditConfig = async () => {
+  if (!editConfigForm.value.name.trim()) {
+    ElMessage.warning('请填写账户名称')
+    return
+  }
+  const concurrencyGroups = buildEditConcurrencyGroups()
+  if (concurrencyGroups === null) return
+  const isCost = editConfigForm.value.billing_mode === 'token'
   editConfigSaving.value = true
   try {
-    await adminApi.updateDownstream(editConfigKeyId.value, {
+    const payload: Record<string, unknown> = {
       name: editConfigForm.value.name.trim() || editConfigKeyId.value,
+      active: editConfigForm.value.active,
+      rate_limit_enabled: editConfigForm.value.rate_limit_enabled,
       per_minute_limit: editConfigForm.value.per_minute_limit,
       max_concurrency: editConfigForm.value.max_concurrency,
-      daily_token_limit: editConfigForm.value.daily_token_limit,
+      request_quota_window_hours: editConfigForm.value.rate_limit_enabled
+        ? editConfigForm.value.request_quota_window_hours
+        : null,
+      request_quota_requests: editConfigForm.value.rate_limit_enabled
+        ? editConfigForm.value.request_quota_requests
+        : null,
+      daily_token_limit: editConfigForm.value.daily_token_limit ?? null,
+      monthly_token_limit: editConfigForm.value.monthly_token_limit ?? null,
+      billing_mode: isCost ? 'token' : 'request',
+      input_token_price_per_million_cents: isCost
+        ? Math.round((editConfigForm.value.input_token_price_per_million ?? 0) * 100)
+        : null,
+      output_token_price_per_million_cents: isCost
+        ? Math.round((editConfigForm.value.output_token_price_per_million ?? 0) * 100)
+        : null,
+      daily_cost_limit_cents: isCost
+        ? Math.round((editConfigForm.value.daily_cost_limit ?? 0) * 100)
+        : null,
+      ip_allowlist: editConfigForm.value.ip_allowlist_text
+        .split('\n')
+        .map(item => item.trim())
+        .filter(Boolean),
       expires_at: editConfigForm.value.expires_at,
-      billing_mode: editConfigForm.value.billing_mode as 'token' | 'request'
-    })
+      model_concurrency_groups: concurrencyGroups
+    }
+    await adminApi.updateDownstream(editConfigKeyId.value, payload)
     ElMessage.success('账户配置已保存')
     editConfigVisible.value = false
     await refreshBindings()
@@ -614,8 +827,14 @@ const openBatchLimits = () => {
   batchLimitsForm.value = {
     per_minute_limit: 60,
     max_concurrency: 10,
+    request_quota_window_hours: 5,
+    request_quota_requests: 600,
     daily_token_limit: undefined,
-    billing_mode: 'request'
+    monthly_token_limit: undefined,
+    billing_mode: 'request',
+    input_token_price_per_million: undefined,
+    output_token_price_per_million: undefined,
+    daily_cost_limit: undefined
   }
   batchLimitsVisible.value = true
 }
@@ -623,13 +842,26 @@ const openBatchLimits = () => {
 const saveBatchLimits = async () => {
   const ids = batchKeyIds()
   if (!ids.length) return
+  const isCost = batchLimitsForm.value.billing_mode === 'token'
   batchLimitsSaving.value = true
   try {
     await adminApi.batchUpdateDownstreams(ids, {
       per_minute_limit: batchLimitsForm.value.per_minute_limit,
       max_concurrency: batchLimitsForm.value.max_concurrency,
-      daily_token_limit: batchLimitsForm.value.daily_token_limit,
-      billing_mode: batchLimitsForm.value.billing_mode as 'token' | 'request'
+      request_quota_window_hours: batchLimitsForm.value.request_quota_window_hours,
+      request_quota_requests: batchLimitsForm.value.request_quota_requests,
+      daily_token_limit: batchLimitsForm.value.daily_token_limit ?? null,
+      monthly_token_limit: batchLimitsForm.value.monthly_token_limit ?? null,
+      billing_mode: isCost ? 'token' : 'request',
+      input_token_price_per_million_cents: isCost
+        ? Math.round((batchLimitsForm.value.input_token_price_per_million ?? 0) * 100)
+        : null,
+      output_token_price_per_million_cents: isCost
+        ? Math.round((batchLimitsForm.value.output_token_price_per_million ?? 0) * 100)
+        : null,
+      daily_cost_limit_cents: isCost
+        ? Math.round((batchLimitsForm.value.daily_cost_limit ?? 0) * 100)
+        : null
     })
     ElMessage.success(`已更新 ${ids.length} 个密钥的限额`)
     batchLimitsVisible.value = false
@@ -671,6 +903,23 @@ onMounted(() => {
 }
 .group-tag {
   margin-right: 4px;
+}
+.legacy-tag {
+  margin-left: 6px;
+}
+.key-id {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+  word-break: break-all;
+}
+.cg-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+.helper-text {
+  margin-top: 8px;
 }
 .field-hint {
   font-size: 12px;
