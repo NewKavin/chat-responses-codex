@@ -1347,3 +1347,109 @@ async fn test_legacy_portal_keys_are_marked_hidden_on_startup() {
         assert!(marked, "legacy portal row {id} must be marked is_portal_key");
     }
 }
+
+#[tokio::test]
+async fn test_admin_can_update_binding_group_and_portal_sees_it() {
+    let _guard = common::oidc::lock().await;
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal_store must exist");
+
+    // 门户用户 + 会话
+    let user = store
+        .create_user_with_identity("binding-group@example.com", None, None, "google", "binding_group_1")
+        .await
+        .expect("create user");
+    let raw_sid = "binding_group_session";
+    let sid_hash = sha256_hex(raw_sid.as_bytes());
+    let now = chat_responses_codex::state::unix_seconds() as i64;
+    store
+        .create_session(&sid_hash, &user.id, now + 3600, None, None)
+        .await
+        .expect("create session");
+
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let admin_token = get_admin_token(&app).await;
+
+    // 管理员先建一把普通下游并绑定 basic
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = "sk-test-bound".into();
+    ds.name = "Bound Account".into();
+    ds.hash = "unused".into();
+    ds.plaintext_key = Some("sk-test-bound-secret".into());
+    state.insert_downstream(ds).await.expect("insert downstream");
+
+    let bind_url = format!("/api/admin/portal/users/{}/bindings", user.id);
+    let req = Request::builder()
+        .method("POST")
+        .uri(&bind_url)
+        .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"downstream_id": "sk-test-bound", "model_group_id": "basic"}).to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 修改绑定分组 -> premium（此前没有 PUT 接口，保存不了）
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/admin/portal/users/{}/bindings/sk-test-bound", user.id))
+        .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::json!({"model_group_id": "premium"}).to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "binding group must be updatable");
+
+    // 绑定列表反映新分组
+    let req = Request::builder()
+        .method("GET")
+        .uri(&bind_url)
+        .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let binding = json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["downstream_id"] == "sk-test-bound")
+        .expect("binding must exist");
+    assert_eq!(binding["model_group_id"], "premium");
+
+    // 门户端 model-groups 现在必须能看到 premium（修复 __none__ 问题）
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/portal/model-groups")
+        .header(header::COOKIE, format!("portal_session={}", raw_sid))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let group_ids: Vec<String> = json["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .map(|g| g["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        group_ids.contains(&"premium".to_string()),
+        "portal model-groups must include binding group premium, got {group_ids:?}"
+    );
+    assert!(
+        !group_ids.contains(&"deny-all".to_string()),
+        "deny-all must not appear as selectable group for a bound user, got {group_ids:?}"
+    );
+}

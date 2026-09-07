@@ -3636,6 +3636,62 @@ pub(super) async fn admin_portal_user_bindings_post(
     }
 }
 
+/// PUT 绑定分组请求体：下游 ID 在路径中，body 仅需分组/默认标记
+#[derive(serde::Deserialize)]
+pub(super) struct UpdateBindingBody {
+    #[serde(default)]
+    pub(super) downstream_id: Option<String>,
+    #[serde(default)]
+    pub(super) is_default: Option<bool>,
+    #[serde(default)]
+    pub(super) model_group_id: Option<String>,
+}
+
+/// 修改绑定级模型分组（门户用户弹窗内联保存；upsert 语义，绑定不存在则创建）
+pub(super) async fn admin_portal_user_binding_update(
+    State(state): State<crate::state::AppState>,
+    Path((user_id, downstream_id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<UpdateBindingBody>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    match store
+        .upsert_downstream_binding_with_group(
+            &user_id,
+            &downstream_id,
+            body.is_default.unwrap_or(false),
+            body.model_group_id.as_deref(),
+        )
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "user_id": user_id,
+                "downstream_id": downstream_id,
+                "is_default": body.is_default.unwrap_or(false),
+                "model_group_id": body.model_group_id,
+            })),
+        )
+            .into_response(),
+        Err(crate::state::PortalStoreError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "binding not found"}})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
 pub(super) async fn admin_portal_user_bindings_delete(
     State(state): State<crate::state::AppState>,
     Path((user_id, downstream_id)): Path<(String, String)>,

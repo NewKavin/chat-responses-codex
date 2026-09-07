@@ -2640,9 +2640,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/admin/portal/users/{id}/bindings/{downstream_id}",
-            delete(admin_portal_user_bindings_delete).route_layer(
-                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
-            ),
+            put(admin_portal_user_binding_update)
+                .delete(admin_portal_user_bindings_delete)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/portal/users/{id}/model-groups",

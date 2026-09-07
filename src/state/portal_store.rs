@@ -1058,6 +1058,13 @@ impl PortalStore {
                         SELECT 1 FROM portal_user_model_groups pumg \
                         WHERE pumg.user_id = $1 AND pumg.model_group_id = mg.id
                     ) \
+                    OR EXISTS (
+                        -- 密钥绑定的分组也属于用户可用分组（管理端绑定后
+                        -- 门户立即可见，而不是只剩 deny-all）
+                        SELECT 1 FROM portal_user_downstreams pud \
+                        WHERE pud.user_id = $1 \
+                          AND COALESCE(pud.model_group_id, 'basic') = mg.id
+                    ) \
                  ORDER BY mg.id",
                 &[&user_id],
             )
