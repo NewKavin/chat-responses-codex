@@ -57,7 +57,7 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
 
 #[tokio::test]
 async fn test_list_model_groups() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -96,7 +96,7 @@ async fn test_list_model_groups() {
 
 #[tokio::test]
 async fn test_create_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -139,7 +139,7 @@ async fn test_create_model_group() {
 
 #[tokio::test]
 async fn test_update_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -173,7 +173,7 @@ async fn test_update_model_group() {
 
 #[tokio::test]
 async fn test_delete_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -223,7 +223,7 @@ async fn test_delete_model_group() {
 /// 语义的事实源)。四个都不可删除；all/deny-all 不可编辑。
 #[tokio::test]
 async fn test_builtin_sentinel_groups_are_protected() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

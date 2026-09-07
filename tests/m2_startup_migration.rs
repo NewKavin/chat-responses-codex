@@ -33,7 +33,7 @@ async fn load_state(database_url: &str) -> AppState {
 /// 场景 C: allowlist 表缺失时启动不报错（下个版本删表路径）。
 #[tokio::test]
 async fn startup_migration_binds_and_is_idempotent_and_skips_missing_table() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -137,7 +137,7 @@ async fn startup_migration_binds_and_is_idempotent_and_skips_missing_table() {
 /// HTTP 冒烟：绑 auto 组后请求组内模型，未被迁移破坏。
 #[tokio::test]
 async fn startup_migration_does_not_break_http_requests() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

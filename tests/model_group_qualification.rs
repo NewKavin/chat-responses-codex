@@ -64,7 +64,7 @@ fn qualification_decisions(models: BTreeSet<String>) -> Vec<chat_responses_codex
 /// 下游本身 model_allowlist 保持原值（不再回写）。
 #[tokio::test]
 async fn qualification_writes_to_bound_group_not_allowlist() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;
@@ -153,7 +153,7 @@ async fn qualification_writes_to_bound_group_not_allowlist() {
 /// 防外溢规则 1：下游未绑组 → InvalidInput，且不影响其它数据。
 #[tokio::test]
 async fn qualification_rejects_unbound_downstream() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;
@@ -188,7 +188,7 @@ async fn qualification_rejects_unbound_downstream() {
 /// 防外溢规则 2：内置组（all）→ InvalidInput，提示先改绑。
 #[tokio::test]
 async fn qualification_rejects_builtin_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;
@@ -225,7 +225,7 @@ async fn qualification_rejects_builtin_group() {
 /// 防外溢规则 3：组被 2+ 下游引用 → InvalidInput。
 #[tokio::test]
 async fn qualification_rejects_shared_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;

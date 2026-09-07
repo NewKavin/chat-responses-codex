@@ -23,7 +23,7 @@ async fn load_state(database_url: &str) -> AppState {
 
 #[tokio::test]
 async fn test_model_groups_table_exists() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -55,7 +55,7 @@ async fn test_model_groups_table_exists() {
 
 #[tokio::test]
 async fn test_model_groups_has_correct_columns() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -97,7 +97,7 @@ fn migration_sql() -> String {
 
 #[tokio::test]
 async fn test_migrate_allowlist_to_groups() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -256,7 +256,7 @@ async fn test_migrate_allowlist_to_groups() {
 /// 带条件 UPDATE 修正；运维手工调整过的内容不得被覆盖。
 #[tokio::test]
 async fn test_schema_sql_fixes_placeholder_seeds_only() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -319,7 +319,7 @@ async fn test_schema_sql_fixes_placeholder_seeds_only() {
 
 #[tokio::test]
 async fn test_model_groups_has_initial_data() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -423,7 +423,7 @@ async fn test_model_groups_has_initial_data() {
 
 #[tokio::test]
 async fn test_portal_user_downstreams_has_model_group_id() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -466,7 +466,7 @@ async fn test_portal_user_downstreams_has_model_group_id() {
 
 #[tokio::test]
 async fn test_model_group_id_constraint() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -497,7 +497,7 @@ async fn test_model_group_id_constraint() {
 
 #[tokio::test]
 async fn test_foreign_key_constraint() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

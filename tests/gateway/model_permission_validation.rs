@@ -40,7 +40,7 @@ async fn register_downstream(state: &AppState, downstream_id: &str) -> String {
 
 #[tokio::test]
 async fn test_allowed_model_passes_through() {
-    let _guard = lock().lock();
+    let _guard = lock().await;
     let url = database_url().expect("OIDC_TEST_DATABASE_URL must be set");
 
     if !ensure_database(&url).await {
@@ -121,7 +121,7 @@ async fn test_allowed_model_passes_through() {
 
 #[tokio::test]
 async fn test_forbidden_model_is_rejected() {
-    let _guard = lock().lock();
+    let _guard = lock().await;
     let url = database_url().expect("OIDC_TEST_DATABASE_URL must be set");
 
     if !ensure_database(&url).await {
@@ -200,7 +200,7 @@ async fn test_forbidden_model_is_rejected() {
 
 #[tokio::test]
 async fn test_wildcard_allows_all_models() {
-    let _guard = lock().lock();
+    let _guard = lock().await;
     let url = database_url().expect("OIDC_TEST_DATABASE_URL must be set");
 
     if !ensure_database(&url).await {
@@ -276,7 +276,7 @@ async fn test_wildcard_allows_all_models() {
 
 #[tokio::test]
 async fn test_non_portal_key_without_group_is_deny_all() {
-    let _guard = lock().lock();
+    let _guard = lock().await;
     let url = database_url().expect("OIDC_TEST_DATABASE_URL must be set");
 
     if !ensure_database(&url).await {

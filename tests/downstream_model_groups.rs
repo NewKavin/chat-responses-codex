@@ -277,7 +277,7 @@ async fn models_request(app: &axum::Router, key: &str) -> (StatusCode, Vec<Strin
 /// 组内模型放行（后续因上游不可达而 502/503），组外模型 403。
 #[tokio::test]
 async fn gateway_http_enforces_downstream_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((_state, app, key1, _key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -307,7 +307,7 @@ async fn gateway_http_enforces_downstream_model_group() {
 /// 分组匹配与 config 层一致：大小写不敏感、归一化。
 #[tokio::test]
 async fn gateway_group_matching_is_normalized() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((_state, app, key1, _key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -326,7 +326,7 @@ async fn gateway_group_matching_is_normalized() {
 /// 通配分组（*）放行任意模型。
 #[tokio::test]
 async fn gateway_wildcard_group_allows_any_model() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((_state, app, _key1, _key3, key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -341,7 +341,7 @@ async fn gateway_wildcard_group_allows_any_model() {
 /// 仍是回退路径的事实源，T14 只清理纯夹具、保留行为测试）。
 #[tokio::test]
 async fn gateway_manual_allowlist_still_enforced() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((_state, app, _key1, key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -360,7 +360,7 @@ async fn gateway_manual_allowlist_still_enforced() {
 /// 阶段 1：批量解析下游有效白名单与逐条解析结果一致（组优先、无组用白名单、组不存在回退）。
 #[tokio::test]
 async fn batch_effective_allowlist_matches_single_resolution() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -413,7 +413,7 @@ async fn batch_effective_allowlist_matches_single_resolution() {
 /// active upstream 模型，而不是只有一个字面叫 * 的模型。
 #[tokio::test]
 async fn gateway_codex_catalog_wildcard_group_returns_all_upstream_models() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((state, app, _key1, _key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -474,7 +474,7 @@ async fn gateway_codex_catalog_wildcard_group_returns_all_upstream_models() {
 /// 成员判定，["*"] 会把它滤成空列表；应改走 model_list_allows。
 #[tokio::test]
 async fn gateway_openai_models_wildcard_group_returns_all_upstream_models() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((state, app, _key1, _key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -529,7 +529,7 @@ async fn gateway_openai_models_wildcard_group_returns_all_upstream_models() {
 /// 场景刻意保持"仅 all 组下游存在"，避免其他下游的 allowlist 掩盖缺口。
 #[tokio::test]
 async fn visible_models_wildcard_group_returns_all_upstream_models() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -588,7 +588,7 @@ async fn visible_models_wildcard_group_returns_all_upstream_models() {
 /// 而不是只读 model_allowlist（空白名单 = 全放行会暴露组外模型）。
 #[tokio::test]
 async fn gateway_codex_catalog_matches_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let Some((_state, app, key1, _key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
@@ -633,7 +633,7 @@ async fn gateway_codex_catalog_matches_model_group() {
 
 #[tokio::test]
 async fn downstream_with_model_group_allows_models_from_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -667,7 +667,7 @@ async fn downstream_with_model_group_allows_models_from_group() {
 
 #[tokio::test]
 async fn downstream_with_model_group_rejects_models_not_in_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -698,7 +698,7 @@ async fn downstream_with_model_group_rejects_models_not_in_group() {
 
 #[tokio::test]
 async fn downstream_without_model_group_uses_allowlist() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -732,7 +732,7 @@ async fn downstream_without_model_group_uses_allowlist() {
 
 #[tokio::test]
 async fn downstream_with_invalid_group_falls_back_to_allowlist() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -783,7 +783,7 @@ async fn downstream_with_invalid_group_falls_back_to_allowlist() {
 
 #[tokio::test]
 async fn downstream_with_wildcard_group_allows_all_models() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {
@@ -813,7 +813,7 @@ async fn downstream_with_wildcard_group_allows_all_models() {
 
 #[tokio::test]
 async fn empty_allowlist_and_no_group_allows_all_models() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = match database_url() {
         Some(url) => url,
         None => {

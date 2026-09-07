@@ -16,7 +16,7 @@ fn database_url() -> String {
 /// 测试：portal_list_model_groups 只返回用户有权访问的分组
 #[tokio::test]
 async fn test_portal_list_groups_returns_only_accessible() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -129,7 +129,7 @@ async fn test_portal_list_groups_returns_only_accessible() {
 /// 测试：portal_update_key_model_group 检查权限
 #[tokio::test]
 async fn test_portal_update_key_group_checks_permission() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -241,7 +241,7 @@ async fn test_portal_update_key_group_checks_permission() {
 /// 测试：portal_create_key 不允许绑定未授权的分组（越权创建密钥）
 #[tokio::test]
 async fn test_portal_create_key_rejects_unauthorized_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

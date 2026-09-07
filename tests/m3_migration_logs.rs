@@ -101,7 +101,7 @@ async fn seed_mixed_downstreams(state: &AppState) {
 /// 无人引用的 auto 组。
 #[tokio::test]
 async fn startup_migration_creates_groups_only_for_unbound_downstreams() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;
@@ -152,9 +152,10 @@ async fn startup_migration_creates_groups_only_for_unbound_downstreams() {
 /// 日志是本次运行的增量统计，且三种情况都有输出。
 #[test]
 fn startup_migration_logs_per_run_counts_and_all_three_states() {
-    let _guard = common::oidc::lock().lock();
-    let url = database_url();
     let rt = tokio::runtime::Runtime::new().unwrap();
+    // 同步 #[test] 里拿组合守卫：block_on await 加锁，guard 持连接直到测试结束
+    let _guard = rt.block_on(common::oidc::lock());
+    let url = database_url();
     let ready = rt.block_on(async { common::oidc::ensure_database(&url).await });
     if !ready {
         return;

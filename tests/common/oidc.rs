@@ -10,7 +10,7 @@
 #![allow(dead_code, unused_imports, clippy::await_holding_lock)]
 
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use tokio_postgres::{Config, NoTls};
 
 pub fn database_url() -> Option<String> {
@@ -19,10 +19,45 @@ pub fn database_url() -> Option<String> {
         .or_else(|| Some("postgres://test:test@127.0.0.1:15433/oidc_test".to_string()))
 }
 
-/// Serialize tests in this binary that share the database.
-pub fn lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+/// Serialize test bodies that share the database — both inside this process
+/// and across the test binaries cargo spawns in parallel.
+///
+/// 组合守卫：
+/// - 进程内 `tokio::sync::Mutex`（原 `std::sync::Mutex` 不能跨 await）；
+/// - 会话级 `pg_advisory_lock(824615807)`：guard 全程持住**同一个专用连接**，
+///   其他进程连同一测试库时会在加锁处阻塞，直到本测试体结束。
+///   DbGuard drop 时连接关闭，advisory lock 由 PostgreSQL 自动释放
+///   （连接归还=丢锁，因此不能用连接池连接）。
+///
+/// 调用形态与旧 `lock().lock()` 对齐（实测同步 lock 换成这个 await 即可）：
+/// `let _guard = lock().await;`  // 在 #[tokio::test] 里直接用
+/// `let _guard = rt.block_on(lock());`  // 在同步 #[test] 里用
+pub async fn lock() -> DbGuard {
+    static DB_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _mutex = DB_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let _conn = match database_url() {
+        Some(url) => match connect(&url).await {
+            Ok(client) => {
+                let _ = client
+                    .simple_query("SELECT pg_advisory_lock(824615807)")
+                    .await;
+                Some(client)
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
+    DbGuard { _mutex, _conn }
+}
+
+/// 组合守卫：进程内互斥 + 会话级 advisory lock（持连接直到测试体结束）。
+pub struct DbGuard {
+    _mutex: tokio::sync::MutexGuard<'static, ()>,
+    // 持住会话：连接 drop 即释放 advisory lock
+    _conn: Option<tokio_postgres::Client>,
 }
 
 async fn connect(database_url: &str) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
@@ -77,13 +112,12 @@ pub async fn reset_portal_tables(database_url: &str) {
     let client = connect(database_url)
         .await
         .expect("oidc test db must connect");
-    // 跨进程串行化 reset：cargo test 会并行跑多个 test binary 连同一个
-    // 测试库，并发 DROP TABLE 会互相等 AccessExclusiveLock 触发 deadlock。
-    // 会话级 advisory lock 保证同一时刻只有一个进程在整表重建。
+    // 跨进程串行化由调用方的外层组合守卫承担（lock().await 持会话级
+    // advisory lock 直到测试体结束）；reset 自身不再加锁/解锁，避免同一
+    // key 重复加锁后提前释放。
     client
         .batch_execute(
-            "SELECT pg_advisory_lock(824615807); \
-             DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
+            "DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
              portal_user_model_groups, portal_identities, portal_users, \
              oauth_login_attempts, runtime_settings, model_groups \
              CASCADE",
@@ -113,8 +147,7 @@ pub async fn reset_portal_tables(database_url: &str) {
                position INTEGER NOT NULL, \
                model_slug TEXT NOT NULL, \
                PRIMARY KEY (downstream_id, model_slug) \
-             ); \
-             SELECT pg_advisory_unlock(824615807)",
+             )",
         )
         .await
         .expect("truncating gateway tables must succeed");

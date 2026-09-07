@@ -81,7 +81,7 @@ async fn ensure_user(store: &PortalStore, user_id: &str) {
 /// GET 默认返回 basic
 #[tokio::test]
 async fn test_get_user_model_groups_default_basic() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -123,7 +123,7 @@ async fn test_get_user_model_groups_default_basic() {
 /// PUT 分配 premium 后，GET 应包含 basic + premium
 #[tokio::test]
 async fn test_put_assigns_model_groups() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -179,7 +179,7 @@ async fn test_put_assigns_model_groups() {
 /// PUT 差量撤销：从 premium 撤回到只有 basic
 #[tokio::test]
 async fn test_put_revokes_model_groups() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -237,7 +237,7 @@ async fn test_put_revokes_model_groups() {
 /// PUT 不存在用户返回 404
 #[tokio::test]
 async fn test_put_user_not_found() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -267,7 +267,7 @@ async fn test_put_user_not_found() {
 /// PUT 不存在的分组返回 400
 #[tokio::test]
 async fn test_put_group_not_found() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -307,7 +307,7 @@ async fn test_put_group_not_found() {
 /// 用户列表接口应附带 model_group_ids
 #[tokio::test]
 async fn test_user_list_includes_model_group_ids() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

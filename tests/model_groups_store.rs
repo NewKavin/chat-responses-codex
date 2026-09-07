@@ -42,7 +42,7 @@ async fn ensure_user(store: &chat_responses_codex::state::PortalStore, user_id: 
 
 #[tokio::test]
 async fn test_list_model_groups() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -88,7 +88,7 @@ async fn test_list_model_groups() {
 
 #[tokio::test]
 async fn test_model_group_structure() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -118,7 +118,7 @@ async fn test_model_group_structure() {
 
 #[tokio::test]
 async fn test_get_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -141,7 +141,7 @@ async fn test_get_model_group() {
 
 #[tokio::test]
 async fn test_get_model_group_not_found() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -161,7 +161,7 @@ async fn test_get_model_group_not_found() {
 async fn test_create_model_group() {
     use chat_responses_codex::state::ModelGroup;
 
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -199,7 +199,7 @@ async fn test_create_model_group() {
 
 #[tokio::test]
 async fn test_update_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -235,7 +235,7 @@ async fn test_update_model_group() {
 async fn test_delete_model_group() {
     use chat_responses_codex::state::ModelGroup;
 
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -269,7 +269,7 @@ async fn test_delete_model_group() {
 
 #[tokio::test]
 async fn test_get_key_allowed_models() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -342,7 +342,7 @@ async fn test_allows_model_wildcard() {
 async fn test_delete_group_resets_keys_to_basic() {
     use chat_responses_codex::state::ModelGroup;
 
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

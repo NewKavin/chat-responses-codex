@@ -37,7 +37,7 @@ async fn load_state(database_url: &str) -> AppState {
 /// 列约束为 NOT NULL + DEFAULT 'deny-all'。
 #[tokio::test]
 async fn deleted_group_falls_back_to_deny_all_and_rejects_every_model() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;

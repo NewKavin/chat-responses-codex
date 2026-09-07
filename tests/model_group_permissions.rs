@@ -41,7 +41,7 @@ async fn ensure_user(store: &chat_responses_codex::state::PortalStore, user_id: 
 
 #[tokio::test]
 async fn test_model_permission_allows_basic_model() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -78,7 +78,7 @@ async fn test_model_permission_allows_basic_model() {
 
 #[tokio::test]
 async fn test_model_permission_blocks_premium_model() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -113,7 +113,7 @@ async fn test_model_permission_blocks_premium_model() {
 
 #[tokio::test]
 async fn test_model_permission_wildcard_allows_all() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

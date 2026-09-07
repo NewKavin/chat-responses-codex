@@ -37,7 +37,7 @@ async fn schema_init_creates_all_four_portal_tables() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -112,7 +112,7 @@ async fn create_user_with_identity_then_find_by_identity() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -162,7 +162,7 @@ async fn duplicate_identity_or_email_is_conflict() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -198,7 +198,7 @@ async fn bind_identity_already_bound_to_other_user_conflicts() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -250,7 +250,7 @@ async fn downstream_bindings_and_default_promotion() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -314,7 +314,7 @@ async fn sessions_roundtrip_expire_when_stale_and_survive_until_then() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -369,7 +369,7 @@ async fn disabling_user_purges_sessions_immediately() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -427,7 +427,7 @@ async fn list_users_keywords_and_totals() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }

@@ -385,7 +385,7 @@ async fn login_flow_with_discovery_succeeds_and_returns_session_cookie() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -441,7 +441,7 @@ async fn login_flow_with_explicit_endpoints_skips_discovery() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -476,7 +476,7 @@ async fn pkce_challenge_present_by_default_and_absent_when_disabled() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -554,7 +554,7 @@ async fn replayed_or_missing_state_is_rejected() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -659,7 +659,7 @@ async fn userinfo_missing_sub_or_email_reports_the_missing_field() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -706,7 +706,7 @@ async fn registration_disabled_new_identity_is_403_and_leaves_no_records() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -776,7 +776,7 @@ async fn session_cookie_unlocks_portal_and_disabling_user_kills_it_immediately()
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -829,7 +829,7 @@ async fn legacy_bearer_login_is_untouched_by_oidc() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1010,7 +1010,7 @@ async fn bind_intent_attaches_identity_to_an_existing_key() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1067,7 +1067,7 @@ async fn bind_conflicts_when_identity_already_bound_to_another_key() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1122,7 +1122,7 @@ async fn bind_requires_login() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1210,7 +1210,7 @@ async fn admin_users_listing_paging_and_keyword() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1266,7 +1266,7 @@ async fn admin_disable_user_kills_their_sessions_immediately() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1310,7 +1310,7 @@ async fn admin_bindings_crud_and_default_promotion() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1406,7 +1406,7 @@ async fn admin_portal_endpoints_require_authentication() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1434,7 +1434,7 @@ async fn email_domain_allowlist_admits_subdomains() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1488,7 +1488,7 @@ async fn disabled_oidc_hides_start_endpoint() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1616,7 +1616,7 @@ async fn authenticated_but_unbound_first_login_is_403_and_no_key_is_issued() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1655,7 +1655,7 @@ async fn bind_works_with_legacy_jwt_login() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1696,7 +1696,7 @@ async fn empty_sub_or_email_is_400_naming_the_field() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1737,7 +1737,7 @@ async fn expired_state_is_rejected_with_400() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1784,7 +1784,7 @@ async fn second_login_reuses_the_same_user() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1839,7 +1839,7 @@ async fn admin_wiring_changes_are_used_by_the_oidc_flow() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -1945,7 +1945,7 @@ async fn provider_denial_redirects_with_oauth_error() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2020,7 +2020,7 @@ async fn login_flow_with_custom_token_path_succeeds() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2054,7 +2054,7 @@ async fn userinfo_post_method_sends_json_body() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2116,7 +2116,7 @@ async fn login_flow_with_uuid_field_derives_identity_without_email() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2166,7 +2166,7 @@ async fn admin_patch_updates_user_profile_fields() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2247,7 +2247,7 @@ async fn admin_patch_rejects_subject_edit_and_email_conflict() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2326,7 +2326,7 @@ async fn portal_session_probe_returns_user_for_valid_cookie_and_401_without() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }
@@ -2395,7 +2395,7 @@ async fn portal_logout_invalidates_the_session_cookie() {
         eprintln!("skipping: OIDC_TEST_DATABASE_URL unset");
         return;
     };
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     if !common::oidc::ensure_database(&url).await {
         return;
     }

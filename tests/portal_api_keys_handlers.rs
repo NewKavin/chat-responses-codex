@@ -57,7 +57,7 @@ fn sha256_hex(input: &[u8]) -> String {
 
 #[tokio::test]
 async fn test_list_keys_empty() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -125,7 +125,7 @@ async fn test_list_keys_empty() {
 
 #[tokio::test]
 async fn test_create_and_list_keys() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -213,7 +213,7 @@ async fn test_create_and_list_keys() {
 
 #[tokio::test]
 async fn test_create_key() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -306,7 +306,7 @@ async fn test_create_key() {
 
 #[tokio::test]
 async fn test_get_key_by_id() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -385,7 +385,7 @@ async fn test_get_key_by_id() {
 
 #[tokio::test]
 async fn test_set_default_key() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -477,7 +477,7 @@ async fn test_set_default_key() {
 
 #[tokio::test]
 async fn test_rotate_key() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -586,7 +586,7 @@ async fn test_rotate_key() {
 
 #[tokio::test]
 async fn test_delete_key_success() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -670,7 +670,7 @@ async fn test_delete_key_success() {
 
 #[tokio::test]
 async fn test_delete_key_forbidden_default() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -735,7 +735,7 @@ async fn test_delete_key_forbidden_default() {
 
 #[tokio::test]
 async fn test_delete_key_forbidden_used() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -815,7 +815,7 @@ async fn test_delete_key_forbidden_used() {
 
 #[tokio::test]
 async fn test_list_model_groups_requires_portal_session() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -838,7 +838,7 @@ async fn test_list_model_groups_requires_portal_session() {
 
 #[tokio::test]
 async fn test_list_model_groups_with_session() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -906,7 +906,7 @@ async fn test_list_model_groups_with_session() {
 
 #[tokio::test]
 async fn test_update_key_model_group() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -1001,7 +1001,7 @@ async fn test_update_key_model_group() {
 
 #[tokio::test]
 async fn test_list_keys_bearer_jwt_fallback_provisions_user() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -1079,7 +1079,7 @@ async fn test_list_keys_bearer_jwt_fallback_provisions_user() {
 
 #[tokio::test]
 async fn test_list_keys_bearer_unknown_downstream_rejected() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -1127,7 +1127,7 @@ async fn test_list_keys_bearer_unknown_downstream_rejected() {
 
 #[tokio::test]
 async fn test_list_keys_bearer_disabled_user_rejected() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

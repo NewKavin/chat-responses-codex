@@ -42,7 +42,7 @@ async fn ensure_user(store: &chat_responses_codex::state::PortalStore, user_id: 
 /// 测试：普通用户默认只能访问 basic 分组
 #[tokio::test]
 async fn test_user_can_access_basic_group_by_default() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -69,7 +69,7 @@ async fn test_user_can_access_basic_group_by_default() {
 /// 测试：普通用户默认不能访问 premium 分组
 #[tokio::test]
 async fn test_user_cannot_access_premium_without_grant() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -96,7 +96,7 @@ async fn test_user_cannot_access_premium_without_grant() {
 /// 测试：管理员授权后，用户可以访问 premium 分组
 #[tokio::test]
 async fn test_user_can_access_premium_after_grant() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -135,7 +135,7 @@ async fn test_user_can_access_premium_after_grant() {
 /// 测试：list_user_accessible_model_groups 只返回用户有权访问的分组
 #[tokio::test]
 async fn test_list_user_accessible_groups_filters_by_permission() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -181,7 +181,7 @@ async fn test_list_user_accessible_groups_filters_by_permission() {
 /// 测试：不能撤销 basic 分组的访问权限
 #[tokio::test]
 async fn test_cannot_revoke_basic_group_access() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

@@ -20,7 +20,7 @@ async fn load_state(database_url: &str) -> AppState {
 
 #[tokio::test]
 async fn test_add_downstream_binding_with_label() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -100,7 +100,7 @@ async fn test_add_downstream_binding_with_label() {
 
 #[tokio::test]
 async fn test_update_downstream_label() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -181,7 +181,7 @@ async fn test_update_downstream_label() {
 
 #[tokio::test]
 async fn test_remove_downstream_binding_safe() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -264,7 +264,7 @@ async fn test_remove_downstream_binding_safe() {
 
 #[tokio::test]
 async fn test_set_default_key() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {

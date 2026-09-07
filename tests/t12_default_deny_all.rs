@@ -54,7 +54,7 @@ async fn admin_token(app: &axum::Router) -> String {
 /// 用返回的明文 key 请求任意模型必须 403（而不是放行）。
 #[tokio::test]
 async fn new_downstream_without_group_defaults_to_deny_all_and_rejects() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;
@@ -123,7 +123,7 @@ async fn new_downstream_without_group_defaults_to_deny_all_and_rejects() {
 /// 显式传 model_group_id 时按传入值绑定（不被默认值覆盖）。
 #[tokio::test]
 async fn new_downstream_explicit_group_is_honored() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
     if !common::oidc::ensure_database(&url).await {
         return;

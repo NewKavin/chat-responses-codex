@@ -20,7 +20,7 @@ async fn load_state(database_url: &str) -> AppState {
 
 #[tokio::test]
 async fn test_list_downstream_bindings_with_labels() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
@@ -83,7 +83,7 @@ async fn test_list_downstream_bindings_with_labels() {
 
 #[tokio::test]
 async fn test_count_user_keys() {
-    let _guard = common::oidc::lock().lock();
+    let _guard = common::oidc::lock().await;
     let url = database_url();
 
     if !common::oidc::ensure_database(&url).await {
