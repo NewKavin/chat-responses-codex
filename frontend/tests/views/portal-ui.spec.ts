@@ -23,6 +23,17 @@ describe('portal ui structure', () => {
     expect(details).toContain('quota-detail-section')
   })
 
+  it('surfaces backend errors on portal data loading', () => {
+    for (const page of ['QuotaDetails', 'UsageHistory', 'Overview']) {
+      const src = source(page)
+      expect(src).not.toContain("ElMessage.error('加载数据失败')")
+      expect(src).not.toContain("ElMessage.error('加载图表失败')")
+      expect(src).not.toContain("ElMessage.error('加载日志失败')")
+      expect(src).not.toContain("ElMessage.error('加载限额详情失败')")
+      expect(src).toContain('(error as any)?.message')
+    }
+  })
+
   it('auto-generates portal key ids server-side (no user-filled key id)', () => {
     const keys = source('KeyManagement')
     const card = componentSource('KeyCard')

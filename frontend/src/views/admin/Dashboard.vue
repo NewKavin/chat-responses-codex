@@ -1088,7 +1088,7 @@ const loadDashboard = async () => {
     renderCharts()
     void loadModelProbe()
   } catch (error) {
-    ElMessage.error('加载数据失败')
+    ElMessage.error((error as any)?.message || '加载数据失败')
   } finally {
     loading.value = false
   }

@@ -849,7 +849,7 @@ const loadData = async () => {
       }])
     )
   } catch (error) {
-    ElMessage.error('加载数据失败')
+    ElMessage.error((error as any)?.message || '加载数据失败')
   } finally {
     loading.value = false
   }
@@ -878,9 +878,9 @@ const updateInlinePriority = async (row: UpstreamConfig) => {
       priority: row.priority
     }
     ElMessage.success('优先级已更新')
-  } catch {
+  } catch (error) {
     row.priority = previous
-    ElMessage.error('优先级更新失败')
+    ElMessage.error((error as any)?.message || '优先级更新失败')
   } finally {
     delete inlineSaving.value[saveKey]
   }
@@ -1050,8 +1050,8 @@ const handleCreate = async () => {
     if (!Number.isSafeInteger(defaultMaxConcurrency) || defaultMaxConcurrency < 1) {
       throw new Error('invalid default_upstream_max_concurrency')
     }
-  } catch {
-    ElMessage.error('加载新建上游默认并发失败')
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '加载新建上游默认并发失败')
     return
   }
   dialogMode.value = 'create'

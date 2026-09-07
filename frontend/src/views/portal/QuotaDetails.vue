@@ -202,7 +202,7 @@ const loadData = async () => {
       }
     }
   } catch (error) {
-    ElMessage.error('加载数据失败')
+    ElMessage.error((error as any)?.message || '加载数据失败')
     modelLoadError.value = error instanceof Error ? error.message : '加载模型失败'
   } finally {
     loading.value = false

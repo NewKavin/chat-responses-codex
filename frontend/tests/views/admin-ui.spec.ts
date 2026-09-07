@@ -59,9 +59,15 @@ describe('admin ui structure', () => {
 
     // adminHttp 拦截器把 {error:{message}} 规范化到 error.message
     expect(api).toContain('error.response?.data?.error?.message')
-    // 上游启用/禁用、下游保存/启停不再吞成固定“操作失败”
-    expect(upstream).toContain("(error as any)?.message || '操作失败'")
-    expect(downstream).toContain("(error as any)?.message || '操作失败'")
+    // 上游/下游页面所有后端操作（保存/启停/轮换/删除/批量/加载）都要透出原因
+    expect(upstream).not.toContain("ElMessage.error('加载数据失败')")
+    expect(upstream).not.toContain("ElMessage.error('优先级更新失败')")
+    expect(downstream).not.toContain("ElMessage.error('操作失败')")
+    expect(downstream).not.toContain("ElMessage.error('轮换失败')")
+    expect(downstream).not.toContain("ElMessage.error('删除失败')")
+    expect(downstream).not.toContain("ElMessage.error('批量设置失败')")
+    expect((upstream.match(/\(error as any\)\?\.message/g) || []).length).toBeGreaterThanOrEqual(4)
+    expect((downstream.match(/\(error as any\)\?\.message/g) || []).length).toBeGreaterThanOrEqual(4)
   })
 
   it('keeps model qualification and probe evidence in compact sections', () => {

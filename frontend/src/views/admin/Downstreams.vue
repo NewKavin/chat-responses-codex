@@ -778,7 +778,7 @@ const loadData = async () => {
       max_concurrency: item.max_concurrency ?? 10
     }))
   } catch (error) {
-    ElMessage.error('加载数据失败')
+    ElMessage.error((error as any)?.message || '加载数据失败')
   } finally {
     loading.value = false
   }
@@ -812,7 +812,7 @@ const loadModels = async () => {
     const { data } = await adminApi.getModels()
     availableModels.value = data.models
   } catch (error) {
-    ElMessage.error('加载模型列表失败')
+    ElMessage.error((error as any)?.message || '加载模型列表失败')
   }
 }
 
@@ -991,7 +991,7 @@ const handleToggle = async (row: DownstreamConfig) => {
     ElMessage.success('状态已更新')
     loadData()
   } catch (error) {
-    ElMessage.error('操作失败')
+    ElMessage.error((error as any)?.message || '操作失败')
   }
 }
 
@@ -1008,7 +1008,7 @@ const handleRotate = async (row: DownstreamConfig) => {
     loadData()
   } catch (error: any) {
     if (error !== 'cancel') {
-      ElMessage.error('轮换失败')
+      ElMessage.error((error as any)?.message || '轮换失败')
     }
   }
 }
@@ -1024,7 +1024,7 @@ const handleDelete = async (row: DownstreamConfig) => {
     loadData()
   } catch (error: any) {
     if (error !== 'cancel') {
-      ElMessage.error('删除失败')
+      ElMessage.error((error as any)?.message || '删除失败')
     }
   }
 }
@@ -1085,7 +1085,7 @@ const submitBatchMode = async () => {
     batchForm.value.daily_cost_limit_cents = undefined
     loadData()
   } catch (error) {
-    ElMessage.error('批量设置失败')
+    ElMessage.error((error as any)?.message || '批量设置失败')
   } finally {
     batchSubmitting.value = false
   }

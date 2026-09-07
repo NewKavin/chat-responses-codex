@@ -463,7 +463,7 @@ const loadQuotaDetail = async () => {
       }
     }
   } catch (error) {
-    ElMessage.error('加载限额详情失败')
+    ElMessage.error((error as any)?.message || '加载限额详情失败')
     modelLoadError.value = error instanceof Error ? error.message : '加载失败'
   } finally {
     quotaLoading.value = false

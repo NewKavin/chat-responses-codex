@@ -351,7 +351,7 @@ const loadSummary = async () => {
     await nextTick()
     updateCharts()
   } catch (error) {
-    ElMessage.error('加载图表失败')
+    ElMessage.error((error as any)?.message || '加载图表失败')
   } finally {
     endLoad()
   }
@@ -374,7 +374,7 @@ const loadLogs = async () => {
       detailDay.value = history.day
     }
   } catch (error) {
-    ElMessage.error('加载日志失败')
+    ElMessage.error((error as any)?.message || '加载日志失败')
   } finally {
     endLoad()
   }
