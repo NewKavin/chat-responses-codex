@@ -14,11 +14,30 @@
       </div>
     </header>
 
+    <el-alert
+      class="groups-explainer"
+      type="info"
+      show-icon
+      closable
+      title="内置分组说明"
+      description="basic / premium 是预置业务组（可编辑、不可删除）；all 是通配符组（必须保持 *，不可编辑/删除）；deny-all 是权限兜底哨兵组（外键默认值引用目标，不可编辑/删除）。auto-* 分组是 model_allowlist 迁移自动生成的，可以改名、合并或删除。"
+    />
+
     <div v-loading="loading" class="groups-surface crc-surface">
       <el-table :data="groups" stripe empty-text="暂无模型分组">
-        <el-table-column prop="id" label="ID" width="150">
+        <el-table-column prop="id" label="ID" width="230">
           <template #default="{ row }">
-            <code class="group-id">{{ row.id }}</code>
+            <div class="group-id-cell">
+              <code class="group-id">{{ row.id }}</code>
+              <el-tag
+                v-if="groupKindTag(row.id)"
+                :type="groupKindTagType(row.id)"
+                size="small"
+                class="group-kind-tag"
+              >
+                {{ groupKindTag(row.id) }}
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="name" label="名称" min-width="160" />
@@ -46,25 +65,43 @@
         </el-table-column>
         <el-table-column label="操作" width="170" align="center">
           <template #default="{ row }">
-            <el-button
-              :icon="Pencil"
-              size="small"
-              :disabled="isSentinelGroup(row.id)"
-              :title="isSentinelGroup(row.id) ? 'all / deny-all 为系统哨兵组，不可编辑' : undefined"
-              @click="openEdit(row)"
+            <el-tooltip
+              :content="
+                isSentinelGroup(row.id)
+                  ? 'all / deny-all 承载通配符与默认兜底语义，不可编辑'
+                  : ''
+              "
+              :disabled="!isSentinelGroup(row.id)"
+              placement="top"
             >
-              编辑
-            </el-button>
-            <el-button
-              :icon="Trash2"
-              size="small"
-              type="danger"
-              :disabled="isBuiltinGroup(row.id)"
-              :title="isBuiltinGroup(row.id) ? '内置分组不可删除' : undefined"
-              @click="handleDelete(row)"
+              <span class="tooltip-wrapper">
+                <el-button
+                  :icon="Pencil"
+                  size="small"
+                  :disabled="isSentinelGroup(row.id)"
+                  @click="openEdit(row)"
+                >
+                  编辑
+                </el-button>
+              </span>
+            </el-tooltip>
+            <el-tooltip
+              content="内置分组不可删除"
+              :disabled="!isBuiltinGroup(row.id)"
+              placement="top"
             >
-              删除
-            </el-button>
+              <span class="tooltip-wrapper">
+                <el-button
+                  :icon="Trash2"
+                  size="small"
+                  type="danger"
+                  :disabled="isBuiltinGroup(row.id)"
+                  @click="handleDelete(row)"
+                >
+                  删除
+                </el-button>
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>
@@ -119,6 +156,19 @@ const isBuiltinGroup = (id: string) =>
   (BUILTIN_GROUP_IDS as readonly string[]).includes(id)
 const isSentinelGroup = (id: string) =>
   (SENTINEL_GROUP_IDS as readonly string[]).includes(id)
+
+// 身份标签：内置 / 系统哨兵 / 迁移生成（auto-* 来自 model_allowlist 迁移）
+const groupKindTag = (id: string): string => {
+  if (id === 'basic' || id === 'premium') return '内置'
+  if (id === 'all' || id === 'deny-all') return '系统哨兵'
+  if (id.startsWith('auto-')) return '迁移生成'
+  return ''
+}
+const groupKindTagType = (id: string): 'success' | 'warning' | 'info' => {
+  if (id === 'all' || id === 'deny-all') return 'warning'
+  if (id.startsWith('auto-')) return 'info'
+  return 'success'
+}
 
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
@@ -213,6 +263,21 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.group-id-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tooltip-wrapper {
+  display: inline-block;
+  margin-right: 8px;
+}
+.group-kind-tag {
+  flex-shrink: 0;
+}
+.groups-explainer {
+  margin-bottom: 16px;
+}
 .model-groups-page {
   min-height: 100%;
 }

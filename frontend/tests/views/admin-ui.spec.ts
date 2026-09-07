@@ -34,6 +34,24 @@ describe('admin ui structure', () => {
     expect(downstreams).toContain('to="/admin/model-groups"')
   })
 
+  it('explains builtin/sentinel/auto group protections in the groups page', () => {
+    const groups = source('views/admin/ModelGroupManagement.vue')
+
+    // 身份标签：内置 / 系统哨兵 / 迁移生成
+    expect(groups).toContain('系统哨兵')
+    expect(groups).toContain('迁移生成')
+    expect(groups).toContain('groupKindTag')
+
+    // 禁用按钮用 tooltip 说明原因（不止 title，disabled button 也能触发）
+    expect(groups).toContain('el-tooltip')
+    expect(groups).toContain('内置分组不可删除')
+    expect(groups).toContain('all / deny-all 承载通配符与默认兜底语义，不可编辑')
+
+    // 顶部说明 alert：四个内置分组的作用 + auto-* 来源
+    expect(groups).toContain('el-alert')
+    expect(groups).toContain('model_allowlist 迁移自动生成')
+  })
+
   it('keeps model qualification and probe evidence in compact sections', () => {
     const adminProbe = source('views/admin/ModelProbe.vue')
     const board = source('components/ModelProbeBoard.vue')
