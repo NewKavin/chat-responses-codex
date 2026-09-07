@@ -56,7 +56,7 @@ describe('KeyCard', () => {
   it('renders key information correctly', () => {
     const wrapper = render()
 
-    expect(wrapper.text()).toContain('sk-test123abc')
+    expect(wrapper.text()).toContain('sk-test456')
     expect(wrapper.text()).toContain('Test Key')
     expect(wrapper.text()).toContain('1,234')
     expect(wrapper.text()).toContain('2 days ago')
@@ -69,11 +69,11 @@ describe('KeyCard', () => {
     expect(wrapper.text()).toContain('DEFAULT')
   })
 
-  it('shows full key id and secret, one per row', () => {
+  it('shows only the key secret (id is internal, not displayed)', () => {
     const wrapper = render()
 
-    expect(wrapper.text()).toContain('sk-test123abc')
     expect(wrapper.text()).toContain('sk-test456')
+    expect(wrapper.text()).not.toContain('sk-test123abc')
     expect(wrapper.text()).not.toContain('***')
   })
 
@@ -90,20 +90,6 @@ describe('KeyCard', () => {
     await saveButton.trigger('click')
 
     expect(mockHandlers.onEdit).toHaveBeenCalledWith('sk-test123abc', 'New Label')
-  })
-
-  it('copies key ID to clipboard', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', {
-      clipboard: { writeText },
-    })
-
-    const wrapper = render()
-
-    const copyButton = wrapper.find('[aria-label="Copy key ID"]')
-    await copyButton.trigger('click')
-
-    expect(writeText).toHaveBeenCalledWith('sk-test123abc')
   })
 
   it('copies key secret to clipboard on demand', async () => {

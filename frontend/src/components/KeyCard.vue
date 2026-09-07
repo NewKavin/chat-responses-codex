@@ -2,24 +2,7 @@
   <div class="key-card">
     <div class="key-card-header">
       <div class="key-card-info">
-        <div class="key-copy-row">
-          <code class="key-id">{{ keyData.downstream_id }}</code>
-          <el-tooltip content="复制密钥 ID" placement="top">
-            <el-button
-              aria-label="Copy key ID"
-              circle
-              size="small"
-              @click="handleCopy"
-            >
-              <Copy :size="14" :stroke-width="1.8" />
-            </el-button>
-          </el-tooltip>
-          <span v-if="keyData.is_default" class="default-badge">
-            <Star :size="11" :stroke-width="2" />DEFAULT
-          </span>
-        </div>
-
-        <div class="key-copy-row">
+        <div class="key-secret-row">
           <code class="key-secret">{{ keyData.plaintext_key || '—' }}</code>
           <el-tooltip
             :content="keyData.plaintext_key ? '复制密钥' : '密钥不可用'"
@@ -34,6 +17,9 @@
               <Copy :size="14" :stroke-width="1.8" />
             </el-button>
           </el-tooltip>
+          <span v-if="keyData.is_default" class="default-badge">
+            <Star :size="11" :stroke-width="2" />DEFAULT
+          </span>
         </div>
 
         <div class="key-label-row">
@@ -288,14 +274,6 @@ const handleEditSave = async () => {
   }
 }
 
-const handleCopy = async () => {
-  try {
-    await navigator.clipboard.writeText(props.keyData.downstream_id)
-  } catch (err) {
-    error.value = '复制失败'
-  }
-}
-
 const handleCopySecret = async () => {
   if (!props.keyData.plaintext_key) {
     error.value = '密钥不可用'
@@ -394,7 +372,7 @@ const handleDelete = async () => {
   gap: 10px;
 }
 
-.key-copy-row {
+.key-secret-row {
   display: flex;
   align-items: center;
   gap: 8px;

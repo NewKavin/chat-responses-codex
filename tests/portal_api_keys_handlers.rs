@@ -272,7 +272,7 @@ async fn test_create_key() {
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let created_id = created["downstream_id"].as_str().unwrap().to_string();
     let created_secret = created["plaintext_key"].as_str().unwrap().to_string();
-    assert!(created_id.starts_with("sk-"), "id must use sk- prefix: {created_id}");
+    assert!(created_id.starts_with("key-"), "id must use neutral key- prefix: {created_id}");
     assert!(
         created_secret.starts_with("sk-"),
         "secret must use sk- prefix, got {created_secret}"
@@ -550,7 +550,7 @@ async fn test_rotate_key() {
     let rotated: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let new_id = rotated["downstream_id"].as_str().unwrap().to_string();
     let new_secret = rotated["plaintext_key"].as_str().unwrap().to_string();
-    assert!(new_id.starts_with("sk-"), "id must use sk- prefix: {new_id}");
+    assert!(new_id.starts_with("key-"), "id must use neutral key- prefix: {new_id}");
     assert!(
         new_secret.starts_with("sk-"),
         "secret must use sk- prefix, got {new_secret}"

@@ -35,13 +35,15 @@ describe('portal ui structure', () => {
     expect(keys).toContain('portalApi.createKey({')
     expect(keys).toContain('plaintext_key')
     expect(keys).toContain('可随时在密钥卡片上查看并复制')
-    expect(keys).toContain('复制全部')
+    expect(keys).toContain('复制密钥')
     expect(card).not.toContain('请输入新的密钥 ID')
-    // 卡片一行一行：完整 ID 一行、密钥一行，各自带复制按钮
-    expect(card).toContain('key-copy-row')
+    // 卡片只显示密钥一行：不显示内部密钥 ID
+    expect(card).toContain('key-secret-row')
     expect(card).toContain('aria-label="Copy key"')
     expect(card).not.toContain('maskedKeyId')
+    expect(card).not.toContain('Copy key ID')
     expect(card).not.toContain('***')
+    expect(keys).not.toContain('secret-label">密钥 ID')
   })
 
   it('uses a compact history toolbar and stable chart surfaces', () => {
