@@ -1137,7 +1137,8 @@ pub struct DownstreamConfig {
     /// Priority: model_group_id > model_allowlist (for backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_group_id: Option<String>,
-    /// 门户用户自建密钥账号：管理员视角隐藏、不可管理（列表/更新/删除/批量/运行时全过滤）。
+    /// 门户用户自建密钥账号：管理端可见、可配置（列表/更新/启停/批量）；
+    /// 生命周期（创建/轮换/删除）由门户侧持有，管理端不直接删除。
     #[serde(default)]
     pub is_portal_key: bool,
     #[serde(default = "default_downstream_rate_limit_enabled")]

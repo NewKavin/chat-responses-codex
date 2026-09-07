@@ -1555,3 +1555,137 @@ async fn downstream_batch_update_reports_invalid_group_per_item() {
         assert!(downstream.model_concurrency_groups.is_empty());
     }
 }
+
+/// 门户自建密钥（is_portal_key）在管理端必须可见、可配置（列表/PUT/toggle/批量），
+/// 这是「下游配置并入门户用户管理」的自洽前提；删除仍由门户侧持有。
+#[tokio::test]
+async fn test_portal_keys_are_admin_listable_and_configurable() {
+    let state = create_test_state();
+    state
+        .insert_downstream(DownstreamConfig {
+            id: "key-portal-test-1".to_string(),
+            name: "Portal Key test".to_string(),
+            hash: "portalhash".to_string(),
+            is_portal_key: true,
+            per_minute_limit: 30,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // 1) 列表可见
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/downstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let downstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(downstreams.len(), 3, "portal key must appear in admin list");
+    assert!(downstreams.iter().any(|d| d["id"] == "key-portal-test-1"));
+    assert!(downstreams.iter().any(|d| d["id"] == "key-portal-test-1" && d["is_portal_key"] == true));
+
+    // 2) PUT 可配置（限额/IP 白名单）
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/key-portal-test-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "per_minute_limit": 120,
+                        "ip_allowlist": ["10.0.0.0/8"]
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "portal key PUT must succeed");
+    let snapshot = state.snapshot().await;
+    let portal = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "key-portal-test-1")
+        .unwrap();
+    assert_eq!(portal.per_minute_limit, 120);
+    assert_eq!(portal.ip_allowlist, vec!["10.0.0.0/8".to_string()]);
+
+    // 3) toggle 可切换
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/key-portal-test-1/toggle")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "portal key toggle must succeed");
+    let snapshot = state.snapshot().await;
+    let portal = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "key-portal-test-1")
+        .unwrap();
+    assert!(!portal.active, "portal key should have been toggled off");
+
+    // 4) 批量更新可命中
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["key-portal-test-1"],
+                        "updates": { "per_minute_limit": 200 }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        payload["updated"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "key-portal-test-1"),
+        "batch-update must accept portal key, got {payload}"
+    );
+    let snapshot = state.snapshot().await;
+    let portal = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "key-portal-test-1")
+        .unwrap();
+    assert_eq!(portal.per_minute_limit, 200);
+}

@@ -147,7 +147,7 @@
           <template #default="{ row }">
             <div>
               {{ rowConfig(row)?.name ?? '—' }}
-              <el-tag v-if="isLegacyKey(row.downstream_id)" size="small" type="info" class="legacy-tag">旧版</el-tag>
+              <el-tag v-if="isLegacyKey(row)" size="small" type="info" class="legacy-tag">旧版</el-tag>
             </div>
             <div class="key-id">{{ row.downstream_id }}</div>
           </template>
@@ -164,7 +164,7 @@
           <template #default="{ row }">
             <span class="muted">
               {{ rowConfig(row)?.per_minute_limit ?? '—' }} req/min ·
-              {{ rowConfig(row)?.billing_mode ?? '—' }}
+              {{ (rowConfig(row)?.billing_mode === 'token') ? '按金额' : (rowConfig(row)?.billing_mode === 'request' ? '按请求' : '—') }}
             </span>
           </template>
         </el-table-column>
@@ -191,7 +191,7 @@
           <template #default="{ row }">
             <el-button
               size="small"
-              :disabled="!rowConfig(row) || rowConfig(row)?.is_portal_key"
+              :disabled="!rowConfig(row)"
               @click="openEditConfig(row)"
             >
               编辑
@@ -218,8 +218,8 @@
       </div>
       <div class="field-hint" style="margin-top: 8px">
         密钥可由管理员在此绑定（含 legacy key-xxx 登录密钥），也可由门户用户自行创建后自动出现；
-        对已有绑定可重新指定分组（会更新该密钥的分组）。门户自建密钥（sk-）的账户配置由系统管理，
-        编辑按钮对其禁用；批量操作作用于当前选中的密钥。
+        对已有绑定可重新指定分组（会更新该密钥的分组）。门户自建密钥（sk-）同样可编辑配置；
+        密钥本体（创建/轮换/删除）由门户侧持有，管理端只做绑定与配置。批量操作作用于当前选中的密钥。
       </div>
     </el-dialog>
 
@@ -536,10 +536,13 @@ const openBindings = async (row: PortalUserRow) => {
   bindingsVisible.value = true
   await refreshBindings()
   const downstreams = await adminApi.getDownstreams()
-  availableKeys.value = downstreams.data.map((d: { id: string; name: string }) => ({
-    id: d.id,
-    name: d.name
-  }))
+  const boundIds = new Set(bindings.value.map(b => b.downstream_id))
+  availableKeys.value = downstreams.data
+    .filter((d: { id: string }) => !boundIds.has(d.id))
+    .map((d: { id: string; name: string }) => ({
+      id: d.id,
+      name: d.name
+    }))
   accountConfigs.value = {}
   for (const d of downstreams.data as unknown as Array<Record<string, unknown>>) {
     const id = String(d.id ?? '')
@@ -594,6 +597,7 @@ const addBinding = async () => {
       newBindingGroup.value || undefined
     )
     ElMessage.success('已添加绑定')
+    availableKeys.value = availableKeys.value.filter(key => key.id !== newBindingKey.value)
     await refreshBindings()
   } finally {
     bindingSaving.value = false
@@ -662,7 +666,8 @@ const batchLimitsForm = ref({
   daily_cost_limit: undefined as number | undefined
 })
 
-const isLegacyKey = (id: string) => id.startsWith('key-') || id.startsWith('portal-')
+// legacy = 非门户自建（管理端/存量登录密钥）；门户密钥 id 也是 key- 前缀，必须用 is_portal_key 区分
+const isLegacyKey = (row: BindingRow) => !!rowConfig(row) && !rowConfig(row)?.is_portal_key
 
 const rowConfigRef = (id: string) => accountConfigs.value[id]
 const editConfigKeyName = computed(() => {
@@ -708,7 +713,7 @@ const rowConfig = (row: BindingRow) => accountConfigs.value[row.downstream_id]
 
 const openEditConfig = (row: BindingRow) => {
   const config = rowConfig(row)
-  if (!config || config.is_portal_key) return
+  if (!config) return
   editConfigKeyId.value = row.downstream_id
   const isCost = config.billing_mode === 'token'
   editConfigForm.value = {

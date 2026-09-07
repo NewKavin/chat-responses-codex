@@ -27,6 +27,8 @@
 | 保留 legacy key-xxx：恢复「添加」绑定入口 + 「旧版」标记 + 名称/内部id双行展示 | 72953dd | ✅ |
 | 管理端 rotateDownstream / createDownstream 从门户用户页移除（前端不再引用） | 72953dd | ✅ |
 | 前端测试：完整配置字段断言 + addBinding/legacy 保留 + rotate/create 不存在 | 72953dd | ✅ |
+| 门户自建密钥（sk-）管理端可配置：后端放开列表/PUT/toggle/批量 的 is_portal_key 守卫，前端编辑按钮放开 | 待提交 | ✅ |
+| legacy 标记改为按 is_portal_key 判定（门户密钥 id 也是 key- 前缀，不能按前缀标旧版） | 待提交 | ✅ |
 | 后端 create/rotate 端点本轮保留（API 兼容、回滚安全），仅 UI 下线入口 | — | 暂缓（下版本再评估删除） |
 
 ## 编辑账户配置弹窗字段（门户用户 → 绑定 → 编辑）
@@ -45,5 +47,9 @@
 
 ## 说明
 
-- 门户自建密钥（is_portal_key）的「编辑」按钮禁用，其账户配置由系统管理。
+- 门户自建密钥（is_portal_key）同样**可编辑配置**：后端 `admin_list_downstreams` /
+  `admin_update_downstream` / `admin_batch_update_downstreams` / `admin_toggle_downstream`
+  已放开 is_portal_key 守卫；其生命周期（创建/轮换/删除）仍由门户侧持有，管理端
+  `admin_delete_downstream` 保持 404 守卫（删除走 unbind / 门户侧）。
+- legacy 标记按 `is_portal_key` 判定，而非 id 前缀（门户密钥 id 也是 `key-` 前缀）。
 - 后端 admin.rs 的 create/rotate 端点保留未动，供 API 兼容与回滚；如需彻底下线另行评估。

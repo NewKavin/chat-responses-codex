@@ -68,6 +68,16 @@ describe('admin ui structure', () => {
     expect(users).toContain('addBinding')
     expect(users).toContain('newBindingKey')
     expect(users).toContain('legacy')
+    // 门户自建密钥（sk-）管理端可配置：编辑按钮只受「配置已加载」限制，不再因 is_portal_key 禁用
+    expect(users).toContain(':disabled="!rowConfig(row)"')
+    expect(users).not.toContain('rowConfig(row)?.is_portal_key"')
+    expect(users).not.toContain('config.is_portal_key) return')
+    // 「旧版」标记按 is_portal_key 判定（门户密钥 id 也是 key- 前缀，不能按前缀标旧版）
+    expect(users).toContain('!rowConfig(row)?.is_portal_key')
+    expect(users).not.toContain("id.startsWith('key-') || id.startsWith('portal-')")
+    // 门户密钥同样可编辑配置 + 可批量绑定列表过滤已绑密钥
+    expect(users).toContain('门户自建密钥（sk-）同样可编辑配置')
+    expect(users).toContain('boundIds')
     // 取消独立下游管理页签：菜单移除，旧路径重定向到门户用户
     expect(app).not.toContain('下游管理')
     expect(router).toContain("path: '/admin/downstreams'")

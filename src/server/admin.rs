@@ -2076,8 +2076,8 @@ pub(super) async fn admin_list_downstreams(
     let snapshot = state.snapshot().await;
 
     let mut downstreams = snapshot.downstreams.as_ref().clone();
-    // 门户自建密钥账号（is_portal_key）不进入管理员下游列表
-    downstreams.retain(|d| !d.is_portal_key);
+    // 下游管理已并入「门户用户管理」：门户自建密钥账号同样进入管理端列表，
+    // 供管理员查看与配置（限额/配额/IP/成本/分组/启停）。
 
     // Filter by status
     if let Some(status) = params.get("status") {
@@ -2430,16 +2430,8 @@ pub(super) async fn admin_update_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
-        // 门户自建密钥账号对管理员隐藏：视为不存在
-        if downstream.is_portal_key {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": { "message": format!("Downstream '{}' not found", id) }
-                })),
-            )
-                .into_response();
-        }
+        // 门户自建密钥账号同样允许管理端配置（限额/配额/IP/成本/启停/分组）；
+        // 身份字段（id/hash/plaintext_key*）仍由 apply_downstream_updates 保护。
         // Apply updates (preserve hash).
         if let Some(updates_object) = updates.as_object() {
             if let Err(message) = apply_downstream_updates(&mut downstream, updates_object) {
@@ -2808,11 +2800,7 @@ pub(super) async fn admin_batch_update_downstreams(
             failed.push(json!({ "id": id, "error": "not found" }));
             continue;
         };
-        // 门户自建密钥账号对管理员隐藏
-        if downstream.is_portal_key {
-            failed.push(json!({ "id": id, "error": "not found" }));
-            continue;
-        }
+        // 门户自建密钥账号同样允许管理端批量配置（与单条 PUT 一致）
         if let Err(message) = apply_downstream_updates(&mut downstream, update_object) {
             failed.push(json!({ "id": id, "error": message }));
             continue;
@@ -2946,16 +2934,7 @@ pub(super) async fn admin_toggle_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
-        // 门户自建密钥账号对管理员隐藏：视为不存在
-        if downstream.is_portal_key {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": { "message": format!("Downstream '{}' not found", id) }
-                })),
-            )
-                .into_response();
-        }
+        // 门户自建密钥账号同样允许管理端切换启停
         downstream.active = !downstream.active;
         let new_status = downstream.active;
 
