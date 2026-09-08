@@ -655,18 +655,8 @@ const saveEdit = async () => {
 
 const currentlyEditingId = ref('')
 
-const openBindings = async (row: PortalUserRow) => {
-  bindingsUser.value = row
-  bindingsVisible.value = true
-  await refreshBindings()
+const refreshAccountConfigs = async () => {
   const downstreams = await adminApi.getDownstreams()
-  const boundIds = new Set(bindings.value.map(b => b.downstream_id))
-  availableKeys.value = downstreams.data
-    .filter((d: { id: string }) => !boundIds.has(d.id))
-    .map((d: { id: string; name: string }) => ({
-      id: d.id,
-      name: d.name
-    }))
   accountConfigs.value = {}
   for (const d of downstreams.data as unknown as Array<Record<string, unknown>>) {
     const id = String(d.id ?? '')
@@ -692,6 +682,21 @@ const openBindings = async (row: PortalUserRow) => {
         : []
     }
   }
+  return downstreams
+}
+
+const openBindings = async (row: PortalUserRow) => {
+  bindingsUser.value = row
+  bindingsVisible.value = true
+  await refreshBindings()
+  const downstreams = await refreshAccountConfigs()
+  const boundIds = new Set(bindings.value.map(b => b.downstream_id))
+  availableKeys.value = downstreams.data
+    .filter((d: { id: string }) => !boundIds.has(d.id))
+    .map((d: { id: string; name: string }) => ({
+      id: d.id,
+      name: d.name
+    }))
 }
 
 const refreshBindings = async () => {
@@ -783,6 +788,7 @@ const batchApplyGroup = async () => {
     batchGroup.value = ''
     batchAccessMode.value = 'inherit'
     await refreshBindings()
+    await refreshAccountConfigs()
   } catch (error) {
     ElMessage.error((error as any)?.message || '批量更新失败')
   }
@@ -802,6 +808,7 @@ const batchToggleActive = async (active: boolean) => {
       ElMessage.success(active ? '已批量启用' : '已批量禁用')
     }
     await refreshBindings()
+    await refreshAccountConfigs()
   } catch (error) {
     ElMessage.error((error as any)?.message || '批量更新失败')
   }
@@ -839,6 +846,7 @@ const saveBatchLimits = async () => {
     }
     batchLimitsVisible.value = false
     await refreshBindings()
+    await refreshAccountConfigs()
   } catch (error) {
     ElMessage.error((error as any)?.message || '批量更新失败')
   } finally {
@@ -1029,6 +1037,7 @@ const saveEditConfig = async () => {
     ElMessage.success('账户配置已保存')
     editConfigVisible.value = false
     await refreshBindings()
+    await refreshAccountConfigs()
   } catch (error) {
     ElMessage.error((error as any)?.message || '保存失败')
   } finally {
