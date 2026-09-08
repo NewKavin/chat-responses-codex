@@ -114,7 +114,10 @@ pub(crate) async fn apply_access_mutation(tx: &Transaction<'_>, mutation: &Acces
             let policy = locked_policy(tx,downstream_id).await?;
             if let Some(user) = actor_user_id {
                 if policy.owner_user_id.as_ref() != Some(user) { return Err(PortalStoreError::Forbidden("key_owner_mismatch".into())); }
-                if policy.mode == AccessMode::Deny { return Err(PortalStoreError::Forbidden("key_denied".into())); }
+                // Deny is a per-key access mode, not a freeze: the owning
+                // user must be able to switch their own key back to
+                // inherit/group.  Blocking updates while mode=deny dead-locks
+                // the portal key management UI (403 on every save).
             }
             if selection.mode == AccessMode::Inherit && (policy.subject_kind != "portal" || policy.owner_user_id.is_none()) {
                 return Err(PortalStoreError::Conflict("inherit requires a portal owner".into()));

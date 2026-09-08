@@ -1215,13 +1215,8 @@ pub(super) async fn portal_set_default_key(
             .into_response();
     };
 
-    // Call Task 3 method
-    if store.set_default_key(&user_id, &downstream_id).await.is_err() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Failed to set default key"}})),
-        )
-            .into_response();
+    if let Err(error) = store.set_default_key(&user_id, &downstream_id).await {
+        return portal_access_error(error);
     }
 
     StatusCode::NO_CONTENT.into_response()
