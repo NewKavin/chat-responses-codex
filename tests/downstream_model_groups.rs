@@ -15,7 +15,11 @@ fn database_url() -> Option<String> {
 }
 
 async fn load_state(database_url: &str) -> AppState {
-    let state = AppState::load_from_database_url(database_url, AppConfig::default())
+    let state = AppState::load_from_database_url(database_url, AppConfig {
+        upstream_route_exhaustion_retry_max_wait_ms: 0,
+        upstream_route_exhaustion_budget_alignment_enabled: false,
+        ..AppConfig::default()
+    })
         .await
         .expect("gateway state must load against the test database");
     let (probe_sender, mut probe_receiver) = tokio::sync::mpsc::channel(16);
@@ -56,7 +60,7 @@ async fn setup_test_data(state: &AppState) {
     ];
 
     for group in model_groups {
-        let _ = portal_store.create_model_group(&group).await;
+        portal_store.create_model_group(&group).await.expect("create fixture group");
     }
 
     // Create test downstreams (hash/plaintext must be a matched pair so
@@ -137,7 +141,7 @@ async fn setup_test_data(state: &AppState) {
     ];
 
     for downstream in downstreams {
-        let _ = state.insert_downstream(downstream).await;
+        state.insert_downstream(downstream).await.expect("insert fixture downstream");
     }
 
     // 未绑组历史形态（manual allowlist / 空白名单）：这些用例验证的是
@@ -166,7 +170,7 @@ async fn setup_test_data(state: &AppState) {
     state.add_downstream(empty).await.expect("add empty downstream in memory");
 
     // 一个不可达的 upstream，使「放行后路由」与「被分组拒绝」可区分。
-    let _ = state
+    state
         .insert_upstream(UpstreamConfig {
             id: "up-unreachable".into(),
             name: "Unreachable".into(),
@@ -179,7 +183,7 @@ async fn setup_test_data(state: &AppState) {
             failure_count: 0,
             ..Default::default()
         })
-        .await;
+        .await.expect("insert fixture upstream");
 }
 
 fn gateway_app(state: AppState) -> axum::Router {
@@ -337,15 +341,17 @@ async fn gateway_wildcard_group_allows_any_model() {
     assert!(!ids.is_empty(), "wildcard group should expose models: {ids:?}");
 }
 
-/// 未配置分组的 downstream 继续走 model_allowlist 语义（该字段在 T16 删除前
-/// 仍是回退路径的事实源，T14 只清理纯夹具、保留行为测试）。
+/// File mode retains legacy allowlist semantics without a portal store.
 #[tokio::test]
 async fn gateway_manual_allowlist_still_enforced() {
     let _guard = common::oidc::lock().await;
-    let Some((_state, app, _key1, key3, _key5)) = fresh_gateway_env().await else {
+    let Some((state, _app, _key1, key3, _key5)) = fresh_gateway_env().await else {
         eprintln!("Skipping test: OIDC_TEST_DATABASE_URL not set");
         return;
     };
+    let dir = tempfile::tempdir().unwrap();
+    let file_state = AppState::new(state.snapshot().await,dir.path().join("state.json"),AppConfig::default());
+    let app = gateway_app(file_state);
 
     // manual allowlist 内的模型在列表中。
     let (status, ids) = models_request(&app, &key3).await;
@@ -555,7 +561,7 @@ async fn visible_models_wildcard_group_returns_all_upstream_models() {
     state.insert_downstream(ds).await.expect("insert downstream");
 
     // 一个 active upstream，3 个模型
-    let _ = state
+    state
         .insert_upstream(chat_responses_codex::state::UpstreamConfig {
             id: "up-wildcard".into(),
             name: "Wildcard Upstream".into(),
@@ -572,7 +578,7 @@ async fn visible_models_wildcard_group_returns_all_upstream_models() {
             failure_count: 0,
             ..Default::default()
         })
-        .await;
+        .await.expect("insert wildcard fixture upstream");
 
     let visible = state.downstream_visible_models().await;
     for expected in ["gpt-3.5-turbo", "claude-instant", "manual-model-1"] {

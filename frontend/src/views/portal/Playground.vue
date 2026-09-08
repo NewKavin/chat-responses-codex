@@ -278,7 +278,7 @@ import {
 import { Marked } from 'marked'
 import { portalApi } from '@/api/portal'
 import PlaygroundSettings from '@/components/PlaygroundSettings.vue'
-import { buildGatewayModelsEndpoint } from '@/utils/integration'
+import { usePortalStore } from '@/stores/portal'
 import { createHighlightedCodeRenderer } from '@/utils/highlight'
 import { extractReadableErrorMessage } from '@/utils/errorDisplay'
 import {
@@ -290,7 +290,6 @@ import {
   formatPlaygroundStreamStatus,
   inferenceStrengthOptions,
   parseSSELine,
-  selectPlayableModels,
   type PlaygroundMessage,
   type PlaygroundStreamPhase,
   type UploadedFileContext
@@ -301,6 +300,9 @@ const marked = new Marked({
     code: createHighlightedCodeRenderer()
   }
 })
+
+const portalStore = usePortalStore()
+const scopeParams = () => portalStore.scopeParams()
 
 interface UploadedFile {
   uid: string
@@ -434,26 +436,18 @@ const safeGetText = async (response: Response) => {
 }
 
 const loadModels = async () => {
-  const allowlist = await fetchPortalModelAllowlist()
-  const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
-    headers: { Authorization: `Bearer ${downstreamKey.value}` }
-  })
-  if (!response.ok) throw new Error(await safeGetText(response))
-  modelOptions.value = selectPlayableModels(allowlist, await response.json())
+  // 模型候选统一来自 /api/portal/model-access（用户或所选密钥范围）：
+  // 不再用 quota 白名单二次过滤 /v1/models，也不把 "*" 当模型。
+  const { data } = await portalApi.getModelAccess(scopeParams())
+  const available = (data.available_models ?? []).map(s => s.trim()).filter(Boolean)
+  modelOptions.value = [...new Set(available)].sort()
   if (modelOptions.value.length === 0) {
-    throw new Error('当前下游没有可路由模型')
+    if (data.status === 'denied') {
+      throw new Error(data.reason || '模型访问被拒绝')
+    }
+    throw new Error('当前没有可路由模型')
   }
   setStatus('实时模型列表已加载', 'success')
-}
-
-const fetchPortalModelAllowlist = async (): Promise<string[]> => {
-  try {
-    const { data } = await portalApi.getQuota()
-    const allowlist = (data.model_allowlist ?? []).map(s => s.trim()).filter(Boolean)
-    return [...new Set(allowlist)]
-  } catch {
-    return []
-  }
 }
 
 const setStatus = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {

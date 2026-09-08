@@ -9,6 +9,10 @@
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use tokio_postgres::NoTls;
+use super::{AccessMutation, AccessMode, ModelAccessSelection};
+use serde::Serialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 type Manager = PostgresConnectionManager<NoTls>;
 
@@ -35,6 +39,7 @@ pub struct PortalDownstreamBinding {
     pub is_default: bool,
     pub label: Option<String>,  // 新增：兼容 NULL
     pub model_group_id: String,  // 新增：模型分组（默认 'basic'）
+    pub model_access: ModelAccessSelection,
 }
 
 impl PortalDownstreamBinding {
@@ -54,6 +59,8 @@ pub struct PortalDownstreamBindingWithLabel {
     pub created_at: i64,  // Unix timestamp
     pub usage_count: i64,  // 使用次数（从 response_history 统计）
     pub plaintext_key: Option<String>,  // 密钥明文（仅对绑定 owner 可见，可随时回看/复制）
+    pub model_access: ModelAccessSelection,
+    pub access_revision: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +92,78 @@ impl ModelGroup {
         self.allowed_models.contains(&"*".to_string())
             || self.allowed_models.contains(&model.to_string())
     }
+}
+
+/// 迁移留档记录（downstream_access_migrations 的对外视图，无 secret）。
+#[derive(Debug, Clone, Serialize)]
+pub struct AccessMigrationRecord {
+    pub downstream_id: String,
+    pub classification: String,
+    pub before_policy: Value,
+    pub after_policy: Value,
+    /// unix seconds
+    pub created_at: i64,
+    /// unix seconds
+    pub resolved_at: Option<i64>,
+    pub owner_user_id: Option<String>,
+    pub mode: String,
+    pub model_group_id: String,
+    pub revision: i64,
+}
+
+/// 单条密钥的修复预览：现授权、待补组、组内容与指纹。
+#[derive(Debug, Clone, Serialize)]
+pub struct AccessMigrationPreviewItem {
+    pub downstream_id: String,
+    pub classification: String,
+    pub owner_user_id: Option<String>,
+    pub existing_user_groups: Vec<String>,
+    pub candidate_group_ids: Vec<String>,
+    pub group_models: std::collections::BTreeMap<String, Value>,
+    pub revision: i64,
+    pub fingerprint: String,
+}
+
+/// apply 提交项：识别密钥 + 待补组 + 预览时的 revision 与指纹。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessMigrationApplyItem {
+    pub downstream_id: String,
+    pub candidate_group_ids: Vec<String>,
+    pub set_inherit: bool,
+    pub expected_revision: i64,
+    pub expected_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccessMigrationItemResult {
+    pub downstream_id: String,
+    pub ok: bool,
+    pub error: String,
+    pub code: String,
+}
+
+fn migration_fingerprint(
+    user_groups: &[String],
+    group_models: &std::collections::BTreeMap<String, Value>,
+    revision: i64,
+) -> String {
+    let mut hasher = Sha256::new();
+    for group in user_groups {
+        hasher.update(b"g:");
+        hasher.update(group.as_bytes());
+        hasher.update(b";");
+    }
+    for (group, models) in group_models {
+        hasher.update(b"m:");
+        hasher.update(group.as_bytes());
+        hasher.update(b"=");
+        hasher.update(models.to_string().as_bytes());
+        hasher.update(b";");
+    }
+    hasher.update(b"r:");
+    hasher.update(revision.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -320,65 +399,57 @@ impl PortalStore {
     }
 
     pub async fn list_downstream_bindings(
-        &self,
-        user_id: &str,
+        &self, user_id: &str,
     ) -> Result<Vec<PortalDownstreamBinding>, PortalStoreError> {
         let client = self.pool.get().await?;
-        let rows = client
-            .query(
-                "SELECT downstream_id, is_default, label, model_group_id FROM portal_user_downstreams \
-                 WHERE user_id = $1 ORDER BY downstream_id",
-                &[&user_id],
-            )
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|row| PortalDownstreamBinding {
-                downstream_id: row.get(0),
-                is_default: row.get(1),
-                label: row.get(2),
-                model_group_id: row.get(3),
+        let rows = client.query(
+            "SELECT b.downstream_id,b.is_default,b.label,
+                CASE WHEN p.mode='inherit' THEN '' ELSE COALESCE(p.model_group_id,'deny-all') END,
+                COALESCE(p.mode,'deny')
+             FROM portal_user_downstreams b LEFT JOIN downstream_access_policies p ON p.downstream_id=b.downstream_id
+             WHERE b.user_id=$1 ORDER BY b.downstream_id", &[&user_id],
+        ).await?;
+        rows.iter().map(|row| {
+            let group_id: String = row.get(3);
+            let mode: AccessMode = serde_json::from_value(serde_json::json!(row.get::<_,String>(4)))
+                .map_err(|e| PortalStoreError::Db(e.to_string()))?;
+            Ok(PortalDownstreamBinding {
+                downstream_id:row.get(0),is_default:row.get(1),label:row.get(2),model_group_id:group_id.clone(),
+                model_access:ModelAccessSelection { mode,group_id:(mode==AccessMode::Group).then_some(group_id) },
             })
-            .collect())
+        }).collect()
     }
 
     pub async fn list_downstream_bindings_with_labels(
-        &self,
-        user_id: &str,
+        &self, user_id: &str,
     ) -> Result<Vec<PortalDownstreamBindingWithLabel>, PortalStoreError> {
         let client = self.pool.get().await?;
-        let rows = client
-            .query(
-                "SELECT d.downstream_id, d.is_default, \
-                        COALESCE(d.label, 'Default Key') AS label, \
-                        COALESCE(d.model_group_id, 'basic') AS model_group_id, \
-                        mg.name AS model_group_name, \
-                        EXTRACT(EPOCH FROM COALESCE(d.created_at, NOW()))::bigint AS created_at, \
-                        COALESCE(COUNT(r.response_id), 0) AS usage_count, \
-                        dd.plaintext_key AS plaintext_key \
-                 FROM portal_user_downstreams d \
-                 LEFT JOIN model_groups mg ON COALESCE(d.model_group_id, 'basic') = mg.id \
-                 LEFT JOIN downstreams dd ON dd.id = d.downstream_id \
-                 LEFT JOIN response_history r ON d.downstream_id = r.downstream_key_id \
-                 WHERE d.user_id = $1 \
-                 GROUP BY d.downstream_id, d.is_default, d.label, COALESCE(d.model_group_id, 'basic'), mg.name, d.created_at, dd.plaintext_key \
-                 ORDER BY d.is_default DESC, d.created_at DESC",
-                &[&user_id],
-            )
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|row| PortalDownstreamBindingWithLabel {
-                downstream_id: row.get(0),
-                is_default: row.get(1),
-                label: row.get(2),
-                model_group_id: row.get(3),
-                model_group_name: row.get(4),
-                created_at: row.get(5),
-                usage_count: row.get(6),
-                plaintext_key: row.get(7),
+        let rows = client.query(
+            "SELECT b.downstream_id,b.is_default,COALESCE(b.label,d.name),
+                CASE WHEN p.mode='inherit' THEN '' ELSE p.model_group_id END,
+                CASE WHEN p.mode='group' THEN g.name ELSE NULL END,
+                EXTRACT(EPOCH FROM COALESCE(b.created_at,NOW()))::bigint,
+                (SELECT COUNT(*) FROM response_history r WHERE r.downstream_key_id=b.downstream_id),
+                d.plaintext_key,p.mode,p.revision
+             FROM portal_user_downstreams b JOIN downstream_access_policies p
+                ON p.downstream_id=b.downstream_id AND p.owner_user_id=b.user_id
+             JOIN downstreams d ON d.id=b.downstream_id
+             LEFT JOIN model_groups g ON g.id=p.model_group_id
+             WHERE b.user_id=$1 AND NOT EXISTS(
+                SELECT 1 FROM portal_user_downstreams other WHERE other.downstream_id=b.downstream_id AND other.user_id<>b.user_id)
+             ORDER BY b.is_default DESC,b.created_at DESC,b.downstream_id", &[&user_id],
+        ).await?;
+        rows.iter().map(|row| {
+            let group_id: String = row.get(3);
+            let mode: AccessMode = serde_json::from_value(serde_json::json!(row.get::<_,String>(8)))
+                .map_err(|e| PortalStoreError::Db(e.to_string()))?;
+            Ok(PortalDownstreamBindingWithLabel {
+                downstream_id:row.get(0),is_default:row.get(1),label:row.get(2),model_group_id:group_id.clone(),
+                model_group_name:row.get(4),created_at:row.get(5),usage_count:row.get(6),plaintext_key:row.get(7),
+                model_access:ModelAccessSelection { mode,group_id:(mode==AccessMode::Group).then_some(group_id) },
+                access_revision:row.get(9),
             })
-            .collect())
+        }).collect()
     }
 
     pub async fn count_user_keys(&self, user_id: &str) -> Result<i64, PortalStoreError> {
@@ -396,273 +467,79 @@ impl PortalStore {
     /// Sets is_default to FALSE initially, created_at to NOW().
     /// ON CONFLICT DO NOTHING makes this idempotent.
     pub async fn add_downstream_binding_with_label(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-        label: Option<&str>,
-        model_group_id: Option<&str>,
-    ) -> Result<(), PortalStoreError> {
-        // NULL 绑定组在读取语义里 fail-closed 落 basic；写入时就显式落 basic，
-        // 避免列里出现 NULL（list_downstream_bindings 按非空读）。
-        let model_group_id = model_group_id.unwrap_or("basic");
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                "INSERT INTO portal_user_downstreams \
-                   (user_id, downstream_id, label, model_group_id, is_default, created_at) \
-                 VALUES ($1, $2, $3, $4, FALSE, NOW()) \
-                 ON CONFLICT (user_id, downstream_id) DO NOTHING",
-                &[&user_id, &downstream_id, &label, &model_group_id],
-            )
-            .await?;
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,label:Option<&str>,model_group_id:Option<&str>,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::Bind {
+            downstream_id:downstream_id.into(),user_id:user_id.into(),is_default:None,
+            label:label.map(str::to_owned),selection:model_group_id.map(ModelAccessSelection::from_group_id),
+            grant_existing:false,
+        }).await
     }
 
     /// Update the label and model_group_id for an existing downstream binding.
     /// Does not check if the row exists - caller should handle missing rows.
     /// Supports NULL values to clear the label/model_group.
     pub async fn update_downstream_label(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-        label: Option<&str>,
-        model_group_id: Option<&str>,
-    ) -> Result<(), PortalStoreError> {
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                "UPDATE portal_user_downstreams \
-                 SET label = $3, model_group_id = $4 \
-                 WHERE user_id = $1 AND downstream_id = $2",
-                &[&user_id, &downstream_id, &label, &model_group_id],
-            )
-            .await?;
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,label:Option<&str>,_model_group_id:Option<&str>,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::SetLabel {
+            downstream_id:downstream_id.into(),user_id:user_id.into(),label:label.map(str::to_owned),
+        }).await
     }
 
     /// Update only the model_group_id of an existing downstream binding,
     /// preserving the label.  Returns NotFound when the binding does not
     /// exist for this user.
     pub async fn update_downstream_model_group(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-        model_group_id: &str,
-    ) -> Result<(), PortalStoreError> {
-        let client = self.pool.get().await?;
-        let rows = client
-            .execute(
-                "UPDATE portal_user_downstreams \
-                 SET model_group_id = $3 \
-                 WHERE user_id = $1 AND downstream_id = $2",
-                &[&user_id, &downstream_id, &model_group_id],
-            )
-            .await?;
-        if rows == 0 {
-            return Err(PortalStoreError::NotFound);
-        }
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,model_group_id:&str,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::Update {
+            downstream_id:downstream_id.into(),selection:ModelAccessSelection::from_group_id(model_group_id),
+            actor_user_id:Some(user_id.into()),
+        }).await
     }
 
     /// Safe delete: only removes if non-default AND no usage history.
     /// Returns Ok(true) if deleted, Ok(false) if rejected (default or has usage).
     /// Must run in a transaction to ensure consistency.
-    pub async fn remove_downstream_binding_safe(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-    ) -> Result<bool, PortalStoreError> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-
-        // Step 1: Check if the binding exists and get its properties
-        let row = transaction
-            .query_opt(
-                "SELECT is_default, \
-                        COALESCE((SELECT COUNT(*) FROM response_history \
-                                  WHERE downstream_key_id = $2), 0) AS usage_count \
-                 FROM portal_user_downstreams \
-                 WHERE user_id = $1 AND downstream_id = $2",
-                &[&user_id, &downstream_id],
-            )
-            .await?;
-
-        let Some(row) = row else {
-            // Binding doesn't exist - treat as successful no-op
-            transaction.commit().await?;
-            return Ok(false);
-        };
-
-        let is_default: bool = row.get(0);
-        let usage_count: i64 = row.get(1);
-
-        // Step 2: Reject if default or has usage
-        if is_default || usage_count > 0 {
-            transaction.commit().await?;
-            return Ok(false);
-        }
-
-        // Step 3: Delete the binding
-        let deleted = transaction
-            .execute(
-                "DELETE FROM portal_user_downstreams \
-                 WHERE user_id = $1 AND downstream_id = $2 \
-                   AND NOT is_default \
-                   AND NOT EXISTS ( \
-                     SELECT 1 FROM response_history \
-                     WHERE downstream_key_id = $2 \
-                   )",
-                &[&user_id, &downstream_id],
-            )
-            .await?;
-
-        transaction.commit().await?;
-        Ok(deleted > 0)
-    }
-
     /// Set a downstream binding as the default key.
     /// Clears all other defaults for this user in a transaction to ensure uniqueness.
     /// Silently succeeds even if downstream_id doesn't exist (no rows updated).
     pub async fn set_default_key(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-    ) -> Result<(), PortalStoreError> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-
-        // Step 1: Clear all defaults for this user
-        transaction
-            .execute(
-                "UPDATE portal_user_downstreams \
-                 SET is_default = FALSE \
-                 WHERE user_id = $1",
-                &[&user_id],
-            )
-            .await?;
-
-        // Step 2: Set the new default
-        transaction
-            .execute(
-                "UPDATE portal_user_downstreams \
-                 SET is_default = TRUE \
-                 WHERE user_id = $1 AND downstream_id = $2",
-                &[&user_id, &downstream_id],
-            )
-            .await?;
-
-        transaction.commit().await?;
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::SetDefault { downstream_id:downstream_id.into(),user_id:user_id.into() }).await
     }
 
     /// Add a binding; setting `is_default` demotes every other row.  Returns
     /// `NotFound` when the user does not exist.
     pub async fn add_downstream_binding(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-        is_default: bool,
-    ) -> Result<(), PortalStoreError> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-        let known = transaction
-            .query_opt(
-                "SELECT 1 FROM portal_users WHERE id = $1",
-                &[&user_id],
-            )
-            .await?
-            .is_some();
-        if !known {
-            return Err(PortalStoreError::NotFound);
-        }
-        if is_default {
-            transaction
-                .execute(
-                    "UPDATE portal_user_downstreams SET is_default = FALSE WHERE user_id = $1",
-                    &[&user_id],
-                )
-                .await?;
-        }
-        transaction
-            .execute(
-                "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default) \
-                 VALUES ($1, $2, $3) \
-                 ON CONFLICT (user_id, downstream_id) \
-                 DO UPDATE SET is_default = EXCLUDED.is_default",
-                &[&user_id, &downstream_id, &is_default],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,is_default:bool,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::Bind {
+            downstream_id:downstream_id.into(),user_id:user_id.into(),is_default:Some(is_default),
+            label:None,selection:None,grant_existing:false,
+        }).await
     }
 
     /// Add (or update) a binding, optionally pinning the model group.
     /// Same semantics as `add_downstream_binding` plus `model_group_id`
     /// (None keeps the previous group / default 'basic' on insert).
     pub async fn upsert_downstream_binding_with_group(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-        is_default: bool,
-        model_group_id: Option<&str>,
-    ) -> Result<(), PortalStoreError> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-        let known = transaction
-            .query_opt("SELECT 1 FROM portal_users WHERE id = $1", &[&user_id])
-            .await?
-            .is_some();
-        if !known {
-            return Err(PortalStoreError::NotFound);
-        }
-        // 同上：未指定分组时显式落 basic（fail-closed），列里不留 NULL。
-        let model_group_id = model_group_id.unwrap_or("basic");
-        if is_default {
-            transaction
-                .execute(
-                    "UPDATE portal_user_downstreams SET is_default = FALSE WHERE user_id = $1",
-                    &[&user_id],
-                )
-                .await?;
-        }
-        transaction
-            .execute(
-                "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, model_group_id) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, downstream_id) DO UPDATE SET is_default = EXCLUDED.is_default, model_group_id = COALESCE(EXCLUDED.model_group_id, portal_user_downstreams.model_group_id)",
-                &[&user_id, &downstream_id, &is_default, &model_group_id],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,is_default:bool,model_group_id:Option<&str>,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::Bind {
+            downstream_id:downstream_id.into(),user_id:user_id.into(),is_default:Some(is_default),
+            label:None,selection:model_group_id.map(ModelAccessSelection::from_group_id),grant_existing:false,
+        }).await
     }
 
     /// Remove a binding; when it was the default and bindings remain, another
     /// row is promoted so the user still has exactly one default.
     pub async fn remove_downstream_binding(
-        &self,
-        user_id: &str,
-        downstream_id: &str,
-    ) -> Result<(), PortalStoreError> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-        transaction
-            .execute(
-                "DELETE FROM portal_user_downstreams WHERE user_id = $1 AND downstream_id = $2",
-                &[&user_id, &downstream_id],
-            )
-            .await?;
-        transaction
-            .execute(
-                "UPDATE portal_user_downstreams SET is_default = TRUE \
-                 WHERE user_id = $1 \
-                   AND NOT EXISTS (SELECT 1 FROM portal_user_downstreams p2 \
-                                   WHERE p2.user_id = $1 AND p2.is_default) \
-                   AND downstream_id = (SELECT p3.downstream_id FROM portal_user_downstreams p3 \
-                                        WHERE p3.user_id = $1 ORDER BY p3.downstream_id LIMIT 1)",
-                &[&user_id],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+        &self,user_id:&str,downstream_id:&str,
+    ) -> Result<(),PortalStoreError> {
+        self.mutate_access(&AccessMutation::Unbind { downstream_id:downstream_id.into(),user_id:user_id.into() }).await
     }
 
     pub async fn default_downstream(
@@ -680,10 +557,7 @@ impl PortalStore {
         Ok(row.map(|row| row.get(0)))
     }
 
-    /// Find the portal user that owns the given downstream binding, if any.
-    /// Downstream ids are unique per deployment, but the PK is
-    /// (user_id, downstream_id); when several users share a downstream this
-    /// returns the first owner (order by creation time).
+    /// Return the durable owner, never an arbitrary legacy binding.
     pub async fn find_user_id_by_downstream(
         &self,
         downstream_id: &str,
@@ -691,12 +565,11 @@ impl PortalStore {
         let client = self.pool.get().await?;
         let row = client
             .query_opt(
-                "SELECT user_id FROM portal_user_downstreams \
-                 WHERE downstream_id = $1 ORDER BY created_at, user_id LIMIT 1",
+                "SELECT owner_user_id FROM downstream_access_policies WHERE downstream_id = $1",
                 &[&downstream_id],
             )
             .await?;
-        Ok(row.map(|row| row.get(0)))
+        Ok(row.and_then(|row| row.get(0)))
     }
 
     /// Lazily provision a portal account for a Bearer-authenticated downstream
@@ -705,46 +578,38 @@ impl PortalStore {
     /// default key.  Idempotent: returns the existing owner when the
     /// downstream is already bound.
     pub async fn ensure_user_for_downstream(
-        &self,
-        downstream_id: &str,
-        display_name: Option<&str>,
+        &self, downstream_id: &str, display_name: Option<&str>,
     ) -> Result<String, PortalStoreError> {
-        if let Some(user_id) = self.find_user_id_by_downstream(downstream_id).await? {
-            // H2: 管理员禁用门户用户后，Bearer 身份（工号+密钥）不得绕过
-            // disabled 继续管理密钥（cookie 路径由 find_session 的
-            // `AND NOT u.disabled` 保证，这里补齐 Bearer 路径）。
-            if let Some(user) = self.find_user_by_id(&user_id).await? {
-                if user.disabled {
-                    return Err(PortalStoreError::Forbidden("user is disabled".into()));
-                }
-            }
-            return Ok(user_id);
-        }
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let email = format!("{downstream_id}@downstream.local");
         let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-        transaction
-            .execute(
-                "INSERT INTO portal_users (id, email, display_name, username) \
-                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                &[&user_id, &email, &display_name, &downstream_id],
-            )
-            .await?;
-        transaction
-            .execute(
-                "INSERT INTO portal_user_downstreams \
-                   (user_id, downstream_id, is_default, label, model_group_id, created_at) \
-                 SELECT id, $1, TRUE, NULL, 'basic', NOW() FROM portal_users WHERE email = $2 \
-                 ON CONFLICT (user_id, downstream_id) DO NOTHING",
-                &[&downstream_id, &email],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(self
-            .find_user_id_by_downstream(downstream_id)
-            .await?
-            .unwrap_or(user_id))
+        let tx = client.transaction().await?;
+        super::model_access_store::lock_access_writes(&tx).await?;
+        let row = tx.query_opt(
+            "SELECT subject_kind,owner_user_id FROM downstream_access_policies WHERE downstream_id=$1 FOR UPDATE",
+            &[&downstream_id],
+        ).await?.ok_or(PortalStoreError::NotFound)?;
+        let owner: Option<String> = row.get(1);
+        if let Some(owner) = owner {
+            let user = tx.query_one("SELECT disabled FROM portal_users WHERE id=$1", &[&owner]).await?;
+            if user.get::<_,bool>(0) { return Err(PortalStoreError::Forbidden("user_disabled".into())); }
+            tx.commit().await?;
+            return Ok(owner);
+        }
+        if row.get::<_,String>(0) == "portal" {
+            return Err(PortalStoreError::Forbidden("owner_missing".into()));
+        }
+        let generated_id = uuid::Uuid::new_v4().to_string();
+        let email = format!("{downstream_id}@downstream.local");
+        tx.execute(
+            "INSERT INTO portal_users(id,email,display_name,username) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+            &[&generated_id,&email,&display_name,&downstream_id],
+        ).await?;
+        let user_id: String = tx.query_one("SELECT id FROM portal_users WHERE email=$1", &[&email]).await?.get(0);
+        super::model_access_store::apply_access_mutation(&tx, &AccessMutation::Bind {
+            downstream_id:downstream_id.into(),user_id:user_id.clone(),is_default:Some(true),
+            label:None,selection:None,grant_existing:true,
+        }).await?;
+        tx.commit().await?;
+        Ok(user_id)
     }
 
     pub async fn create_session(
@@ -1058,13 +923,6 @@ impl PortalStore {
                         SELECT 1 FROM portal_user_model_groups pumg \
                         WHERE pumg.user_id = $1 AND pumg.model_group_id = mg.id
                     ) \
-                    OR EXISTS (
-                        -- 密钥绑定的分组也属于用户可用分组（管理端绑定后
-                        -- 门户立即可见，而不是只剩 deny-all）
-                        SELECT 1 FROM portal_user_downstreams pud \
-                        WHERE pud.user_id = $1 \
-                          AND COALESCE(pud.model_group_id, 'basic') = mg.id
-                    ) \
                  ORDER BY mg.id",
                 &[&user_id],
             )
@@ -1175,52 +1033,366 @@ impl PortalStore {
         Ok(())
     }
 
+    /// 原子替换用户的模型组授权：basic + 显式目标集合整体替换。
+    /// 组缺失或任一步失败时整个事务回滚，不产生半套授权。
+    pub async fn replace_user_model_groups(
+        &self,
+        user_id: &str,
+        target_ids: &[String],
+    ) -> Result<(), PortalStoreError> {
+        let mut client = self.get_client().await?;
+        let tx = client.transaction().await?;
+        let user_row = tx
+            .query_opt("SELECT id FROM portal_users WHERE id = $1 FOR UPDATE", &[&user_id])
+            .await?
+            .ok_or(PortalStoreError::NotFound)?;
+        drop(user_row);
+
+        let mut target: Vec<String> = target_ids.iter().cloned().collect();
+        target.sort();
+        target.dedup();
+        if !target.iter().any(|id| id == "basic") {
+            target.push("basic".to_string());
+            target.sort();
+        }
+
+        // 校验目标组都存在（basic 恒存在）。
+        for group_id in &target {
+            if group_id == "basic" {
+                continue;
+            }
+            let row = tx
+                .query_opt("SELECT id FROM model_groups WHERE id = $1 FOR SHARE", &[group_id])
+                .await?
+                .ok_or(PortalStoreError::NotFound)?;
+            drop(row);
+        }
+
+        tx.execute(
+            "DELETE FROM portal_user_model_groups WHERE user_id = $1 AND model_group_id <> 'basic'",
+            &[&user_id],
+        )
+        .await?;
+        for group_id in &target {
+            if group_id == "basic" {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO portal_user_model_groups (user_id, model_group_id, granted_by) \
+                 VALUES ($1, $2, 'admin') ON CONFLICT (user_id, model_group_id) DO NOTHING",
+                &[&user_id, group_id],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Get allowed models for a specific downstream key.
     /// Returns the allowed_models list from the key's model_group, or empty vec if no group assigned.
     pub async fn get_key_allowed_models(
-        &self,
-        downstream_id: &str,
+        &self, downstream_id: &str,
     ) -> Result<Vec<String>, PortalStoreError> {
-        let client = self.pool.get().await?;
-        let row = client
-            .query_opt(
-                "SELECT mg.id, mg.allowed_models::text \
-                 FROM portal_user_downstreams d \
-                 LEFT JOIN model_groups mg ON d.model_group_id = mg.id \
-                 WHERE d.downstream_id = $1",
-                &[&downstream_id],
+        let catalog = super::ModelCatalog::new(&[], &super::model_identity::ModelAliasRegistry::default(), true);
+        let mut access = self.resolve_key_access(&[downstream_id.into()], &catalog).await?;
+        Ok(access.remove(downstream_id).ok_or(PortalStoreError::NotFound)?.allowed.legacy_projection())
+    }
+
+    /// 待处理迁移记录：downstream_access_migrations 中尚未解决的行，
+    /// 附当前策略派生状态。不含任何 secret/hash。
+    pub async fn access_migration_records(
+        &self,
+    ) -> Result<Vec<AccessMigrationRecord>, PortalStoreError> {
+        let client = self.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT m.downstream_id, m.classification, m.before_policy, m.after_policy,
+                        EXTRACT(EPOCH FROM m.created_at)::bigint,
+                        EXTRACT(EPOCH FROM m.resolved_at)::bigint,
+                        p.owner_user_id, p.mode, p.model_group_id, p.revision
+                 FROM downstream_access_migrations m
+                 JOIN downstream_access_policies p ON p.downstream_id = m.downstream_id
+                 WHERE m.migration_version = 1
+                 ORDER BY m.downstream_id",
+                &[],
             )
             .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(AccessMigrationRecord {
+                    downstream_id: row.get(0),
+                    classification: row.get(1),
+                    before_policy: row.get(2),
+                    after_policy: row.get(3),
+                    created_at: row.get(4),
+                    resolved_at: row.get(5),
+                    owner_user_id: row.get(6),
+                    mode: row.get(7),
+                    model_group_id: row.get(8),
+                    revision: row.get(9),
+                })
+            })
+            .collect()
+    }
 
-        match row {
-            // Binding found, group resolved: return the group's allowed models.
-            Some(r) if r.get::<_, Option<String>>(0).is_some() => {
-                let allowed_models_json: String = r.get(1);
-                let models: Vec<String> = serde_json::from_str(&allowed_models_json)
-                    .unwrap_or_default();
-                Ok(models)
-            }
-            // Binding found but model_group_id is NULL (created before the
-            // columns existed): enforce the conservative default group.
-            // Fail closed: a missing basic group is an integrity error, not a
-            // reason to silently open the key to every model.
-            Some(_) => {
-                let allowed_models_json: String = client
-                    .query_one(
-                        "SELECT allowed_models::text FROM model_groups WHERE id = 'basic'",
-                        &[],
+    /// 迁移修复预览：对指定待处理密钥，返回 owner 的现有授权、待补旧绑定组、
+    /// 各组内容以及一个指纹。指纹由用户授权集合 + 候选组内容 + 策略 revision
+    /// 计算，apply 时在事务内重新计算并比对（任何变化返回 409）。
+    pub async fn access_migration_preview(
+        &self,
+        downstream_ids: &[String],
+    ) -> Result<Vec<AccessMigrationPreviewItem>, PortalStoreError> {
+        if downstream_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.get_client().await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await?;
+        let rows = tx
+            .query(
+                "SELECT m.downstream_id, m.classification, m.before_policy,
+                        p.owner_user_id, p.revision
+                 FROM downstream_access_migrations m
+                 JOIN downstream_access_policies p ON p.downstream_id = m.downstream_id
+                 WHERE m.downstream_id = ANY($1) AND m.migration_version = 1
+                 ORDER BY m.downstream_id",
+                &[&downstream_ids],
+            )
+            .await?;
+        let mut result = Vec::new();
+        for row in rows {
+            let downstream_id: String = row.get(0);
+            let classification: String = row.get(1);
+            let before: Value = row.get(2);
+            let owner_user_id: Option<String> = row.get(3);
+            let revision: i64 = row.get(4);
+            let binding_group_ids: Vec<String> = before
+                .get("binding_group_ids")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut existing_user_groups: Vec<String> = Vec::new();
+            let mut group_models = std::collections::BTreeMap::new();
+            if let Some(user_id) = &owner_user_id {
+                for grant in tx
+                    .query(
+                        "SELECT model_group_id FROM portal_user_model_groups \
+                         WHERE user_id = $1 ORDER BY model_group_id",
+                        &[user_id],
                     )
                     .await?
-                    .get::<_, String>(0);
-                let models: Vec<String> = serde_json::from_str(&allowed_models_json)
-                    .map_err(|e| PortalStoreError::Db(format!("invalid basic group models: {e}")))?;
-                Ok(models)
+                {
+                    existing_user_groups.push(grant.get(0));
+                }
             }
-            // No portal binding: this is a direct-config downstream key; no
-            // model-group enforcement (backward compatible).  An empty list
-            // therefore means "no restriction" at the gateway.
-            None => Ok(vec![]),
+            for group_id in &binding_group_ids {
+                let value: Value = tx
+                    .query_one(
+                        "SELECT allowed_models FROM model_groups WHERE id = $1",
+                        &[group_id],
+                    )
+                    .await?
+                    .get(0);
+                group_models.insert(group_id.clone(), value);
+            }
+            let fingerprint = migration_fingerprint(
+                &existing_user_groups,
+                &group_models,
+                revision,
+            );
+            result.push(AccessMigrationPreviewItem {
+                downstream_id,
+                classification,
+                owner_user_id,
+                existing_user_groups,
+                candidate_group_ids: binding_group_ids,
+                group_models,
+                revision,
+                fingerprint,
+            });
         }
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// 应用选定的迁移修复（设计 4.2 / P10）：每把密钥一个事务，
+    /// 锁定策略行后重新核对指纹与 revision；变化返回 409（Conflict），
+    /// 归属冲突（ownership_conflict/orphan）或已解决记录直接拒绝。
+    /// 成功后补授权、置显式 inherit、标记 resolved_at。
+    pub async fn apply_access_migration(
+        &self,
+        items: &[AccessMigrationApplyItem],
+    ) -> Result<Vec<AccessMigrationItemResult>, PortalStoreError> {
+        let mut results = Vec::new();
+        for item in items {
+            let outcome = self
+                .apply_access_migration_one(item)
+                .await
+                .unwrap_or_else(|error| {
+                    AccessMigrationItemResult {
+                        downstream_id: item.downstream_id.clone(),
+                        ok: false,
+                        error: error.to_string(),
+                        code: match error {
+                            PortalStoreError::Conflict(_) => "conflict",
+                            PortalStoreError::Forbidden(_) => "forbidden",
+                            PortalStoreError::NotFound => "not_found",
+                            PortalStoreError::Db(_) => "db_error",
+                        }
+                        .to_owned(),
+                    }
+                });
+            results.push(outcome);
+        }
+        Ok(results)
+    }
+
+    async fn apply_access_migration_one(
+        &self,
+        item: &AccessMigrationApplyItem,
+    ) -> Result<AccessMigrationItemResult, PortalStoreError> {
+        let mut client = self.get_client().await?;
+        let tx = client.transaction().await?;
+        super::model_access_store::lock_access_writes(&tx).await?;
+        let migration = tx
+            .query_opt(
+                "SELECT classification, before_policy, resolved_at
+                 FROM downstream_access_migrations
+                 WHERE downstream_id = $1 AND migration_version = 1 FOR UPDATE",
+                &[&item.downstream_id],
+            )
+            .await?
+            .ok_or(PortalStoreError::NotFound)?;
+        let classification: String = migration.get(0);
+        let before: Value = migration.get(1);
+        let resolved_at: Option<chrono::DateTime<chrono::Utc>> = migration.get(2);
+        if resolved_at.is_some() {
+            return Err(PortalStoreError::Conflict(
+                "migration record already resolved".into(),
+            ));
+        }
+        if !matches!(
+            classification.as_str(),
+            "preserved" | "review_required"
+        ) {
+            return Err(PortalStoreError::Conflict(
+                "ownership is unresolved (conflict/orphan); create a replacement key instead".into(),
+            ));
+        }
+        let policy = tx
+            .query_opt(
+                "SELECT owner_user_id, revision FROM downstream_access_policies \
+                 WHERE downstream_id = $1 FOR UPDATE",
+                &[&item.downstream_id],
+            )
+            .await?
+            .ok_or(PortalStoreError::NotFound)?;
+        let owner_user_id: Option<String> = policy.get(0);
+        let revision: i64 = policy.get(1);
+        if revision != item.expected_revision {
+            return Err(PortalStoreError::Conflict(
+                "access policy revision changed since preview".into(),
+            ));
+        }
+        let Some(user_id) = owner_user_id else {
+            return Err(PortalStoreError::Forbidden("owner_missing".into()));
+        };
+        let binding_group_ids: Vec<String> = before
+            .get("binding_group_ids")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for group_id in &item.candidate_group_ids {
+            if !binding_group_ids.contains(group_id) {
+                return Err(PortalStoreError::Conflict(format!(
+                    "group '{group_id}' is not a migration candidate for this key"
+                )));
+            }
+            if matches!(group_id.as_str(), "deny-all" | "all") {
+                return Err(PortalStoreError::Conflict(format!(
+                    "group '{group_id}' cannot be applied as a migration grant"
+                )));
+            }
+        }
+        // 重新计算指纹：现有授权 + 候选组内容 + revision。
+        let mut existing_user_groups: Vec<String> = Vec::new();
+        for grant in tx
+            .query(
+                "SELECT model_group_id FROM portal_user_model_groups \
+                 WHERE user_id = $1 ORDER BY model_group_id",
+                &[&user_id],
+            )
+            .await?
+        {
+            existing_user_groups.push(grant.get(0));
+        }
+        let mut group_models = std::collections::BTreeMap::new();
+        for group_id in &item.candidate_group_ids {
+            let value: Value = tx
+                .query_one(
+                    "SELECT allowed_models FROM model_groups WHERE id = $1 FOR SHARE",
+                    &[group_id],
+                )
+                .await?
+                .get(0);
+            group_models.insert(group_id.clone(), value);
+        }
+        let fingerprint = migration_fingerprint(
+            &existing_user_groups,
+            &group_models,
+            revision,
+        );
+        if fingerprint != item.expected_fingerprint {
+            return Err(PortalStoreError::Conflict(
+                "preview is stale; user grants, group content or policy changed".into(),
+            ));
+        }
+        for group_id in &item.candidate_group_ids {
+            tx.execute(
+                "INSERT INTO portal_user_model_groups (user_id, model_group_id, granted_by) \
+                 VALUES ($1, $2, 'access-migration-apply') ON CONFLICT DO NOTHING",
+                &[&user_id, group_id],
+            )
+            .await?;
+        }
+        if item.set_inherit {
+            tx.execute(
+                "UPDATE downstream_access_policies SET mode = 'inherit', \
+                 model_group_id = 'deny-all', revision = revision + 1 \
+                 WHERE downstream_id = $1",
+                &[&item.downstream_id],
+            )
+            .await?;
+        }
+        tx.execute(
+            "UPDATE downstream_access_migrations SET resolved_at = NOW() \
+             WHERE downstream_id = $1 AND migration_version = 1",
+            &[&item.downstream_id],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(AccessMigrationItemResult {
+            downstream_id: item.downstream_id.clone(),
+            ok: true,
+            error: String::new(),
+            code: "applied".to_owned(),
+        })
     }
 }
 

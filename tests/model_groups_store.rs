@@ -5,6 +5,7 @@ mod common;
 
 use chat_responses_codex::state::AppConfig;
 use chat_responses_codex::state::AppState;
+use chat_responses_codex::state::DownstreamConfig;
 
 fn database_url() -> String {
     common::oidc::database_url()
@@ -38,6 +39,24 @@ async fn ensure_user(store: &chat_responses_codex::state::PortalStore, user_id: 
         )
         .await
         .unwrap();
+}
+
+/// 新策略模型要求被绑定密钥必须真实存在（防孤儿绑定）：绑定前先建档。
+async fn ensure_downstream(state: &AppState, downstream_id: &str) {
+    if state
+        .downstream_config(downstream_id)
+        .await
+        .is_some()
+    {
+        return;
+    }
+    let mut ds = DownstreamConfig::default();
+    ds.id = downstream_id.to_string();
+    ds.name = downstream_id.to_string();
+    state
+        .insert_downstream(ds)
+        .await
+        .expect("insert downstream fixture");
 }
 
 #[tokio::test]
@@ -285,6 +304,7 @@ async fn test_get_key_allowed_models() {
     let user_id = "test-user-models-get";
     let downstream_id = "test-downstream-models-get";
 
+    ensure_downstream(&state, downstream_id).await;
     store
         .add_downstream_binding_with_label(
             user_id,
@@ -369,6 +389,7 @@ async fn test_delete_group_resets_keys_to_basic() {
 
     // 创建一个用户和绑定，使用新分组
     ensure_user(&store, "test-user-delete-reset").await;
+    ensure_downstream(&state, "key-delete-reset").await;
     store
         .add_downstream_binding_with_label(
             "test-user-delete-reset",
@@ -379,7 +400,8 @@ async fn test_delete_group_resets_keys_to_basic() {
         .await
         .expect("Should add binding");
 
-    // 删除分组：FK ON DELETE SET DEFAULT 把绑定回退到 basic
+    // 删除分组：策略事实源落 deny-all（设计 P04：组删除→旧 L3 组变 deny-all，
+    // 从不让密钥变 inherit），绑定行 label 保留。
     store
         .delete_model_group("to-delete-reset")
         .await
@@ -394,6 +416,6 @@ async fn test_delete_group_resets_keys_to_basic() {
         .iter()
         .find(|b| b.downstream_id == "key-delete-reset")
         .expect("binding should survive group deletion");
-    assert_eq!(binding.model_group_id, "basic");
+    assert_eq!(binding.model_group_id, "deny-all");
     assert_eq!(binding.label, "Reset Key");
 }

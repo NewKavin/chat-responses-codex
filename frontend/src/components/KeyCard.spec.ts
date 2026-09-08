@@ -19,7 +19,7 @@ const mockHandlers = {
   onRotate: vi.fn().mockResolvedValue(undefined),
   onDelete: vi.fn().mockResolvedValue(undefined),
   onSetDefault: vi.fn().mockResolvedValue(undefined),
-  onChangeModelGroup: vi.fn().mockResolvedValue(undefined),
+  onChangeModelAccess: vi.fn().mockResolvedValue(undefined),
 }
 
 const mockGroups: ModelGroup[] = [

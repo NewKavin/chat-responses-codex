@@ -35,8 +35,9 @@ mod portal_store;
 #[doc(hidden)]
 pub use postgres::insert_statement;
 pub use portal_store::{
-    ModelGroup, PortalDownstreamBinding, PortalDownstreamBindingWithLabel, PortalOidcHandshake,
-    PortalSession, PortalStore, PortalStoreError, PortalUser,
+    AccessMigrationApplyItem, AccessMigrationItemResult, AccessMigrationPreviewItem,
+    AccessMigrationRecord, ModelGroup, PortalDownstreamBinding, PortalDownstreamBindingWithLabel,
+    PortalOidcHandshake, PortalSession, PortalStore, PortalStoreError, PortalUser,
 };
 #[path = "state/redis_runtime.rs"]
 mod redis_runtime;
@@ -51,6 +52,17 @@ mod freekey_sync;
 mod model_discovery;
 #[path = "state/model_identity.rs"]
 pub mod model_identity;
+#[path = "state/model_catalog.rs"]
+pub mod model_catalog;
+pub use model_catalog::{ModelCatalog, ModelId, PublishedModel};
+#[path = "state/model_access.rs"]
+pub mod model_access;
+pub use model_access::{AccessMode, AccessMutation, AccessPolicy, AllowedModels, ModelAccessSelection, ResolvedModelAccess};
+#[path = "state/model_access_store.rs"]
+mod model_access_store;
+#[path = "state/downstream_patch.rs"]
+mod downstream_patch;
+pub use downstream_patch::{apply_downstream_updates, parse_model_access_update};
 #[path = "state/model_key_sync.rs"]
 mod model_key_sync;
 #[path = "state/model_qualification.rs"]
@@ -6140,6 +6152,7 @@ impl AppState {
     pub async fn reconcile_dialect_profiles(&self, now: u64) -> io::Result<Vec<ProbeJob>> {
         let runtime_settings = self.runtime_settings();
         let routing = self.routing_snapshot().await;
+        let catalog = self.model_catalog().await;
         let snapshot = self.capability_snapshot();
         let stale_profile_keys = snapshot
             .profiles
@@ -6170,12 +6183,13 @@ impl AppState {
             .await;
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
             for exposed in upstream.effective_downstream_models() {
+                let Some(public_name) = catalog.public_name_for_route(&upstream.id,&exposed) else { continue; };
                 let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
                     downstream.active
                         && downstream_effective
                             .get(&downstream.id)
                             .is_some_and(|allowlist| {
-                                crate::state::model_list_allows(allowlist, &exposed)
+                                catalog.allows_legacy(allowlist, public_name)
                             })
                 });
                 if !exposed_to_downstream {
@@ -6246,14 +6260,10 @@ impl AppState {
         &self,
         downstream: &DownstreamConfig,
     ) -> Result<Vec<String>, String> {
-        if downstream.model_group_id.is_none() {
+        if self.portal_store().is_none() {
             return Ok(downstream.model_allowlist.clone());
         }
-        match self.portal_store() {
-            Some(store) => downstream.get_allowed_models(store.as_ref()).await,
-            // 文件模式：组不可用，回退白名单，不要让每个请求都失败
-            None => Ok(downstream.model_allowlist.clone()),
-        }
+        Ok(self.resolved_model_access(downstream).await?.allowed.legacy_projection())
     }
 
     /// 按 id 解析下游的有效白名单；下游不存在时返回 None。
@@ -6265,6 +6275,17 @@ impl AppState {
         &self,
         downstreams: &[DownstreamConfig],
     ) -> HashMap<String, Vec<String>> {
+        if let Some(store) = self.portal_store() {
+            let ids = downstreams.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
+            let catalog = self.model_catalog().await;
+            return match store.resolve_key_access(&ids, &catalog).await {
+                Ok(results) => results.into_iter().map(|(id, access)| (id, access.allowed.legacy_projection())).collect(),
+                Err(error) => {
+                    tracing::warn!(%error, "model access resolution failed; exposing no models");
+                    ids.into_iter().map(|id| (id, vec!["__none__".into()])).collect()
+                }
+            };
+        }
         // 收集去重的 model_group_id，一次拉取全部组。
         let group_ids: std::collections::HashSet<&str> = downstreams
             .iter()
@@ -6322,23 +6343,27 @@ impl AppState {
                 tracing::warn!(
                     downstream_id = %downstream_id,
                     error = %error,
-                    "failed to resolve model group for read path; degrading to allowlist"
+                    "failed to resolve model access for read path; exposing no models"
                 );
-                Some(downstream.model_allowlist.clone())
+                Some(vec!["__none__".into()])
             }
         }
+    }
+
+    pub async fn model_catalog(&self) -> ModelCatalog {
+        let snapshot = self.routing_snapshot().await;
+        ModelCatalog::new(
+            &snapshot.upstreams,
+            &self.model_alias_registry(),
+            self.runtime_settings().model_case_insensitive_matching,
+        )
     }
 
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
         let Some(downstream) = self.downstream_for_secret(secret).await else {
             return Vec::new();
         };
-        let snapshot = self.routing_snapshot().await;
-        let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
-        let alias_registry = self.model_alias_registry();
-
-        // Effective allowlist: model_group_id (if set) takes priority over
-        // model_allowlist; group lookup failure fails closed (empty result).
+        let catalog = self.model_catalog().await;
         let effective_allowlist: Vec<String> = match self
             .effective_model_allowlist(&downstream)
             .await
@@ -6355,43 +6380,7 @@ impl AppState {
             }
         };
 
-        let mut seen = HashSet::new();
-        let mut models = Vec::new();
-        for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for entry in upstream.effective_downstream_models_detailed() {
-                let model = entry.model.as_str();
-                if model_list_allows(effective_allowlist.as_slice(), &model)
-                {
-                    // Admin-picked per-upstream mapping labels are exposed
-                    // verbatim (the operator typed them); everything else
-                    // resolves through alias rules first, then falls back to
-                    // B1 case-folding for display.
-                    let display_name = if entry.from_mapping {
-                        model.trim().to_string()
-                    } else if let Some(canonical) = alias_registry.resolve_alias(&model) {
-                        canonical.to_string()
-                    } else if case_insensitive {
-                        canonical_model_id(&model)
-                    } else {
-                        model.trim().to_string()
-                    };
-
-                    let key = if case_insensitive {
-                        canonical_model_id(&display_name)
-                    } else {
-                        display_name.clone()
-                    };
-
-                    if key.is_empty() || !seen.insert(key) {
-                        continue;
-                    }
-                    models.push(display_name);
-                }
-            }
-        }
-
-        models.sort();
-        models
+        catalog.names_for_legacy(&effective_allowlist)
     }
 
     /// Union of models visible to at least one active downstream: every
@@ -6400,54 +6389,12 @@ impl AppState {
     /// per-downstream semantics of `available_models_for_downstream`.
     pub async fn downstream_visible_models(&self) -> Vec<String> {
         let snapshot = self.routing_snapshot().await;
-        let case_insensitive = self.runtime_settings().model_case_insensitive_matching;
-        let alias_registry = self.model_alias_registry();
-
-        // 预解析所有下游的有效白名单（分组优先），一次批量拉组，避免 N+1。
-        let downstream_effective = self
-            .effective_model_allowlist_map(&snapshot.downstreams)
-            .await;
-
-        let mut seen = HashSet::new();
-        let mut models = Vec::new();
-        for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            for entry in upstream.effective_downstream_models_detailed() {
-                let model = entry.model.as_str();
-                if snapshot.downstreams.iter().any(|downstream| {
-                    downstream.active
-                        && downstream_effective
-                            .get(&downstream.id)
-                            .is_some_and(|allowlist| {
-                                crate::state::model_list_allows(allowlist, &model)
-                            })
-                }) {
-                    // Admin-picked per-upstream mapping labels are exposed
-                    // verbatim (see available_models_for_downstream).
-                    let display_name = if entry.from_mapping {
-                        model.trim().to_string()
-                    } else if let Some(canonical) = alias_registry.resolve_alias(&model) {
-                        canonical.to_string()
-                    } else if case_insensitive {
-                        canonical_model_id(&model)
-                    } else {
-                        model.trim().to_string()
-                    };
-
-                    let key = if case_insensitive {
-                        canonical_model_id(&display_name)
-                    } else {
-                        display_name.clone()
-                    };
-
-                    if key.is_empty() || !seen.insert(key) {
-                        continue;
-                    }
-                    models.push(display_name);
-                }
-            }
-        }
-        models.sort();
-        models
+        let catalog = self.model_catalog().await;
+        let access = self.effective_model_allowlist_map(&snapshot.downstreams).await;
+        catalog.models().iter().filter(|model| snapshot.downstreams.iter().any(|downstream| {
+            downstream.active && access.get(&downstream.id)
+                .is_some_and(|allowed| catalog.allows_legacy(allowed,&model.name))
+        })).map(|model| model.name.clone()).collect()
     }
 
     async fn initialize_capability_snapshot_from_store(
@@ -6858,20 +6805,19 @@ impl AppState {
                 tracing::warn!(
                     downstream_id = %downstream.id,
                     error = %error,
-                    "failed to resolve model group for probe queue; degrading to allowlist"
+                    "failed to resolve model access for probe queue"
                 );
-                downstream.model_allowlist.clone()
+                return 0;
             }
         };
 
+        let catalog = self.model_catalog().await;
+        if !catalog.allows_legacy(&effective_allowlist,model) { return 0; }
+        let Some(published) = catalog.find(model) else { return 0; };
         let mut queued = 0usize;
-        for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
-            if !crate::state::model_list_allows(&effective_allowlist, model) {
-                continue;
-            }
-            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
-                continue;
-            };
+        for route in &published.routes {
+            let Some(upstream) = routing.upstreams.iter().find(|upstream| upstream.id==route.upstream_id) else { continue; };
+            let runtime_model_slug = &route.wire_model;
             for api_key in upstream.keys_for_model(&runtime_model_slug) {
                 let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
                 for protocol in upstream.supported_protocols() {
@@ -6879,7 +6825,7 @@ impl AppState {
                         .build_capability_probe_job(
                             &upstream.id,
                             &key_fingerprint,
-                            model,
+                            &route.exposed_model,
                             &runtime_model_slug,
                             protocol,
                             ProbeReason::Manual,
@@ -7292,121 +7238,205 @@ impl AppState {
             ));
         }
 
-        let result = self
-            .mutate_persisted_state_with_group_models(
-                move |state| {
-                    let mut updated = HashSet::new();
-                    for decision in &decisions {
-                    if !updated.insert(decision.upstream_id.clone()) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "duplicate upstream qualification decision",
-                        ));
-                    }
-                    let upstream = Arc::make_mut(&mut state.upstreams)
-                        .iter_mut()
-                        .find(|value| value.id == decision.upstream_id)
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::NotFound, "upstream disappeared")
-                        })?;
-                    let configured_keys = upstream
-                        .available_keys()
-                        .into_iter()
-                        .collect::<HashSet<_>>();
-                    if decision
-                        .keys
-                        .iter()
-                        .any(|key| !configured_keys.contains(key.api_key.trim()))
-                    {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "qualification referenced an unknown upstream key",
-                        ));
-                    }
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let mut state = self.inner.lock().await;
+        let mut candidate_state = state.clone();
 
-                    upstream.api_key_models = decision
-                        .keys
-                        .iter()
-                        .map(|key| ApiKeyModelConfig {
-                            api_key: key.api_key.clone(),
-                            supported_models: key.retained.iter().cloned().collect(),
-                        })
-                        .collect();
-                    let retained = decision
-                        .keys
-                        .iter()
-                        .flat_map(|key| key.retained.iter().cloned())
-                        .collect::<BTreeSet<_>>();
-                    upstream.supported_models = retained.into_iter().collect();
-                    upstream.normalize_for_storage();
-                    upstream
-                        .validate_configuration()
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-                }
+        // 1) 应用上游审定决策（纯内存校验与应用）。
+        let mut updated = HashSet::new();
+        for decision in &decisions {
+            if !updated.insert(decision.upstream_id.clone()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate upstream qualification decision",
+                ));
+            }
+            let upstream = Arc::make_mut(&mut candidate_state.upstreams)
+                .iter_mut()
+                .find(|value| value.id == decision.upstream_id)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "upstream disappeared")
+                })?;
+            let configured_keys = upstream
+                .available_keys()
+                .into_iter()
+                .collect::<HashSet<_>>();
+            if decision
+                .keys
+                .iter()
+                .any(|key| !configured_keys.contains(key.api_key.trim()))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "qualification referenced an unknown upstream key",
+                ));
+            }
+            upstream.api_key_models = decision
+                .keys
+                .iter()
+                .map(|key| ApiKeyModelConfig {
+                    api_key: key.api_key.clone(),
+                    supported_models: key.retained.iter().cloned().collect(),
+                })
+                .collect();
+            let retained = decision
+                .keys
+                .iter()
+                .flat_map(|key| key.retained.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            upstream.supported_models = retained.into_iter().collect();
+            upstream.normalize_for_storage();
+            upstream
+                .validate_configuration()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        }
 
-                let exposed = state
-                    .upstreams
-                    .iter()
-                    .filter(|upstream| upstream.active)
-                    .flat_map(UpstreamConfig::route_models)
-                    .collect::<BTreeSet<_>>();
-                if exposed.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "qualification would remove the final routable model",
-                    ));
-                }
-                // T11：资格审定结果写入下游所绑分组的 allowed_models，不再写
-                // model_allowlist。三条防外溢规则（全部可基于候选快照内存判定）：
-                //   1) 未绑组 → InvalidInput（不自动建组、不回退写 allowlist）
-                //   2) 内置组（all/basic/premium/deny-all）→ 拒绝，提示改绑专属组
-                //   3) 组被 2+ 下游引用 → 拒绝（避免单个下游的审定改掉别人的权限）
-                let downstream = Arc::make_mut(&mut state.downstreams)
-                    .iter_mut()
-                    .find(|value| value.id == downstream_id)
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "downstream not found")
-                    })?;
+        // 2) 剩余可路由模型不能为空。
+        let exposed = candidate_state
+            .upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .flat_map(UpstreamConfig::route_models)
+            .collect::<BTreeSet<_>>();
+        if exposed.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "qualification would remove the final routable model",
+            ));
+        }
 
-                let Some(group_id) = downstream.model_group_id.clone() else {
+        // 3) 目标下游必须存在。
+        if !candidate_state
+            .downstreams
+            .iter()
+            .any(|value| value.id == downstream_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "downstream not found",
+            ));
+        }
+
+        // 4) 组内容与目标配置同事务提交。数据库模式下目标组来自新策略表
+        //    （downstream_access_policies），检查在事务内完成（P12）。
+        let group_models: Option<(String, Vec<String>)> = if self.postgres.is_some() {
+            let store = self.portal_store().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Unsupported, "portal store unavailable")
+            })?;
+            let policies = store
+                .access_policies(&[downstream_id.to_string()])
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let policy = policies.get(&downstream_id.to_string()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "downstream access policy missing; cannot qualify",
+                )
+            })?;
+            let group_id = match policy.selection() {
+                crate::state::ModelAccessSelection {
+                    mode: crate::state::AccessMode::Group,
+                    group_id: Some(group_id),
+                } => group_id,
+                _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "downstream is not bound to a model group; bind a dedicated group before qualifying",
-                    ));
-                };
-                if matches!(group_id.as_str(), "all" | "basic" | "premium" | "deny-all") {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "model group '{group_id}' is a builtin group; rebind the downstream to a dedicated group before qualifying"
-                        ),
-                    ));
+                    ))
                 }
-                let referencing = state
-                    .downstreams
-                    .iter()
-                    .filter(|other| other.model_group_id.as_deref() == Some(group_id.as_str()))
-                    .count();
-                if referencing > 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "model group '{group_id}' is shared by {referencing} downstreams; rebind to a dedicated group before qualifying"
-                        ),
-                    ));
-                }
+            };
+            if matches!(
+                group_id.as_str(),
+                "all" | "basic" | "premium" | "deny-all"
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "model group '{group_id}' is a builtin group; rebind the downstream to a dedicated group before qualifying"
+                    ),
+                ));
+            }
+            Some((group_id, exposed.iter().cloned().collect()))
+        } else {
+            // 文件模式：组不在数据库里，回退旧内存判定（legacy 适配）。
+            let downstream = candidate_state
+                .downstreams
+                .iter()
+                .find(|value| value.id == downstream_id)
+                .expect("downstream existence checked above");
+            let Some(group_id) = downstream.model_group_id.clone() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "downstream is not bound to a model group; bind a dedicated group before qualifying",
+                ));
+            };
+            if matches!(group_id.as_str(), "all" | "basic" | "premium" | "deny-all") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "model group '{group_id}' is a builtin group; rebind the downstream to a dedicated group before qualifying"
+                    ),
+                ));
+            }
+            let referencing = candidate_state
+                .downstreams
+                .iter()
+                .filter(|other| other.model_group_id.as_deref() == Some(group_id.as_str()))
+                .count();
+            if referencing > 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "model group '{group_id}' is shared by {referencing} downstreams; rebind to a dedicated group before qualifying"
+                    ),
+                ));
+            }
+            Some((group_id, exposed.iter().cloned().collect()))
+        };
 
-                Ok((
-                    ModelQualificationApplySummary {
-                        upstreams_updated: updated.len(),
-                        retained_models: exposed.len(),
-                    },
-                    Some((group_id, exposed.iter().cloned().collect())),
-                ))
-            },
-            io::Error::other,
-        )
-            .await?;
+        if !downstream_plaintext_pairs_unchanged(
+            &state.downstreams,
+            &candidate_state.downstreams,
+        ) {
+            validate_downstream_plaintext_pairs(&mut candidate_state);
+        }
+
+        match &group_models {
+            Some((group_id, allowed_models)) => {
+                if let Some(postgres) = &self.postgres {
+                    postgres
+                        .replace_state_with_qualified_models(
+                            &candidate_state,
+                            &downstream_id.to_string(),
+                            group_id,
+                            allowed_models,
+                        )
+                        .await?;
+                } else {
+                    self.config_store
+                        .persist_config_with_group_models(
+                            &candidate_state,
+                            group_id,
+                            allowed_models,
+                        )
+                        .await?;
+                }
+            }
+            None => {
+                self.config_store.persist_config(&candidate_state).await?;
+            }
+        }
+        state.upstreams = candidate_state.upstreams;
+        state.downstreams = candidate_state.downstreams;
+        state.announcement = candidate_state.announcement;
+        state.global_context_profiles = candidate_state.global_context_profiles;
+        state.runtime_settings = candidate_state.runtime_settings;
+        drop(state);
+
+        let result = ModelQualificationApplySummary {
+            upstreams_updated: updated.len(),
+            retained_models: exposed.len(),
+        };
         let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams)
             .await
@@ -7420,53 +7450,6 @@ impl AppState {
         M: Fn(io::Error) -> E,
     {
         self.mutate_persisted_state_inner(mutator, map_io).await
-    }
-
-    /// T11: 同 `mutate_persisted_state`，但 mutator 返回 `(T, Option<(group_id, models)>)`，
-    /// 组 allowed_models 更新与快照持久化放入同一事务。
-    async fn mutate_persisted_state_with_group_models<T, E, F, M>(
-        &self,
-        mutator: F,
-        map_io: M,
-    ) -> Result<T, E>
-    where
-        F: FnOnce(&mut PersistedState) -> Result<(T, Option<(String, Vec<String>)>), E>,
-        M: Fn(io::Error) -> E,
-    {
-        let _persist_guard = self.config_persist_lock.lock().await;
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let (result, group_models) = mutator(&mut candidate_state)?;
-        if !downstream_plaintext_pairs_unchanged(&state.downstreams, &candidate_state.downstreams) {
-            validate_downstream_plaintext_pairs(&mut candidate_state);
-        }
-
-        match group_models {
-            Some((group_id, allowed_models)) => {
-                self.config_store
-                    .persist_config_with_group_models(
-                        &candidate_state,
-                        &group_id,
-                        &allowed_models,
-                    )
-                    .await
-                    .map_err(map_io)?;
-            }
-            None => {
-                self.config_store
-                    .persist_config(&candidate_state)
-                    .await
-                    .map_err(map_io)?;
-            }
-        }
-
-        state.upstreams = candidate_state.upstreams;
-        state.downstreams = candidate_state.downstreams;
-        state.announcement = candidate_state.announcement;
-        state.global_context_profiles = candidate_state.global_context_profiles;
-        state.runtime_settings = candidate_state.runtime_settings;
-
-        Ok(result)
     }
 
     async fn mutate_persisted_state_inner<T, E, F, M>(
@@ -8576,82 +8559,10 @@ impl AppState {
 
     /// Update an existing downstream
     pub async fn update_downstream_by_id(
-        &self,
-        id: &str,
-        updates: serde_json::Value,
+        &self, id: &str, updates: serde_json::Value,
     ) -> Result<DownstreamConfig, String> {
-        self.mutate_persisted_state(
-            |candidate_state| {
-                let downstream = Arc::make_mut(&mut candidate_state.downstreams)
-                    .iter_mut()
-                    .find(|d| d.id == id)
-                    .ok_or_else(|| format!("Downstream '{}' not found", id))?;
-
-                if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
-                    downstream.name = name.to_string();
-                }
-                if let Some(per_minute_limit) =
-                    updates.get("per_minute_limit").and_then(|v| v.as_u64())
-                {
-                    downstream.per_minute_limit = per_minute_limit as u32;
-                }
-                if let Some(max_concurrency) =
-                    updates.get("max_concurrency").and_then(|v| v.as_u64())
-                {
-                    downstream.max_concurrency = max_concurrency as u32;
-                }
-                if let Some(rate_limit_enabled) =
-                    updates.get("rate_limit_enabled").and_then(|v| v.as_bool())
-                {
-                    downstream.rate_limit_enabled = rate_limit_enabled;
-                }
-                if let Some(request_quota_window_hours) = updates
-                    .get("request_quota_window_hours")
-                    .and_then(|v| v.as_u64())
-                {
-                    downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
-                }
-                if updates
-                    .get("request_quota_window_hours")
-                    .is_some_and(serde_json::Value::is_null)
-                {
-                    downstream.request_quota_window_hours = None;
-                }
-                if let Some(request_quota_requests) = updates
-                    .get("request_quota_requests")
-                    .and_then(|v| v.as_u64())
-                {
-                    downstream.request_quota_requests = Some(request_quota_requests as u32);
-                }
-                if updates
-                    .get("request_quota_requests")
-                    .is_some_and(serde_json::Value::is_null)
-                {
-                    downstream.request_quota_requests = None;
-                }
-                // T10：停写 model_allowlist（分组是唯一事实源）。老客户端
-                // 传该字段时忽略并告警，契约保持 200 不报错。
-                if updates.get("model_allowlist").is_some() {
-                    tracing::warn!(
-                        downstream_id = %downstream.id,
-                        "ignoring model_allowlist in update (model groups are the single source of truth)"
-                    );
-                }
-                if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
-                    downstream.ip_allowlist = ip_allowlist
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                }
-                if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
-                    downstream.active = active;
-                }
-
-                Ok(downstream.clone())
-            },
-            |e| format!("Failed to persist state: {e}"),
-        )
-        .await
+        let updates = updates.as_object().ok_or_else(|| "updates must be an object".to_owned())?;
+        self.patch_downstream_account(id,updates).await.map_err(|e| e.to_string())
     }
 
     /// Delete a downstream

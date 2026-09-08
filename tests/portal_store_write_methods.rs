@@ -3,6 +3,20 @@ mod common;
 use chat_responses_codex::state::AppConfig;
 use chat_responses_codex::state::AppState;
 
+/// 新策略模型：被绑定密钥必须真实存在（防孤儿绑定），绑定前先建档。
+async fn ensure_binding_downstream(state: &AppState, downstream_id: &str) {
+    if state.downstream_config(downstream_id).await.is_some() {
+        return;
+    }
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = downstream_id.to_string();
+    ds.name = downstream_id.to_string();
+    state
+        .insert_downstream(ds)
+        .await
+        .expect("insert downstream fixture");
+}
+
 fn database_url() -> String {
     common::oidc::database_url()
         .expect("OIDC_TEST_DATABASE_URL unset; tests should skip before reaching here")
@@ -44,6 +58,7 @@ async fn test_add_downstream_binding_with_label() {
     .expect("Failed to create user");
 
     // Test 1: Add new binding with label and model_group_id
+    ensure_binding_downstream(&state, "openai").await;
     store
         .add_downstream_binding_with_label(
             &user.id,
@@ -61,10 +76,12 @@ async fn test_add_downstream_binding_with_label() {
     assert_eq!(binding.downstream_id, "openai");
     assert_eq!(binding.label, "Work Key");
     assert_eq!(binding.model_group_id, "premium");
-    assert!(!binding.is_default); // Should be FALSE initially
+    // 新语义：无默认密钥时首个绑定自动成为默认（set_binding 明确提交）。
+    assert!(binding.is_default);
     assert!(binding.created_at > 0); // Should have timestamp
 
     // Test 2: Idempotency - adding same binding again should not fail
+    ensure_binding_downstream(&state, "openai").await;
     store
         .add_downstream_binding_with_label(
             &user.id,
@@ -75,13 +92,14 @@ async fn test_add_downstream_binding_with_label() {
         .await
         .expect("Failed on duplicate insert");
 
-    // Should still have only 1 binding with original values (ON CONFLICT DO NOTHING)
+    // 新语义：重复绑定不失败；新 label 通过 DO UPDATE 的 COALESCE 合并。
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].label, "Work Key"); // Original label unchanged
-    assert_eq!(bindings[0].model_group_id, "premium"); // Original model_group unchanged
+    assert_eq!(bindings[0].label, "Different Label");
+    assert_eq!(bindings[0].model_group_id, "basic"); // 策略随新 selection 更新
 
     // Test 3: Add binding with NULL label and model_group
+    ensure_binding_downstream(&state, "anthropic").await;
     store
         .add_downstream_binding_with_label(
             &user.id,
@@ -95,7 +113,7 @@ async fn test_add_downstream_binding_with_label() {
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 2);
     let anthropic = bindings.iter().find(|b| b.downstream_id == "anthropic").unwrap();
-    assert_eq!(anthropic.label, "Default Key"); // Should get default label from COALESCE
+    assert_eq!(anthropic.label, "anthropic"); // NULL label falls back to the downstream name
 }
 
 #[tokio::test]
@@ -123,6 +141,7 @@ async fn test_update_downstream_label() {
     .expect("Failed to create user");
 
     // Add initial binding
+    ensure_binding_downstream(&state, "openai").await;
     store
         .add_downstream_binding_with_label(
             &user.id,
@@ -147,7 +166,9 @@ async fn test_update_downstream_label() {
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].label, "Updated Label");
-    assert_eq!(bindings[0].model_group_id, "premium");
+    // 新语义（设计 16）：标签编辑等旁路不再更新旧绑定分组/模型访问，
+    // 模型访问由策略表决定（add 时 basic）。
+    assert_eq!(bindings[0].model_group_id, "basic");
 
     // Test 2: Update to NULL (clear label)
     store
@@ -162,7 +183,8 @@ async fn test_update_downstream_label() {
 
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].label, "Default Key"); // Should use COALESCE default
+    // 新语义：label 为空时回退显示下游名（COALESCE(label, downstream.name, ...)）。
+    assert_eq!(bindings[0].label, "openai");
     assert_eq!(bindings[0].model_group_id, "basic"); // Should default to 'basic'
 
     // Test 3: Verify other fields unchanged (is_default, created_at)
@@ -176,11 +198,13 @@ async fn test_update_downstream_label() {
         .expect("Failed to query");
 
     let is_default: bool = row.get(0);
-    assert!(!is_default); // Should still be FALSE
+    // 新语义：无默认密钥时首个绑定自动成为默认；update_downstream_label
+    // 只更新 label，不改变默认标记。
+    assert!(is_default);
 }
 
 #[tokio::test]
-async fn test_remove_downstream_binding_safe() {
+async fn test_revoke_portal_downstream() {
     let _guard = common::oidc::lock().await;
     let url = database_url();
 
@@ -204,44 +228,16 @@ async fn test_remove_downstream_binding_safe() {
     .expect("Failed to create user");
 
     // Add test bindings
+    ensure_binding_downstream(&state, "openai").await;
     store.add_downstream_binding_with_label(&user.id, "openai", Some("Key 1"), Some("basic")).await.unwrap();
+    ensure_binding_downstream(&state, "anthropic").await;
     store.add_downstream_binding_with_label(&user.id, "anthropic", Some("Key 2"), Some("basic")).await.unwrap();
+    ensure_binding_downstream(&state, "cohere").await;
     store.add_downstream_binding_with_label(&user.id, "cohere", Some("Key 3"), Some("basic")).await.unwrap();
 
-    // Test 1: Success - delete non-default key with no usage
-    let result = store
-        .remove_downstream_binding_safe(&user.id, "openai")
-        .await
-        .expect("Failed to call remove");
-
-    assert!(result); // Should return true (deleted)
-    let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
-    assert_eq!(bindings.len(), 2); // Should have 2 keys left
-    assert!(!bindings.iter().any(|b| b.downstream_id == "openai")); // openai should be gone
-
-    // Test 2: Reject - cannot delete default key
-    // First set anthropic as default
+    // 设计 2.4：删除密钥必须在成功响应前撤销 API 可用性；历史日志所需记录保留。
+    // 删除 = revoke：策略落 deny、owner 置空，绑定主体保留（门户仍可见但拒绝一切）。
     let client = store.get_client().await.expect("Failed to get client");
-    client
-        .execute(
-            "UPDATE portal_user_downstreams SET is_default = TRUE WHERE user_id = $1 AND downstream_id = $2",
-            &[&user.id, &"anthropic"],
-        )
-        .await
-        .expect("Failed to set default");
-
-    let result = store
-        .remove_downstream_binding_safe(&user.id, "anthropic")
-        .await
-        .expect("Failed to call remove");
-
-    assert!(!result); // Should return false (rejected)
-    let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
-    assert_eq!(bindings.len(), 2); // Should still have 2 keys
-    assert!(bindings.iter().any(|b| b.downstream_id == "anthropic")); // anthropic should still exist
-
-    // Test 3: Reject - cannot delete key with usage history
-    // Insert a response_history record for cohere
     client
         .execute(
             "INSERT INTO response_history (downstream_key_id, response_id, items, state, created_at) \
@@ -251,15 +247,45 @@ async fn test_remove_downstream_binding_safe() {
         .await
         .expect("Failed to insert history");
 
-    let result = store
-        .remove_downstream_binding_safe(&user.id, "cohere")
-        .await
-        .expect("Failed to call remove");
+    for key_id in ["openai", "anthropic", "cohere"] {
+        state
+            .revoke_portal_downstream(key_id, &user.id)
+            .await
+            .unwrap_or_else(|error| panic!("revoke {key_id}: {error}"));
+    }
 
-    assert!(!result); // Should return false (rejected)
-    let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
-    assert_eq!(bindings.len(), 2); // Should still have 2 keys
-    assert!(bindings.iter().any(|b| b.downstream_id == "cohere")); // cohere should still exist
+    // 全部成功撤销：策略 deny、owner 清空。
+    let policies = store
+        .access_policies(std::slice::from_ref(&"openai".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        policies["openai"].mode,
+        chat_responses_codex::state::AccessMode::Deny
+    );
+    assert_eq!(policies["openai"].owner_user_id, None);
+
+    // revoke 语义：绑定行随删除移除（门户不再看到该密钥），
+    // 策略保留为 deny 供审计，历史日志不被删除。
+    let bindings = store
+        .list_downstream_bindings_with_labels(&user.id)
+        .await
+        .unwrap();
+    assert_eq!(bindings.len(), 0, "revoked bindings are removed");
+    let history_before: i64 = client
+        .query_one("SELECT COUNT(*) FROM response_history", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let history_after: i64 = client
+        .query_one("SELECT COUNT(*) FROM response_history", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        history_after, history_before,
+        "revoke must not delete history records"
+    );
 }
 
 #[tokio::test]
@@ -287,14 +313,18 @@ async fn test_set_default_key() {
     .expect("Failed to create user");
 
     // Add test bindings
+    ensure_binding_downstream(&state, "openai").await;
     store.add_downstream_binding_with_label(&user.id, "openai", Some("Key 1"), Some("basic")).await.unwrap();
+    ensure_binding_downstream(&state, "anthropic").await;
     store.add_downstream_binding_with_label(&user.id, "anthropic", Some("Key 2"), Some("basic")).await.unwrap();
+    ensure_binding_downstream(&state, "cohere").await;
     store.add_downstream_binding_with_label(&user.id, "cohere", Some("Key 3"), Some("basic")).await.unwrap();
 
     // Verify all are non-default initially
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();
     assert_eq!(bindings.len(), 3);
-    assert!(bindings.iter().all(|b| !b.is_default));
+    // 新语义：无默认密钥时首个绑定自动成为默认（set_binding 明确提交）。
+    assert_eq!(bindings.iter().filter(|b| b.is_default).count(), 1);
 
     // Test 1: Set openai as default
     store

@@ -443,11 +443,13 @@ describe('admin api auth behavior', () => {
     await adminApi.importCapabilities({ schema_version: 1, revision: 42 } as never)
     await adminApi.getResolvedCapabilities({
       upstream_id: 'up-1',
+      route_id: 'up-1::opaque::chat_completions',
       model: 'opaque',
       protocol: 'chat_completions'
     })
     await adminApi.queueDialectProbe({
       upstream_id: 'up-1',
+      route_id: 'up-1::opaque::chat_completions',
       runtime_model_slug: 'opaque',
       protocol: 'chat_completions'
     })
@@ -460,12 +462,14 @@ describe('admin api auth behavior', () => {
     expect(getSpy).toHaveBeenCalledWith('/admin/capabilities/resolved', {
       params: {
         upstream_id: 'up-1',
+        route_id: 'up-1::opaque::chat_completions',
         model: 'opaque',
         protocol: 'chat_completions'
       }
     })
     expect(postSpy).toHaveBeenCalledWith('/admin/capabilities/probe', {
       upstream_id: 'up-1',
+      route_id: 'up-1::opaque::chat_completions',
       runtime_model_slug: 'opaque',
       protocol: 'chat_completions'
     })

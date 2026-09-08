@@ -60,7 +60,9 @@ pub struct DbGuard {
     _conn: Option<tokio_postgres::Client>,
 }
 
-async fn connect(database_url: &str) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
+pub(crate) async fn connect(
+    database_url: &str,
+) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
     let mut config = Config::from_str(database_url)?;
     if config.get_password().is_none() {
         if let Ok(password) = std::env::var("PGPASSWORD") {
@@ -117,7 +119,8 @@ pub async fn reset_portal_tables(database_url: &str) {
     // key 重复加锁后提前释放。
     client
         .batch_execute(
-            "DROP TABLE IF EXISTS portal_sessions, portal_user_downstreams, \
+            "DROP TABLE IF EXISTS downstream_access_policies, downstream_access_migrations, \
+             portal_sessions, portal_user_downstreams, \
              portal_user_model_groups, portal_identities, portal_users, \
              oauth_login_attempts, runtime_settings, model_groups \
              CASCADE",

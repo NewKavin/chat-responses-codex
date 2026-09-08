@@ -17,7 +17,7 @@ describe('portal api', () => {
 
     await portalApi.getModels()
 
-    expect(spy).toHaveBeenCalledWith('/portal/models')
+    expect(spy).toHaveBeenCalledWith('/portal/models', { params: undefined })
   })
 
   it('calls the announcement read endpoint', async () => {
@@ -48,7 +48,7 @@ describe('portal api', () => {
 
     await portalApi.getModelProbe()
 
-    expect(spy).toHaveBeenCalledWith('/portal/model-probe')
+    expect(spy).toHaveBeenCalledWith('/portal/model-probe', { params: undefined })
   })
 
 })

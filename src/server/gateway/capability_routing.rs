@@ -871,24 +871,21 @@ pub(super) fn select_catalog_witness_entry(
     case_insensitive: bool,
 ) -> Option<CatalogWitnessEntry> {
     let snapshot = state.capability_snapshot();
+    let catalog = crate::state::ModelCatalog::new(upstreams, &state.model_alias_registry(), case_insensitive);
+    let published = catalog.find(model)?;
     let mut candidates = Vec::new();
-    for upstream in upstreams
-        .iter()
-        .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
-    {
-        let Some(runtime_model_slug) = upstream.resolved_model_name_with(model, case_insensitive)
-        else {
-            continue;
-        };
-        for api_key in upstream.keys_for_model_with(&runtime_model_slug, case_insensitive) {
+    for route in &published.routes {
+        let Some(upstream) = upstreams.iter().find(|upstream| upstream.id == route.upstream_id) else { continue; };
+        let runtime_model_slug = &route.wire_model;
+        for api_key in upstream.keys_for_model_with(runtime_model_slug, case_insensitive) {
             let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
             for protocol in upstream.supported_protocols() {
                 let Some(resolved) = resolve_route_capabilities_with_snapshot(
                     &snapshot,
                     upstream,
                     &key_fingerprint,
-                    model,
-                    &runtime_model_slug,
+                    &route.exposed_model,
+                    runtime_model_slug,
                     protocol,
                     &RequestedFeatures::default(),
                 ) else {

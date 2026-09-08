@@ -334,6 +334,21 @@ impl PostgresStateStore {
         self.replace_state_with_group_models(state, None).await
     }
 
+    pub async fn replace_state_with_access(
+        &self,
+        state: &PersistedState,
+        mutations: &[super::model_access::AccessMutation],
+    ) -> io::Result<()> {
+        let mut conn = self.pool.get().await.map_err(io_other)?;
+        let tx = conn.transaction().await.map_err(io_other)?;
+        super::model_access_store::lock_access_writes(&tx).await.map_err(io::Error::other)?;
+        sync_config_tables(&tx, state).await?;
+        for mutation in mutations {
+            super::model_access_store::apply_access_mutation(&tx, mutation).await.map_err(io::Error::other)?;
+        }
+        tx.commit().await.map_err(io_other)
+    }
+
     /// T11: 与快照替换同一事务内更新模型分组的 allowed_models。
     /// group_id 指向不存在的组时返回 NotFound（防静默丢失写入）。
     pub async fn replace_state_with_group_models(
@@ -343,6 +358,7 @@ impl PostgresStateStore {
     ) -> io::Result<()> {
         let mut conn = self.pool.get().await.map_err(io_other)?;
         let tx = conn.transaction().await.map_err(io_other)?;
+        super::model_access_store::lock_access_writes(&tx).await.map_err(io::Error::other)?;
         sync_config_tables(&tx, state).await?;
         if let Some((group_id, allowed_models)) = group_models {
             let models_json: serde_json::Value =
@@ -360,6 +376,117 @@ impl PostgresStateStore {
                     format!("model group not found: {group_id}"),
                 ));
             }
+        }
+        tx.commit().await.map_err(io_other)
+    }
+
+    /// T11 资格审定写路径：与 `replace_state_with_group_models` 同事务，但
+    /// 在提交前按新策略事实源（downstream_access_policies）核对：
+    /// - 目标限定组必须来自该下游策略的 group 模式（不是旧 config 字段）；
+    /// - 组不能是内置组；
+    /// - 组只能被这一把密钥的策略引用（不能被其它策略共享）；
+    /// - 组不能被任何用户授权引用（portal_user_model_groups）。
+    /// 任何变化都整体回滚，不能因审定一个 key 改变其它 key 的权限上限。
+    pub async fn replace_state_with_qualified_models(
+        &self,
+        state: &PersistedState,
+        downstream_id: &str,
+        group_id: &str,
+        allowed_models: &[String],
+    ) -> io::Result<()> {
+        let mut conn = self.pool.get().await.map_err(io_other)?;
+        let tx = conn.transaction().await.map_err(io_other)?;
+        super::model_access_store::lock_access_writes(&tx)
+            .await
+            .map_err(io::Error::other)?;
+
+        let policy = tx
+            .query_opt(
+                "SELECT mode, model_group_id FROM downstream_access_policies \
+                 WHERE downstream_id = $1 FOR UPDATE",
+                &[&downstream_id],
+            )
+            .await
+            .map_err(io_other)?;
+        let (mode, policy_group): (String, String) = match policy {
+            Some(row) => (row.get(0), row.get(1)),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "downstream access policy missing; cannot qualify",
+                ))
+            }
+        };
+        if mode != "group" || policy_group != group_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "downstream is not bound to model group '{group_id}'; \
+                     bind it to a dedicated group before qualifying"
+                ),
+            ));
+        }
+        if matches!(group_id, "all" | "basic" | "premium" | "deny-all") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "model group '{group_id}' is a builtin group; rebind the downstream \
+                     to a dedicated group before qualifying"
+                ),
+            ));
+        }
+        let references: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM downstream_access_policies \
+                 WHERE mode = 'group' AND model_group_id = $1",
+                &[&group_id],
+            )
+            .await
+            .map_err(io_other)?
+            .get(0);
+        if references > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "model group '{group_id}' is shared by {references} access policies; \
+                     rebind to a dedicated group before qualifying"
+                ),
+            ));
+        }
+        let user_references: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM portal_user_model_groups WHERE model_group_id = $1",
+                &[&group_id],
+            )
+            .await
+            .map_err(io_other)?
+            .get(0);
+        if user_references > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "model group '{group_id}' is referenced by {user_references} user grants; \
+                     qualifying it would change other users' limits"
+                ),
+            ));
+        }
+
+        sync_config_tables(&tx, state).await?;
+        let models_json: serde_json::Value =
+            serde_json::to_value(allowed_models).map_err(io_other)?;
+        let updated = tx
+            .execute(
+                "UPDATE model_groups SET allowed_models = $2::jsonb, updated_at = NOW() \
+                 WHERE id = $1",
+                &[&group_id, &models_json],
+            )
+            .await
+            .map_err(io_other)?;
+        if updated == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("model group not found: {group_id}"),
+            ));
         }
         tx.commit().await.map_err(io_other)
     }
@@ -948,6 +1075,7 @@ impl PostgresStateStore {
         // 必须排在迁移之后（迁移把历史 NULL 填完，SET NOT NULL 才不会失败）。
         migrate_downstream_group_fallback(&tx).await?;
         migrate_portal_key_markers(&tx).await?;
+        super::model_access_store::migrate_access_policies(&tx).await?;
         tx.commit().await.map_err(io_other)
     }
 }
@@ -1539,12 +1667,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             .map_err(io_other)?;
         }
 
-        tx.execute(
-            "DELETE FROM upstream_premium_models WHERE upstream_id = $1",
-            &[&upstream.id],
-        )
-        .await
-        .map_err(io_other)?;
     }
 
     Ok(())
@@ -1670,6 +1792,15 @@ async fn sync_downstreams(
             DOWNSTREAM_INSERT_CONFLICT,
         );
         tx.execute(&sql, params).await.map_err(io_other)?;
+
+        tx.execute(
+            "INSERT INTO downstream_access_policies(downstream_id,subject_kind,mode,model_group_id)
+             VALUES($1,$2,$3,$4) ON CONFLICT(downstream_id) DO NOTHING",
+            &[&downstream.id,
+              &(if downstream.is_portal_key { "portal" } else { "direct" }),
+              &(if downstream.is_portal_key || downstream.model_group_id.as_deref().unwrap_or("deny-all") == "deny-all" { "deny" } else { "group" }),
+              &(if downstream.is_portal_key { "deny-all" } else { downstream.model_group_id.as_deref().unwrap_or("deny-all") })],
+        ).await.map_err(io_other)?;
 
         tx.execute(
             "DELETE FROM downstream_model_allowlist WHERE downstream_id = $1",

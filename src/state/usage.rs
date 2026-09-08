@@ -182,60 +182,6 @@ pub(super) fn downstream_token_retry_after_seconds(
     window_seconds.max(1)
 }
 
-pub(super) fn build_active_upstream_model_catalog(
-    snapshot: &PersistedState,
-) -> HashMap<String, Vec<String>> {
-    let mut catalog: HashMap<String, Vec<String>> = HashMap::new();
-    let mut seen_exact = HashSet::new();
-
-    for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-        for model in upstream.effective_downstream_models() {
-            let model = model.trim();
-            if model.is_empty() {
-                continue;
-            }
-
-            let model = model.to_string();
-            if !seen_exact.insert(model.clone()) {
-                continue;
-            }
-
-            catalog
-                .entry(model.to_ascii_lowercase())
-                .or_default()
-                .push(model);
-        }
-    }
-
-    catalog
-}
-
-pub(super) fn canonicalize_portal_model_name(
-    catalog: &HashMap<String, Vec<String>>,
-    model: &str,
-) -> Option<String> {
-    let model = model.trim();
-    if model.is_empty() {
-        return None;
-    }
-
-    let lookup_key = model.to_ascii_lowercase();
-    let Some(candidates) = catalog.get(&lookup_key) else {
-        return Some(model.to_string());
-    };
-    if let Some(exact_match) = candidates
-        .iter()
-        .find(|candidate| candidate.as_str() == model)
-    {
-        return Some(exact_match.clone());
-    }
-
-    candidates
-        .first()
-        .cloned()
-        .or_else(|| Some(model.to_string()))
-}
-
 pub(super) fn normalize_model_name(model: &str) -> Option<String> {
     let model = model.trim();
     if model.is_empty() {
@@ -563,13 +509,13 @@ impl AppState {
                 tracing::warn!(
                     downstream_key_id = %downstream.id,
                     error = %error,
-                    "failed to resolve model group for model stats; degrading to allowlist"
+                    "failed to resolve model access for model stats"
                 );
-                downstream.model_allowlist.clone()
+                return Vec::new();
             }
         };
 
-        let canonical_models = build_active_upstream_model_catalog(&snapshot);
+        let catalog = self.model_catalog().await;
 
         let mut model_logs: std::collections::HashMap<String, Vec<&UsageLog>> =
             std::collections::HashMap::new();
@@ -579,14 +525,11 @@ impl AppState {
                 continue;
             }
 
-            let Some(model) = canonicalize_portal_model_name(&canonical_models, &log.model) else {
-                continue;
-            };
-
-            if !model_list_allows(&effective_allowlist, &model) {
+            if log.model.trim().is_empty() || !catalog.allows_legacy(&effective_allowlist, &log.model) {
                 continue;
             }
-
+            let model = catalog.find(&log.model).map(|model| model.name.clone())
+                .unwrap_or_else(|| log.model.clone());
             model_logs.entry(model).or_default().push(log);
         }
 
@@ -641,7 +584,7 @@ impl AppState {
         downstream: &DownstreamConfig,
     ) -> HashMap<String, ModelContextConfig> {
         let snapshot = self.snapshot().await;
-        let canonical_models = build_active_upstream_model_catalog(&snapshot);
+        let catalog = self.model_catalog().await;
 
         // 阶段 1：上下文限制与有效白名单一致（分组优先）；解析失败降级回 allowlist。
         let effective_allowlist = match self.effective_model_allowlist(downstream).await {
@@ -650,40 +593,21 @@ impl AppState {
                 tracing::warn!(
                     downstream_key_id = %downstream.id,
                     error = %error,
-                    "failed to resolve model group for context limits; degrading to allowlist"
+                    "failed to resolve model access for context limits"
                 );
-                downstream.model_allowlist.clone()
+                return HashMap::new();
             }
         };
 
         let mut result: HashMap<String, ModelContextConfig> = HashMap::new();
 
-        let allowlist: Vec<String> = if effective_allowlist.is_empty() {
-            canonical_models
-                .values()
-                .flat_map(|slugs| slugs.iter().cloned())
-                .collect()
-        } else {
-            effective_allowlist
-                .iter()
-                .map(|slug| slug.trim().to_string())
-                .filter(|slug| !slug.is_empty())
-                .collect()
-        };
-
-        for model in allowlist {
-            if !model_list_allows(&effective_allowlist, &model) {
+        for published in catalog.models() {
+            if !catalog.allows_legacy(&effective_allowlist, &published.name) {
                 continue;
             }
-
-            for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
-                let exposes = upstream
-                    .effective_downstream_models()
-                    .iter()
-                    .any(|candidate| candidate.trim().eq_ignore_ascii_case(model.trim()));
-                if !exposes {
-                    continue;
-                }
+            let model = &published.name;
+            for route in &published.routes {
+                let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == route.upstream_id) else { continue; };
 
                 let base_url = normalize_context_profile_base_url(&upstream.base_url);
                 let profile = if base_url.is_empty() {
@@ -692,7 +616,9 @@ impl AppState {
                     snapshot.global_context_profiles.get(&base_url)
                 };
 
-                let Some(cfg) = upstream.context_config_for_model_with_profile(&model, profile)
+                let Some(cfg) = upstream.context_config_for_model_with_profile_and_case(
+                    &route.exposed_model, profile, self.runtime_settings().model_case_insensitive_matching,
+                )
                 else {
                     continue;
                 };

@@ -306,18 +306,19 @@ export const adminApi = {
   login: (data: LoginRequest) => adminHttp.post<LoginResponse>('/admin/login', data),
 
   // Dashboard
-  getDashboard: (range?: string): Promise<AxiosResponse<DashboardViewResponse>> =>
+  getDashboard: (range?: string, signal?: AbortSignal): Promise<AxiosResponse<DashboardViewResponse>> =>
     adminHttp
       .get<DashboardSummaryResponse>('/admin/dashboard', {
-        params: range ? { range } : undefined
+        params: range ? { range } : undefined,
+        ...(signal ? { signal } : {})
       })
       .then(response => ({
         ...response,
         data: splitDashboardResponse(response.data)
       })),
 
-  getModelProbe: () =>
-    adminHttp.get<ModelProbeResponse>('/admin/model-probe', { timeout: 60000 }),
+  getModelProbe: (signal?: AbortSignal) =>
+    adminHttp.get<ModelProbeResponse>('/admin/model-probe', { timeout: 60000, ...(signal ? { signal } : {}) }),
 
   // Upstreams
   getUpstreams: () => adminHttp.get<UpstreamConfig[]>('/admin/upstreams'),
@@ -399,7 +400,7 @@ export const adminApi = {
     adminHttp.patch<{ id: string }>(`/admin/portal/users/${id}`, data),
   getPortalUserBindings: (id: string) =>
     adminHttp.get<
-      { items: Array<{ downstream_id: string; is_default: boolean; model_group_id?: string }> }
+      { items: Array<{ downstream_id: string; is_default: boolean; model_group_id?: string; model_access?: { mode: string; group_id?: string | null }; subject_kind?: string; owner_user_id?: string | null; access_revision?: number; plaintext_key?: string }> }
     >(`/admin/portal/users/${id}/bindings`),
   /** 修改绑定级模型分组（绑定分组可保存；失败透出后端原因） */
   updatePortalUserBinding: (
@@ -430,6 +431,47 @@ export const adminApi = {
       `/admin/portal/users/${id}/model-groups`,
       { model_group_ids }
     ),
+
+  // 迁移修复（设计 4.2 / P09/P10）：摘要/预览与应用
+  getAccessMigration: () =>
+    adminHttp.get<{
+      summary: {
+        total: number
+        pending: number
+        resolved: number
+        by_classification: Record<string, number>
+      }
+      pending: Array<{
+        downstream_id: string
+        classification: string
+        owner_user_id: string | null
+        existing_user_groups: string[]
+        candidate_group_ids: string[]
+        group_models: Record<string, string[]>
+        revision: number
+        fingerprint: string
+      }>
+    }>('/admin/portal/users/access-migration'),
+  applyAccessMigration: (items: Array<Record<string, unknown>>) =>
+    adminHttp.post<{
+      updated: string[]
+      failed: Array<{ id: string; error: string; code: string }>
+    }>('/admin/portal/users/access-migration', { items }),
+
+  // 跨用户批量模型组授权（设计 6）
+  batchUserModelGroups: (
+    userIds: string[],
+    op: 'add' | 'remove' | 'replace',
+    modelGroupIds: string[]
+  ) =>
+    adminHttp.post<{
+      updated: string[]
+      failed: Array<{ id: string; error: string; code: string }>
+    }>('/admin/portal/users/batch-model-groups', {
+      user_ids: userIds,
+      op,
+      model_group_ids: modelGroupIds
+    }),
   batchSetDownstreamMode: (data: {
     ids: string[]
     billing_mode?: 'request' | 'token'
@@ -477,9 +519,9 @@ export const adminApi = {
     adminHttp.post<TroubleshootingRunResponse>('/admin/troubleshooting/run', data),
   runCompatibilityMatrix: (data: CompatibilityMatrixRunRequest) =>
     adminHttp.post<CompatibilityMatrixRunResponse>('/admin/troubleshooting/matrix/run', data),
-  getActiveTroubleshootingRequests: () =>
-    adminHttp.get<ActiveGatewayRequestsResponse>('/admin/troubleshooting/active-requests'),
-  getRetryAmplification: (windowSeconds?: number) =>
+  getActiveTroubleshootingRequests: (signal?: AbortSignal) =>
+    adminHttp.get<ActiveGatewayRequestsResponse>('/admin/troubleshooting/active-requests', signal ? { signal } : undefined),
+  getRetryAmplification: (windowSeconds?: number, signal?: AbortSignal) =>
     adminHttp.get<RetryAmplificationResponse>('/admin/retry-amplification', {
       params: windowSeconds ? { window_seconds: windowSeconds } : undefined,
     }),

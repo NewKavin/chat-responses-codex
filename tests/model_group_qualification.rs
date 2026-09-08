@@ -185,6 +185,131 @@ async fn qualification_rejects_unbound_downstream() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }
 
+/// P12：资格审定目标组被其它策略/用户授权引用 → 拒绝且不修改。
+/// 目标组来自新策略表（downstream_access_policies），用户授权引用
+/// （portal_user_model_groups）也必须为空才能原地审定。
+#[tokio::test]
+async fn qualification_rejects_group_referenced_by_user_grant() {
+    let _guard = common::oidc::lock().await;
+    let url = database_url();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+    let state = load_state(&url).await;
+    let store = state.portal_store().expect("portal store must exist");
+    let client = store.get_client().await.expect("get client");
+    client
+        .execute(
+            "INSERT INTO model_groups (id, name, description, allowed_models) VALUES ($1, $2, $3, $4::jsonb)",
+            &[
+                &"qual-user-group",
+                &"User Group",
+                &"granted to a user",
+                &serde_json::json!(["old"]),
+            ],
+        )
+        .await
+        .unwrap();
+    let user = store
+        .create_user_with_identity("qual-user@example.test", None, None, "test", "qual-user")
+        .await
+        .unwrap();
+    store
+        .grant_user_model_group(&user.id, "qual-user-group", Some("admin"))
+        .await
+        .unwrap();
+
+    let key = generate_downstream_key("gw");
+    let mut ds = DownstreamConfig::default();
+    ds.id = "test".to_string();
+    ds.name = "Test".to_string();
+    ds.hash = key.hash.clone();
+    ds.plaintext_key = Some(key.plaintext.clone());
+    ds.model_allowlist = vec!["old".to_string()];
+    ds.model_group_id = Some("qual-user-group".to_string());
+    state.insert_downstream(ds).await.expect("insert downstream");
+    insert_qualified_upstream(&state).await;
+
+    let err = state
+        .apply_model_qualification(
+            qualification_decisions(BTreeSet::from(["adapted".to_string()])),
+            "test",
+        )
+        .await
+        .expect_err("user-referenced group must be rejected");
+    assert!(
+        err.to_string().contains("user grants"),
+        "error should mention user grants, got {err}"
+    );
+
+    let group_models: String = client
+        .query_one(
+            "SELECT allowed_models::text FROM model_groups WHERE id = 'qual-user-group'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(group_models, "[\"old\"]", "group must not be modified");
+}
+
+/// P12：策略模式不是明确定位组（deny/inherit/缺策略）不能审定，
+/// 不能按旧 config.model_group_id 猜测目标组。
+#[tokio::test]
+async fn qualification_rejects_when_policy_is_not_group_mode() {
+    let _guard = common::oidc::lock().await;
+    let url = database_url();
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+    common::oidc::reset_portal_tables(&url).await;
+    let state = load_state(&url).await;
+    let store = state.portal_store().unwrap();
+    store
+        .create_model_group(&chat_responses_codex::state::ModelGroup {
+            id: "extra".into(),
+            name: "Extra".into(),
+            description: None,
+            allowed_models: vec!["old".into()],
+            created_at: 0,
+            updated_at: 0,
+        })
+        .await
+        .unwrap();
+    let key = generate_downstream_key("gw");
+    let mut ds = DownstreamConfig::default();
+    ds.id = "test".to_string();
+    ds.name = "Test".to_string();
+    ds.hash = key.hash.clone();
+    ds.plaintext_key = Some(key.plaintext.clone());
+    ds.model_allowlist = vec!["old".to_string()];
+    ds.model_group_id = Some("extra".to_string()); // config 旧字段指向组
+    state.insert_downstream(ds).await.expect("insert downstream");
+    // 策略被显式改为 deny：config 旧字段仍在，但策略事实源否决。
+    store
+        .mutate_access(&chat_responses_codex::state::AccessMutation::Update {
+            downstream_id: "test".into(),
+            selection: chat_responses_codex::state::ModelAccessSelection {
+                mode: chat_responses_codex::state::AccessMode::Deny,
+                group_id: None,
+            },
+            actor_user_id: None,
+        })
+        .await
+        .expect("set deny policy");
+    insert_qualified_upstream(&state).await;
+
+    let err = state
+        .apply_model_qualification(
+            qualification_decisions(BTreeSet::from(["adapted".to_string()])),
+            "test",
+        )
+        .await
+        .expect_err("policy not in group mode must be rejected");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 /// 防外溢规则 2：内置组（all）→ InvalidInput，提示先改绑。
 #[tokio::test]
 async fn qualification_rejects_builtin_group() {

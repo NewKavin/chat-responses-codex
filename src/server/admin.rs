@@ -707,6 +707,8 @@ pub(super) async fn admin_list_models(
 ) -> impl IntoResponse {
     let models_list = if params.get("scope").map(String::as_str) == Some("visible") {
         state.downstream_visible_models().await
+    } else if params.get("scope").map(String::as_str) == Some("exposed") {
+        state.model_catalog().await.models().iter().map(|model| model.name.clone()).collect()
     } else {
         let snapshot = state.snapshot().await;
         let case_insensitive = state.runtime_settings().model_case_insensitive_matching;
@@ -1220,6 +1222,7 @@ pub(super) async fn build_model_probe_response(
 ) -> ModelProbeResponse {
     let runtime_settings = state.runtime_settings();
     let snapshot = state.snapshot().await;
+    let catalog = state.model_catalog().await;
     let timeout_seconds = runtime_settings.admin_upstream_timeout_seconds.max(1);
     let refreshed_at = unix_seconds();
 
@@ -1230,6 +1233,12 @@ pub(super) async fn build_model_probe_response(
     let mut offline_channels = 0usize;
 
     for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
+        if let Some(allowed) = allowlist {
+            if !catalog.models().iter().any(|model| catalog.allows_legacy(allowed, &model.name)
+                && model.routes.iter().any(|route| route.upstream_id == upstream.id)) {
+                continue;
+            }
+        }
         let keys = upstream.available_keys();
         let client = state.client_for_url(&model_discovery_url(&upstream.base_url));
         let discovery_results = fetch_models_from_upstream_keys_concurrently(
@@ -1260,7 +1269,13 @@ pub(super) async fn build_model_probe_response(
             );
             let channel_id = route_id.clone();
             if let Some(allowlist) = allowlist {
-                models.retain(|model| crate::state::model_list_allows(allowlist, model));
+                models = catalog.models().iter().filter(|model| {
+                    catalog.allows_legacy(allowlist, &model.name) && model.routes.iter().any(|route| {
+                        route.upstream_id == upstream.id && models.iter().any(|raw| {
+                            crate::state::models_equivalent_with(raw,&route.wire_model,runtime_settings.model_case_insensitive_matching)
+                        }) && upstream.keys_for_model_with(&route.wire_model,runtime_settings.model_case_insensitive_matching).iter().any(|key| key==api_key)
+                    })
+                }).map(|model| model.name.clone()).collect();
             }
 
             let status = if error.is_some() {
@@ -2106,13 +2121,20 @@ pub(super) async fn admin_list_downstreams(
         });
     }
 
+    let policies = if let Some(store) = state.portal_store() {
+        let ids = downstreams.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
+        match store.access_policies(&ids).await {
+            Ok(policies) => policies,
+            Err(error) => return super::portal::portal_access_error(error),
+        }
+    } else { HashMap::new() };
     let mut items = Vec::with_capacity(downstreams.len());
     for downstream in downstreams {
         let usage = state.downstream_usage_summary(&downstream.id).await.ok();
-        items.push(DownstreamListItem {
-            config: downstream,
-            usage,
-        });
+        let id = downstream.id.clone();
+        let mut value = json!(DownstreamListItem { config: downstream, usage });
+        if let Some(policy) = policies.get(&id) { add_access_metadata(&mut value,policy); }
+        items.push(value);
     }
 
     Json(items).into_response()
@@ -2139,18 +2161,8 @@ pub(super) async fn admin_downstream_runtime(State(state): State<AppState>) -> i
         .first()
         .map(|(_, snapshot)| snapshot.updated_at)
         .unwrap_or_else(unix_seconds);
-    // 门户自建密钥账号不进入管理员运行时视图
-    let portal_key_ids: std::collections::HashSet<String> = state
-        .snapshot()
-        .await
-        .downstreams
-        .iter()
-        .filter(|d| d.is_portal_key)
-        .map(|d| d.id.clone())
-        .collect();
     let items = snapshots
         .into_iter()
-        .filter(|(downstream_id, _)| !portal_key_ids.contains(downstream_id))
         .map(|(downstream_id, concurrency)| DownstreamRuntimeItem {
             downstream_id,
             concurrency,
@@ -2248,7 +2260,7 @@ pub(super) async fn admin_get_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(downstream) = snapshot.downstreams.iter().find(|d| d.id == id) {
-        Json(downstream.clone()).into_response()
+        admin_downstream_response(&state,downstream).await
     } else {
         (
             StatusCode::NOT_FOUND,
@@ -2270,211 +2282,58 @@ pub(super) async fn admin_get_downstream(
 /// the single PUT never touches them. Returns an error message when a field
 /// value is rejected; the caller decides whether that aborts the whole request
 /// (single PUT -> 400) or a single batch item (batch -> per-id failure).
-fn apply_downstream_updates(
-    downstream: &mut DownstreamConfig,
-    updates: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
-        downstream.name = name.to_string();
-    }
-    if let Some(per_minute_limit) = updates.get("per_minute_limit").and_then(|v| v.as_u64()) {
-        downstream.per_minute_limit = per_minute_limit as u32;
-    }
-    if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
-        downstream.max_concurrency = max_concurrency as u32;
-    }
-    if let Some(rate_limit_enabled) = updates.get("rate_limit_enabled").and_then(|v| v.as_bool()) {
-        downstream.rate_limit_enabled = rate_limit_enabled;
-    }
-    if let Some(billing_mode) = updates.get("billing_mode").and_then(|v| v.as_str()) {
-        if billing_mode != "request" && billing_mode != "token" {
-            return Err("billing_mode must be \"request\" or \"token\"".to_string());
-        }
-        downstream.billing_mode = billing_mode.to_string();
-    }
-    if let Some(request_quota_window_hours) = updates
-        .get("request_quota_window_hours")
-        .and_then(|v| v.as_u64())
-    {
-        downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
-    }
-    if updates
-        .get("request_quota_window_hours")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.request_quota_window_hours = None;
-    }
-    if let Some(request_quota_requests) = updates
-        .get("request_quota_requests")
-        .and_then(|v| v.as_u64())
-    {
-        downstream.request_quota_requests = Some(request_quota_requests as u32);
-    }
-    if updates
-        .get("request_quota_requests")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.request_quota_requests = None;
-    }
-    // T10：停写 model_allowlist（分组是唯一事实源）。老客户端传该字段时
-    // 忽略并告警，契约保持 200 不报错；双写/清理留给下个版本。
-    if updates.get("model_allowlist").is_some() {
-        tracing::warn!(
-            downstream_id = %downstream.id,
-            "ignoring model_allowlist in update (model groups are the single source of truth)"
-        );
-    }
-    if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
-        downstream.ip_allowlist = ip_allowlist
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-    }
-    if let Some(daily_token_limit) = updates.get("daily_token_limit").and_then(|v| v.as_u64()) {
-        downstream.daily_token_limit = Some(daily_token_limit);
-    }
-    if updates
-        .get("daily_token_limit")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.daily_token_limit = None;
-    }
-    if let Some(monthly_token_limit) = updates.get("monthly_token_limit").and_then(|v| v.as_u64()) {
-        downstream.monthly_token_limit = Some(monthly_token_limit);
-    }
-    if updates
-        .get("monthly_token_limit")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.monthly_token_limit = None;
-    }
-    if let Some(price) = updates
-        .get("input_token_price_per_million_cents")
-        .and_then(|v| v.as_u64())
-    {
-        downstream.input_token_price_per_million_cents = Some(price);
-    }
-    if updates
-        .get("input_token_price_per_million_cents")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.input_token_price_per_million_cents = None;
-    }
-    if let Some(price) = updates
-        .get("output_token_price_per_million_cents")
-        .and_then(|v| v.as_u64())
-    {
-        downstream.output_token_price_per_million_cents = Some(price);
-    }
-    if updates
-        .get("output_token_price_per_million_cents")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.output_token_price_per_million_cents = None;
-    }
-    if let Some(cost_limit) = updates
-        .get("daily_cost_limit_cents")
-        .and_then(|v| v.as_u64())
-    {
-        downstream.daily_cost_limit_cents = Some(cost_limit);
-    }
-    if updates
-        .get("daily_cost_limit_cents")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.daily_cost_limit_cents = None;
-    }
-    if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
-        downstream.active = active;
-    }
-    if let Some(groups_value) = updates.get("model_concurrency_groups") {
-        if groups_value.is_null() {
-            downstream.model_concurrency_groups = Vec::new();
-        } else {
-            let groups = serde_json::from_value::<Vec<crate::state::ModelConcurrencyGroup>>(
-                groups_value.clone(),
-            )
-            .map_err(|_| {
-                "model_concurrency_groups must be an array of objects {\"name\", \"match\", \"max_concurrency\"}"
-                    .to_string()
-            })?;
-            let mut candidate = downstream.clone();
-            candidate.model_concurrency_groups = groups;
-            candidate
-                .validate_model_concurrency_groups()
-                .map_err(|message| message.to_string())?;
-            let cap_sum: u64 = candidate
-                .model_concurrency_groups
-                .iter()
-                .map(|group| u64::from(group.max_concurrency))
-                .sum();
-            if cap_sum > u64::from(downstream.max_concurrency.max(1)) {
-                tracing::warn!(
-                    downstream_id = %downstream.id,
-                    cap_sum,
-                    global_max_concurrency = downstream.max_concurrency,
-                    "model_concurrency_groups caps sum above the global max_concurrency (legal overbooking; the global cap stays the backstop)"
-                );
-            }
-            downstream.model_concurrency_groups = candidate.model_concurrency_groups;
-        }
-    }
-    Ok(())
-}
-
 pub(super) async fn admin_update_downstream(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(updates): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let snapshot = state.snapshot().await;
+    let Some(updates) = updates.as_object() else {
+        return (StatusCode::BAD_REQUEST,Json(json!({"error":{"message":"updates must be an object"}}))).into_response();
+    };
+    match state.patch_downstream_account(&id,updates).await {
+        Ok(downstream) => admin_downstream_response(&state,&downstream).await,
+        Err(error) => downstream_write_error(error),
+    }
+}
 
-    if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
-        // 门户自建密钥账号同样允许管理端配置（限额/配额/IP/成本/启停/分组）；
-        // 身份字段（id/hash/plaintext_key*）仍由 apply_downstream_updates 保护。
-        // Apply updates (preserve hash).
-        if let Some(updates_object) = updates.as_object() {
-            if let Err(message) = apply_downstream_updates(&mut downstream, updates_object) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": { "message": message } })),
-                )
-                    .into_response();
-            }
-        }
-
-        match state.update_downstream(&id, downstream.clone()).await {
-            Ok(true) => Json(downstream).into_response(),
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": {
-                        "message": format!("Downstream '{}' not found", id)
-                    }
-                })),
-            )
-                .into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": format!("Failed to update downstream: {}", e)
-                    }
-                })),
-            )
-                .into_response(),
+fn downstream_write_error(error: std::io::Error) -> Response {
+    let status = if let Some(error) = error.get_ref().and_then(|e| e.downcast_ref::<crate::state::PortalStoreError>()) {
+        match error {
+            crate::state::PortalStoreError::Forbidden(_) => StatusCode::FORBIDDEN,
+            crate::state::PortalStoreError::Conflict(_) => StatusCode::CONFLICT,
+            crate::state::PortalStoreError::NotFound => StatusCode::BAD_REQUEST,
+            crate::state::PortalStoreError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": {
-                    "message": format!("Downstream '{}' not found", id)
-                }
-            })),
-        )
-            .into_response()
+        match error.kind() {
+            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported => StatusCode::BAD_REQUEST,
+            std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    };
+    (status,Json(json!({"error":{"message":error.to_string()}}))).into_response()
+}
+
+fn add_access_metadata(value: &mut Value, policy: &crate::state::AccessPolicy) {
+    value["model_access"] = json!(policy.selection());
+    value["model_group_id"] = if policy.mode == crate::state::AccessMode::Inherit { Value::Null }
+        else { json!(policy.model_group_id) };
+    value["owner_user_id"] = json!(policy.owner_user_id);
+    value["subject_kind"] = json!(policy.subject_kind);
+    value["access_revision"] = json!(policy.revision);
+}
+
+async fn admin_downstream_response(state: &AppState, downstream: &DownstreamConfig) -> Response {
+    let mut value = json!(downstream);
+    if let Some(store) = state.portal_store() {
+        match store.access_policies(std::slice::from_ref(&downstream.id)).await {
+            Ok(policies) => {
+                if let Some(policy) = policies.get(&downstream.id) { add_access_metadata(&mut value,policy); }
+            }
+            Err(error) => return super::portal::portal_access_error(error),
+        }
     }
+    Json(value).into_response()
 }
 
 /// `null` -> `Some(None)` (clear); missing key -> `None` (leave unchanged);
@@ -2735,6 +2594,9 @@ const BATCH_UPDATE_DOWNSTREAM_ALLOWED_FIELDS: &[&str] = &[
     "output_token_price_per_million_cents",
     "daily_cost_limit_cents",
     "model_concurrency_groups",
+    "expires_at",
+    "model_access",
+    "model_group_id",
 ];
 
 pub(super) async fn admin_batch_update_downstreams(
@@ -2791,23 +2653,16 @@ pub(super) async fn admin_batch_update_downstreams(
             .into_response();
     }
 
-    let snapshot = state.snapshot().await;
     let mut updated: Vec<String> = Vec::new();
     let mut failed: Vec<serde_json::Value> = Vec::new();
+    if update_object.is_empty() {
+        return (StatusCode::BAD_REQUEST,Json(json!({"error":{"message":"updates must not be empty"}}))).into_response();
+    }
+    let mut seen = HashSet::new();
     for id in &payload.ids {
-        let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == *id).cloned()
-        else {
-            failed.push(json!({ "id": id, "error": "not found" }));
-            continue;
-        };
-        // 门户自建密钥账号同样允许管理端批量配置（与单条 PUT 一致）
-        if let Err(message) = apply_downstream_updates(&mut downstream, update_object) {
-            failed.push(json!({ "id": id, "error": message }));
-            continue;
-        }
-        match state.update_downstream(id, downstream).await {
-            Ok(true) => updated.push(id.clone()),
-            Ok(false) => failed.push(json!({ "id": id, "error": "not found" })),
+        if !seen.insert(id) { continue; }
+        match state.patch_downstream_account(id, update_object).await {
+            Ok(_) => updated.push(id.clone()),
             Err(error) => failed.push(json!({ "id": id, "error": error.to_string() })),
         }
     }
@@ -3619,8 +3474,6 @@ pub(super) async fn admin_portal_user_bindings_post(
 #[derive(serde::Deserialize)]
 pub(super) struct UpdateBindingBody {
     #[serde(default)]
-    pub(super) downstream_id: Option<String>,
-    #[serde(default)]
     pub(super) is_default: Option<bool>,
     #[serde(default)]
     pub(super) model_group_id: Option<String>,
@@ -3830,41 +3683,22 @@ pub(super) async fn admin_portal_user_model_groups_put(
         }
     }
 
-    let current = match store.list_user_accessible_model_groups(&user_id).await {
-        Ok(groups) => groups,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": error.to_string()}})),
-            )
-                .into_response();
-        }
-    };
-    let current_ids: HashSet<String> = current.iter().map(|g| g.id.clone()).collect();
-    let target_set: HashSet<String> = target.iter().cloned().collect();
-
-    // 需要新增的授权。
-    for group_id in target_set.difference(&current_ids) {
-        if let Err(error) = store
-            .grant_user_model_group(&user_id, group_id, Some("admin"))
-            .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": error.to_string()}})),
-            )
-                .into_response();
-        }
-    }
-    // 需要撤销的授权（basic 由 store 内部保护，不会被撤销）。
-    for group_id in current_ids.difference(&target_set) {
-        if let Err(error) = store.revoke_user_model_group(&user_id, group_id).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": error.to_string()}})),
-            )
-                .into_response();
-        }
+    // 原子替换：basic + 显式目标集合整体提交，任一步失败整体回滚。
+    if let Err(error) = store.replace_user_model_groups(&user_id, &target).await {
+        let status = match error {
+            crate::state::PortalStoreError::NotFound => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return (
+            status,
+            Json(json!({
+                "error": {
+                    "code": "group_not_found",
+                    "message": error.to_string()
+                }
+            })),
+        )
+            .into_response();
     }
 
     match store.list_user_accessible_model_groups(&user_id).await {
@@ -3879,6 +3713,201 @@ pub(super) async fn admin_portal_user_model_groups_put(
         )
             .into_response(),
     }
+}
+
+/// GET /api/admin/portal/users/access-migration
+/// 迁移摘要 + 待处理项（含修复预览：现授权、待补组、组内容与指纹）。
+pub(super) async fn admin_portal_access_migration(
+    State(state): State<crate::state::AppState>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    let records = match store.access_migration_records().await {
+        Ok(records) => records,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response()
+        }
+    };
+    let pending_ids: Vec<String> = records
+        .iter()
+        .filter(|record| record.resolved_at.is_none())
+        .map(|record| record.downstream_id.clone())
+        .collect();
+    let mut by_classification = std::collections::BTreeMap::<String, usize>::new();
+    for record in &records {
+        *by_classification.entry(record.classification.clone()).or_default() += 1;
+    }
+    let preview = match store.access_migration_preview(&pending_ids).await {
+        Ok(preview) => preview,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response()
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "summary": {
+                "total": records.len(),
+                "pending": pending_ids.len(),
+                "resolved": records.len() - pending_ids.len(),
+                "by_classification": by_classification,
+            },
+            "pending": preview,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AccessMigrationApplyBody {
+    items: Vec<crate::state::AccessMigrationApplyItem>,
+}
+
+/// POST /api/admin/portal/users/access-migration
+/// 提交选定的迁移修复。每把密钥独立事务；预览失效/归属冲突按失败项返回
+/// （code=conflict），不整体回滚；成功项立即生效。
+pub(super) async fn admin_portal_access_migration_apply(
+    State(state): State<crate::state::AppState>,
+    axum::Json(body): axum::Json<AccessMigrationApplyBody>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    if body.items.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "items must not be empty"}})),
+        )
+            .into_response();
+    }
+    match store.apply_access_migration(&body.items).await {
+        Ok(results) => {
+            let failed: Vec<_> = results
+                .iter()
+                .filter(|result| !result.ok)
+                .map(|result| {
+                    json!({"id": result.downstream_id, "error": result.error, "code": result.code})
+                })
+                .collect();
+            let updated: Vec<_> = results
+                .iter()
+                .filter(|result| result.ok)
+                .map(|result| result.downstream_id.clone())
+                .collect();
+            (StatusCode::OK, Json(json!({"updated": updated, "failed": failed}))).into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": error.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BatchUserModelGroupsBody {
+    user_ids: Vec<String>,
+    /// add = 只增不撤；remove = 只撤不增（basic 受保护）；replace = 整体替换。
+    #[serde(default = "default_batch_group_op")]
+    op: String,
+    model_group_ids: Vec<String>,
+}
+
+fn default_batch_group_op() -> String {
+    "replace".to_string()
+}
+
+/// POST /api/admin/portal/users/batch-model-groups
+/// 跨用户批量模型组授权：逐用户独立事务，部分失败返回真实结果。
+pub(super) async fn admin_portal_users_batch_model_groups(
+    State(state): State<crate::state::AppState>,
+    axum::Json(body): axum::Json<BatchUserModelGroupsBody>,
+) -> Response {
+    let Some(store) = state.portal_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response();
+    };
+    if body.user_ids.is_empty() || body.model_group_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "user_ids and model_group_ids must not be empty"}})),
+        )
+            .into_response();
+    }
+    if !matches!(body.op.as_str(), "add" | "remove" | "replace") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "op must be add, remove or replace"}})),
+        )
+            .into_response();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut updated: Vec<String> = Vec::new();
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+    for user_id in &body.user_ids {
+        if !seen.insert(user_id.clone()) {
+            continue;
+        }
+        let outcome = async {
+            let groups: Vec<String> = body.model_group_ids.to_vec();
+            match body.op.as_str() {
+                "add" => {
+                    for group_id in &groups {
+                        store
+                            .grant_user_model_group(user_id, group_id, Some("admin"))
+                            .await?;
+                    }
+                }
+                "remove" => {
+                    for group_id in &groups {
+                        store.revoke_user_model_group(user_id, group_id).await?;
+                    }
+                }
+                _ => {
+                    // replace = 目标集合整体替换（basic 恒保留），撤销未列出的授权。
+                    store.replace_user_model_groups(user_id, &groups).await?;
+                }
+            }
+            Ok::<(), crate::state::PortalStoreError>(())
+        }
+        .await;
+        match outcome {
+            Ok(()) => updated.push(user_id.clone()),
+            Err(error) => failed.push(json!({
+                "id": user_id,
+                "error": error.to_string(),
+                "code": match error {
+                    crate::state::PortalStoreError::NotFound => "not_found",
+                    crate::state::PortalStoreError::Conflict(_) => "conflict",
+                    crate::state::PortalStoreError::Forbidden(_) => "forbidden",
+                    crate::state::PortalStoreError::Db(_) => "db_error",
+                },
+            })),
+        }
+    }
+    (StatusCode::OK, Json(json!({"updated": updated, "failed": failed}))).into_response()
 }
 
 // Model Groups CRUD handlers

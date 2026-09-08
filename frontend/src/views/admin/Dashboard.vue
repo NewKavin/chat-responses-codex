@@ -28,7 +28,7 @@
           </el-radio-group>
           <el-button
             :icon="RefreshCw"
-            :loading="loading"
+            :loading="refreshActive"
             size="small"
             circle
             aria-label="刷新控制台数据"
@@ -39,6 +39,17 @@
         <div class="refresh-label">最近刷新 {{ refreshedLabel }}</div>
       </div>
     </section>
+
+    <el-alert
+      v-if="refreshState === 'error'"
+      type="error"
+      :closable="false"
+      class="dashboard-refresh-error"
+      show-icon
+    >
+      <template #title>控制台数据刷新失败（已保留上次成功数据 {{ refreshedLabel }}）</template>
+      {{ refreshError }}
+    </el-alert>
 
     <div class="kpi-wrap">
       <el-row v-if="showKpiSkeleton" :gutter="20" class="kpi-grid" aria-hidden="true">
@@ -54,7 +65,7 @@
           </div>
         </el-col>
       </el-row>
-      <el-row v-else v-loading="loading" :gutter="20" class="kpi-grid">
+      <el-row v-else v-loading="refreshActive" :gutter="20" class="kpi-grid">
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--blue">
             <div class="metric-card__top">
@@ -208,6 +219,7 @@
             v-else
             :data="activeRequests"
             v-loading="activeRequestsLoading"
+            row-key="request_id"
             stripe
             size="small"
             style="width: 100%"
@@ -396,7 +408,7 @@
             </div>
           </div>
 
-          <div ref="trendChartRef" v-loading="loading" class="chart chart--trend"></div>
+          <div ref="trendChartRef" v-loading="refreshActive" class="chart chart--trend"></div>
         </el-card>
       </el-col>
     </el-row>
@@ -426,7 +438,7 @@
             </div>
           </div>
 
-          <div ref="modelUsageChartRef" v-loading="loading" class="chart chart--medium"></div>
+          <div ref="modelUsageChartRef" v-loading="refreshActive" class="chart chart--medium"></div>
         </el-card>
       </el-col>
 
@@ -454,7 +466,7 @@
             </div>
           </div>
 
-          <div ref="downstreamUsageChartRef" v-loading="loading" class="chart chart--medium"></div>
+          <div ref="downstreamUsageChartRef" v-loading="refreshActive" class="chart chart--medium"></div>
         </el-card>
       </el-col>
 
@@ -490,7 +502,7 @@
             </div>
           </div>
 
-          <div ref="failureChartRef" v-loading="loading" class="chart chart--medium"></div>
+          <div ref="failureChartRef" v-loading="refreshActive" class="chart chart--medium"></div>
         </el-card>
       </el-col>
     </el-row>
@@ -528,7 +540,7 @@
             </div>
           </div>
 
-          <div ref="userAgentChartRef" v-loading="loading" class="chart chart--wide"></div>
+          <div ref="userAgentChartRef" v-loading="refreshActive" class="chart chart--wide"></div>
         </el-card>
       </el-col>
     </el-row>
@@ -566,7 +578,12 @@ type ChartRange = '1d' | '7d' | '30d'
 
 const router = useRouter()
 const { resolvedTheme } = useTheme()
-const loading = ref(false)
+// F：刷新状态机 —— ready / inFlight / manualLoading / error。
+// 防重入只看 inFlight；失败时保留上一次成功数据并显示局部不可用。
+const refreshState = ref<'ready' | 'inFlight' | 'manualLoading' | 'error'>('ready')
+const refreshError = ref('')
+/** 每块独立序号：范围切换或手动刷新使旧响应过期，过期响应直接丢弃。 */
+const refreshSeq = ref(0)
 const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
 const activeRequests = ref<ActiveGatewayRequest[]>([])
@@ -574,7 +591,14 @@ const activeRequestsLoading = ref(false)
 const chartRange = ref<ChartRange>('7d')
 const lastRefreshedAt = ref(0)
 
-const showKpiSkeleton = computed(() => loading.value && lastRefreshedAt.value === 0)
+const showKpiSkeleton = computed(
+  () =>
+    (refreshState.value === 'inFlight' || refreshState.value === 'manualLoading') &&
+    lastRefreshedAt.value === 0
+)
+const refreshActive = computed(
+  () => refreshState.value === 'inFlight' || refreshState.value === 'manualLoading'
+)
 
 const dashboard = ref<DashboardData>({
   upstreams_count: 0,
@@ -1078,25 +1102,39 @@ const loadModelProbe = async () => {
 }
 
 const loadDashboard = async () => {
+  // 防重入：请求在途时忽略重复触发（包括定时与手动）。
+  if (refreshState.value === 'inFlight') return
+  const seq = ++refreshSeq.value
+  const manual = refreshState.value === 'manualLoading'
+  refreshState.value = manual ? 'manualLoading' : 'inFlight'
   try {
-    loading.value = true
     const response = await adminApi.getDashboard(chartRange.value)
+    if (seq !== refreshSeq.value) return
     dashboard.value = response.data.dashboard
     analytics.value = response.data.analytics
     lastRefreshedAt.value = Date.now()
+    refreshError.value = ''
+    refreshState.value = 'ready'
     await nextTick()
     renderCharts()
     void loadModelProbe()
   } catch (error) {
-    ElMessage.error((error as any)?.message || '加载数据失败')
-  } finally {
-    loading.value = false
+    if (seq !== refreshSeq.value) return
+    refreshState.value = 'error'
+    refreshError.value = (error as any)?.message || '加载数据失败'
+    // 保留上次成功数据；仅当从未成功时展示失败提示。
+    if (lastRefreshedAt.value === 0) {
+      ElMessage.error(refreshError.value)
+    }
   }
 }
 
 const handleRangeChange = (value: ChartRange) => {
+  // 参数变更：使在途旧响应过期并重新加载（seq 不匹配的响应直接丢弃）。
+  refreshSeq.value += 1
   chartRange.value = value
-  loadDashboard()
+  if (refreshState.value === 'inFlight') refreshState.value = 'ready'
+  void loadDashboard()
 }
 
 const openModelProbe = () => {
@@ -1216,8 +1254,6 @@ const loadRetryAmplification = async () => {
   }
 }
 
-let activeRequestsTimer: ReturnType<typeof setInterval> | null = null
-
 const handleResize = () => {
   trendChart?.resize()
   modelUsageChart?.resize()
@@ -1239,12 +1275,91 @@ const disposeCharts = () => {
   userAgentChart = null
 }
 
+// F：主题切换保留图表交互状态（缩放/图例选择），轮询刷新不得重建实例。
+const saveChartsState = () =>
+  [
+    trendChart, modelUsageChart, downstreamUsageChart, failureChart, userAgentChart
+  ].map(chart => {
+    if (!chart) return null
+    const option = chart.getOption() as {
+      dataZoom?: Array<{ start?: number; end?: number }>
+      legend?: Array<{ selected?: Record<string, boolean> }>
+    }
+    const zoom = option.dataZoom?.[0]?.start !== undefined
+      ? { start: option.dataZoom[0].start, end: option.dataZoom[0].end }
+      : null
+    const legend = option.legend?.[0]?.selected ?? null
+    return { zoom, legend }
+  })
+
+const restoreChartsState = (
+  states: Array<{ zoom: { start?: number; end?: number } | null; legend: Record<string, boolean> | null } | null>
+) => {
+  const charts = [
+    trendChart, modelUsageChart, downstreamUsageChart, failureChart, userAgentChart
+  ]
+  charts.forEach((chart, index) => {
+    const state = states[index]
+    if (!chart || !state) return
+    const patch: Record<string, unknown> = {}
+    if (state.zoom) patch.dataZoom = [{ ...state.zoom }]
+    if (state.legend) patch.legend = { selected: state.legend }
+    chart.setOption(patch)
+  })
+}
+
 watch(resolvedTheme, async () => {
+  const saved = saveChartsState()
   disposeCharts()
   await nextTick()
   await initCharts()
+  restoreChartsState(saved)
   renderCharts()
 })
+
+// F：独立轮询链 —— 请求完成后才安排下一次，不堆积；隐藏时暂停、恢复补刷。
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let retryAmplificationInFlight = false
+
+const scheduleNextPoll = () => {
+  if (pollTimer !== null) clearTimeout(pollTimer)
+  pollTimer = setTimeout(() => {
+    void pollTick()
+  }, 5_000)
+}
+
+const pollTick = async () => {
+  if (document.hidden) {
+    scheduleNextPoll()
+    return
+  }
+  await loadActiveRequests()
+  if (!retryAmplificationInFlight) {
+    retryAmplificationInFlight = true
+    try {
+      await loadRetryAmplification()
+    } finally {
+      retryAmplificationInFlight = false
+    }
+  }
+  scheduleNextPoll()
+}
+
+const onVisibilityChange = () => {
+  if (document.hidden) return
+  // 恢复可见：立即补刷并重排轮询。
+  void loadActiveRequests()
+  if (!retryAmplificationInFlight) {
+    retryAmplificationInFlight = true
+    void loadRetryAmplification().finally(() => {
+      retryAmplificationInFlight = false
+    })
+  }
+  scheduleNextPoll()
+  if (lastRefreshedAt.value && Date.now() - lastRefreshedAt.value > 60_000) {
+    void loadDashboard()
+  }
+}
 
 onMounted(async () => {
   await nextTick()
@@ -1252,16 +1367,15 @@ onMounted(async () => {
   await loadDashboard()
   await loadActiveRequests()
   await loadRetryAmplification()
-  activeRequestsTimer = setInterval(() => {
-    void loadActiveRequests()
-    void loadRetryAmplification()
-  }, 5_000)
+  scheduleNextPoll()
   window.addEventListener('resize', handleResize)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
-  if (activeRequestsTimer !== null) clearInterval(activeRequestsTimer)
+  if (pollTimer !== null) clearTimeout(pollTimer)
   window.removeEventListener('resize', handleResize)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   disposeCharts()
 })
 </script>

@@ -599,19 +599,18 @@ async fn codex_catalog_keeps_configured_models_without_tool_capability_witness()
 async fn codex_catalog_uses_the_complete_nonempty_downstream_allowlist() {
     // B1 canonical matching collapses the case-only duplicates the upstream
     // declares (`MiniMax/MiniMax-M2.7` + `minimax/minimax-m2.7`) into the one
-    // canonical display slug, and the allowlist-only entry is displayed in
-    // canonical form too (no upstream spelling to preserve).
+    // canonical display slug.  The allowlist-only entry (`ZhipuAI/GLM-5.1`,
+    // authorised but not routable on any upstream) is deliberately NOT
+    // published as a fake model (M03): it stays in the group configuration
+    // and is marked unroutable by the frontend, never advertised as callable.
     let live_model = "MiniMax/MiniMax-M2.7";
     let alternate_live_casing = "minimax/minimax-m2.7";
     let canonical_live = "minimax/minimax-m2.7";
-    let allowlist_only_model = "ZhipuAI/GLM-5.1";
-    let canonical_allowlist_only = "zhipuai/glm-5.1";
     let upstream = catalog_upstream("partial-live-catalog", &[live_model, alternate_live_casing]);
     let (_tempdir, state, secret) = catalog_state(
         vec![upstream],
         vec![
             "minimax/minimax-m2.7".into(),
-            allowlist_only_model.into(),
             "zhipuai/glm-5.1".into(),
         ],
     );
@@ -625,18 +624,11 @@ async fn codex_catalog_uses_the_complete_nonempty_downstream_allowlist() {
 
     assert_eq!(
         slugs,
-        std::collections::BTreeSet::from([canonical_live, canonical_allowlist_only,])
+        std::collections::BTreeSet::from([canonical_live])
     );
-    let conservative = models
-        .iter()
-        .find(|model| model["slug"] == canonical_allowlist_only)
-        .expect("allowlist-only model");
     for model in models {
         assert_eq!(model["multi_agent_version"], "v1");
     }
-    assert_eq!(conservative["default_reasoning_level"], "none");
-    assert_eq!(conservative["supports_parallel_tool_calls"], false);
-    assert_eq!(conservative["input_modalities"], json!(["text"]));
 }
 
 #[tokio::test]

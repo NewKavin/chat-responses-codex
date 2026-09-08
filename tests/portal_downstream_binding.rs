@@ -6,7 +6,13 @@
 //! - label() method returns the actual label when set
 //! - PortalDownstreamBindingWithLabel struct has all required fields
 
-use chat_responses_codex::state::{PortalDownstreamBinding, PortalDownstreamBindingWithLabel};
+use chat_responses_codex::state::{
+    AccessMode, ModelAccessSelection, PortalDownstreamBinding, PortalDownstreamBindingWithLabel,
+};
+
+fn group_selection(group_id: &str) -> ModelAccessSelection {
+    ModelAccessSelection { mode: AccessMode::Group, group_id: Some(group_id.to_owned()) }
+}
 
 #[test]
 fn test_portal_downstream_binding_has_new_fields() {
@@ -15,6 +21,7 @@ fn test_portal_downstream_binding_has_new_fields() {
         is_default: true,
         label: Some("Production Key".to_string()),
         model_group_id: "advanced".to_string(),
+        model_access: group_selection("advanced"),
     };
 
     assert_eq!(binding.downstream_id, "test-key-1");
@@ -30,6 +37,7 @@ fn test_portal_downstream_binding_label_method_with_value() {
         is_default: false,
         label: Some("My Custom Label".to_string()),
         model_group_id: "basic".to_string(),
+        model_access: group_selection("basic"),
     };
 
     assert_eq!(binding.label(), "My Custom Label");
@@ -42,6 +50,7 @@ fn test_portal_downstream_binding_label_method_with_none() {
         is_default: false,
         label: None,
         model_group_id: "basic".to_string(),
+        model_access: group_selection("basic"),
     };
 
     assert_eq!(binding.label(), "Default Key");
@@ -54,6 +63,7 @@ fn test_portal_downstream_binding_default_model_group() {
         is_default: true,
         label: None,
         model_group_id: "basic".to_string(),
+        model_access: group_selection("basic"),
     };
 
     assert_eq!(binding.model_group_id, "basic");
@@ -70,6 +80,8 @@ fn test_portal_downstream_binding_with_label_struct() {
         created_at: 1725350400,
         usage_count: 42,
         plaintext_key: Some("sk-test-secret".to_string()),
+        model_access: group_selection("advanced"),
+        access_revision: 1,
     };
 
     assert_eq!(binding_with_label.downstream_id, "test-key-1");

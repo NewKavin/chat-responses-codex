@@ -350,6 +350,8 @@ export interface CostDailyQuota {
 }
 
 export interface PortalOverview {
+  downstream_id?: string
+  scope?: 'user' | 'key'
   quota_summary: {
     request_quota?: RequestQuotaUsage
     cost_daily?: CostDailyQuota
@@ -365,8 +367,31 @@ export interface PortalOverview {
   model_summary: {
     total_models: number
     active_models: number
+    user_available_models?: string[]
   }
   concurrency: DownstreamConcurrencySnapshot
+}
+
+export type ModelAccessMode = 'inherit' | 'group' | 'deny'
+
+export interface ModelAccessSelection {
+  mode: ModelAccessMode
+  group_id?: string | null
+}
+
+export interface PortalModelAccessResponse {
+  user_id: string
+  scope: 'user' | 'key'
+  downstream_id?: string | null
+  available_models: string[]
+  status: 'denied' | 'no_routes' | 'ready'
+  reason?: string | null
+  source: {
+    user_group_ids: string[]
+    mode?: string | null
+    key_group_id?: string | null
+  }
+  model_access: ModelAccessSelection | null
 }
 
 export interface PortalModelStat {

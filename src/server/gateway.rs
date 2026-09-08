@@ -18,9 +18,9 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, model_list_allows, unix_millis, unix_seconds, AccountConcurrencyKey,
+    join_upstream_url, unix_millis, unix_seconds, AccountConcurrencyKey,
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
-    CompatibilityUsageMetadata, DownstreamConcurrencyLease, DownstreamModelEntry,
+    CompatibilityUsageMetadata, DownstreamConcurrencyLease,
     GlobalContextProfile, KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit,
     RouteOutcome, RouteRecovery, RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings,
     StreamDecodeCounter, StreamDiagnostics, UpstreamConfig, UpstreamRequestLease, UsageLog,
@@ -29,7 +29,7 @@ use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream as futures_stream, FutureExt, StreamExt};
@@ -2656,6 +2656,23 @@ pub fn build_router(state: AppState) -> Router {
                     admin_auth_middleware,
                 )),
         )
+        .route(
+            "/api/admin/portal/users/access-migration",
+            get(admin_portal_access_migration)
+                .post(admin_portal_access_migration_apply)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/portal/users/batch-model-groups",
+            post(admin_portal_users_batch_model_groups)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
         // Portal API
         .route("/api/portal/login", post(portal_login))
         .route("/api/portal/overview", get(portal_overview))
@@ -2663,6 +2680,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/usage-history", get(portal_usage_history))
         .route("/api/portal/usage-summary", get(portal_usage_summary))
         .route("/api/portal/models", get(portal_models))
+        .route("/api/portal/model-access", get(portal_model_access))
         .route("/api/portal/model-probe", get(portal_model_probe))
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
@@ -2941,104 +2959,15 @@ fn codex_conservative_reasoning_metadata() -> CodexReasoningMetadata {
 }
 
 fn codex_catalog_context_window(
-    upstreams: &[UpstreamConfig],
+    snapshot: &crate::state::PersistedState,
+    catalog: &crate::state::ModelCatalog,
     model: &str,
-    case_insensitive: bool,
+    _case_insensitive: bool,
 ) -> Option<i64> {
-    upstreams
-        .iter()
-        .filter(|upstream| upstream.active && upstream.supports_model_with(model, case_insensitive))
-        .filter_map(|upstream| upstream.context_config_for_model_with(model, case_insensitive))
+    catalog.find(model)?.routes.iter()
+        .filter_map(|route| catalog.route_context(snapshot,route))
         .map(|config| i64::from(config.context_limit))
         .max()
-}
-
-fn codex_exposed_models(
-    upstreams: &[UpstreamConfig],
-    allowlist: &[String],
-    case_insensitive: bool,
-) -> Vec<String> {
-    // Canonical-grouped dedup: one displayed slug per canonical model id.
-    // Without explicit alias rules the display spelling is the canonical
-    // (trimmed, lowercased) form; stored upstream spellings are never
-    // rewritten on the wire. Admin-picked per-upstream mapping labels are
-    // the exception: they are exposed verbatim (the operator typed them),
-    // see DownstreamModelEntry::from_mapping.
-    let group_models = |entries: Vec<DownstreamModelEntry>| -> Vec<String> {
-        let mut grouped = BTreeMap::<String, (String, bool)>::new();
-        for entry in entries {
-            let slug = entry.model.trim();
-            let key = crate::state::model_identity_key_with(slug, case_insensitive);
-            if key.is_empty() {
-                continue;
-            }
-            let display = if entry.from_mapping || !case_insensitive {
-                slug.to_owned()
-            } else {
-                key.clone()
-            };
-            match grouped.entry(key) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert((display, entry.from_mapping));
-                }
-                std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    let (current_display, current_from_mapping) = slot.get();
-                    if (entry.from_mapping && !current_from_mapping)
-                        || (entry.from_mapping == *current_from_mapping
-                            && display < *current_display)
-                    {
-                        slot.insert((display, entry.from_mapping));
-                    }
-                }
-            }
-        }
-        grouped.into_values().map(|(display, _)| display).collect()
-    };
-
-    // “*” 通配 = 放行全部，与空列表同分支（否则字面 “*” 会作为唯一模型出现在目录里）。
-    if allowlist.is_empty() || allowlist.iter().any(|allowed| allowed.trim() == "*") {
-        let slugs = upstreams
-            .iter()
-            .filter(|upstream| upstream.active)
-            .flat_map(UpstreamConfig::effective_downstream_models_detailed)
-            .collect::<Vec<_>>();
-        return group_models(slugs);
-    }
-
-    let mut allowed_slugs = BTreeMap::new();
-    for allowed in allowlist {
-        let slug = allowed.trim();
-        if !slug.is_empty() {
-            allowed_slugs
-                .entry(slug.to_ascii_lowercase())
-                .or_insert_with(|| slug.to_owned());
-        }
-    }
-    let mut matched_allowlist_keys = BTreeSet::new();
-    let mut exposed: Vec<String> = group_models(
-        upstreams
-            .iter()
-            .filter(|upstream| upstream.active)
-            .flat_map(UpstreamConfig::effective_downstream_models_detailed)
-            .filter_map(|entry| {
-                let match_key = entry.model.trim().to_ascii_lowercase();
-                if match_key.is_empty() || !allowed_slugs.contains_key(&match_key) {
-                    return None;
-                }
-                matched_allowlist_keys.insert(match_key);
-                Some(entry)
-            })
-            .collect::<Vec<_>>(),
-    );
-    for (match_key, _slug) in allowed_slugs {
-        if !matched_allowlist_keys.contains(&match_key) {
-            // Allowlist-only models have no upstream spelling to preserve:
-            // display them in canonical form like every other entry.
-            exposed.push(match_key);
-        }
-    }
-    exposed.sort();
-    exposed
 }
 
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
@@ -3057,8 +2986,9 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
 
     // 有效白名单 = 模型分组优先（阶段 1：Codex 目录与分组一致）。
     // 组已配置但解析失败时 fail-closed（权限相关目录，不允许回退成全放行）。
-    let effective_allowlist = match state.effective_model_allowlist(&downstream).await {
-        Ok(models) => models,
+    let catalog = crate::state::ModelCatalog::new(&snapshot.upstreams,&state.model_alias_registry(),case_insensitive);
+    let effective_access = match state.resolved_model_access_with_catalog(&downstream,&catalog).await {
+        Ok(access) => access,
         Err(error) => {
             tracing::error!(
                 downstream_key_id = %downstream.id,
@@ -3078,11 +3008,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
             .into_response();
         }
     };
-    let model_infos = codex_exposed_models(
-        &snapshot.upstreams,
-        &effective_allowlist,
-        case_insensitive,
-    )
+    let model_infos = catalog.models().iter().filter(|model| effective_access.allowed.allows(&model.id))
+        .map(|model| model.name.clone()).collect::<Vec<_>>()
         .into_iter()
         .map(|slug| {
             let witness = select_catalog_witness_entry(
@@ -3100,16 +3027,23 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 })
                 .or_else(|| {
                     codex_catalog_context_window(
-                        &snapshot.upstreams,
+                        &snapshot,
+                        &catalog,
                         &slug,
                         case_insensitive,
                     )
                 });
-            let reasoning_key = crate::state::model_identity_key_with(&slug, case_insensitive);
-            let reasoning = verified_reasoning_levels
-                .get(&reasoning_key)
-                .map(|levels| codex_reasoning_metadata(levels))
-                .unwrap_or_else(codex_conservative_reasoning_metadata);
+            let mut levels = Vec::new();
+            if let Some(published) = catalog.find(&slug) {
+                for route in &published.routes {
+                    let key = crate::state::model_identity_key_with(&route.exposed_model, case_insensitive);
+                    for level in verified_reasoning_levels.get(&key).into_iter().flatten() {
+                        if !levels.contains(level) { levels.push(level.clone()); }
+                    }
+                }
+            }
+            let reasoning = if levels.is_empty() { codex_conservative_reasoning_metadata() }
+                else { codex_reasoning_metadata(&levels) };
             let supports_custom_tools = capabilities
                 .is_some_and(|capabilities| capabilities.supports(Capability::CustomTools));
             let supports_parallel_tool_calls = capabilities
@@ -3306,8 +3240,9 @@ async fn claude_count_tokens(
     };
     // Resolve the effective allowlist (model_group_id takes priority over
     // model_allowlist); group lookup failure fails closed.
-    let effective_allowlist: Vec<String> = match state
-        .effective_model_allowlist(&downstream)
+    let model_catalog = state.model_catalog().await;
+    let effective_access = match state
+        .resolved_model_access_with_catalog(&downstream,&model_catalog)
         .await
     {
         Ok(models) => models,
@@ -3331,7 +3266,7 @@ async fn claude_count_tokens(
         }
     };
 
-    if !model_list_allows(effective_allowlist.as_slice(), model) {
+    if !effective_access.allowed.allows(&model_catalog.resolve_public_model_id(model)) {
         return GatewayError::gateway_forbidden("model not allowed", "gateway_model_not_allowed")
             .into_anthropic_response();
     }
@@ -5471,15 +5406,9 @@ async fn process_gateway_request_inner(
         }
     };
     let model = model_owned.as_str();
-    let normalized_model = {
-        let alias_registry = state.model_alias_registry();
-        if let Some(canonical) = alias_registry.resolve_alias(model) {
-            canonical.to_string()
-        } else {
-            model.to_string()
-        }
-    };
     let case_insensitive = runtime_settings.model_case_insensitive_matching;
+    let model_catalog = crate::state::ModelCatalog::new(&routing_snapshot.upstreams,&state.model_alias_registry(),case_insensitive);
+    let normalized_model = model_catalog.normalize_request_name(model);
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let stream_only_recovery_request_safe =
         !request_stream && request_allows_stream_only_recovery(endpoint, &body);
@@ -5590,8 +5519,8 @@ async fn process_gateway_request_inner(
     // takes priority over the legacy model_allowlist (downstream-level model
     // group management). Group lookup runs inside the request path, so a
     // stale/missing group fails closed instead of silently widening access.
-    let effective_allowlist: Vec<String> = match state
-        .effective_model_allowlist(&downstream)
+    let effective_access = match state
+        .resolved_model_access_with_catalog(&downstream,&model_catalog)
         .await
     {
         Ok(models) => models,
@@ -5638,7 +5567,7 @@ async fn process_gateway_request_inner(
         }
     };
 
-    if !model_list_allows(effective_allowlist.as_slice(), model) {
+    if !effective_access.allowed.allows(&model_catalog.resolve_public_model_id(model)) {
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -5674,106 +5603,6 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
 
-    // Model Groups 权限校验：绑定到 Portal key 时按分组白名单放行/拒绝。
-    // - 空列表（无 portal 绑定，直接配置的 downstream）跳过校验，向后兼容。
-    // - 通配符 "*" 放行全部模型。
-    // - 查询失败 fail-closed（500），不允许权限层静默放行。
-    if let Some(portal_store) = state.portal_store() {
-        match portal_store
-            .get_key_allowed_models(&downstream.id)
-            .await
-        {
-            Ok(allowed_models) => {
-                let has_restriction = !allowed_models.is_empty();
-                // Normalized matching (case-insensitive + subagent base-model
-                // passthrough), consistent with the config-layer allowlist.
-                let is_allowed = model_list_allows(&allowed_models, model);
-
-                if has_restriction && !is_allowed {
-                    tracing::warn!(
-                        request_id = %request_id,
-                        downstream_key_id = %downstream.id,
-                        path = %request_path,
-                        original_model = %model,
-                        normalized_model = %&normalized_model,
-                        "model not allowed by model group"
-                    );
-                    let error = GatewayError::classified(
-                        StatusCode::FORBIDDEN,
-                        "model not allowed",
-                        "permission_error",
-                        "model_not_allowed",
-                        "model_not_allowed",
-                        None,
-                        None,
-                    );
-                    let _ = append_gateway_usage_log(
-                        &state,
-                        &request_id,
-                        &downstream.id,
-                        &downstream.name,
-                        "",
-                        None,
-                        request_path,
-                        model,
-                        inference_strength.as_deref(),
-                        user_agent.as_deref(),
-                        None,
-                        error.status_code(),
-                        Some(error.to_string()),
-                        Some(error.error_category().to_string()),
-                        0,
-                        0,
-                        0,
-                        started,
-                    )
-                    .await;
-                    active_request_guard.fail_and_finish(error.error_category());
-                    return Err(error);
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    request_id = %request_id,
-                    downstream_key_id = %downstream.id,
-                    error = %e,
-                    "failed to check model group permissions; failing closed"
-                );
-                let error = GatewayError::classified(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "model group permission check failed",
-                    "permission_error",
-                    "model_group_check_failed",
-                    "model_group_check_failed",
-                    None,
-                    None,
-                );
-                let _ = append_gateway_usage_log(
-                    &state,
-                    &request_id,
-                    &downstream.id,
-                    &downstream.name,
-                    "",
-                    None,
-                    request_path,
-                    model,
-                    inference_strength.as_deref(),
-                    user_agent.as_deref(),
-                    None,
-                    error.status_code(),
-                    Some(error.to_string()),
-                    Some(error.error_category().to_string()),
-                    0,
-                    0,
-                    0,
-                    started,
-                )
-                .await;
-                active_request_guard.fail_and_finish(error.error_category());
-                return Err(error);
-            }
-        }
-    }
 
     if request_has_unknown_tool_kind(endpoint, &body) {
         let error = GatewayError::classified(

@@ -2064,7 +2064,10 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
                 protocol: WireProtocol::ChatCompletions,
             },
             FailureClass::ConcurrencySaturated,
-            Some(Duration::from_millis(50)),
+            // 高负载并行测试下 50ms 的 fallback 恢复窗口会被调度延迟错过，
+            // 造成偶发 200/503 flaky；500ms 保证请求必然落在饱和窗口内，
+            // 不改变被测协调逻辑的语义。
+            Some(Duration::from_millis(500)),
             false,
         )
         .await

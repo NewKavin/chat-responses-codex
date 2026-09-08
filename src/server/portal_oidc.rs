@@ -629,7 +629,7 @@ async fn current_login_downstream(
     if bearer.starts_with("eyJ") {
         // Legacy 工号+key login issues a JWT whose sub is the employee id,
         // which is also the downstream id (design §4.2's eyJ branch).
-        if let Ok(claims) = crate::auth::verify_admin_token(&bearer, &state.config.jwt_secret) {
+        if let Ok(claims) = crate::auth::verify_principal_token(&bearer, &state.config.jwt_secret) {
             return Some(claims.sub);
         }
         return None;

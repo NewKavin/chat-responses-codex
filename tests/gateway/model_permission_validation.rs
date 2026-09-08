@@ -195,7 +195,9 @@ async fn test_forbidden_model_is_rejected() {
 
     let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(body["error"]["code"], "model_not_allowed");
+    // 权限检查合并后（config allowlist 与 portal 组统一为 resolved access）
+    // 拒绝码固定为 gateway_model_not_allowed（与文件模式的旧 L1 拒绝一致）。
+    assert_eq!(body["error"]["code"], "gateway_model_not_allowed");
 }
 
 #[tokio::test]
@@ -233,6 +235,13 @@ async fn test_wildcard_allows_all_models() {
         .unwrap();
 
     let wildcard_secret = register_downstream(&state, downstream_id).await;
+
+    // 新模型语义：key 限定 all 只是收窄，用户授权上限 U(user) 才是天花板。
+    // 要让通配符真正放行全部模型，用户自身必须拥有 all 组授权。
+    store
+        .grant_user_model_group(user_id, "all", Some("admin"))
+        .await
+        .expect("grant all group");
 
     // 添加密钥，关联到 all 分组（包含 * 通配符）
     store

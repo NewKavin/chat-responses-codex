@@ -2,6 +2,14 @@
   <div class="container">
     <el-card shadow="never" class="header-card">
       <div class="toolbar">
+        <el-button
+          v-if="migrationSummary.pending > 0"
+          type="warning"
+          plain
+          @click="openMigrationDialog"
+        >
+          待处理迁移修复 {{ migrationSummary.pending }} 条
+        </el-button>
         <el-input
           v-model="keyword"
           placeholder="按邮箱 / 姓名 / 用户名搜索"
@@ -12,12 +20,21 @@
         >
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
+        <el-button :disabled="!userSelection.length" @click="openBatchUsersDialog">
+          批量授权
+        </el-button>
         <el-button type="primary" @click="load">查询</el-button>
       </div>
     </el-card>
 
     <el-card shadow="never">
-      <el-table :data="users" v-loading="loading" stripe>
+      <el-table
+        :data="users"
+        v-loading="loading"
+        stripe
+        @selection-change="userSelection = $event"
+      >
+        <el-table-column type="selection" width="46" />
         <el-table-column prop="email" label="邮箱" min-width="200" show-overflow-tooltip />
         <el-table-column prop="display_name" label="姓名" min-width="110" />
         <el-table-column prop="username" label="用户名" min-width="110" />
@@ -119,11 +136,27 @@
     <el-dialog v-model="bindingsVisible" :title="`密钥与账户：${bindingsUser?.email ?? ''}`" width="940">
       <div class="binding-toolbar" style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px">
         <span class="muted">已选 {{ batchSelection.length }} 个密钥</span>
-        <el-select v-model="batchGroup" placeholder="批量改分组" clearable style="width: 150px" filterable>
+        <el-select v-model="batchAccessMode" style="width: 120px" aria-label="批量模型访问模式">
+          <el-option label="继承" value="inherit" />
+          <el-option label="限定分组" value="group" />
+          <el-option label="拒绝" value="deny" />
+        </el-select>
+        <el-select
+          v-if="batchAccessMode === 'group'"
+          v-model="batchGroup"
+          placeholder="选择分组"
+          clearable
+          style="width: 150px"
+          filterable
+        >
           <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
         </el-select>
-        <el-button size="small" :disabled="!batchSelection.length || !batchGroup" @click="batchApplyGroup">
-          应用分组
+        <el-button
+          size="small"
+          :disabled="!batchSelection.length || (batchAccessMode === 'group' && !batchGroup)"
+          @click="batchApplyGroup"
+        >
+          应用模型访问
         </el-button>
         <el-button size="small" type="success" plain :disabled="!batchSelection.length" @click="batchToggleActive(true)">
           批量启用
@@ -168,17 +201,9 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="模型分组" min-width="170">
+        <el-table-column label="模型访问" min-width="170">
           <template #default="{ row }">
-            <el-select
-              v-model="row.model_group_id"
-              size="small"
-              filterable
-              style="width: 140px"
-              @change="updateBindingGroup(row)"
-            >
-              <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
-            </el-select>
+            <el-tag size="small" :type="rowAccessType(row)">{{ modelAccessLabel(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="默认" width="90" align="center">
@@ -288,6 +313,18 @@
         <el-form-item label="过期时间">
           <el-date-picker v-model="editConfigForm.expires_at" type="datetime" value-format="x" style="width: 100%" />
         </el-form-item>
+        <el-form-item label="模型访问">
+          <el-radio-group v-model="editConfigForm.access_mode">
+            <el-radio value="inherit">继承（用户授权）</el-radio>
+            <el-radio value="group">限定分组</el-radio>
+            <el-radio value="deny">拒绝</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="editConfigForm.access_mode === 'group'" label="限定分组">
+          <el-select v-model="editConfigForm.access_group_id" placeholder="选择模型分组" filterable style="width: 100%">
+            <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
+          </el-select>
+        </el-form-item>
 
         <el-divider content-position="left">模型并发组（可选）</el-divider>
         <el-form-item v-for="(group, index) in editConcurrencyGroups" :key="index" :label="`组 ${index + 1}`">
@@ -354,6 +391,92 @@
         <el-button type="primary" :loading="batchLimitsSaving" @click="saveBatchLimits">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="migrationVisible" title="待处理迁移修复（模型访问）" width="860">
+      <el-alert type="warning" :closable="false" class="helper-text">
+        这些旧密钥在切换模型访问模式时被归类为待确认。勾选后应用：补齐旧绑定组授权并将密钥设为
+        「继承」；预览失效或归属冲突的密钥不会被放权，按实际结果显示。
+      </el-alert>
+      <el-table
+        v-loading="migrationLoading"
+        :data="migrationPreview"
+        stripe
+        style="margin-top: 12px"
+        @selection-change="migrationSelection = $event.map((item: any) => item.downstream_id)"
+      >
+        <el-table-column type="selection" width="46" />
+        <el-table-column label="密钥" min-width="180">
+          <template #default="{ row }">
+            <div class="key-id">{{ row.downstream_id }}</div>
+            <el-tag v-if="row.owner_user_id" size="small" type="info">{{ row.owner_user_id }}</el-tag>
+            <el-tag v-else size="small" type="danger">无归属</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="分类" width="130">
+          <template #default="{ row }">
+            {{ row.classification }}
+          </template>
+        </el-table-column>
+        <el-table-column label="现有用户授权" min-width="150">
+          <template #default="{ row }">
+            <el-tag v-for="groupId in row.existing_user_groups" :key="groupId" size="small" class="group-tag">
+              {{ groupId }}
+            </el-tag>
+            <span v-if="!row.existing_user_groups.length" class="muted">仅 basic</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="待补组" min-width="150">
+          <template #default="{ row }">
+            <el-tag v-for="groupId in row.candidate_group_ids" :key="groupId" size="small" type="warning" class="group-tag">
+              {{ groupId }}
+            </el-tag>
+            <span v-if="!row.candidate_group_ids.length" class="muted">—</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="migrationVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="migrationApplying"
+          :disabled="!migrationSelection.length || migrationLoading"
+          @click="applyMigrationSelection"
+        >
+          应用所选（{{ migrationSelection.length }}）
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="batchUsersDialogVisible" title="跨用户批量模型组授权" width="560">
+      <el-alert type="info" :closable="false" class="helper-text">
+        已选 {{ userSelection.length }} 个用户。add 只增不撤；remove 只撤不增（basic 不可移除）；replace 整体替换授权集合。
+      </el-alert>
+      <el-form label-width="110px" style="margin-top: 14px">
+        <el-form-item label="操作">
+          <el-radio-group v-model="batchUsersOp">
+            <el-radio value="add">新增授权</el-radio>
+            <el-radio value="remove">撤销授权</el-radio>
+            <el-radio value="replace">整体替换</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="模型分组">
+          <el-select v-model="batchUsersGroupIds" multiple filterable style="width: 100%" placeholder="选择模型分组">
+            <el-option v-for="g in allModelGroups" :key="g.id" :label="g.name" :value="g.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchUsersDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="batchUsersSaving"
+          :disabled="!batchUsersGroupIds.length"
+          @click="applyBatchUserGroups"
+        >
+          应用
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -380,6 +503,10 @@ interface BindingRow {
   downstream_id: string
   is_default: boolean
   model_group_id?: string
+  model_access?: { mode: 'inherit' | 'group' | 'deny'; group_id?: string | null }
+  access_revision?: number
+  subject_kind?: string
+  owner_user_id?: string | null
 }
 
 interface AccountConfig {
@@ -577,7 +704,15 @@ const refreshBindings = async () => {
   bindingsLoading.value = true
   try {
     const response = await adminApi.getPortalUserBindings(bindingsUser.value.id)
-    bindings.value = response.data.items
+    bindings.value = response.data.items.map(item => ({
+      ...item,
+      model_access: item.model_access
+        ? {
+            mode: item.model_access.mode as 'inherit' | 'group' | 'deny',
+            group_id: item.model_access.group_id ?? null
+          }
+        : undefined
+    }))
     newBindingKey.value = ''
     newBindingGroup.value = ''
     newBindingDefault.value = false
@@ -604,17 +739,117 @@ const addBinding = async () => {
   }
 }
 
-const updateBindingGroup = async (row: BindingRow) => {
-  if (!bindingsUser.value) return
+/** 绑定级模型访问保持只读展示；修改走「编辑配置」对话框（model_access）。 */
+const modelAccessLabel = (row: BindingRow) => {
+  const access = row.model_access
+  if (!access) {
+    return row.model_group_id && row.model_group_id !== 'deny-all'
+      ? `分组：${row.model_group_id}`
+      : '拒绝（deny-all）'
+  }
+  if (access.mode === 'inherit') return '继承（用户授权）'
+  if (access.mode === 'deny') return '拒绝一切'
+  const group = allModelGroups.value.find(g => g.id === access.group_id)
+  return `分组：${group?.name ?? access.group_id ?? '（无）'}`
+}
+
+const rowAccessType = (row: BindingRow) => {
+  const mode = row.model_access?.mode
+  if (mode === 'deny') return 'danger'
+  if (mode === 'group') return 'warning'
+  return 'primary'
+}
+
+/**
+ * 批量应用模型访问（设计 2.3/12）：缺失字段保持原值，显式 null 清空，
+ * 部分失败按实际结果显示并回读。
+ */
+const batchApplyGroup = async () => {
+  const ids = batchKeyIds()
+  if (!ids.length) return
+  const mode = batchAccessMode.value
+  const payload: Record<string, unknown> = {
+    model_access:
+      mode === 'group'
+        ? { mode: 'group', group_id: batchGroup.value || null }
+        : { mode }
+  }
   try {
-    await adminApi.updatePortalUserBinding(bindingsUser.value.id, row.downstream_id, {
-      model_group_id: row.model_group_id
-    })
-    ElMessage.success('绑定分组已保存')
+    const response = await adminApi.batchUpdateDownstreams(ids, payload)
+    const failed = response.data.failed ?? []
+    if (failed.length) {
+      ElMessage.warning(
+        `已更新 ${response.data.updated?.length ?? 0} 个，${failed.length} 个失败：` +
+          failed.map(item => (item as { id?: string }).id || '?').join('、')
+      )
+    } else {
+      ElMessage.success(`已更新 ${ids.length} 个密钥的模型访问`)
+    }
+    batchGroup.value = ''
+    batchAccessMode.value = 'inherit'
     await refreshBindings()
   } catch (error) {
-    ElMessage.error((error as any)?.message || '保存失败')
+    ElMessage.error((error as any)?.message || '批量更新失败')
+  }
+}
+
+const batchToggleActive = async (active: boolean) => {
+  const ids = batchKeyIds()
+  if (!ids.length) return
+  try {
+    const response = await adminApi.batchUpdateDownstreams(ids, { active })
+    const failed = response.data.failed ?? []
+    if (failed.length) {
+      ElMessage.warning(
+        `已${active ? '启用' : '禁用'} ${response.data.updated?.length ?? 0} 个，${failed.length} 个失败`
+      )
+    } else {
+      ElMessage.success(active ? '已批量启用' : '已批量禁用')
+    }
     await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '批量更新失败')
+  }
+}
+
+const saveBatchLimits = async () => {
+  const ids = batchKeyIds()
+  if (!ids.length) return
+  const isCost = batchLimitsForm.value.billing_mode === 'token'
+  batchLimitsSaving.value = true
+  try {
+    const response = await adminApi.batchUpdateDownstreams(ids, {
+      per_minute_limit: batchLimitsForm.value.per_minute_limit,
+      max_concurrency: batchLimitsForm.value.max_concurrency,
+      request_quota_window_hours: batchLimitsForm.value.request_quota_window_hours,
+      request_quota_requests: batchLimitsForm.value.request_quota_requests,
+      daily_token_limit: batchLimitsForm.value.daily_token_limit ?? null,
+      monthly_token_limit: batchLimitsForm.value.monthly_token_limit ?? null,
+      billing_mode: isCost ? 'token' : 'request',
+      input_token_price_per_million_cents: isCost
+        ? Math.round((batchLimitsForm.value.input_token_price_per_million ?? 0) * 100)
+        : null,
+      output_token_price_per_million_cents: isCost
+        ? Math.round((batchLimitsForm.value.output_token_price_per_million ?? 0) * 100)
+        : null,
+      daily_cost_limit_cents: isCost
+        ? Math.round((batchLimitsForm.value.daily_cost_limit ?? 0) * 100)
+        : null
+    })
+    const failed = response.data.failed ?? []
+    if (failed.length) {
+      ElMessage.warning(
+        `已更新 ${response.data.updated?.length ?? 0} 个限额，${failed.length} 个失败`
+      )
+    } else {
+      ElMessage.success(`已更新 ${ids.length} 个密钥的限额`)
+    }
+    batchLimitsVisible.value = false
+    await refreshBindings()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '批量更新失败')
+  } finally {
+    batchLimitsSaving.value = false
   }
 }
 
@@ -630,6 +865,7 @@ const removeBinding = async (row: BindingRow) => {
 const accountConfigs = ref<Record<string, AccountConfig>>({})
 const batchSelection = ref<BindingRow[]>([])
 const batchGroup = ref('')
+const batchAccessMode = ref<'inherit' | 'group' | 'deny'>('inherit')
 const editConfigVisible = ref(false)
 const editConfigKeyId = ref('')
 const editConfigSaving = ref(false)
@@ -648,7 +884,9 @@ const editConfigForm = ref({
   output_token_price_per_million: undefined as number | undefined,
   daily_cost_limit: undefined as number | undefined,
   ip_allowlist_text: '',
-  expires_at: undefined as number | undefined
+  expires_at: undefined as number | undefined,
+  access_mode: 'inherit' as 'inherit' | 'group' | 'deny',
+  access_group_id: ''
 })
 const editConcurrencyGroups = ref<Array<{ name: string; matchText: string; max_concurrency: number }>>([])
 const batchLimitsVisible = ref(false)
@@ -716,6 +954,7 @@ const openEditConfig = (row: BindingRow) => {
   if (!config) return
   editConfigKeyId.value = row.downstream_id
   const isCost = config.billing_mode === 'token'
+  const access = row.model_access
   editConfigForm.value = {
     name: config.name ?? row.downstream_id,
     active: config.active ?? true,
@@ -738,7 +977,14 @@ const openEditConfig = (row: BindingRow) => {
     daily_cost_limit:
       isCost && config.daily_cost_limit_cents ? config.daily_cost_limit_cents / 100 : undefined,
     ip_allowlist_text: (config.ip_allowlist || []).join('\n'),
-    expires_at: config.expires_at ?? undefined
+    expires_at: config.expires_at ?? undefined,
+    access_mode: access?.mode ?? (row.model_group_id && row.model_group_id !== 'deny-all' ? 'group' : 'inherit'),
+    access_group_id:
+      access?.mode === 'group'
+        ? (access.group_id ?? '')
+        : row.model_group_id && row.model_group_id !== 'deny-all'
+          ? row.model_group_id
+          : ''
   }
   editConcurrencyGroups.value = (config.model_concurrency_groups || []).map(group => ({
     name: group.name,
@@ -758,6 +1004,7 @@ const saveEditConfig = async () => {
   const isCost = editConfigForm.value.billing_mode === 'token'
   editConfigSaving.value = true
   try {
+    const accessMode = editConfigForm.value.access_mode
     const payload: Record<string, unknown> = {
       name: editConfigForm.value.name.trim() || editConfigKeyId.value,
       active: editConfigForm.value.active,
@@ -787,6 +1034,10 @@ const saveEditConfig = async () => {
         .map(item => item.trim())
         .filter(Boolean),
       expires_at: editConfigForm.value.expires_at,
+      model_access:
+        accessMode === 'group'
+          ? { mode: 'group', group_id: editConfigForm.value.access_group_id || null }
+          : { mode: accessMode },
       model_concurrency_groups: concurrencyGroups
     }
     await adminApi.updateDownstream(editConfigKeyId.value, payload)
@@ -801,32 +1052,6 @@ const saveEditConfig = async () => {
 }
 
 const batchKeyIds = () => Array.from(new Set(batchSelection.value.map(r => r.downstream_id)))
-
-const batchApplyGroup = async () => {
-  if (!batchGroup.value) return
-  const ids = batchKeyIds()
-  if (!ids.length) return
-  try {
-    await adminApi.batchUpdateDownstreams(ids, { model_group_id: batchGroup.value })
-    ElMessage.success(`已更新 ${ids.length} 个密钥的分组`)
-    batchGroup.value = ''
-    await refreshBindings()
-  } catch (error) {
-    ElMessage.error((error as any)?.message || '批量更新失败')
-  }
-}
-
-const batchToggleActive = async (active: boolean) => {
-  const ids = batchKeyIds()
-  if (!ids.length) return
-  try {
-    await adminApi.batchUpdateDownstreams(ids, { active })
-    ElMessage.success(active ? '已批量启用' : '已批量禁用')
-    await refreshBindings()
-  } catch (error) {
-    ElMessage.error((error as any)?.message || '批量更新失败')
-  }
-}
 
 const openBatchLimits = () => {
   batchLimitsForm.value = {
@@ -844,43 +1069,141 @@ const openBatchLimits = () => {
   batchLimitsVisible.value = true
 }
 
-const saveBatchLimits = async () => {
-  const ids = batchKeyIds()
-  if (!ids.length) return
-  const isCost = batchLimitsForm.value.billing_mode === 'token'
-  batchLimitsSaving.value = true
+// ---- 迁移修复（设计 4.2/P09/P10）：摘要横幅 + 预览/应用 ----
+interface MigrationPreviewItem {
+  downstream_id: string
+  classification: string
+  owner_user_id: string | null
+  existing_user_groups: string[]
+  candidate_group_ids: string[]
+  revision: number
+  fingerprint: string
+}
+
+const migrationSummary = ref<{ pending: number; total: number; resolved: number }>({
+  pending: 0,
+  total: 0,
+  resolved: 0
+})
+const migrationVisible = ref(false)
+const migrationLoading = ref(false)
+const migrationApplying = ref(false)
+const migrationPreview = ref<MigrationPreviewItem[]>([])
+const migrationSelection = ref<string[]>([])
+
+const loadMigrationSummary = async () => {
   try {
-    await adminApi.batchUpdateDownstreams(ids, {
-      per_minute_limit: batchLimitsForm.value.per_minute_limit,
-      max_concurrency: batchLimitsForm.value.max_concurrency,
-      request_quota_window_hours: batchLimitsForm.value.request_quota_window_hours,
-      request_quota_requests: batchLimitsForm.value.request_quota_requests,
-      daily_token_limit: batchLimitsForm.value.daily_token_limit ?? null,
-      monthly_token_limit: batchLimitsForm.value.monthly_token_limit ?? null,
-      billing_mode: isCost ? 'token' : 'request',
-      input_token_price_per_million_cents: isCost
-        ? Math.round((batchLimitsForm.value.input_token_price_per_million ?? 0) * 100)
-        : null,
-      output_token_price_per_million_cents: isCost
-        ? Math.round((batchLimitsForm.value.output_token_price_per_million ?? 0) * 100)
-        : null,
-      daily_cost_limit_cents: isCost
-        ? Math.round((batchLimitsForm.value.daily_cost_limit ?? 0) * 100)
-        : null
-    })
-    ElMessage.success(`已更新 ${ids.length} 个密钥的限额`)
-    batchLimitsVisible.value = false
-    await refreshBindings()
+    const { data } = await adminApi.getAccessMigration()
+    migrationSummary.value = {
+      pending: data.summary.pending,
+      total: data.summary.total,
+      resolved: data.summary.resolved
+    }
+  } catch {
+    // 管理端可离线运行；摘要失败静默保留上次值。
+  }
+}
+
+const openMigrationDialog = async () => {
+  migrationVisible.value = true
+  migrationLoading.value = true
+  migrationSelection.value = []
+  try {
+    const { data } = await adminApi.getAccessMigration()
+    migrationPreview.value = data.pending as MigrationPreviewItem[]
+    migrationSelection.value = data.pending
+      .filter(item => item.classification === 'review_required')
+      .map(item => item.downstream_id)
   } catch (error) {
-    ElMessage.error((error as any)?.message || '批量更新失败')
+    ElMessage.error((error as any)?.message || '加载迁移预览失败')
   } finally {
-    batchLimitsSaving.value = false
+    migrationLoading.value = false
+  }
+}
+
+const applyMigrationSelection = async () => {
+  const items = migrationPreview.value.filter(item =>
+    migrationSelection.value.includes(item.downstream_id)
+  )
+  if (!items.length) return
+  migrationApplying.value = true
+  try {
+    const { data } = await adminApi.applyAccessMigration(
+      items.map(item => ({
+        downstream_id: item.downstream_id,
+        candidate_group_ids: item.candidate_group_ids,
+        set_inherit: true,
+        expected_revision: item.revision,
+        expected_fingerprint: item.fingerprint
+      }))
+    )
+    if (data.failed.length) {
+      ElMessage.warning(
+        `已应用 ${data.updated.length} 个，${data.failed.length} 个冲突/失败：` +
+          data.failed.map(item => item.id).join('、')
+      )
+    } else {
+      ElMessage.success(`已应用 ${data.updated.length} 条迁移修复`)
+    }
+    await openMigrationDialog()
+    await loadMigrationSummary()
+    await load()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '应用迁移修复失败')
+  } finally {
+    migrationApplying.value = false
+  }
+}
+
+// ---- 跨用户批量模型组授权（设计 6）----
+const userSelection = ref<PortalUserRow[]>([])
+const batchUsersDialogVisible = ref(false)
+const batchUsersOp = ref<'add' | 'remove' | 'replace'>('add')
+const batchUsersGroupIds = ref<string[]>([])
+const batchUsersSaving = ref(false)
+
+const openBatchUsersDialog = () => {
+  if (!userSelection.value.length) {
+    ElMessage.warning('请先选择用户')
+    return
+  }
+  batchUsersDialogVisible.value = true
+}
+
+const applyBatchUserGroups = async () => {
+  if (!batchUsersGroupIds.value.length) {
+    ElMessage.warning('请选择模型组')
+    return
+  }
+  batchUsersSaving.value = true
+  try {
+    const { data } = await adminApi.batchUserModelGroups(
+      userSelection.value.map(user => user.id),
+      batchUsersOp.value,
+      batchUsersGroupIds.value
+    )
+    if (data.failed.length) {
+      ElMessage.warning(
+        `已处理 ${data.updated.length} 个用户，${data.failed.length} 个失败：` +
+          data.failed.map(item => item.id).join('、')
+      )
+    } else {
+      ElMessage.success(`已处理 ${data.updated.length} 个用户的模型组授权`)
+    }
+    batchUsersDialogVisible.value = false
+    batchUsersGroupIds.value = []
+    await load()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '批量授权失败')
+  } finally {
+    batchUsersSaving.value = false
   }
 }
 
 onMounted(() => {
   load()
   loadModelGroups()
+  loadMigrationSummary()
 })
 </script>
 

@@ -12,9 +12,11 @@ vi.mock('@/api/portal', () => ({
     rotateKeyById: vi.fn(),
     setDefaultKey: vi.fn(),
     listModelGroups: vi.fn(),
-    updateKeyModelGroup: vi.fn()
+    updateKeyModelGroup: vi.fn(),
+    updateKeyModelAccess: vi.fn()
   },
-  portalHttp: {}
+  portalHttp: {},
+  usePortalStore: vi.fn()
 }))
 
 vi.mock('@/components/KeyCard.vue', () => ({
@@ -23,12 +25,12 @@ vi.mock('@/components/KeyCard.vue', () => ({
     template: `
       <div :data-testid="'key-' + keyData.downstream_id" class="key-card-mock" :data-group-count="(modelGroups || []).length">
         <span class="key-label">{{ keyData.label }}</span>
-        <button class="group-change-trigger" @click="$emit('change-model-group', keyData.downstream_id, 'premium')">ChangeGroup</button>
+        <button class="group-change-trigger" @click="$emit('change-model-access', keyData.downstream_id, { mode: 'group', group_id: 'premium' })">ChangeGroup</button>
         <button @click="$emit('delete', keyData.downstream_id)">Delete</button>
       </div>
     `,
     props: ['keyData', 'modelGroups'],
-    emits: ['edit', 'rotate', 'delete', 'setDefault', 'change-model-group']
+    emits: ['edit', 'rotate', 'delete', 'setDefault', 'change-model-access']
   }
 }))
 
@@ -225,12 +227,12 @@ describe('KeyManagement Page', () => {
     expect(cards[0].attributes('data-group-count')).toBe('2')
   })
 
-  it('updates a key model group when the card requests it', async () => {
+  it('updates a key model access when the card requests it', async () => {
     vi.mocked(portalApi.portalApi.listKeys).mockResolvedValue({ data: mockKeys } as any)
     vi.mocked(portalApi.portalApi.listModelGroups).mockResolvedValue({
       data: { groups: [{ id: 'basic', name: 'Basic', description: null, allowed_models: [], created_at: 1, updated_at: 1 }] }
     } as any)
-    vi.mocked(portalApi.portalApi.updateKeyModelGroup).mockResolvedValue({ data: { success: true } } as any)
+    vi.mocked(portalApi.portalApi.updateKeyModelAccess).mockResolvedValue({ data: { success: true } } as any)
 
     const wrapper = mount(KeyManagement, {
       global: {
@@ -246,9 +248,9 @@ describe('KeyManagement Page', () => {
     await changeBtn.trigger('click')
     await wrapper.vm.$nextTick()
 
-    expect(portalApi.portalApi.updateKeyModelGroup).toHaveBeenCalledWith(
+    expect(portalApi.portalApi.updateKeyModelAccess).toHaveBeenCalledWith(
       mockKeys[0].downstream_id,
-      'premium'
+      { mode: 'group', group_id: 'premium' }
     )
   })
 })

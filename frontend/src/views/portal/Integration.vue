@@ -593,6 +593,7 @@ import { copyTextToClipboard } from '@/utils/clipboard'
 import { ElMessage } from 'element-plus'
 import { Copy } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
+import { usePortalStore } from '@/stores/portal'
 import type { ModelContextEntry, PortalModelStat } from '@/types'
 import {
   buildClaudeCodeSettingsJson,
@@ -642,6 +643,7 @@ const catalogViewState = computed(() =>
 )
 
 const allModelSlugs = computed(() => catalogViewState.value.allModelSlugs)
+const portalStore = usePortalStore()
 const primaryModelSlug = computed(() => catalogViewState.value.primaryModelSlug)
 const codexBaseModelSelection = computed(() =>
   resolveCodexModelSelection(
@@ -848,10 +850,10 @@ const loadIntegrationData = async () => {
   try {
     gatewayBaseUrl.value = buildGatewayBaseUrl(window.location.origin)
 
-    const [keyResult, modelsResult, quotaResult] = await Promise.allSettled([
+    const [keyResult, modelsResult, accessResult] = await Promise.allSettled([
       portalApi.getKey(),
       portalApi.getModels(),
-      portalApi.getQuota()
+      portalApi.getModelAccess(portalStore.scopeParams())
     ])
 
     if (keyResult.status === 'rejected') {
@@ -865,9 +867,17 @@ const loadIntegrationData = async () => {
       return
     }
 
-    if (quotaResult.status === 'fulfilled') {
-      modelAllowlist.value = quotaResult.value.data.model_allowlist ?? []
-      modelContexts.value = quotaResult.value.data.model_contexts ?? {}
+    if (accessResult.status === 'fulfilled') {
+      // 目录与所选密钥权限一致：可用模型来自 model-access，不再用
+      // quota 白名单二次过滤 /v1/models（设计 10）。
+      modelAllowlist.value = accessResult.value.data.available_models ?? []
+      if (accessResult.value.data.status === 'denied') {
+        fatalError.value =
+          accessResult.value.data.reason || '当前密钥模型访问被拒绝，无法生成配置。'
+        return
+      }
+    } else {
+      loadWarnings.value.push('模型范围读取失败，将退化为网关模型列表生成排序。')
     }
 
     if (modelsResult.status === 'fulfilled') {

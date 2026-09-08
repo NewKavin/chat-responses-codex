@@ -3,6 +3,20 @@ mod common;
 use chat_responses_codex::state::AppConfig;
 use chat_responses_codex::state::AppState;
 
+/// 新策略模型：被绑定密钥必须真实存在（防孤儿绑定），绑定前先建档。
+async fn ensure_binding_downstream(state: &AppState, downstream_id: &str) {
+    if state.downstream_config(downstream_id).await.is_some() {
+        return;
+    }
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = downstream_id.to_string();
+    ds.name = downstream_id.to_string();
+    state
+        .insert_downstream(ds)
+        .await
+        .expect("insert downstream fixture");
+}
+
 fn database_url() -> String {
     common::oidc::database_url()
         .expect("OIDC_TEST_DATABASE_URL unset; tests should skip before reaching here")
@@ -43,21 +57,18 @@ async fn test_list_downstream_bindings_with_labels() {
     .await
     .expect("Failed to create user");
 
-    // Get database client for direct SQL access
-    let client = store.get_client().await.expect("Failed to get client");
-
-    // Insert test downstream bindings with label and model_group_id
-    client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())",
-        &[&user.id, &"openai".to_string(), &true, &"Work".to_string(), &"basic".to_string()],
-    ).await.expect("Failed to insert binding 1");
-
-    client.execute(
-        "INSERT INTO portal_user_downstreams (user_id, downstream_id, is_default, label, model_group_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())",
-        &[&user.id, &"anthropic".to_string(), &false, &"Personal".to_string(), &"premium".to_string()],
-    ).await.expect("Failed to insert binding 2");
+    // 新策略模型：绑定必须指向真实 downstream 且通过策略生效
+    // （绑定行 model_group_id 不再是授权事实源）。
+    ensure_binding_downstream(&state, "openai").await;
+    ensure_binding_downstream(&state, "anthropic").await;
+    store
+        .add_downstream_binding_with_label(&user.id, "openai", Some("Work"), Some("basic"))
+        .await
+        .expect("Failed to bind openai");
+    store
+        .add_downstream_binding_with_label(&user.id, "anthropic", Some("Personal"), Some("premium"))
+        .await
+        .expect("Failed to bind anthropic");
 
     // Test list_downstream_bindings_with_labels
     let bindings = store.list_downstream_bindings_with_labels(&user.id).await.unwrap();

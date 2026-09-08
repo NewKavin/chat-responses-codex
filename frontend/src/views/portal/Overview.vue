@@ -304,14 +304,18 @@ import CountUpValue from '@/components/CountUpValue.vue'
 import GaugeRing from '@/components/GaugeRing.vue'
 import SignalWave from '@/components/SignalWave.vue'
 import { portalApi } from '@/api/portal'
-import type { PortalOverview, PortalQuota } from '@/types'
+import type { PortalOverview, PortalQuota, PortalModelAccessResponse } from '@/types'
 import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatPercentageTwoDecimals } from '@/utils/percentage'
-import {
-  buildGatewayModelsEndpoint,
-  extractGatewayModelSlugs
-} from '@/utils/integration'
-import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
+import { usePortalStore } from '@/stores/portal'
+
+const portalStore = usePortalStore()
+
+/** 请求作用域：仅当用户显式选择了密钥时带上；否则交由服务端默认选择。 */
+const scopeParams = () =>
+  portalStore.explicitSelection && portalStore.selectedDownstreamId
+    ? { downstream_id: portalStore.selectedDownstreamId }
+    : undefined
 
 const data = ref<PortalOverview>({
   quota_summary: {
@@ -331,7 +335,7 @@ const quotaData = ref<PortalQuota>({
   ip_allowlist: []
 })
 const quotaLoading = ref(false)
-const availableModelSlugs = ref<string[]>([])
+const modelAccess = ref<PortalModelAccessResponse | null>(null)
 const modelLoadError = ref('')
 const activeDetail = ref(['request', 'cost', 'models', 'ips'])
 const overviewLoaded = ref(false)
@@ -378,15 +382,14 @@ const heroStatusTitle = computed(() => {
   return '配额信号良好'
 })
 
-const displayModelSlugs = computed(() =>
-  resolvePortalQuotaModelSlugs(quotaData.value.model_allowlist, availableModelSlugs.value)
-)
-const allowlistIsEmpty = computed(() => quotaData.value.model_allowlist.length === 0)
+const displayModelSlugs = computed(() => modelAccess.value?.available_models ?? [])
+const allowlistIsEmpty = computed(() => displayModelSlugs.value.length === 0)
 const modelSectionHint = computed(() => {
-  if (!allowlistIsEmpty.value) return '仅展示配置的模型白名单'
-  if (availableModelSlugs.value.length > 0) return '未配置白名单，当前展示全部可用模型'
-  if (modelLoadError.value) return '未配置白名单，暂时无法读取全部模型'
-  return '未配置白名单，当前展示全部可用模型'
+  if (modelLoadError.value) return modelLoadError.value
+  if (!allowlistIsEmpty.value) {
+    return modelAccess.value?.scope === 'key' ? '当前所选密钥的模型范围' : '你的授权模型范围'
+  }
+  return '暂无可用模型'
 })
 const modelEmptyDescription = computed(() => {
   if (!allowlistIsEmpty.value) return '无限制'
@@ -408,7 +411,7 @@ let refreshTimer: number | null = null
 
 const loadOverview = async () => {
   try {
-    const { data: payload } = await portalApi.getOverview()
+    const { data: payload } = await portalApi.getOverview(scopeParams())
     // 局部静默刷新：数据未变化就不重新赋值（避免整页重渲染造成跳动）
     if (JSON.stringify(payload) !== JSON.stringify(data.value)) {
       data.value = payload
@@ -432,8 +435,7 @@ const loadQuotaDetail = async () => {
   try {
     quotaLoading.value = true
     modelLoadError.value = ''
-    availableModelSlugs.value = []
-    const response = await portalApi.getQuota()
+    const response = await portalApi.getQuota(scopeParams())
     const payload = response.data as PortalQuota
     quotaData.value = {
       request_quota: payload.request_quota,
@@ -442,28 +444,14 @@ const loadQuotaDetail = async () => {
       ip_allowlist: payload.ip_allowlist || [],
       model_contexts: payload.model_contexts
     }
-    if (quotaData.value.model_allowlist.length === 0) {
-      const keyResponse = await portalApi.getKey()
-      const portalKey = keyResponse.data.plaintext_key?.trim() ?? ''
-      if (!portalKey) {
-        modelLoadError.value = '当前下游没有可用秘钥，无法读取全部模型。'
-        return
-      }
-
-      const modelsResponse = await fetch(buildGatewayModelsEndpoint(window.location.origin), {
-        headers: { Authorization: 'Bearer ' + portalKey }
-      })
-
-      if (!modelsResponse.ok) {
-        modelLoadError.value = '网关模型接口返回 ' + modelsResponse.status
-        return
-      }
-
-      const modelsPayload = await modelsResponse.json()
-      availableModelSlugs.value = extractGatewayModelSlugs(modelsPayload)
-      if (availableModelSlugs.value.length === 0) {
-        modelLoadError.value = '未发现可用模型。'
-      }
+    // 模型范围统一走 /api/portal/model-access（用户或所选密钥），
+    // 不再用 quota model_allowlist 二次过滤 /v1/models，也不把 "*" 当模型。
+    const modelAccessResponse = await portalApi.getModelAccess(scopeParams())
+    modelAccess.value = modelAccessResponse.data
+    if (modelAccess.value.status === 'denied') {
+      modelLoadError.value = modelAccess.value.reason || '模型访问被拒绝'
+    } else if (modelAccess.value.available_models.length === 0) {
+      modelLoadError.value = '未发现可用模型。'
     }
   } catch (error) {
     ElMessage.error((error as any)?.message || '加载限额详情失败')

@@ -44,6 +44,21 @@ async fn load_state(database_url: &str) -> AppState {
     state
 }
 
+
+/// 新策略模型：被绑定密钥必须真实存在（防孤儿绑定），先建档。
+async fn ensure_binding_downstream(state: &AppState, downstream_id: &str) {
+    if state.downstream_config(downstream_id).await.is_some() {
+        return;
+    }
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = downstream_id.to_string();
+    ds.name = downstream_id.to_string();
+    state
+        .insert_downstream(ds)
+        .await
+        .expect("insert downstream fixture");
+}
+
 fn sha256_hex(input: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -149,10 +164,12 @@ async fn test_create_and_list_keys() {
     .expect("Failed to create user");
 
     // Add two keys
+    ensure_binding_downstream(&state, "key1").await;
     store.add_downstream_binding_with_label(&user.id, "key1", Some("Work Key"), Some("basic"))
         .await
         .expect("Failed to add key1");
 
+    ensure_binding_downstream(&state, "key2").await;
     store.add_downstream_binding_with_label(&user.id, "key2", Some("Personal Key"), Some("premium"))
         .await
         .expect("Failed to add key2");
@@ -335,6 +352,7 @@ async fn test_get_key_by_id() {
     .expect("Failed to create user");
 
     // Add a key
+    ensure_binding_downstream(&state, "existing-key").await;
     store.add_downstream_binding_with_label(&user.id, "existing-key", Some("My Key"), Some("basic"))
         .await
         .expect("Failed to add key");
@@ -414,10 +432,12 @@ async fn test_set_default_key() {
     .expect("Failed to create user");
 
     // Add two keys
+    ensure_binding_downstream(&state, "key1").await;
     store.add_downstream_binding_with_label(&user.id, "key1", Some("Key 1"), Some("basic"))
         .await
         .expect("Failed to add key1");
 
+    ensure_binding_downstream(&state, "key2").await;
     store.add_downstream_binding_with_label(&user.id, "key2", Some("Key 2"), Some("premium"))
         .await
         .expect("Failed to add key2");
@@ -510,6 +530,7 @@ async fn test_rotate_key() {
         .grant_user_model_group(&user.id, "premium", Some("admin"))
         .await
         .expect("grant premium");
+    ensure_binding_downstream(&state, "old-key-1").await;
     store.add_downstream_binding_with_label(&user.id, "old-key-1", Some("Production Key"), Some("premium"))
         .await
         .expect("Failed to add key");
@@ -620,10 +641,12 @@ async fn test_delete_key_success() {
     .expect("Failed to create user");
 
     // Add two keys
+    ensure_binding_downstream(&state, "key1").await;
     store.add_downstream_binding_with_label(&user.id, "key1", Some("Key 1"), Some("basic"))
         .await
         .expect("Failed to add key1");
 
+    ensure_binding_downstream(&state, "key2").await;
     store.add_downstream_binding_with_label(&user.id, "key2", Some("Key 2"), Some("premium"))
         .await
         .expect("Failed to add key2");
@@ -679,7 +702,7 @@ async fn test_delete_key_success() {
 }
 
 #[tokio::test]
-async fn test_delete_key_forbidden_default() {
+async fn test_delete_default_key_succeeds_and_revokes_policy() {
     let _guard = common::oidc::lock().await;
     let url = database_url();
 
@@ -704,6 +727,7 @@ async fn test_delete_key_forbidden_default() {
     .expect("Failed to create user");
 
     // Add a key and set as default
+    ensure_binding_downstream(&state, "default-key").await;
     store.add_downstream_binding_with_label(&user.id, "default-key", Some("Default Key"), Some("basic"))
         .await
         .expect("Failed to add key");
@@ -723,7 +747,7 @@ async fn test_delete_key_forbidden_default() {
     // Build the app
     let app = chat_responses_codex::server::build_router(state.clone());
 
-    // Try to delete default key
+    // 设计 2.4：删除密钥必须在成功响应前撤销 API 可用性（默认密钥可删）。
     let req = Request::builder()
         .uri("/api/portal/keys/default-key")
         .method("DELETE")
@@ -733,18 +757,23 @@ async fn test_delete_key_forbidden_default() {
 
     let response = app.oneshot(req).await.unwrap();
 
-    // GREEN: Expect 403 FORBIDDEN
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+    // 策略撤销：mode=deny、owner 置空（封闭状态），拒绝新目录/请求。
+    let policies = store
+        .access_policies(&["default-key".to_string()])
         .await
         .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["error"]["message"].as_str().unwrap().contains("default or in use"));
+    let policy = &policies["default-key"];
+    assert_eq!(
+        policy.mode,
+        chat_responses_codex::state::AccessMode::Deny
+    );
+    assert_eq!(policy.owner_user_id, None);
 }
 
 #[tokio::test]
-async fn test_delete_key_forbidden_used() {
+async fn test_delete_used_key_succeeds_and_keeps_history() {
     let _guard = common::oidc::lock().await;
     let url = database_url();
 
@@ -769,10 +798,12 @@ async fn test_delete_key_forbidden_used() {
     .expect("Failed to create user");
 
     // Add two keys
+    ensure_binding_downstream(&state, "used-key").await;
     store.add_downstream_binding_with_label(&user.id, "used-key", Some("Used Key"), Some("basic"))
         .await
         .expect("Failed to add used-key");
 
+    ensure_binding_downstream(&state, "default-key").await;
     store.add_downstream_binding_with_label(&user.id, "default-key", Some("Default Key"), Some("basic"))
         .await
         .expect("Failed to add default-key");
@@ -803,7 +834,16 @@ async fn test_delete_key_forbidden_used() {
     // Build the app
     let app = chat_responses_codex::server::build_router(state.clone());
 
-    // Try to delete used key
+    // 历史日志保留：response_history 记录不能被密钥删除影响
+    // （该表按 key hash 记录且并行测试共享，比较删除前后计数）。
+    let count_before: i64 = client
+        .query_one("SELECT COUNT(*) FROM response_history", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(count_before > 0, "fixture must have seeded history");
+
+    // 设计 2.4：有使用记录的密钥同样可删；历史日志所需记录保留。
     let req = Request::builder()
         .uri("/api/portal/keys/used-key")
         .method("DELETE")
@@ -813,14 +853,17 @@ async fn test_delete_key_forbidden_used() {
 
     let response = app.oneshot(req).await.unwrap();
 
-    // GREEN: Expect 403 FORBIDDEN
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+    let count_after: i64 = client
+        .query_one("SELECT COUNT(*) FROM response_history", &[])
         .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["error"]["message"].as_str().unwrap().contains("default or in use"));
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        count_after, count_before,
+        "history records must not be deleted by key deletion"
+    );
 }
 
 #[tokio::test]
@@ -946,6 +989,7 @@ async fn test_update_key_model_group() {
         .await
         .expect("Failed to create session");
 
+    ensure_binding_downstream(&state, "key-group-test").await;
     store
         .add_downstream_binding_with_label(
             &user.id,
@@ -1264,9 +1308,11 @@ async fn test_portal_keys_are_hidden_from_admin_downstreams() {
         .iter()
         .map(|item| item["id"].as_str().unwrap().to_string())
         .collect();
+    // 新语义（设计 16）：下游管理已并入门户用户管理，门户自建密钥账号
+    // 同样进入管理端列表，供管理员查看与配置（限额/配额/IP/成本/分组/启停）。
     assert!(
-        !ids.contains(&portal_key_id),
-        "portal key must not appear in admin downstream list: {ids:?}"
+        ids.contains(&portal_key_id),
+        "portal key must appear in admin downstream list: {ids:?}"
     );
 
     // 管理员不能删除门户密钥（管理员视角该资源不存在）
@@ -1427,7 +1473,8 @@ async fn test_admin_can_update_binding_group_and_portal_sees_it() {
         .expect("binding must exist");
     assert_eq!(binding["model_group_id"], "premium");
 
-    // 门户端 model-groups 现在必须能看到 premium（修复 __none__ 问题）
+    // 新语义（设计 4.4）：绑定组不再反向成为用户可见分组——
+    // 门户只看到自己显式授权的组；密钥模型范围由策略模式决定。
     let req = Request::builder()
         .method("GET")
         .uri("/api/portal/model-groups")
@@ -1445,8 +1492,8 @@ async fn test_admin_can_update_binding_group_and_portal_sees_it() {
         .map(|g| g["id"].as_str().unwrap().to_string())
         .collect();
     assert!(
-        group_ids.contains(&"premium".to_string()),
-        "portal model-groups must include binding group premium, got {group_ids:?}"
+        !group_ids.contains(&"premium".to_string()),
+        "binding alone must NOT expose premium as user group, got {group_ids:?}"
     );
     assert!(
         !group_ids.contains(&"deny-all".to_string()),

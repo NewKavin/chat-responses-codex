@@ -63,14 +63,14 @@
         <div class="key-meta">
           <span class="meta-item">
             <Layers :size="12" :stroke-width="1.8" />
-            {{ keyData.model_group_name || keyData.model_group_id }}
+            {{ modelAccessLabel }}
             <el-button
               aria-label="Change model group"
               text
               size="small"
               class="group-change-btn"
               :disabled="loading"
-              @click="showGroupDialog = true"
+              @click="openGroupDialog"
             >
               <Pencil :size="11" :stroke-width="1.8" />
             </el-button>
@@ -142,16 +142,22 @@
       </template>
     </el-dialog>
 
-    <!-- Change Model Group Dialog -->
+    <!-- Change Model Access Dialog -->
     <el-dialog
       v-model="showGroupDialog"
-      title="更改模型分组"
+      title="更改模型访问"
       width="min(440px, calc(100vw - 32px))"
     >
       <p class="group-dialog-hint">
-        当前分组：{{ keyData.model_group_name || keyData.model_group_id }}。切换后该密钥只能请求新分组允许的模型。
+        当前：{{ modelAccessLabel }}。inherit 使用您全部授权分组的并集；group 只允许所选分组；deny 拒绝一切。
       </p>
+      <el-radio-group v-model="selectedMode" style="margin-top: 12px; width: 100%">
+        <el-radio value="inherit">继承（我的全部授权）</el-radio>
+        <el-radio value="group">限定分组</el-radio>
+        <el-radio value="deny">拒绝</el-radio>
+      </el-radio-group>
       <el-select
+        v-if="selectedMode === 'group'"
         v-model="selectedGroupId"
         placeholder="选择模型分组"
         style="width: 100%; margin-top: 12px"
@@ -168,7 +174,7 @@
         <el-button @click="showGroupDialog = false">取消</el-button>
         <el-button
           type="primary"
-          :disabled="!selectedGroupId || loading"
+          :disabled="selectedMode === 'group' && (!selectedGroupId || loading)"
           @click="handleGroupChange"
         >
           确认更改
@@ -221,7 +227,10 @@ interface Props {
   onRotate: (downstreamId: string) => Promise<void>
   onDelete: (downstreamId: string) => Promise<void>
   onSetDefault: (downstreamId: string) => Promise<void>
-  onChangeModelGroup: (downstreamId: string, modelGroupId: string) => Promise<void>
+  onChangeModelAccess: (
+    downstreamId: string,
+    modelAccess: { mode: 'inherit' | 'group' | 'deny'; group_id?: string | null }
+  ) => Promise<void>
 }
 
 const props = defineProps<Props>()
@@ -233,7 +242,27 @@ const error = ref<string | null>(null)
 const showRotateDialog = ref(false)
 const showDeleteDialog = ref(false)
 const showGroupDialog = ref(false)
+const selectedMode = ref<'inherit' | 'group' | 'deny'>('inherit')
 const selectedGroupId = ref('')
+
+const modelAccessLabel = computed(() => {
+  const access = props.keyData.model_access
+  if (!access) {
+    return props.keyData.model_group_name || props.keyData.model_group_id || 'basic'
+  }
+  if (access.mode === 'inherit') return '继承（我的全部授权）'
+  if (access.mode === 'deny') return '拒绝一切'
+  const group = props.modelGroups.find(g => g.id === access.group_id)
+  return `分组：${group?.name || access.group_id || '（无）'}`
+})
+
+const openGroupDialog = () => {
+  const access = props.keyData.model_access
+  selectedMode.value = access?.mode ?? (props.keyData.model_group_id ? 'group' : 'inherit')
+  selectedGroupId.value =
+    selectedMode.value === 'group' ? (access?.group_id ?? props.keyData.model_group_id ?? '') : ''
+  showGroupDialog.value = true
+}
 
 const formattedTime = computed(() => {
   const seconds = Date.now() / 1000 - props.keyData.created_at
@@ -299,11 +328,14 @@ const handleSetDefault = async () => {
 }
 
 const handleGroupChange = async () => {
-  if (!selectedGroupId.value) return
+  if (selectedMode.value === 'group' && !selectedGroupId.value) return
   loading.value = true
   error.value = null
   try {
-    await props.onChangeModelGroup(props.keyData.downstream_id, selectedGroupId.value)
+    await props.onChangeModelAccess(props.keyData.downstream_id, {
+      mode: selectedMode.value,
+      group_id: selectedMode.value === 'group' ? selectedGroupId.value : null
+    })
     showGroupDialog.value = false
     selectedGroupId.value = ''
   } catch (err: any) {

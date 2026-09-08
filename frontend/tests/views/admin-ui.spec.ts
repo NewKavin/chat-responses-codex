@@ -48,10 +48,16 @@ describe('admin ui structure', () => {
     expect(users).toContain('openEditConfig')
     expect(users).toContain('accountConfigs')
     expect(users).toContain('type="selection"')
-    // 绑定分组可保存（内联下拉 + PUT）
-    expect(users).toContain('updateBindingGroup')
-    expect(users).toContain('updatePortalUserBinding')
-    expect(users).toContain('绑定分组已保存')
+    // 模型访问契约：绑定行只读展示 + 编辑配置对话框改模型访问 + 批量部分失败回读
+    expect(users).toContain('modelAccessLabel')
+    expect(users).toContain('batchAccessMode')
+    expect(users).toContain('model_access')
+    expect(users).toContain('batchApplyGroup')
+    expect(users).toContain('addPortalUserBinding')
+    // 迁移修复与跨用户批量授权入口
+    expect(users).toContain('loadMigrationSummary')
+    expect(users).toContain('applyMigrationSelection')
+    expect(users).toContain('batchUserModelGroups')
     // 合并自下游管理的完整配置能力：限速/配额/并发组/Token/成本/IP/过期
     expect(users).toContain('rate_limit_enabled')
     expect(users).toContain('ip_allowlist')

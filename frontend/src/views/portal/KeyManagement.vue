@@ -50,7 +50,7 @@
           @rotate="handleRotate"
           @delete="handleDelete"
           @set-default="handleSetDefault"
-          @change-model-group="handleChangeModelGroup"
+          @change-model-access="handleChangeModelAccess"
         />
       </div>
       <footer class="key-count">
@@ -71,11 +71,17 @@
             placeholder="为密钥添加备注标签"
           />
         </el-form-item>
-        <el-form-item label="模型分组">
+        <el-form-item label="模型访问">
+          <el-radio-group v-model="newKeyForm.mode" style="width: 100%">
+            <el-radio value="inherit">继承（我的全部授权）</el-radio>
+            <el-radio value="group">限定分组</el-radio>
+            <el-radio value="deny">拒绝</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="newKeyForm.mode === 'group'" label="模型分组">
           <el-select
             v-model="newKeyForm.model_group_id"
-            placeholder="选择模型分组（默认 basic）"
-            clearable
+            placeholder="选择模型分组"
             style="width: 100%"
           >
             <el-option
@@ -136,8 +142,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, RotateCw, KeyRound, Copy } from '@lucide/vue'
-import { portalApi, type ModelGroup, type PortalKey } from '@/api/portal'
+import { portalApi, type ModelAccessSelection, type ModelGroup, type PortalKey } from '@/api/portal'
 import KeyCard from '@/components/KeyCard.vue'
+import { usePortalStore } from '@/stores/portal'
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -146,6 +153,7 @@ const showAddDialog = ref(false)
 const modelGroups = ref<ModelGroup[]>([])
 const newKeyForm = ref({
   label: '',
+  mode: 'inherit' as 'inherit' | 'group' | 'deny',
   model_group_id: ''
 })
 const showSecretDialog = ref(false)
@@ -176,15 +184,20 @@ const loadKeys = async () => {
 
 const handleCreate = async () => {
   try {
+    const modelAccess =
+      newKeyForm.value.mode === 'group'
+        ? { mode: 'group' as const, group_id: newKeyForm.value.model_group_id || null }
+        : { mode: newKeyForm.value.mode }
     const { data } = await portalApi.createKey({
       label: newKeyForm.value.label || undefined,
-      model_group_id: newKeyForm.value.model_group_id || 'basic'
+      model_access: modelAccess
     })
     ElMessage.success('密钥添加成功')
     showAddDialog.value = false
-    newKeyForm.value = { label: '', model_group_id: '' }
+    newKeyForm.value = { label: '', mode: 'inherit', model_group_id: '' }
     showSecret(data)
     await loadKeys()
+    usePortalStore().primeSelection(keys.value)
   } catch (err: any) {
     ElMessage.error(err.message || '添加密钥失败')
   }
@@ -249,13 +262,20 @@ const handleSetDefault = async (downstreamId: string) => {
   }
 }
 
-const handleChangeModelGroup = async (downstreamId: string, modelGroupId: string) => {
+const handleChangeModelAccess = async (
+  downstreamId: string,
+  modelAccess: ModelAccessSelection
+) => {
   try {
-    await portalApi.updateKeyModelGroup(downstreamId, modelGroupId)
-    ElMessage.success('模型分组已更新')
+    await portalApi.updateKeyModelAccess(downstreamId, {
+      mode: modelAccess.mode,
+      group_id: modelAccess.mode === 'group' ? modelAccess.group_id || null : null
+    })
+    ElMessage.success('模型访问已更新')
     await loadKeys()
+    usePortalStore().primeSelection(keys.value)
   } catch (err: any) {
-    ElMessage.error(err.message || '更新模型分组失败')
+    ElMessage.error(err.message || '更新模型访问失败')
     throw err
   }
 }

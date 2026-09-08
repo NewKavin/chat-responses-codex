@@ -178,7 +178,9 @@ async fn test_list_user_accessible_groups_filters_by_permission() {
     assert!(!ids.contains(&"all"), "Should NOT see 'all' group without grant");
 }
 
-/// 测试：密钥绑定（portal_user_downstreams）的分组也算用户可用分组
+/// 测试（新语义，设计 4.4）：密钥绑定（portal_user_downstreams）的分组
+/// **不再**反向算作用户可用分组——用户授权只来自 portal_user_model_groups。
+/// 管理员显式授权后该组才对用户可见。
 #[tokio::test]
 async fn test_list_user_accessible_groups_includes_binding_groups() {
     let _guard = common::oidc::lock().await;
@@ -196,7 +198,7 @@ async fn test_list_user_accessible_groups_includes_binding_groups() {
     let user_id = "test-user-binding-groups";
     ensure_user(&store, user_id).await;
 
-    // 管理员给用户绑定一把密钥并指定 premium 分组（绑定级）
+    // 管理员给用户绑定一把密钥并指定 premium 分组（绑定级，未显式授权）
     let client = store.get_client().await.expect("get client");
     client
         .execute(
@@ -214,10 +216,25 @@ async fn test_list_user_accessible_groups_includes_binding_groups() {
 
     let ids: Vec<&str> = groups.iter().map(|g| g.id.as_str()).collect();
     assert!(
-        ids.contains(&"premium"),
-        "binding group must be visible to the user, got {ids:?}"
+        !ids.contains(&"premium"),
+        "binding alone must NOT grant group visibility, got {ids:?}"
     );
     assert!(ids.contains(&"basic"), "basic must still be visible");
+
+    // 显式授权后可见。
+    store
+        .grant_user_model_group(user_id, "premium", Some("admin"))
+        .await
+        .expect("grant premium");
+    let groups = store
+        .list_user_accessible_model_groups(user_id)
+        .await
+        .expect("list groups after grant");
+    let ids: Vec<&str> = groups.iter().map(|g| g.id.as_str()).collect();
+    assert!(
+        ids.contains(&"premium"),
+        "granted group must be visible to the user, got {ids:?}"
+    );
 }
 
 /// 测试：不能撤销 basic 分组的访问权限

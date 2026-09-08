@@ -4,6 +4,21 @@
 mod common;
 
 use chat_responses_codex::server::build_router;
+use chat_responses_codex::state::AppState;
+
+/// 新策略模型：被绑定密钥必须真实存在（防孤儿绑定），绑定前先建档。
+async fn ensure_binding_downstream(state: &AppState, downstream_id: &str) {
+    if state.downstream_config(downstream_id).await.is_some() {
+        return;
+    }
+    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
+    ds.id = downstream_id.to_string();
+    ds.name = downstream_id.to_string();
+    state
+        .insert_downstream(ds)
+        .await
+        .expect("insert downstream fixture");
+}
 use tower::ServiceExt;
 use axum::http::StatusCode;
 use serde_json::json;
@@ -160,6 +175,7 @@ async fn test_portal_update_key_group_checks_permission() {
         .await
         .unwrap();
 
+    ensure_binding_downstream(&state, downstream_id).await;
     store
         .add_downstream_binding_with_label(user_id, downstream_id, Some("Test Key"), Some("basic"))
         .await

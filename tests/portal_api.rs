@@ -1146,7 +1146,7 @@ async fn test_portal_models_preserves_canonical_upstream_model_casing() {
 
     let glm5 = models
         .iter()
-        .find(|model| model["model"] == "ZhipuAI/GLM-5");
+        .find(|model| model["model"] == "zhipuai/glm-5");
     assert!(glm5.is_some());
     let glm5 = glm5.unwrap();
     assert_eq!(glm5["today_count"], 2);
@@ -1154,13 +1154,13 @@ async fn test_portal_models_preserves_canonical_upstream_model_casing() {
 
     let minimax = models
         .iter()
-        .find(|model| model["model"] == "MiniMax/MiniMax-M2.7");
+        .find(|model| model["model"] == "minimax/minimax-m2.7");
     assert!(minimax.is_some());
     let minimax = minimax.unwrap();
     assert_eq!(minimax["today_count"], 1);
     assert_eq!(minimax["month_count"], 1);
 
-    assert!(!models.iter().any(|model| model["model"] == "zhipuai/glm-5"));
+    assert!(!models.iter().any(|model| model["model"] == "ZhipuAI/GLM-5"));
     assert!(!models
         .iter()
         .any(|model| model["model"] == "legacy/lowercase-model"));
@@ -1708,7 +1708,7 @@ async fn test_portal_quota_exposes_per_model_context_limits() {
     // GLM-5 is on two active upstreams (400k and 128k) and one inactive (8k).
     // We take the min across active upstreams to be safe (smallest window wins).
     let glm = contexts
-        .get("ZhipuAI/GLM-5")
+        .get("zhipuai/glm-5")
         .expect("GLM-5 context entry must be present");
     assert_eq!(
         glm.get("context_window").and_then(Value::as_u64),
@@ -1718,7 +1718,7 @@ async fn test_portal_quota_exposes_per_model_context_limits() {
 
     // MiniMax is only on the large upstream and resolves via default_model_context.
     let minimax = contexts
-        .get("MiniMax/MiniMax-M2.7")
+        .get("minimax/minimax-m2.7")
         .expect("MiniMax context entry must be present");
     assert_eq!(
         minimax.get("context_window").and_then(Value::as_u64),

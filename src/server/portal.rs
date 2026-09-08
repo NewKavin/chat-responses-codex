@@ -1,7 +1,7 @@
 use crate::keys::generate_downstream_key;
 use crate::state::{
     unix_seconds, AppState, DownstreamConcurrencySnapshot, DownstreamConfig, EnrichedUsageLog,
-    UsageLogQuery,
+    UsageLogQuery, AllowedModels, ModelAccessSelection, PortalStoreError,
 };
 use uuid::Uuid;
 use axum::extract::{Json, Query, State};
@@ -77,7 +77,7 @@ pub(super) async fn portal_login(
             .into_response();
     }
 
-    match crate::auth::generate_admin_token(&body.employee_id, &state.config.jwt_secret) {
+    match crate::auth::generate_portal_token(&body.employee_id, &state.config.jwt_secret) {
         Ok(token) => (
             StatusCode::OK,
             Json(json!({
@@ -104,13 +104,25 @@ pub(super) async fn portal_login(
 /// Portal overview
 pub(super) async fn portal_overview(
     State(state): State<AppState>,
+    Query(query): Query<PortalScopeQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Extract downstream ID from Bearer token
-    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+    // 显式 downstream_id（所选密钥权限）优先；缺省仍走 cookie 默认/Bearer。
+    let downstream_id = match resolve_portal_downstream_scope(&state, &headers, query.downstream_id.as_deref()).await {
         Ok(id) => id,
         Err(response) => return response,
     };
+    let scope = if query.downstream_id.is_some() { "key" } else { "user" };
+
+    // 概览的用户模型范围（M05）：独立于所选密钥统计。
+    let user_available_models = if let Ok(user_id) = extract_user_id_from_session(&state, &headers).await {
+        if let Some(store) = state.portal_store() {
+            let catalog = state.model_catalog().await;
+            store.resolve_user_access(&user_id, &catalog).await
+                .map(|access| access.allowed.legacy_projection())
+                .unwrap_or_default()
+        } else { Vec::new() }
+    } else { Vec::new() };
 
     let snapshot = state.routing_snapshot().await;
     let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
@@ -170,6 +182,7 @@ pub(super) async fn portal_overview(
     let model_summary = json!({
         "total_models": summary.total_models,
         "active_models": summary.active_models,
+        "user_available_models": user_available_models,
     });
 
     let concurrency = state
@@ -188,6 +201,8 @@ pub(super) async fn portal_overview(
         });
 
     Json(json!({
+        "downstream_id": downstream_id,
+        "scope": scope,
         "quota_summary": quota_summary,
         "token_summary": token_summary,
         "cost_summary": cost_summary,
@@ -200,9 +215,10 @@ pub(super) async fn portal_overview(
 /// Portal quota details
 pub(super) async fn portal_quota(
     State(state): State<AppState>,
+    Query(query): Query<PortalScopeQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+    let downstream_id = match resolve_portal_downstream_scope(&state, &headers, query.downstream_id.as_deref()).await {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -226,9 +242,9 @@ pub(super) async fn portal_quota(
             tracing::warn!(
                 downstream_key_id = %downstream.id,
                 error = %error,
-                "failed to resolve model group for portal quota; degrading to allowlist"
+                "failed to resolve model access for portal quota"
             );
-            downstream.model_allowlist.clone()
+            return portal_access_error(PortalStoreError::Db(error));
         }
     };
 
@@ -262,6 +278,7 @@ pub(super) async fn portal_quota(
     });
 
     Json(json!({
+        "downstream_id": downstream_id,
         "per_minute_limit": per_minute_limit,
         "request_quota": request_quota,
         "cost_quota": {
@@ -463,9 +480,10 @@ pub(super) async fn portal_usage_summary(
 /// Portal models
 pub(super) async fn portal_models(
     State(state): State<AppState>,
+    Query(query): Query<PortalScopeQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+    let downstream_id = match resolve_portal_downstream_scope(&state, &headers, query.downstream_id.as_deref()).await {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -484,14 +502,20 @@ pub(super) async fn portal_models(
 
     let model_stats = state.compute_model_stats(downstream).await;
 
-    Json(model_stats).into_response()
+    // 原数组响应保持数组结构，通过 X-Portal-Downstream-Id 头回显作用域。
+    (
+        [(header::HeaderName::from_static("x-portal-downstream-id"), downstream_id)],
+        Json(model_stats),
+    )
+        .into_response()
 }
 
 pub(super) async fn portal_model_probe(
     State(state): State<AppState>,
+    Query(query): Query<PortalScopeQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+    let downstream_id = match resolve_portal_downstream_scope(&state, &headers, query.downstream_id.as_deref()).await {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -509,7 +533,7 @@ pub(super) async fn portal_model_probe(
     };
 
     // 阶段 1：probe 目录与有效白名单一致（分组优先）；解析失败降级回 allowlist。
-    let effective_allowlist = match state.effective_model_allowlist(&downstream).await {
+    let effective_allowlist = match state.effective_model_allowlist(downstream).await {
         Ok(models) => models,
         Err(error) => {
             tracing::warn!(
@@ -517,7 +541,7 @@ pub(super) async fn portal_model_probe(
                 error = %error,
                 "failed to resolve model group for probe; degrading to allowlist"
             );
-            downstream.model_allowlist.clone()
+            return portal_access_error(PortalStoreError::Db(error));
         }
     };
     let response = super::admin::build_model_probe_response(
@@ -678,32 +702,18 @@ pub(super) async fn portal_session_info(
         )
             .into_response();
     };
-    let Some(cookie) = crate::server::portal_oidc::session_cookie_value(&headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": {"message": "no portal session"}})),
-        )
-            .into_response();
+    // cookie 优先（OIDC 登录）；否则回退 legacy 门户 JWT / 下游密钥，
+    // 通过策略 owner 定位用户。统一 principal，不出现"显示 B 却请求 A"。
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
     };
-    let sid_hash = crate::server::portal_oidc::sha256_hex(cookie.as_bytes());
-    let session = match store.find_session(&sid_hash).await {
-        Ok(Some(session)) => session,
-        Ok(None) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"message": "invalid or expired portal session"}})),
-            )
-                .into_response()
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": error.to_string()}})),
-            )
-                .into_response()
-        }
+    let auth_method = if crate::server::portal_oidc::session_cookie_value(&headers).is_some() {
+        "cookie"
+    } else {
+        "legacy"
     };
-    let user = match store.find_user_by_id(&session.user_id).await {
+    let user = match store.find_user_by_id(&user_id).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             return (
@@ -720,9 +730,30 @@ pub(super) async fn portal_session_info(
                 .into_response()
         }
     };
+    let bindings = match store.list_downstream_bindings(&user.id).await {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": error.to_string()}})),
+            )
+                .into_response()
+        }
+    };
+    let default_downstream_id = bindings
+        .iter()
+        .find(|binding| binding.is_default)
+        .map(|binding| binding.downstream_id.clone());
+    // legacy 登录（工号+密钥）的 JWT sub 即登录下游；OIDC cookie 登录无此来源。
+    let login_downstream_id = if auth_method == "cookie" {
+        None
+    } else {
+        extract_downstream_id_from_bearer(&state, &headers).await.ok()
+    };
     (
         StatusCode::OK,
         Json(json!({
+            "auth_method": auth_method,
             "user": {
                 "id": user.id,
                 "email": user.email,
@@ -730,7 +761,10 @@ pub(super) async fn portal_session_info(
                 "username": user.username,
                 "provider": user.provider,
                 "subject": user.subject,
-            }
+            },
+            "login_downstream_id": login_downstream_id,
+            "default_downstream_id": default_downstream_id,
+            "has_keys": !bindings.is_empty(),
         })),
     )
         .into_response()
@@ -787,7 +821,7 @@ async fn extract_downstream_id_from_bearer(
     }
 
     if token.starts_with("eyJ") {
-        match crate::auth::verify_admin_token(token, &state.config.jwt_secret) {
+        match crate::auth::verify_principal_token(token, &state.config.jwt_secret) {
             Ok(claims) => return Ok(claims.sub),
             Err(_) => {
                 return Err((
@@ -808,6 +842,48 @@ async fn extract_downstream_id_from_bearer(
         Json(json!({"error": {"message": "Invalid Bearer token"}})),
     )
         .into_response())
+}
+
+#[derive(Default, Deserialize)]
+pub(super) struct PortalScopeQuery {
+    /// 显式选定密钥（设计 5.4）：必须先验证属于当前 principal；
+    /// 越权 ID 直接拒绝且不回退默认选择。
+    pub downstream_id: Option<String>,
+}
+
+/// 解析门户统计/目录类接口的目标密钥。
+/// - 未显式指定：沿用旧默认选择（cookie 默认绑定 → Bearer 解析）。
+/// - 显式指定：principal + 唯一 owner 校验；越权/缺策略一律拒绝。
+async fn resolve_portal_downstream_scope(
+    state: &AppState,
+    headers: &HeaderMap,
+    explicit: Option<&str>,
+) -> Result<String, Response> {
+    let Some(downstream_id) = explicit else {
+        return extract_downstream_id_from_bearer(state, headers).await;
+    };
+    let user_id = extract_user_id_from_session(state, headers).await?;
+    let Some(store) = state.portal_store() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "portal store unavailable"}})),
+        )
+            .into_response());
+    };
+    let policies = store
+        .access_policies(&[downstream_id.to_string()])
+        .await
+        .map_err(portal_access_error)?;
+    if policies
+        .get(downstream_id)
+        .and_then(|policy| policy.owner_user_id.as_ref())
+        != Some(&user_id)
+    {
+        return Err(portal_access_error(
+            PortalStoreError::Forbidden("key_owner_mismatch".into()),
+        ));
+    }
+    Ok(downstream_id.to_string())
 }
 
 /// Helper function to extract user_id for the multi-key API.
@@ -882,6 +958,7 @@ async fn extract_user_id_from_session(
 pub(super) struct CreateKeyRequest {
     label: Option<String>,
     model_group_id: Option<String>,
+    model_access: Option<ModelAccessSelection>,
 }
 
 
@@ -925,119 +1002,120 @@ pub(super) async fn portal_create_key(
     headers: HeaderMap,
     Json(payload): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
-    // Extract user_id from session cookie
     let user_id = match extract_user_id_from_session(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-
     let Some(store) = state.portal_store() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Portal store not available"}})),
-        )
-            .into_response();
+        return portal_access_error(PortalStoreError::Db("portal store unavailable".into()));
     };
-
-    // Resolve the model group: explicit id validated against existing groups,
-    // otherwise fall back to the conservative default.
-    let model_group_id = payload.model_group_id.as_deref().unwrap_or("basic");
-    if store.get_model_group(model_group_id).await.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": {
-                "code": "model_group_not_found",
-                "message": format!("Model group '{}' does not exist", model_group_id)
-            }})),
-        )
-            .into_response();
+    if payload.model_access.is_some() && payload.model_group_id.is_some() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":{"message":"use model_access or model_group_id, not both"}}))).into_response();
     }
-
-    // The user may only create keys bound to groups they have been granted
-    // (mirrors the update path; prevents escalating to arbitrary groups).
-    match store.user_can_access_model_group(&user_id, model_group_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": {
-                        "code": "model_group_forbidden",
-                        "message": format!(
-                            "You do not have access to model group '{}'",
-                            model_group_id
-                        )
-                    }
-                })),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": error.to_string()}})),
-            )
-                .into_response();
+    let selection = payload.model_access.unwrap_or_else(|| {
+        payload.model_group_id.as_deref().map(ModelAccessSelection::from_group_id).unwrap_or_default()
+    });
+    if let Err(message) = selection.validate() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":{"message":message}}))).into_response();
+    }
+    if let Some(group) = &selection.group_id {
+        if let Err(error) = store.get_model_group(group).await { return portal_access_error(error); }
+        match store.user_can_access_model_group(&user_id, group).await {
+            Ok(true) => {}
+            Ok(false) => return portal_access_error(PortalStoreError::Forbidden("model_group_forbidden".into())),
+            Err(error) => return portal_access_error(error),
         }
     }
-
-    // 密钥 ID/密钥本体都由服务端生成（用户不需要也不应该填 ID）。
     let generated = generate_downstream_key("sk");
     let new_id = format!("key-{}", Uuid::new_v4().simple());
-
-    // 门户密钥的权限由绑定级分组管控；key 级必须放行（T12 默认 deny-all
-    // 会挡住一切请求），故显式落 all 组。
     let downstream = DownstreamConfig {
         id: new_id.clone(),
-        name: payload
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("Portal Key {}", &new_id[7..19])),
-        hash: generated.hash.clone(),
+        name: payload.label.clone().unwrap_or_else(|| "Portal key".into()),
+        hash: generated.hash,
         plaintext_key: Some(generated.plaintext.clone()),
         active: true,
-        model_group_id: Some("all".to_string()),
-        // 门户自建密钥账号：管理员视角隐藏
-        is_portal_key: true,
         ..Default::default()
     };
-    if let Err(error) = state.insert_downstream(downstream).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": format!("Failed to create key: {error}")}})),
-        )
-            .into_response();
+    if let Err(error) = state.insert_portal_downstream(
+        downstream, &user_id, payload.label.clone(), selection.clone(),
+    ).await {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string()}}))).into_response();
     }
+    (StatusCode::CREATED, Json(json!({
+        "success":true,"downstream_id":new_id,"label":payload.label,
+        "model_access":selection,"model_group_id":selection.group_id,
+        "plaintext_key":generated.plaintext,
+    }))).into_response()
+}
 
-    if store
-        .add_downstream_binding_with_label(
-            &user_id,
-            &new_id,
-            payload.label.as_deref(),
-            Some(model_group_id),
-        )
-        .await
-        .is_err()
-    {
-        let _ = state.remove_downstream(&new_id).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Failed to create key"}})),
-        )
-            .into_response();
-    }
+pub(super) fn portal_access_error(error: PortalStoreError) -> Response {
+    let (status, code) = match &error {
+        PortalStoreError::NotFound => (StatusCode::NOT_FOUND, "model_group_not_found"),
+        PortalStoreError::Conflict(_) => (StatusCode::CONFLICT, "access_conflict"),
+        PortalStoreError::Forbidden(_) => (StatusCode::FORBIDDEN, "model_group_forbidden"),
+        PortalStoreError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, "model_group_check_failed"),
+    };
+    (status, Json(json!({"error":{"code":code,"message":error.to_string()}}))).into_response()
+}
 
-    (
-        StatusCode::CREATED,
-        Json(json!({
-            "success": true,
-            "downstream_id": new_id,
-            "label": payload.label,
-            "model_group_id": model_group_id,
-            "plaintext_key": generated.plaintext,
-        })),
-    )
-        .into_response()
+#[derive(Default, Deserialize)]
+pub(super) struct ModelAccessQuery {
+    pub downstream_id: Option<String>,
+}
+
+pub(super) async fn portal_model_access(
+    State(state): State<AppState>,
+    Query(query): Query<ModelAccessQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let user_id = match extract_user_id_from_session(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    let Some(store) = state.portal_store() else {
+        return portal_access_error(PortalStoreError::Db("portal store unavailable".into()));
+    };
+    let catalog = state.model_catalog().await;
+    let access = if let Some(id) = &query.downstream_id {
+        let policies = match store.access_policies(std::slice::from_ref(id)).await {
+            Ok(policies) => policies,
+            Err(error) => return portal_access_error(error),
+        };
+        if policies.get(id).and_then(|p| p.owner_user_id.as_ref()) != Some(&user_id) {
+            return portal_access_error(PortalStoreError::Forbidden("key_owner_mismatch".into()));
+        }
+        let Some(downstream) = state.downstream_config(id).await else {
+            return portal_access_error(PortalStoreError::NotFound);
+        };
+        let mut access = match state.resolved_model_access_with_catalog(&downstream,&catalog).await {
+            Ok(access) => access,
+            Err(error) => return portal_access_error(PortalStoreError::Db(error)),
+        };
+        if !downstream.active || downstream.expires_at.is_some_and(|expiry| expiry <= unix_seconds()) {
+            access.allowed = AllowedModels::None;
+            access.reason = Some(if downstream.active { "key_expired" } else { "key_disabled" }.into());
+        }
+        access
+    } else {
+        match store.resolve_user_access(&user_id, &catalog).await {
+            Ok(access) => access,
+            Err(error) => return portal_access_error(error),
+        }
+    };
+    let models: Vec<String> = catalog.models().iter().filter(|model| access.allowed.allows(&model.id))
+        .map(|model| model.name.clone()).collect();
+    let status = if access.allowed == AllowedModels::None { "denied" }
+        else if models.is_empty() { "no_routes" } else { "ready" };
+    Json(json!({
+        "user_id":user_id,"scope":if query.downstream_id.is_some() { "key" } else { "user" },
+        "downstream_id":query.downstream_id,"available_models":models,"status":status,"reason":access.reason,
+        "source":{
+            "user_group_ids":access.user_group_ids,
+            "mode":access.policy.as_ref().map(|p| p.mode),
+            "key_group_id":access.policy.as_ref().and_then(|p| p.selection().group_id),
+        },
+        "model_access":access.policy.as_ref().map(|p| p.selection()),
+    })).into_response()
 }
 
 pub(super) async fn portal_get_key_by_id(
@@ -1091,135 +1169,31 @@ pub(super) async fn portal_rotate_key_by_id(
     headers: HeaderMap,
     axum::extract::Path(old_downstream_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    // Extract user_id from session cookie
     let user_id = match extract_user_id_from_session(&state, &headers).await {
-        Ok(id) => id,
-        Err(response) => return response,
+        Ok(id) => id, Err(response) => return response,
     };
-
     let Some(store) = state.portal_store() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Portal store not available"}})),
-        )
-            .into_response();
+        return portal_access_error(PortalStoreError::Db("portal store unavailable".into()));
     };
-
-    // Get old key details
-    let keys = match store.list_downstream_bindings_with_labels(&user_id).await {
-        Ok(keys) => keys,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "Failed to list keys"}})),
-            )
-                .into_response();
-        }
+    let policies = match store.access_policies(std::slice::from_ref(&old_downstream_id)).await {
+        Ok(policies) => policies, Err(error) => return portal_access_error(error),
     };
-
-    let old_key = match keys.iter().find(|k| k.downstream_id == old_downstream_id) {
-        Some(key) => key,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": {"message": "Old key not found"}})),
-            )
-                .into_response();
-        }
+    let Some(old_policy) = policies.get(&old_downstream_id) else {
+        return portal_access_error(PortalStoreError::NotFound);
     };
-
-    let was_default = old_key.is_default;
-    let model_group_id = (!old_key.model_group_id.is_empty()).then_some(old_key.model_group_id.as_str());
-
-    // Re-verify the old key's group is still accessible: a revoked grant must
-    // not be resurrected by rotating the key.
-    if let Some(group_id) = model_group_id {
-        match store.user_can_access_model_group(&user_id, group_id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({
-                        "error": {
-                            "code": "model_group_forbidden",
-                            "message": format!(
-                                "You do not have access to model group '{}'",
-                                group_id
-                            )
-                        }
-                    })),
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"message": error.to_string()}})),
-                )
-                    .into_response();
-            }
-        }
+    if old_policy.owner_user_id.as_ref() != Some(&user_id) {
+        return portal_access_error(PortalStoreError::Forbidden("key_owner_mismatch".into()));
     }
-
-    // 新密钥由服务端生成（新 ID + 新 secret），保留 label 与绑定级分组。
-    let label: Option<&str> = (!old_key.label.is_empty()).then_some(old_key.label.as_str());
     let generated = generate_downstream_key("sk");
     let new_id = format!("key-{}", Uuid::new_v4().simple());
-
-    let downstream = DownstreamConfig {
-        id: new_id.clone(),
-        name: label.unwrap_or("Portal Key").to_string(),
-        hash: generated.hash.clone(),
-        plaintext_key: Some(generated.plaintext.clone()),
-        active: true,
-        model_group_id: Some("all".to_string()),
-        // 门户自建密钥账号：管理员视角隐藏
-        is_portal_key: true,
+    let replacement = DownstreamConfig {
+        id:new_id.clone(),hash:generated.hash,plaintext_key:Some(generated.plaintext.clone()),
         ..Default::default()
     };
-    if let Err(error) = state.insert_downstream(downstream).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": format!("Failed to create key: {error}")}})),
-        )
-            .into_response();
+    if let Err(error) = state.rotate_portal_downstream(&old_downstream_id,replacement,&user_id).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":{"message":error.to_string()}}))).into_response();
     }
-
-    if store
-        .add_downstream_binding_with_label(&user_id, &new_id, label, model_group_id)
-        .await
-        .is_err()
-    {
-        let _ = state.remove_downstream(&new_id).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Failed to add new key"}})),
-        )
-            .into_response();
-    }
-
-    // If old key was default, set new key as default
-    if was_default && store.set_default_key(&user_id, &new_id).await.is_err() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Failed to set new key as default"}})),
-        )
-            .into_response();
-    }
-
-    // 删除旧绑定 + 旧 downstream：旧 secret 立即失效（仅删绑定不够，
-    // 无绑定的 key 级 all 仍会放行）。
-    let _ = store.remove_downstream_binding_safe(&user_id, &old_downstream_id).await;
-    let _ = state.remove_downstream(&old_downstream_id).await;
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "downstream_id": new_id,
-            "plaintext_key": generated.plaintext,
-        })),
-    )
-        .into_response()
+    Json(json!({"downstream_id":new_id,"plaintext_key":generated.plaintext,"model_access":old_policy.selection()})).into_response()
 }
 
 pub(super) async fn portal_set_default_key(
@@ -1272,17 +1246,19 @@ pub(super) async fn portal_delete_key(
             .into_response();
     };
 
-    // Call Task 3 safe delete method
-    match store.remove_downstream_binding_safe(&user_id, &downstream_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": {"message": "Cannot delete: key is default or in use"}})),
-        )
-            .into_response(),
-        Err(_) => (
+    let policies = match store.access_policies(std::slice::from_ref(&downstream_id)).await {
+        Ok(policies) => policies,
+        Err(error) => return portal_access_error(error),
+    };
+    if policies.get(&downstream_id).and_then(|p| p.owner_user_id.as_ref()) != Some(&user_id) {
+        return portal_access_error(PortalStoreError::Forbidden("key_owner_mismatch".into()));
+    }
+    // 设计 2.4：删除密钥必须在成功响应前撤销 API 可用性；历史日志保留。
+    match state.revoke_portal_downstream(&downstream_id, &user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Failed to delete key"}})),
+            Json(json!({"error": {"message": error.to_string()}})),
         )
             .into_response(),
     }
@@ -1399,7 +1375,8 @@ pub(super) async fn portal_update_key_label(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct UpdateKeyModelGroupRequest {
-    model_group_id: String,
+    model_group_id: Option<String>,
+    model_access: Option<ModelAccessSelection>,
 }
 
 pub(super) async fn portal_update_key_model_group(
@@ -1408,70 +1385,21 @@ pub(super) async fn portal_update_key_model_group(
     axum::extract::Path(downstream_id): axum::extract::Path<String>,
     Json(payload): Json<UpdateKeyModelGroupRequest>,
 ) -> impl IntoResponse {
-    // Extract user_id from session cookie
     let user_id = match extract_user_id_from_session(&state, &headers).await {
-        Ok(id) => id,
-        Err(response) => return response,
+        Ok(id) => id, Err(response) => return response,
     };
-
     let Some(store) = state.portal_store() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "Portal store not available"}})),
-        )
-            .into_response();
+        return portal_access_error(PortalStoreError::Db("portal store unavailable".into()));
     };
-
-    // The target group must exist.
-    if store.get_model_group(&payload.model_group_id).await.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": {
-                "code": "model_group_not_found",
-                "message": format!("Model group '{}' does not exist", payload.model_group_id)
-            }})),
-        )
-            .into_response();
-    }
-
-    // 新增：检查用户是否有权访问该分组
-    match store.user_can_access_model_group(&user_id, &payload.model_group_id).await {
-        Ok(true) => {},  // 有权限，继续
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": {
-                        "code": "model_group_forbidden",
-                        "message": format!("You do not have access to model group '{}'", payload.model_group_id)
-                    }
-                })),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": error.to_string()}})),
-            )
-                .into_response();
-        }
-    }
-
-    match store
-        .update_downstream_model_group(&user_id, &downstream_id, &payload.model_group_id)
-        .await
-    {
+    let selection = match (payload.model_access,payload.model_group_id) {
+        (Some(selection),None) => selection,
+        (None,Some(id)) if !id.trim().is_empty() => ModelAccessSelection::from_group_id(&id),
+        _ => return (StatusCode::BAD_REQUEST,Json(json!({"error":{"message":"specify one model_access or model_group_id"}}))).into_response(),
+    };
+    match store.mutate_access(&crate::state::AccessMutation::Update {
+        downstream_id,selection,actor_user_id:Some(user_id),
+    }).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(crate::state::PortalStoreError::NotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "key_not_found", "message": "key not found"}})),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": error.to_string()}})),
-        )
-            .into_response(),
+        Err(error) => portal_access_error(error),
     }
 }
