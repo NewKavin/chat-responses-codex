@@ -232,8 +232,10 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     // plus the 13 portal OIDC wiring keys = 100,
     // plus portal_oidc_userinfo_method and portal_oidc_token_path = 102,
     // plus portal_oidc_uuid_field = 103,
-    // plus upstream_rate_limit_internal_retry_enabled = 104 (B3 gate switch).
-    assert_eq!(body["settings"].as_object().unwrap().len(), 104);
+    // plus upstream_rate_limit_internal_retry_enabled = 104 (B3 gate switch),
+    // plus active_requests_refresh_interval_seconds = 105.
+    assert_eq!(body["settings"].as_object().unwrap().len(), 105);
+    assert_eq!(body["settings"]["active_requests_refresh_interval_seconds"], 2);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }
@@ -413,6 +415,35 @@ async fn runtime_probe_refresh_interval_is_used_by_later_probe_requests() {
         response_json(response).await["refresh_interval_seconds"],
         777
     );
+}
+
+#[tokio::test]
+async fn active_request_refresh_interval_updates_without_restart() {
+    let harness = SettingsHarness::new().await;
+    let response = harness
+        .get_path("/api/admin/troubleshooting/active-requests")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await["refresh_interval_seconds"], 2);
+
+    let mut settings = harness.get().await["settings"].clone();
+    settings["active_requests_refresh_interval_seconds"] = json!(7);
+    let response = harness.put(0, settings).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = response_json(response).await;
+    assert_eq!(saved["restart_required"], false);
+    assert!(saved["applied_immediately"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("active_requests_refresh_interval_seconds")));
+
+    let response = harness
+        .get_path("/api/admin/troubleshooting/active-requests")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["refresh_interval_seconds"], 7);
+    assert_eq!(body["active_requests"], json!([]));
 }
 
 #[tokio::test]

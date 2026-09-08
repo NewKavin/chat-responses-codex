@@ -98,7 +98,7 @@ describe('Dashboard refresh state machine', () => {
     vi.clearAllMocks()
     __resetEchartsLoaderForTests()
     vi.mocked(adminApi.getDashboard).mockResolvedValue({ data: emptyDashboard() } as never)
-    vi.mocked(adminApi.getActiveTroubleshootingRequests).mockResolvedValue({
+    vi.mocked(adminApi.getActiveTroubleshootingRequests).mockReset().mockResolvedValue({
       data: { active_requests: [] }
     } as never)
     vi.mocked(adminApi.getRetryAmplification).mockResolvedValue({
@@ -145,6 +145,64 @@ describe('Dashboard refresh state machine', () => {
     old.resolve({ data: { ...emptyDashboard(), dashboard: { ...emptyDashboard().dashboard, upstreams_count: 99 } } })
     await flushPromises()
     expect(vm.dashboard.upstreams_count).toBe(7)
+  })
+
+  it('refreshes active requests every two seconds by default without changing retry polling', async () => {
+    await mountDashboard()
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1999)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(2)
+    expect(adminApi.getRetryAmplification).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(adminApi.getRetryAmplification).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses the latest response interval for the next active request refresh', async () => {
+    vi.mocked(adminApi.getActiveTroubleshootingRequests)
+      .mockResolvedValueOnce({ data: { active_requests: [], refresh_interval_seconds: 3 } } as never)
+      .mockResolvedValue({ data: { active_requests: [], refresh_interval_seconds: 7 } } as never)
+    await mountDashboard()
+    await vi.advanceTimersByTimeAsync(2999)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(6999)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not stack active request refreshes while a background request is pending', async () => {
+    const wrapper = await mountDashboard()
+    const active = deferred<any>()
+    vi.mocked(adminApi.getActiveTroubleshootingRequests).mockReturnValueOnce(active.promise)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(2)
+    void (wrapper.vm as any).loadActiveRequests()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(2)
+    active.resolve({ data: { active_requests: [], refresh_interval_seconds: 2 } })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(3)
+  })
+
+  it('pauses active request polling while hidden and refreshes on return', async () => {
+    await mountDashboard()
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(1)
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(adminApi.getActiveTroubleshootingRequests).toHaveBeenCalledTimes(3)
   })
 
   it('keeps empty states and loading masks unchanged during a background refresh', async () => {

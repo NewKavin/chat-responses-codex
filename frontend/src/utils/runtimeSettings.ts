@@ -82,6 +82,16 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_SAFE_INTEGER
   },
   {
+    key: 'active_requests_refresh_interval_seconds',
+    group: 'general',
+    label: '在途请求刷新间隔',
+    apply: 'immediate',
+    control: 'number',
+    unit: '秒',
+    min: 1,
+    max: MAX_SAFE_INTEGER
+  },
+  {
     key: 'model_probe_refresh_interval_seconds',
     group: 'discovery',
     label: '模型探测刷新间隔',

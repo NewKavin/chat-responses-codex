@@ -213,8 +213,9 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     // + portal_oidc_userinfo_method and portal_oidc_token_path = 101,
     // + portal_oidc_uuid_field = 102,
     // + upstream_rate_limit_internal_retry_enabled = 103 (B3 gate switch),
-    // + upstream_common_mode_breaker_threshold = 104 (immediate metadata).
-    assert_eq!(all.len(), 104);
+    // + upstream_common_mode_breaker_threshold = 104 (immediate metadata),
+    // + active_requests_refresh_interval_seconds = 105.
+    assert_eq!(all.len(), 105);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
@@ -224,6 +225,7 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     assert!(all.contains("capability_probe_reasoning_timeout_seconds"));
     assert!(all.contains("upstream_concurrency_probe_delays_ms"));
     for field in [
+        "active_requests_refresh_interval_seconds",
         "upstream_transient_route_cooldown_base_seconds",
         "upstream_transient_route_cooldown_max_seconds",
         "upstream_transient_route_cooldown_max_step",
@@ -289,6 +291,44 @@ fn runtime_settings_without_default_upstream_concurrency_use_canonical_default()
     let reserialized = serde_json::to_value(loaded).unwrap();
 
     assert_eq!(reserialized["default_upstream_max_concurrency"], 32);
+}
+
+#[test]
+fn active_request_refresh_defaults_survive_old_settings_documents() {
+    let config = AppConfig::default();
+    let mut serialized = serde_json::to_value(RuntimeSettings::from_app_config(&config)).unwrap();
+    assert_eq!(serialized["active_requests_refresh_interval_seconds"], 2);
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("active_requests_refresh_interval_seconds");
+
+    let loaded: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    assert_eq!(loaded.active_requests_refresh_interval_seconds, 2);
+}
+
+#[test]
+fn active_request_refresh_interval_round_trips_through_app_config() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    settings.active_requests_refresh_interval_seconds = 7;
+    let settings = settings.validate_and_normalize().unwrap();
+    let mut config = AppConfig::default();
+    settings.apply_to_app_config(&mut config);
+    assert_eq!(config.active_requests_refresh_interval_seconds, 7);
+    assert_eq!(
+        RuntimeSettings::from_app_config(&config).active_requests_refresh_interval_seconds,
+        7
+    );
+}
+
+#[test]
+fn active_request_refresh_interval_rejects_zero() {
+    let mut settings = RuntimeSettings::from_app_config(&AppConfig::default());
+    settings.active_requests_refresh_interval_seconds = 0;
+    assert_eq!(
+        settings.validate_and_normalize().unwrap_err().field(),
+        "active_requests_refresh_interval_seconds"
+    );
 }
 
 #[test]
@@ -378,6 +418,7 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
     document.updated_at = 123;
     document.settings.app_name = "Saved settings".into();
     document.settings.upstream_route_exhaustion_retry_max_rounds = 9;
+    document.settings.active_requests_refresh_interval_seconds = 7;
 
     let state = AppState::new(
         PersistedState {
@@ -401,6 +442,10 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
 
     assert_eq!(snapshot.runtime_settings, Some(document));
     assert_eq!(reloaded.config.app_name, "Saved settings");
+    assert_eq!(
+        reloaded.runtime_settings().active_requests_refresh_interval_seconds,
+        7
+    );
     assert_eq!(
         reloaded
             .runtime_settings()

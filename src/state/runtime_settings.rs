@@ -1,4 +1,5 @@
 use super::types::{
+    default_active_requests_refresh_interval_seconds,
     default_capability_probe_concurrency, default_capability_probe_reasoning_timeout_seconds,
     default_gateway_request_body_limit_mb, default_model_case_insensitive_matching,
     default_stream_decode_error_code_split_enabled, default_stream_max_skipped_bad_frames,
@@ -53,6 +54,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "admin_logs_page_size_max",
     "admin_upstream_timeout_seconds",
     "troubleshooting_check_timeout_seconds",
+    "active_requests_refresh_interval_seconds",
     "model_probe_refresh_interval_seconds",
     "capability_probe_request_timeout_seconds",
     "capability_probe_reasoning_timeout_seconds",
@@ -167,6 +169,8 @@ pub struct RuntimeSettings {
     pub admin_logs_page_size_max: usize,
     pub admin_upstream_timeout_seconds: u64,
     pub troubleshooting_check_timeout_seconds: u64,
+    #[serde(default = "default_active_requests_refresh_interval_seconds")]
+    pub active_requests_refresh_interval_seconds: u64,
     pub model_probe_refresh_interval_seconds: u64,
     pub upstream_model_auto_discovery_enabled: bool,
     pub upstream_model_key_sync_interval_seconds: u64,
@@ -419,6 +423,8 @@ impl RuntimeSettings {
             admin_logs_page_size_max: config.admin_logs_page_size_max,
             admin_upstream_timeout_seconds: config.admin_upstream_timeout_seconds,
             troubleshooting_check_timeout_seconds: config.troubleshooting_check_timeout_seconds,
+            active_requests_refresh_interval_seconds: config
+                .active_requests_refresh_interval_seconds,
             model_probe_refresh_interval_seconds: config.model_probe_refresh_interval_seconds,
             upstream_model_auto_discovery_enabled: config.upstream_model_auto_discovery_enabled,
             upstream_model_key_sync_interval_seconds: config
@@ -566,6 +572,8 @@ impl RuntimeSettings {
         config.admin_logs_page_size_max = self.admin_logs_page_size_max;
         config.admin_upstream_timeout_seconds = self.admin_upstream_timeout_seconds;
         config.troubleshooting_check_timeout_seconds = self.troubleshooting_check_timeout_seconds;
+        config.active_requests_refresh_interval_seconds =
+            self.active_requests_refresh_interval_seconds;
         config.model_probe_refresh_interval_seconds = self.model_probe_refresh_interval_seconds;
         config.upstream_model_auto_discovery_enabled = self.upstream_model_auto_discovery_enabled;
         config.upstream_model_key_sync_interval_seconds =
@@ -724,6 +732,10 @@ impl RuntimeSettings {
         require_positive(
             self.troubleshooting_check_timeout_seconds,
             "troubleshooting_check_timeout_seconds",
+        )?;
+        require_positive(
+            self.active_requests_refresh_interval_seconds,
+            "active_requests_refresh_interval_seconds",
         )?;
         require_positive(
             self.model_probe_refresh_interval_seconds,

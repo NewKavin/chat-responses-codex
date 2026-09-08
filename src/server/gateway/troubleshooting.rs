@@ -270,7 +270,8 @@ pub(super) async fn admin_troubleshooting_active_requests(
     State(state): State<AppState>,
 ) -> Response {
     Json(json!({
-        "active_requests": state.active_gateway_requests(None)
+        "active_requests": state.active_gateway_requests(None),
+        "refresh_interval_seconds": state.runtime_settings().active_requests_refresh_interval_seconds
     }))
     .into_response()
 }

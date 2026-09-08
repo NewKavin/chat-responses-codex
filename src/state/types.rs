@@ -436,6 +436,8 @@ pub struct AppConfig {
     /// premium checks, affinity keys, model-list dedup). Default true.
     pub model_case_insensitive_matching: bool,
     pub model_probe_refresh_interval_seconds: u64,
+    #[serde(default = "default_active_requests_refresh_interval_seconds")]
+    pub active_requests_refresh_interval_seconds: u64,
     pub upstream_model_auto_discovery_enabled: bool,
     pub upstream_model_key_sync_interval_seconds: u64,
     pub postgres_pool_max_size: u32,
@@ -703,6 +705,8 @@ impl Default for AppConfig {
             routing_affinity_escape_pressure_ratio: 1.5,
             model_case_insensitive_matching: DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
             model_probe_refresh_interval_seconds: 15,
+            active_requests_refresh_interval_seconds:
+                default_active_requests_refresh_interval_seconds(),
             upstream_model_auto_discovery_enabled: false,
             upstream_model_key_sync_interval_seconds: 0,
             postgres_pool_max_size: 16,
@@ -1672,6 +1676,10 @@ pub fn default_upstream_max_concurrency() -> u32 {
 
 pub fn default_capability_probe_concurrency() -> u32 {
     4
+}
+
+pub fn default_active_requests_refresh_interval_seconds() -> u64 {
+    2
 }
 
 pub fn default_capability_probe_reasoning_timeout_seconds() -> u64 {

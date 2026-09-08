@@ -657,6 +657,7 @@ export interface RetryAmplificationResponse {
 
 export interface ActiveGatewayRequestsResponse {
   active_requests: ActiveGatewayRequest[]
+  refresh_interval_seconds?: number
 }
 
 export interface CompatibilityMatrixRunRequest {
@@ -961,6 +962,7 @@ export interface RuntimeSettings {
   admin_logs_page_size_max: number
   admin_upstream_timeout_seconds: number
   troubleshooting_check_timeout_seconds: number
+  active_requests_refresh_interval_seconds: number
   model_probe_refresh_interval_seconds: number
   upstream_model_auto_discovery_enabled: boolean
   upstream_model_key_sync_interval_seconds: number

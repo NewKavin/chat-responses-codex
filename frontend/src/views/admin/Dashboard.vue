@@ -571,6 +571,7 @@ import { formatPercentageLabel } from '@/utils/percentage'
 import { groupTopBreakdownItems } from '@/utils/dashboardCharts'
 import { DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS } from '@/utils/modelProbePolling'
 import { useTheme } from '@/composables/useTheme'
+import { useQuietRefresh } from '@/composables/useQuietRefresh'
 import { buildChartTheme, chartEnterAnimation } from '@/utils/chartTheme'
 import type { EChartsType } from 'echarts/core'
 
@@ -587,7 +588,6 @@ const refreshSeq = ref(0)
 const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
 const activeRequests = ref<ActiveGatewayRequest[]>([])
-const activeRequestsLoading = ref(false)
 const chartRange = ref<ChartRange>('7d')
 const lastRefreshedAt = ref(0)
 
@@ -1166,18 +1166,23 @@ const firstOutputStalledCount = computed(
 const activeRequestRowClass = ({ row }: { row: ActiveGatewayRequest }) =>
   row.phase === 'awaiting_first_output' ? 'active-request-row--stalled' : ''
 
-const loadActiveRequests = async (showLoading = true) => {
-  if (activeRequestsLoading.value) return
-  try {
-    if (showLoading) activeRequestsLoading.value = true
-    const response = await adminApi.getActiveTroubleshootingRequests()
-    activeRequests.value = response.data.active_requests ?? []
-  } catch {
-    // keep the last snapshot; the dashboard itself reports load failures.
-  } finally {
-    if (showLoading) activeRequestsLoading.value = false
-  }
-}
+let activeRequestsRefreshIntervalMs = 2_000
+const activeRequestsRefresh = useQuietRefresh(
+  async signal => (await adminApi.getActiveTroubleshootingRequests(signal)).data,
+  data => {
+    activeRequests.value = data.active_requests ?? []
+    const seconds = data.refresh_interval_seconds ?? 2
+    activeRequestsRefreshIntervalMs = Number.isFinite(seconds) && seconds > 0
+      ? Math.min(Math.max(1, Math.floor(seconds)) * 1000, 2_147_483_647)
+      : 2_000
+  },
+  () => activeRequestsRefreshIntervalMs
+)
+const activeRequestsLoading = computed(() =>
+  activeRequestsRefresh.manualLoading.value ||
+  (!activeRequestsRefresh.ready.value && activeRequestsRefresh.inFlight.value)
+)
+const loadActiveRequests = () => activeRequestsRefresh.refresh(true)
 
 const RETRY_WINDOW_OPTIONS = [
   { label: '1 分钟', value: 60 },
@@ -1336,8 +1341,6 @@ const pollTick = async () => {
     scheduleNextPoll()
     return
   }
-  await loadActiveRequests(false)
-  if (disposed) return
   if (!retryAmplificationInFlight) {
     retryAmplificationInFlight = true
     try {
@@ -1353,7 +1356,6 @@ const pollTick = async () => {
 const onVisibilityChange = () => {
   if (document.hidden) return
   // 恢复可见：立即补刷并重排轮询（静默，不闪 loading）。
-  void loadActiveRequests(false)
   if (!retryAmplificationInFlight) {
     retryAmplificationInFlight = true
     void loadRetryAmplification(false).finally(() => {
@@ -1370,7 +1372,6 @@ onMounted(async () => {
   await nextTick()
   await initCharts()
   await loadDashboard()
-  await loadActiveRequests()
   await loadRetryAmplification()
   scheduleNextPoll()
   window.addEventListener('resize', handleResize)

@@ -18,6 +18,7 @@ const validSettings = (): RuntimeSettings => ({
   admin_logs_page_size_max: 500,
   admin_upstream_timeout_seconds: 30,
   troubleshooting_check_timeout_seconds: 60,
+  active_requests_refresh_interval_seconds: 2,
   model_probe_refresh_interval_seconds: 300,
   upstream_model_auto_discovery_enabled: true,
   upstream_model_key_sync_interval_seconds: 0,
@@ -125,6 +126,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'admin_logs_page_size_max',
   'admin_upstream_timeout_seconds',
   'troubleshooting_check_timeout_seconds',
+  'active_requests_refresh_interval_seconds',
   'model_probe_refresh_interval_seconds',
   'upstream_model_auto_discovery_enabled',
   'upstream_model_key_sync_interval_seconds',
@@ -237,10 +239,10 @@ describe('runtime settings catalog', () => {
       'observability',
       'portal'
     ])
-    expect(runtimeSettingFields).toHaveLength(104)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(104)
+    expect(runtimeSettingFields).toHaveLength(105)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(105)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(91)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(92)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(13)
   })
 })
@@ -260,6 +262,7 @@ describe('runtime settings helpers', () => {
 
     const invalid = validSettings()
     invalid.app_name = '  '
+    invalid.active_requests_refresh_interval_seconds = 0
     invalid.default_upstream_max_concurrency = 0
     invalid.capability_probe_reasoning_timeout_seconds = 0
     invalid.upstream_transient_route_cooldown_base_seconds = 61
@@ -280,6 +283,7 @@ describe('runtime settings helpers', () => {
 
     const errors = validateRuntimeSettings(invalid)
     expect(errors.app_name).toBeTruthy()
+    expect(errors.active_requests_refresh_interval_seconds).toBeTruthy()
     expect(errors.default_upstream_max_concurrency).toBeTruthy()
     expect(errors.capability_probe_reasoning_timeout_seconds).toBeTruthy()
     expect(errors.upstream_transient_route_cooldown_base_seconds).toBeTruthy()
