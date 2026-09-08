@@ -524,6 +524,7 @@ export const adminApi = {
   getRetryAmplification: (windowSeconds?: number, signal?: AbortSignal) =>
     adminHttp.get<RetryAmplificationResponse>('/admin/retry-amplification', {
       params: windowSeconds ? { window_seconds: windowSeconds } : undefined,
+      signal,
     }),
   exportCapabilities: () =>
     adminHttp.get<CapabilityExportResponse>('/admin/capabilities/export'),
