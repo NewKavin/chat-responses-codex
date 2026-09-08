@@ -276,14 +276,6 @@
           </el-form-item>
         </template>
 
-        <el-divider content-position="left">Token 限额</el-divider>
-        <el-form-item label="每日 Token 限额">
-          <el-input-number v-model="editConfigForm.daily_token_limit" :min="0" :step="10000" />
-        </el-form-item>
-        <el-form-item label="每月 Token 限额">
-          <el-input-number v-model="editConfigForm.monthly_token_limit" :min="0" :step="100000" />
-        </el-form-item>
-
         <el-divider content-position="left">计费</el-divider>
         <el-form-item label="计费模式">
           <el-radio-group v-model="editConfigForm.billing_mode">
@@ -361,12 +353,6 @@
         </el-form-item>
         <el-form-item label="最大并发">
           <el-input-number v-model="batchLimitsForm.max_concurrency" :min="1" />
-        </el-form-item>
-        <el-form-item label="每日 Token 限额">
-          <el-input-number v-model="batchLimitsForm.daily_token_limit" :min="0" :step="10000" />
-        </el-form-item>
-        <el-form-item label="每月 Token 限额">
-          <el-input-number v-model="batchLimitsForm.monthly_token_limit" :min="0" :step="100000" />
         </el-form-item>
         <el-form-item label="计费模式">
           <el-radio-group v-model="batchLimitsForm.billing_mode">
@@ -695,8 +681,6 @@ const openBindings = async (row: PortalUserRow) => {
       max_concurrency: typeof d.max_concurrency === 'number' ? d.max_concurrency : undefined,
       request_quota_window_hours: typeof d.request_quota_window_hours === 'number' ? d.request_quota_window_hours : undefined,
       request_quota_requests: typeof d.request_quota_requests === 'number' ? d.request_quota_requests : undefined,
-      daily_token_limit: typeof d.daily_token_limit === 'number' ? d.daily_token_limit : undefined,
-      monthly_token_limit: typeof d.monthly_token_limit === 'number' ? d.monthly_token_limit : undefined,
       billing_mode: typeof d.billing_mode === 'string' ? d.billing_mode : undefined,
       input_token_price_per_million_cents: typeof d.input_token_price_per_million_cents === 'number' ? d.input_token_price_per_million_cents : undefined,
       output_token_price_per_million_cents: typeof d.output_token_price_per_million_cents === 'number' ? d.output_token_price_per_million_cents : undefined,
@@ -834,8 +818,6 @@ const saveBatchLimits = async () => {
       max_concurrency: batchLimitsForm.value.max_concurrency,
       request_quota_window_hours: batchLimitsForm.value.request_quota_window_hours,
       request_quota_requests: batchLimitsForm.value.request_quota_requests,
-      daily_token_limit: batchLimitsForm.value.daily_token_limit ?? null,
-      monthly_token_limit: batchLimitsForm.value.monthly_token_limit ?? null,
       billing_mode: isCost ? 'token' : 'request',
       input_token_price_per_million_cents: isCost
         ? Math.round((batchLimitsForm.value.input_token_price_per_million ?? 0) * 100)
@@ -888,8 +870,6 @@ const editConfigForm = ref({
   max_concurrency: 10,
   request_quota_window_hours: 5,
   request_quota_requests: 600,
-  daily_token_limit: undefined as number | undefined,
-  monthly_token_limit: undefined as number | undefined,
   billing_mode: 'request' as 'request' | 'token',
   input_token_price_per_million: undefined as number | undefined,
   output_token_price_per_million: undefined as number | undefined,
@@ -907,8 +887,6 @@ const batchLimitsForm = ref({
   max_concurrency: 10,
   request_quota_window_hours: 5,
   request_quota_requests: 600,
-  daily_token_limit: undefined as number | undefined,
-  monthly_token_limit: undefined as number | undefined,
   billing_mode: 'request' as 'request' | 'token',
   input_token_price_per_million: undefined as number | undefined,
   output_token_price_per_million: undefined as number | undefined,
@@ -974,8 +952,6 @@ const openEditConfig = (row: BindingRow) => {
     max_concurrency: config.max_concurrency ?? 10,
     request_quota_window_hours: config.request_quota_window_hours || 5,
     request_quota_requests: config.request_quota_requests || 600,
-    daily_token_limit: config.daily_token_limit ?? undefined,
-    monthly_token_limit: config.monthly_token_limit ?? undefined,
     billing_mode: (config.billing_mode as 'request' | 'token') ?? 'request',
     input_token_price_per_million:
       isCost && config.input_token_price_per_million_cents
@@ -1028,8 +1004,6 @@ const saveEditConfig = async () => {
       request_quota_requests: editConfigForm.value.rate_limit_enabled
         ? editConfigForm.value.request_quota_requests
         : null,
-      daily_token_limit: editConfigForm.value.daily_token_limit ?? null,
-      monthly_token_limit: editConfigForm.value.monthly_token_limit ?? null,
       billing_mode: isCost ? 'token' : 'request',
       input_token_price_per_million_cents: isCost
         ? Math.round((editConfigForm.value.input_token_price_per_million ?? 0) * 100)
@@ -1070,8 +1044,6 @@ const openBatchLimits = () => {
     max_concurrency: 10,
     request_quota_window_hours: 5,
     request_quota_requests: 600,
-    daily_token_limit: undefined,
-    monthly_token_limit: undefined,
     billing_mode: 'request',
     input_token_price_per_million: undefined,
     output_token_price_per_million: undefined,
