@@ -394,14 +394,16 @@
 
     <el-dialog v-model="migrationVisible" title="待处理迁移修复（模型访问）" width="860">
       <el-alert type="warning" :closable="false" class="helper-text">
-        这些旧密钥在切换模型访问模式时被归类为待确认。勾选后应用：补齐旧绑定组授权并将密钥设为
-        「继承」；预览失效或归属冲突的密钥不会被放权，按实际结果显示。
+        仅「待确认 / 保留且有归属」的旧密钥可应用修复（补齐旧绑定组授权并设为「继承」）；
+        孤儿 / 归属冲突 / 无归属的密钥不可勾选，需在密钥列表中重建替换密钥后重新绑定。
+        同一用户多把密钥请逐个应用：上一把会先补齐用户授权，预览指纹随之变化。
       </el-alert>
       <el-table
         v-loading="migrationLoading"
         :data="migrationPreview"
         stripe
         style="margin-top: 12px"
+        :selectable="migrationSelectable"
         @selection-change="migrationSelection = $event.map((item: any) => item.downstream_id)"
       >
         <el-table-column type="selection" width="46" />
@@ -412,9 +414,18 @@
             <el-tag v-else size="small" type="danger">无归属</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="分类" width="130">
+        <el-table-column label="分类" width="120">
           <template #default="{ row }">
-            {{ row.classification }}
+            <el-tag size="small" :type="migrationClassificationType(row.classification)">
+              {{ migrationClassificationLabel(row.classification) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="可应用" width="150">
+          <template #default="{ row }">
+            <span v-if="migrationSelectable(row)" class="muted">可应用（自动预选）</span>
+            <span v-else-if="!row.owner_user_id" class="muted">无归属，不可应用</span>
+            <span v-else class="muted">归属未解决，需重建密钥</span>
           </template>
         </el-table-column>
         <el-table-column label="现有用户授权" min-width="150">
@@ -1078,6 +1089,27 @@ interface MigrationPreviewItem {
   candidate_group_ids: string[]
   revision: number
   fingerprint: string
+}
+
+const migrationSelectable = (row: MigrationPreviewItem) =>
+  (row.classification === 'review_required' || row.classification === 'preserved') &&
+  !!row.owner_user_id
+
+const migrationClassificationLabel = (classification: string) => {
+  const labels: Record<string, string> = {
+    review_required: '待确认',
+    preserved: '保留',
+    orphan: '孤儿（无归属）',
+    ownership_conflict: '归属冲突',
+    invalid_group: '组无效'
+  }
+  return labels[classification] ?? classification
+}
+
+const migrationClassificationType = (classification: string) => {
+  if (classification === 'review_required') return 'warning'
+  if (classification === 'preserved') return 'success'
+  return 'danger'
 }
 
 const migrationSummary = ref<{ pending: number; total: number; resolved: number }>({

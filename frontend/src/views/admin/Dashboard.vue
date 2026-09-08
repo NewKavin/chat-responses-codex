@@ -1166,16 +1166,16 @@ const firstOutputStalledCount = computed(
 const activeRequestRowClass = ({ row }: { row: ActiveGatewayRequest }) =>
   row.phase === 'awaiting_first_output' ? 'active-request-row--stalled' : ''
 
-const loadActiveRequests = async () => {
+const loadActiveRequests = async (showLoading = true) => {
   if (activeRequestsLoading.value) return
   try {
-    activeRequestsLoading.value = true
+    if (showLoading) activeRequestsLoading.value = true
     const response = await adminApi.getActiveTroubleshootingRequests()
     activeRequests.value = response.data.active_requests ?? []
   } catch {
     // keep the last snapshot; the dashboard itself reports load failures.
   } finally {
-    activeRequestsLoading.value = false
+    if (showLoading) activeRequestsLoading.value = false
   }
 }
 
@@ -1240,17 +1240,17 @@ const retryMaxCount = computed(() =>
 const retryBarWidth = (count: number) =>
   retryMaxCount.value > 0 ? `${Math.max(4, (count / retryMaxCount.value) * 100)}%` : '0%'
 
-const loadRetryAmplification = async () => {
+const loadRetryAmplification = async (showLoading = true) => {
   if (retryLoading.value) return
   try {
-    retryLoading.value = true
+    if (showLoading) retryLoading.value = true
     const response = await adminApi.getRetryAmplification(retryWindowSeconds.value)
     retryTotal.value = response.data.total ?? 0
     retryPoints.value = [...(response.data.points ?? [])].sort((a, b) => b.count - a.count)
   } catch {
     // 保留上一次快照；仪表盘自身会报告加载失败。
   } finally {
-    retryLoading.value = false
+    if (showLoading) retryLoading.value = false
   }
 }
 
@@ -1320,8 +1320,10 @@ watch(resolvedTheme, async () => {
 // F：独立轮询链 —— 请求完成后才安排下一次，不堆积；隐藏时暂停、恢复补刷。
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let retryAmplificationInFlight = false
+let disposed = false
 
 const scheduleNextPoll = () => {
+  if (disposed) return
   if (pollTimer !== null) clearTimeout(pollTimer)
   pollTimer = setTimeout(() => {
     void pollTick()
@@ -1329,29 +1331,32 @@ const scheduleNextPoll = () => {
 }
 
 const pollTick = async () => {
+  if (disposed) return
   if (document.hidden) {
     scheduleNextPoll()
     return
   }
-  await loadActiveRequests()
+  await loadActiveRequests(false)
+  if (disposed) return
   if (!retryAmplificationInFlight) {
     retryAmplificationInFlight = true
     try {
-      await loadRetryAmplification()
+      await loadRetryAmplification(false)
     } finally {
       retryAmplificationInFlight = false
     }
   }
+  if (disposed) return
   scheduleNextPoll()
 }
 
 const onVisibilityChange = () => {
   if (document.hidden) return
-  // 恢复可见：立即补刷并重排轮询。
-  void loadActiveRequests()
+  // 恢复可见：立即补刷并重排轮询（静默，不闪 loading）。
+  void loadActiveRequests(false)
   if (!retryAmplificationInFlight) {
     retryAmplificationInFlight = true
-    void loadRetryAmplification().finally(() => {
+    void loadRetryAmplification(false).finally(() => {
       retryAmplificationInFlight = false
     })
   }
@@ -1373,6 +1378,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
   if (pollTimer !== null) clearTimeout(pollTimer)
   window.removeEventListener('resize', handleResize)
   document.removeEventListener('visibilitychange', onVisibilityChange)

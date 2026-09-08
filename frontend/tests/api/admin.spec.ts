@@ -428,7 +428,7 @@ describe('admin api auth behavior', () => {
 
     await adminApi.getActiveTroubleshootingRequests()
 
-    expect(spy).toHaveBeenCalledWith('/admin/troubleshooting/active-requests')
+    expect(spy).toHaveBeenCalledWith('/admin/troubleshooting/active-requests', undefined)
   })
 
   it('exports, imports, inspects, and probes capabilities through the admin api', async () => {
