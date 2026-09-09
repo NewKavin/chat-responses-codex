@@ -2060,6 +2060,7 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 requests_per_minute: 60,
                 max_concurrency: 10,
                 priority: 0,
+                weight: 1,
                 active: true,
                 failure_count: 0,
                 strip_nonstandard_chat_fields: NonstandardFieldPolicy::Auto,

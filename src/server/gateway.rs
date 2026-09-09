@@ -18,12 +18,12 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_millis, unix_seconds, AccountConcurrencyKey,
-    AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
-    CompatibilityUsageMetadata, DownstreamConcurrencyLease,
-    GlobalContextProfile, KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit,
-    RouteOutcome, RouteRecovery, RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings,
-    StreamDecodeCounter, StreamDiagnostics, UpstreamConfig, UpstreamRequestLease, UsageLog,
+    join_upstream_url, unix_millis, unix_seconds, AccountConcurrencyKey, AccountProbeOutcome,
+    ActiveGatewayRequestStart, AppConfig, AppState, CompatibilityUsageMetadata,
+    DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey, RouteAvailability,
+    RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
+    RuntimeCoordinationError, RuntimeSettings, StreamDecodeCounter, StreamDiagnostics,
+    UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
@@ -2667,11 +2667,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/admin/portal/users/batch-model-groups",
-            post(admin_portal_users_batch_model_groups)
-                .route_layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    admin_auth_middleware,
-                )),
+            post(admin_portal_users_batch_model_groups).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
         )
         // Portal API
         .route("/api/portal/login", post(portal_login))
@@ -2691,10 +2689,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/oidc/callback", get(portal_oidc_callback))
         // Multi-key management API
         .route("/api/portal/model-groups", get(portal_list_model_groups))
-        .route("/api/portal/keys", get(portal_list_keys).post(portal_create_key))
-        .route("/api/portal/keys/{downstream_id}", get(portal_get_key_by_id).delete(portal_delete_key))
-        .route("/api/portal/keys/{downstream_id}/rotate", post(portal_rotate_key_by_id))
-        .route("/api/portal/keys/{downstream_id}/default", put(portal_set_default_key))
+        .route(
+            "/api/portal/keys",
+            get(portal_list_keys).post(portal_create_key),
+        )
+        .route(
+            "/api/portal/keys/{downstream_id}",
+            get(portal_get_key_by_id).delete(portal_delete_key),
+        )
+        .route(
+            "/api/portal/keys/{downstream_id}/rotate",
+            post(portal_rotate_key_by_id),
+        )
+        .route(
+            "/api/portal/keys/{downstream_id}/default",
+            put(portal_set_default_key),
+        )
         .route(
             "/api/portal/keys/{downstream_id}/model-group",
             put(portal_update_key_model_group),
@@ -2964,8 +2974,11 @@ fn codex_catalog_context_window(
     model: &str,
     _case_insensitive: bool,
 ) -> Option<i64> {
-    catalog.find(model)?.routes.iter()
-        .filter_map(|route| catalog.route_context(snapshot,route))
+    catalog
+        .find(model)?
+        .routes
+        .iter()
+        .filter_map(|route| catalog.route_context(snapshot, route))
         .map(|config| i64::from(config.context_limit))
         .max()
 }
@@ -2986,8 +2999,15 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
 
     // 有效白名单 = 模型分组优先（阶段 1：Codex 目录与分组一致）。
     // 组已配置但解析失败时 fail-closed（权限相关目录，不允许回退成全放行）。
-    let catalog = crate::state::ModelCatalog::new(&snapshot.upstreams,&state.model_alias_registry(),case_insensitive);
-    let effective_access = match state.resolved_model_access_with_catalog(&downstream,&catalog).await {
+    let catalog = crate::state::ModelCatalog::new(
+        &snapshot.upstreams,
+        &state.model_alias_registry(),
+        case_insensitive,
+    );
+    let effective_access = match state
+        .resolved_model_access_with_catalog(&downstream, &catalog)
+        .await
+    {
         Ok(access) => access,
         Err(error) => {
             tracing::error!(
@@ -3242,7 +3262,7 @@ async fn claude_count_tokens(
     // model_allowlist); group lookup failure fails closed.
     let model_catalog = state.model_catalog().await;
     let effective_access = match state
-        .resolved_model_access_with_catalog(&downstream,&model_catalog)
+        .resolved_model_access_with_catalog(&downstream, &model_catalog)
         .await
     {
         Ok(models) => models,
@@ -3266,7 +3286,10 @@ async fn claude_count_tokens(
         }
     };
 
-    if !effective_access.allowed.allows(&model_catalog.resolve_public_model_id(model)) {
+    if !effective_access
+        .allowed
+        .allows(&model_catalog.resolve_public_model_id(model))
+    {
         return GatewayError::gateway_forbidden("model not allowed", "gateway_model_not_allowed")
             .into_anthropic_response();
     }
@@ -5407,7 +5430,11 @@ async fn process_gateway_request_inner(
     };
     let model = model_owned.as_str();
     let case_insensitive = runtime_settings.model_case_insensitive_matching;
-    let model_catalog = crate::state::ModelCatalog::new(&routing_snapshot.upstreams,&state.model_alias_registry(),case_insensitive);
+    let model_catalog = crate::state::ModelCatalog::new(
+        &routing_snapshot.upstreams,
+        &state.model_alias_registry(),
+        case_insensitive,
+    );
     let normalized_model = model_catalog.normalize_request_name(model);
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let stream_only_recovery_request_safe =
@@ -5520,7 +5547,7 @@ async fn process_gateway_request_inner(
     // group management). Group lookup runs inside the request path, so a
     // stale/missing group fails closed instead of silently widening access.
     let effective_access = match state
-        .resolved_model_access_with_catalog(&downstream,&model_catalog)
+        .resolved_model_access_with_catalog(&downstream, &model_catalog)
         .await
     {
         Ok(models) => models,
@@ -5567,7 +5594,10 @@ async fn process_gateway_request_inner(
         }
     };
 
-    if !effective_access.allowed.allows(&model_catalog.resolve_public_model_id(model)) {
+    if !effective_access
+        .allowed
+        .allows(&model_catalog.resolve_public_model_id(model))
+    {
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -5602,7 +5632,6 @@ async fn process_gateway_request_inner(
         active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
     }
-
 
     if request_has_unknown_tool_kind(endpoint, &body) {
         let error = GatewayError::classified(
@@ -6892,17 +6921,50 @@ async fn process_gateway_request_inner(
                 )
             };
             if upstreams.len() > 1 {
-                let top_bucket_key = ranking_bucket_key(&upstreams[0]);
-                let top_bucket_len = upstreams
-                    .iter()
-                    .take_while(|upstream| ranking_bucket_key(upstream) == top_bucket_key)
-                    .count();
                 let tie_breaker =
                     state.next_routing_tie_breaker(&downstream.id, &normalized_model, protocol);
-                if top_bucket_len > 1 {
-                    let rotation = tie_breaker as usize % top_bucket_len;
-                    if rotation > 0 {
-                        upstreams[..top_bucket_len].rotate_left(rotation);
+                // Weighted layer: within the highest-priority tier, differing
+                // weights pick the first candidate deterministically (3:1 ->
+                // a,a,a,b across successive cursors) regardless of pressure;
+                // equal weights keep the existing pressure-bucket rotation.
+                let top_priority = upstreams[0].priority;
+                let tier_len = upstreams
+                    .iter()
+                    .take_while(|upstream| upstream.priority == top_priority)
+                    .count();
+                let weights_differ = tier_len > 1
+                    && upstreams[..tier_len]
+                        .iter()
+                        .any(|upstream| upstream.weight != upstreams[0].weight);
+                if weights_differ {
+                    // Stable candidate order by id so the cursor maps to the
+                    // same cumulative pattern regardless of pressure-driven
+                    // reordering inside the tier; the picked route moves to
+                    // the front and the remaining routes keep their order.
+                    let mut stable_positions: Vec<usize> = (0..tier_len).collect();
+                    stable_positions.sort_by_key(|index| upstreams[*index].id.clone());
+                    let weighted_candidates: Vec<crate::routing::UpstreamCandidate> =
+                        stable_positions
+                            .iter()
+                            .map(|index| {
+                                crate::routing::UpstreamCandidate::new(
+                                    upstreams[*index].id.clone(),
+                                    upstreams[*index].name.clone(),
+                                    protocol,
+                                )
+                                .with_priority(upstreams[*index].priority)
+                                .with_weight(upstreams[*index].weight)
+                            })
+                            .collect();
+                    let picked = crate::routing::select_weighted_candidate_index(
+                        &weighted_candidates,
+                        tie_breaker,
+                    )
+                    .unwrap_or(0);
+                    let picked_index = stable_positions[picked];
+                    if picked_index > 0 {
+                        let picked_upstream = upstreams.remove(picked_index);
+                        upstreams.insert(0, picked_upstream);
                     }
                     tracing::debug!(
                         request_id = %request_id,
@@ -6911,10 +6973,33 @@ async fn process_gateway_request_inner(
                         original_model = %model,
                         normalized_model = %&normalized_model,
                         protocol = ?protocol,
-                        tie_bucket_size = top_bucket_len,
-                        tie_rotation = rotation,
-                        "rotated equal-pressure upstream candidates"
+                        priority_tier_size = tier_len,
+                        picked_upstream = %upstreams[0].id,
+                        "weighted-picked upstream candidate within priority tier"
                     );
+                } else {
+                    let top_bucket_key = ranking_bucket_key(&upstreams[0]);
+                    let top_bucket_len = upstreams
+                        .iter()
+                        .take_while(|upstream| ranking_bucket_key(upstream) == top_bucket_key)
+                        .count();
+                    if top_bucket_len > 1 {
+                        let rotation = tie_breaker as usize % top_bucket_len;
+                        if rotation > 0 {
+                            upstreams[..top_bucket_len].rotate_left(rotation);
+                        }
+                        tracing::debug!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %&normalized_model,
+                            protocol = ?protocol,
+                            tie_bucket_size = top_bucket_len,
+                            tie_rotation = rotation,
+                            "rotated equal-pressure upstream candidates"
+                        );
+                    }
                 }
             }
             let candidate_summary = upstreams

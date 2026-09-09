@@ -565,12 +565,10 @@ impl AppState {
                         upstream.model_mappings = model_mappings
                             .iter()
                             .filter_map(|value| {
-                                let upstream_model = value
-                                    .get("upstream_model")
-                                    .and_then(|v| v.as_str())?;
-                                let downstream_model = value
-                                    .get("downstream_model")
-                                    .and_then(|v| v.as_str())?;
+                                let upstream_model =
+                                    value.get("upstream_model").and_then(|v| v.as_str())?;
+                                let downstream_model =
+                                    value.get("downstream_model").and_then(|v| v.as_str())?;
                                 Some(UpstreamModelMapping {
                                     upstream_model: upstream_model.to_string(),
                                     downstream_model: downstream_model.to_string(),
@@ -687,21 +685,34 @@ impl AppState {
                         let priority = priority_value
                             .as_u64()
                             .and_then(|value| u32::try_from(value).ok())
+                            .filter(|value| *value <= 1000)
                             .ok_or_else(|| {
                                 UpstreamMutationError::InvalidInput(
-                                    "priority must be a non-negative integer no greater than 4294967295"
-                                        .to_string(),
+                                    "priority must be an integer between 0 and 1000".to_string(),
                                 )
                             })?;
                         upstream.priority = priority;
+                    }
+                    if let Some(weight_value) = updates.get("weight") {
+                        let weight = weight_value
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .filter(|value| *value <= 1000)
+                            .ok_or_else(|| {
+                                UpstreamMutationError::InvalidInput(
+                                    "weight must be an integer between 0 and 1000".to_string(),
+                                )
+                            })?;
+                        upstream.weight = weight;
                     }
                     // premium_models, premium_only, protect_premium_quota fields removed
                     if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
                         upstream.active = active;
                     }
-                    if let Some(strip_nonstandard_chat_fields) = updates
-                        .get("strip_nonstandard_chat_fields")
-                        .and_then(|v| serde_json::from_value::<NonstandardFieldPolicy>(v.clone()).ok())
+                    if let Some(strip_nonstandard_chat_fields) =
+                        updates.get("strip_nonstandard_chat_fields").and_then(|v| {
+                            serde_json::from_value::<NonstandardFieldPolicy>(v.clone()).ok()
+                        })
                     {
                         upstream.strip_nonstandard_chat_fields = strip_nonstandard_chat_fields;
                     }
@@ -713,9 +724,10 @@ impl AppState {
                     } else if updates.get("dialect_preset").is_some() {
                         upstream.dialect_preset = None;
                     }
-                    if let Some(model_dialect_presets) = updates
-                        .get("model_dialect_presets")
-                        .and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok())
+                    if let Some(model_dialect_presets) =
+                        updates.get("model_dialect_presets").and_then(|v| {
+                            serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok()
+                        })
                     {
                         upstream.model_dialect_presets = model_dialect_presets;
                     } else if updates.get("model_dialect_presets").is_some() {
@@ -727,7 +739,8 @@ impl AppState {
                         return Err(UpstreamMutationError::InvalidInput(error));
                     }
                     let alias_registry = self.model_alias_registry();
-                    if let Err(error) = upstream.validate_model_mappings_against_aliases(&alias_registry)
+                    if let Err(error) =
+                        upstream.validate_model_mappings_against_aliases(&alias_registry)
                     {
                         return Err(UpstreamMutationError::InvalidInput(error));
                     }

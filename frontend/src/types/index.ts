@@ -105,6 +105,8 @@ export interface UpstreamConfig {
   requests_per_minute: number
   max_concurrency: number
   priority: number
+  /** 同优先级分流权重 0-1000（默认 1，0 = 仅兜底，等权时走原有压力均衡） */
+  weight?: number
   premium_models: string[]
   protect_premium_quota: boolean
   active: boolean

@@ -424,8 +424,11 @@ describe('admin ui structure', () => {
   it('supports inline upstream priority updates', () => {
     const page = source('views/admin/Upstreams.vue')
 
-    expect(page).toContain('label="优先级/权重"')
+    expect(page).toContain('label="优先级"')
+    expect(page).toContain('label="分流权重"')
     expect(page).toContain('@change="updateInlinePriority(row)"')
+    expect(page).toContain('@change="updateInlineWeight(row)"')
+    expect(page).toContain('adminApi.updateUpstream(row.id, { weight })')
     expect(page).toContain('adminApi.updateUpstream(row.id, { priority })')
     expect(page).not.toContain('concurrency_status_enabled')
     expect(page).not.toContain('私有并发状态接口')

@@ -78,7 +78,7 @@ impl PostgresStateStore {
                  model_contexts, default_model_context, \
                  COALESCE(request_quota_window_hours, 5), \
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
-                 requests_per_minute, max_concurrency, priority, active, failure_count, \
+                 requests_per_minute, max_concurrency, priority, weight, active, failure_count, \
                  auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
                  strip_nonstandard_chat_fields, nonstandard_field_policy, \
                  COALESCE(remark, ''), continuation_provider_group, dialect_preset, \
@@ -117,24 +117,25 @@ impl PostgresStateStore {
                 requests_per_minute: row.get::<_, i32>(10) as u32,
                 max_concurrency: row.get::<_, i32>(11) as u32,
                 priority: row.get::<_, i32>(12) as u32,
-                active: row.get::<_, bool>(13),
-                failure_count: row.get::<_, i32>(14) as u32,
-                auto_managed: row.get::<_, bool>(15),
-                managed_source: row.get::<_, Option<String>>(16),
-                last_synced_at: row.get::<_, i64>(17) as u64,
+                weight: row.get::<_, i32>(13) as u32,
+                active: row.get::<_, bool>(14),
+                failure_count: row.get::<_, i32>(15) as u32,
+                auto_managed: row.get::<_, bool>(16),
+                managed_source: row.get::<_, Option<String>>(17),
+                last_synced_at: row.get::<_, i64>(18) as u64,
                 strip_nonstandard_chat_fields: decode_nonstandard_field_policy(
-                    row.get::<_, String>(21),
-                    row.get::<_, bool>(20),
+                    row.get::<_, String>(22),
+                    row.get::<_, bool>(21),
                 ),
-                remark: row.get::<_, String>(22),
-                continuation_provider_group: row.get::<_, Option<String>>(23),
-                dialect_preset: row.get::<_, Option<String>>(24),
+                remark: row.get::<_, String>(23),
+                continuation_provider_group: row.get::<_, Option<String>>(24),
+                dialect_preset: row.get::<_, Option<String>>(25),
                 model_mappings: row
-                    .get::<_, Option<String>>(25)
+                    .get::<_, Option<String>>(26)
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
                 model_dialect_presets: row
-                    .get::<_, Option<String>>(26)
+                    .get::<_, Option<String>>(27)
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
             });
@@ -341,10 +342,14 @@ impl PostgresStateStore {
     ) -> io::Result<()> {
         let mut conn = self.pool.get().await.map_err(io_other)?;
         let tx = conn.transaction().await.map_err(io_other)?;
-        super::model_access_store::lock_access_writes(&tx).await.map_err(io::Error::other)?;
+        super::model_access_store::lock_access_writes(&tx)
+            .await
+            .map_err(io::Error::other)?;
         sync_config_tables(&tx, state).await?;
         for mutation in mutations {
-            super::model_access_store::apply_access_mutation(&tx, mutation).await.map_err(io::Error::other)?;
+            super::model_access_store::apply_access_mutation(&tx, mutation)
+                .await
+                .map_err(io::Error::other)?;
         }
         tx.commit().await.map_err(io_other)
     }
@@ -358,7 +363,9 @@ impl PostgresStateStore {
     ) -> io::Result<()> {
         let mut conn = self.pool.get().await.map_err(io_other)?;
         let tx = conn.transaction().await.map_err(io_other)?;
-        super::model_access_store::lock_access_writes(&tx).await.map_err(io::Error::other)?;
+        super::model_access_store::lock_access_writes(&tx)
+            .await
+            .map_err(io::Error::other)?;
         sync_config_tables(&tx, state).await?;
         if let Some((group_id, allowed_models)) = group_models {
             let models_json: serde_json::Value =
@@ -1573,6 +1580,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &(upstream.requests_per_minute as i32),
             &(upstream.max_concurrency as i32),
             &(upstream.priority as i32),
+            &(upstream.weight as i32),
             &upstream.active,
             &(upstream.failure_count as i32),
             &upstream.auto_managed,
@@ -1588,7 +1596,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &model_mappings_json,
             &model_dialect_presets_json,
         ];
-        const UPSTREAM_COLUMNS: [&str; 28] = [
+        const UPSTREAM_COLUMNS: [&str; 29] = [
             "id",
             "name",
             "base_url",
@@ -1603,6 +1611,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             "requests_per_minute",
             "max_concurrency",
             "priority",
+            "weight",
             "active",
             "failure_count",
             "auto_managed",
@@ -1632,6 +1641,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 requests_per_minute = EXCLUDED.requests_per_minute,
                 max_concurrency = EXCLUDED.max_concurrency,
                 priority = EXCLUDED.priority,
+                weight = EXCLUDED.weight,
                 active = EXCLUDED.active,
                 failure_count = EXCLUDED.failure_count,
                 auto_managed = EXCLUDED.auto_managed,
@@ -1666,7 +1676,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             .await
             .map_err(io_other)?;
         }
-
     }
 
     Ok(())
@@ -1796,11 +1805,29 @@ async fn sync_downstreams(
         tx.execute(
             "INSERT INTO downstream_access_policies(downstream_id,subject_kind,mode,model_group_id)
              VALUES($1,$2,$3,$4) ON CONFLICT(downstream_id) DO NOTHING",
-            &[&downstream.id,
-              &(if downstream.is_portal_key { "portal" } else { "direct" }),
-              &(if downstream.is_portal_key || downstream.model_group_id.as_deref().unwrap_or("deny-all") == "deny-all" { "deny" } else { "group" }),
-              &(if downstream.is_portal_key { "deny-all" } else { downstream.model_group_id.as_deref().unwrap_or("deny-all") })],
-        ).await.map_err(io_other)?;
+            &[
+                &downstream.id,
+                &(if downstream.is_portal_key {
+                    "portal"
+                } else {
+                    "direct"
+                }),
+                &(if downstream.is_portal_key
+                    || downstream.model_group_id.as_deref().unwrap_or("deny-all") == "deny-all"
+                {
+                    "deny"
+                } else {
+                    "group"
+                }),
+                &(if downstream.is_portal_key {
+                    "deny-all"
+                } else {
+                    downstream.model_group_id.as_deref().unwrap_or("deny-all")
+                }),
+            ],
+        )
+        .await
+        .map_err(io_other)?;
 
         tx.execute(
             "DELETE FROM downstream_model_allowlist WHERE downstream_id = $1",
@@ -2213,6 +2240,8 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 4;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS premium_only BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE upstreams

@@ -30,6 +30,7 @@ pub struct UpstreamCandidate {
     pub protocol: UpstreamProtocol,
     pub models: Vec<String>,
     pub priority: u32,
+    pub weight: u32,
     pub failure_count: u32,
 }
 
@@ -41,6 +42,7 @@ impl UpstreamCandidate {
             protocol,
             models: Vec::new(),
             priority: 0,
+            weight: 1,
             failure_count: 0,
         }
     }
@@ -59,6 +61,11 @@ impl UpstreamCandidate {
         self
     }
 
+    pub fn with_weight(mut self, weight: u32) -> Self {
+        self.weight = weight;
+        self
+    }
+
     pub fn with_failure_count(mut self, failure_count: u32) -> Self {
         self.failure_count = failure_count;
         self
@@ -69,6 +76,51 @@ impl UpstreamCandidate {
 pub enum RouteError {
     ModelUnavailable(String),
     NoHealthyUpstream(String),
+}
+
+/// Deterministic weighted pick within the highest-priority tier.
+///
+/// Finds the maximum `priority` among the candidates, collects the
+/// positive-weight members of that tier, and picks one using a cumulative
+/// weighted round-robin over `cursor` (a monotonically increasing per-key
+/// counter; no random state). For weights `3` and `1`, successive cursors
+/// yield indices in the cumulative 3:1 pattern (a, a, a, b, ...).
+///
+/// Weight `0` members are never actively picked while a positive-weight
+/// member exists. If every member of the highest tier has weight `0`, the
+/// tier's first member (existing stable ordering) is returned. Returns
+/// `None` when there are no candidates at all.
+pub fn select_weighted_candidate_index(
+    candidates: &[UpstreamCandidate],
+    cursor: u64,
+) -> Option<usize> {
+    let highest_priority = candidates
+        .iter()
+        .map(|candidate| candidate.priority)
+        .max()?;
+    let tier = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.priority == highest_priority)
+        .collect::<Vec<_>>();
+    let positive = tier
+        .iter()
+        .filter(|(_, candidate)| candidate.weight > 0)
+        .map(|(index, candidate)| (*index, candidate.weight))
+        .collect::<Vec<_>>();
+    if positive.is_empty() {
+        // Stable ordering: first member of the highest tier.
+        return tier.first().map(|(index, _)| *index);
+    }
+    let total: u64 = positive.iter().map(|(_, weight)| *weight as u64).sum();
+    let mut bucket = cursor % total;
+    for (index, weight) in &positive {
+        if bucket < *weight as u64 {
+            return Some(*index);
+        }
+        bucket -= *weight as u64;
+    }
+    positive.first().map(|(index, _)| *index)
 }
 
 /// Intelligent upstream selection algorithm with premium quota protection

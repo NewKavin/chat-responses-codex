@@ -22,11 +22,16 @@ mod calendar;
 mod file_store;
 #[path = "state/log_queries.rs"]
 pub mod log_queries;
-#[path = "state/postgres.rs"]
-mod postgres;
 #[path = "state/portal_store.rs"]
 mod portal_store;
+#[path = "state/postgres.rs"]
+mod postgres;
 
+pub use portal_store::{
+    AccessMigrationApplyItem, AccessMigrationItemResult, AccessMigrationPreviewItem,
+    AccessMigrationRecord, ModelGroup, PortalDownstreamBinding, PortalDownstreamBindingWithLabel,
+    PortalOidcHandshake, PortalSession, PortalStore, PortalStoreError, PortalUser,
+};
 /// Test-only seam: builds an INSERT statement with one `$n` placeholder per
 /// column so the placeholder list can never drift from the column list by
 /// hand. Exposed for integration tests (the state module lives in the
@@ -34,11 +39,6 @@ mod portal_store;
 /// by the root package's test run).
 #[doc(hidden)]
 pub use postgres::insert_statement;
-pub use portal_store::{
-    AccessMigrationApplyItem, AccessMigrationItemResult, AccessMigrationPreviewItem,
-    AccessMigrationRecord, ModelGroup, PortalDownstreamBinding, PortalDownstreamBindingWithLabel,
-    PortalOidcHandshake, PortalSession, PortalStore, PortalStoreError, PortalUser,
-};
 #[path = "state/redis_runtime.rs"]
 mod redis_runtime;
 #[path = "state/store.rs"]
@@ -48,20 +48,23 @@ mod store;
 mod context_profile;
 #[path = "state/freekey_sync.rs"]
 mod freekey_sync;
+#[path = "state/model_catalog.rs"]
+pub mod model_catalog;
 #[path = "state/model_discovery.rs"]
 mod model_discovery;
 #[path = "state/model_identity.rs"]
 pub mod model_identity;
-#[path = "state/model_catalog.rs"]
-pub mod model_catalog;
 pub use model_catalog::{ModelCatalog, ModelId, PublishedModel};
 #[path = "state/model_access.rs"]
 pub mod model_access;
-pub use model_access::{AccessMode, AccessMutation, AccessPolicy, AllowedModels, ModelAccessSelection, ResolvedModelAccess};
-#[path = "state/model_access_store.rs"]
-mod model_access_store;
+pub use model_access::{
+    AccessMode, AccessMutation, AccessPolicy, AllowedModels, ModelAccessSelection,
+    ResolvedModelAccess,
+};
 #[path = "state/downstream_patch.rs"]
 mod downstream_patch;
+#[path = "state/model_access_store.rs"]
+mod model_access_store;
 pub use downstream_patch::{apply_downstream_updates, parse_model_access_update};
 #[path = "state/model_key_sync.rs"]
 mod model_key_sync;
@@ -171,20 +174,19 @@ pub use types::{
     NonstandardFieldPolicy, PersistedState, RouteFailureClass, RouteHealthSnapshotDto,
     StreamDiagnostics, UpstreamConfig, UpstreamModelMapping, UpstreamMutationError, UsageLog,
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_MODEL_CASE_INSENSITIVE_MATCHING,
-    DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED, DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES,
-    DEFAULT_TOOL_ARGUMENTS_STRICT, DEFAULT_TOOL_CALL_MERGE_STRICT,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
-    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
     DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS, DEFAULT_PORTAL_OIDC_AUTH_STYLE,
     DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD, DEFAULT_PORTAL_OIDC_EMAIL_FIELD,
     DEFAULT_PORTAL_OIDC_ENABLED, DEFAULT_PORTAL_OIDC_PKCE_ENABLED,
     DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED, DEFAULT_PORTAL_OIDC_SCOPES,
     DEFAULT_PORTAL_OIDC_TOKEN_PATH, DEFAULT_PORTAL_OIDC_USERINFO_METHOD,
-    DEFAULT_PORTAL_OIDC_UUID_FIELD,
     DEFAULT_PORTAL_OIDC_USERNAME_FIELD, DEFAULT_PORTAL_OIDC_USER_ID_FIELD,
-    DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN, DEFAULT_PORTAL_SESSION_TTL_SECONDS,
+    DEFAULT_PORTAL_OIDC_UUID_FIELD, DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN,
+    DEFAULT_PORTAL_SESSION_TTL_SECONDS, DEFAULT_STREAM_DECODE_ERROR_CODE_SPLIT_ENABLED,
+    DEFAULT_STREAM_MAX_SKIPPED_BAD_FRAMES, DEFAULT_TOOL_ARGUMENTS_STRICT,
+    DEFAULT_TOOL_CALL_MERGE_STRICT, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_CEILING_MS,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ADAPTIVE_BUDGET_FACTOR, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_ENABLED,
+    DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_DEPTH, DEFAULT_UPSTREAM_ACCOUNT_QUEUE_MAX_WAIT_MS,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_POLL_INTERVAL_MS,
     DEFAULT_UPSTREAM_ACCOUNT_QUEUE_SKIP_WHEN_DOOMED_ENABLED,
     DEFAULT_UPSTREAM_CAPACITY_FAILURE_COOLDOWN_ENABLED,
@@ -201,16 +203,15 @@ pub use types::{
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_LEASE_STALE_AFTER_MS,
     DEFAULT_UPSTREAM_LOCAL_GATE_DISTINCT_ERROR_CODE_ENABLED,
     DEFAULT_UPSTREAM_LOCAL_GATE_FAST_FAIL_ENABLED, DEFAULT_UPSTREAM_LOCAL_GATE_MAX_WAIT_MS,
-    DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS,
-    DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
+    DEFAULT_UPSTREAM_LOCAL_LEASE_TTL_SECONDS, DEFAULT_UPSTREAM_RATE_LIMIT_INTERNAL_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_RETRY_AFTER_CAP_SECONDS, DEFAULT_UPSTREAM_RETRY_AFTER_COOLDOWN_CAP_SECONDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_ALIGNMENT_TRUNCATED_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_BUDGET_ALIGNMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
-    DEFAULT_UPSTREAM_RATE_LIMIT_INTERNAL_RETRY_ENABLED,
-    DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
-    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_HALF_OPEN_BUSY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_ROUTE_HEALTH_ENFORCEMENT_ENABLED, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
     DEFAULT_UPSTREAM_SHARED_HOST_FAILURE_DOMAIN_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_LAST_RESORT_PROBE_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
@@ -711,15 +712,15 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
     Arc::new(Mutex::new(
         RouteHealthRegistry::new_with_runtime_tuning_and_enforcement(
             ROUTE_HEALTH_GLOBAL_CAPACITY,
-        ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
-        config.upstream_concurrency_probe_delays_ms.clone(),
-        config.upstream_transient_route_cooldown_base_seconds,
-        config.upstream_transient_route_cooldown_max_seconds,
-        config.upstream_transient_route_cooldown_max_step,
-        config.upstream_route_health_half_open_ttl_seconds,
-        config.upstream_route_half_open_exclusive_window_ms,
-        config.upstream_credentials_first_strike_seconds,
-        config.upstream_capacity_failure_cooldown_enabled,
+            ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+            config.upstream_concurrency_probe_delays_ms.clone(),
+            config.upstream_transient_route_cooldown_base_seconds,
+            config.upstream_transient_route_cooldown_max_seconds,
+            config.upstream_transient_route_cooldown_max_step,
+            config.upstream_route_health_half_open_ttl_seconds,
+            config.upstream_route_half_open_exclusive_window_ms,
+            config.upstream_credentials_first_strike_seconds,
+            config.upstream_capacity_failure_cooldown_enabled,
             config.upstream_route_health_enforcement_enabled,
         ),
     ))
@@ -4230,6 +4231,7 @@ impl AppState {
                         UpstreamCandidate::new(upstream.id.clone(), upstream.name.clone(), protocol)
                             .with_models(upstream.route_models())
                             .with_priority(upstream.priority)
+                            .with_weight(upstream.weight)
                             .with_failure_count(upstream.failure_count)
                     })
                     .collect::<Vec<_>>()
@@ -6183,14 +6185,15 @@ impl AppState {
             .await;
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
             for exposed in upstream.effective_downstream_models() {
-                let Some(public_name) = catalog.public_name_for_route(&upstream.id,&exposed) else { continue; };
+                let Some(public_name) = catalog.public_name_for_route(&upstream.id, &exposed)
+                else {
+                    continue;
+                };
                 let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
                     downstream.active
                         && downstream_effective
                             .get(&downstream.id)
-                            .is_some_and(|allowlist| {
-                                catalog.allows_legacy(allowlist, public_name)
-                            })
+                            .is_some_and(|allowlist| catalog.allows_legacy(allowlist, public_name))
                 });
                 if !exposed_to_downstream {
                     continue;
@@ -6263,7 +6266,11 @@ impl AppState {
         if self.portal_store().is_none() {
             return Ok(downstream.model_allowlist.clone());
         }
-        Ok(self.resolved_model_access(downstream).await?.allowed.legacy_projection())
+        Ok(self
+            .resolved_model_access(downstream)
+            .await?
+            .allowed
+            .legacy_projection())
     }
 
     /// 按 id 解析下游的有效白名单；下游不存在时返回 None。
@@ -6279,10 +6286,15 @@ impl AppState {
             let ids = downstreams.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
             let catalog = self.model_catalog().await;
             return match store.resolve_key_access(&ids, &catalog).await {
-                Ok(results) => results.into_iter().map(|(id, access)| (id, access.allowed.legacy_projection())).collect(),
+                Ok(results) => results
+                    .into_iter()
+                    .map(|(id, access)| (id, access.allowed.legacy_projection()))
+                    .collect(),
                 Err(error) => {
                     tracing::warn!(%error, "model access resolution failed; exposing no models");
-                    ids.into_iter().map(|id| (id, vec!["__none__".into()])).collect()
+                    ids.into_iter()
+                        .map(|id| (id, vec!["__none__".into()]))
+                        .collect()
                 }
             };
         }
@@ -6328,10 +6340,7 @@ impl AppState {
         result
     }
 
-    pub async fn effective_model_allowlist_opt(
-        &self,
-        downstream_id: &str,
-    ) -> Option<Vec<String>> {
+    pub async fn effective_model_allowlist_opt(&self, downstream_id: &str) -> Option<Vec<String>> {
         let snapshot = self.routing_snapshot().await;
         let downstream = snapshot
             .downstreams
@@ -6364,21 +6373,19 @@ impl AppState {
             return Vec::new();
         };
         let catalog = self.model_catalog().await;
-        let effective_allowlist: Vec<String> = match self
-            .effective_model_allowlist(&downstream)
-            .await
-        {
-            Ok(models) => models,
-            Err(e) => {
-                tracing::warn!(
-                    downstream_id = %downstream.id,
-                    model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
-                    error = %e,
-                    "failed to resolve downstream model group for model list; exposing none"
-                );
-                return Vec::new();
-            }
-        };
+        let effective_allowlist: Vec<String> =
+            match self.effective_model_allowlist(&downstream).await {
+                Ok(models) => models,
+                Err(e) => {
+                    tracing::warn!(
+                        downstream_id = %downstream.id,
+                        model_group_id = %downstream.model_group_id.as_deref().unwrap_or(""),
+                        error = %e,
+                        "failed to resolve downstream model group for model list; exposing none"
+                    );
+                    return Vec::new();
+                }
+            };
 
         catalog.names_for_legacy(&effective_allowlist)
     }
@@ -6390,11 +6397,22 @@ impl AppState {
     pub async fn downstream_visible_models(&self) -> Vec<String> {
         let snapshot = self.routing_snapshot().await;
         let catalog = self.model_catalog().await;
-        let access = self.effective_model_allowlist_map(&snapshot.downstreams).await;
-        catalog.models().iter().filter(|model| snapshot.downstreams.iter().any(|downstream| {
-            downstream.active && access.get(&downstream.id)
-                .is_some_and(|allowed| catalog.allows_legacy(allowed,&model.name))
-        })).map(|model| model.name.clone()).collect()
+        let access = self
+            .effective_model_allowlist_map(&snapshot.downstreams)
+            .await;
+        catalog
+            .models()
+            .iter()
+            .filter(|model| {
+                snapshot.downstreams.iter().any(|downstream| {
+                    downstream.active
+                        && access
+                            .get(&downstream.id)
+                            .is_some_and(|allowed| catalog.allows_legacy(allowed, &model.name))
+                })
+            })
+            .map(|model| model.name.clone())
+            .collect()
     }
 
     async fn initialize_capability_snapshot_from_store(
@@ -6812,11 +6830,21 @@ impl AppState {
         };
 
         let catalog = self.model_catalog().await;
-        if !catalog.allows_legacy(&effective_allowlist,model) { return 0; }
-        let Some(published) = catalog.find(model) else { return 0; };
+        if !catalog.allows_legacy(&effective_allowlist, model) {
+            return 0;
+        }
+        let Some(published) = catalog.find(model) else {
+            return 0;
+        };
         let mut queued = 0usize;
         for route in &published.routes {
-            let Some(upstream) = routing.upstreams.iter().find(|upstream| upstream.id==route.upstream_id) else { continue; };
+            let Some(upstream) = routing
+                .upstreams
+                .iter()
+                .find(|upstream| upstream.id == route.upstream_id)
+            else {
+                continue;
+            };
             let runtime_model_slug = &route.wire_model;
             for api_key in upstream.keys_for_model(&runtime_model_slug) {
                 let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
@@ -7254,9 +7282,7 @@ impl AppState {
             let upstream = Arc::make_mut(&mut candidate_state.upstreams)
                 .iter_mut()
                 .find(|value| value.id == decision.upstream_id)
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "upstream disappeared")
-                })?;
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "upstream disappeared"))?;
             let configured_keys = upstream
                 .available_keys()
                 .into_iter()
@@ -7345,10 +7371,7 @@ impl AppState {
                     ))
                 }
             };
-            if matches!(
-                group_id.as_str(),
-                "all" | "basic" | "premium" | "deny-all"
-            ) {
+            if matches!(group_id.as_str(), "all" | "basic" | "premium" | "deny-all") {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -7394,10 +7417,7 @@ impl AppState {
             Some((group_id, exposed.iter().cloned().collect()))
         };
 
-        if !downstream_plaintext_pairs_unchanged(
-            &state.downstreams,
-            &candidate_state.downstreams,
-        ) {
+        if !downstream_plaintext_pairs_unchanged(&state.downstreams, &candidate_state.downstreams) {
             validate_downstream_plaintext_pairs(&mut candidate_state);
         }
 
@@ -7452,11 +7472,7 @@ impl AppState {
         self.mutate_persisted_state_inner(mutator, map_io).await
     }
 
-    async fn mutate_persisted_state_inner<T, E, F, M>(
-        &self,
-        mutator: F,
-        map_io: M,
-    ) -> Result<T, E>
+    async fn mutate_persisted_state_inner<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>
     where
         F: FnOnce(&mut PersistedState) -> Result<T, E>,
         M: Fn(io::Error) -> E,
@@ -8559,10 +8575,16 @@ impl AppState {
 
     /// Update an existing downstream
     pub async fn update_downstream_by_id(
-        &self, id: &str, updates: serde_json::Value,
+        &self,
+        id: &str,
+        updates: serde_json::Value,
     ) -> Result<DownstreamConfig, String> {
-        let updates = updates.as_object().ok_or_else(|| "updates must be an object".to_owned())?;
-        self.patch_downstream_account(id,updates).await.map_err(|e| e.to_string())
+        let updates = updates
+            .as_object()
+            .ok_or_else(|| "updates must be an object".to_owned())?;
+        self.patch_downstream_account(id, updates)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Delete a downstream

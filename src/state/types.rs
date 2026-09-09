@@ -792,7 +792,8 @@ impl Default for AppConfig {
             portal_oidc_display_name_field: DEFAULT_PORTAL_OIDC_DISPLAY_NAME_FIELD.to_string(),
             portal_oidc_enabled: DEFAULT_PORTAL_OIDC_ENABLED,
             portal_oidc_registration_enabled: DEFAULT_PORTAL_OIDC_REGISTRATION_ENABLED,
-            portal_oidc_allowed_email_domains: DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS.to_string(),
+            portal_oidc_allowed_email_domains: DEFAULT_PORTAL_OIDC_ALLOWED_EMAIL_DOMAINS
+                .to_string(),
             portal_session_ttl_seconds: DEFAULT_PORTAL_SESSION_TTL_SECONDS,
             portal_oidc_pkce_enabled: DEFAULT_PORTAL_OIDC_PKCE_ENABLED,
             portal_oidc_verify_id_token: DEFAULT_PORTAL_OIDC_VERIFY_ID_TOKEN,
@@ -970,6 +971,10 @@ pub struct UpstreamConfig {
     pub max_concurrency: u32,
     #[serde(default)]
     pub priority: u32,
+    /// Deterministic traffic share among same-priority eligible candidates
+    /// (0-1000; 0 = fallback only, default 1).
+    #[serde(default = "default_upstream_weight")]
+    pub weight: u32,
     #[serde(default)]
     pub active: bool,
     #[serde(default)]
@@ -1036,6 +1041,7 @@ impl Default for UpstreamConfig {
             requests_per_minute: default_upstream_requests_per_minute(),
             max_concurrency: default_upstream_max_concurrency(),
             priority: 0,
+            weight: default_upstream_weight(),
             active: false,
             failure_count: 0,
             auto_managed: false,
@@ -1674,6 +1680,10 @@ pub fn default_upstream_max_concurrency() -> u32 {
     32
 }
 
+pub fn default_upstream_weight() -> u32 {
+    1
+}
+
 pub fn default_capability_probe_concurrency() -> u32 {
     4
 }
@@ -2162,8 +2172,7 @@ mod downstream_model_group_tests {
             ..Default::default()
         };
 
-        let mock_store = MockPortalStore::new()
-            .with_group("premium-models", vec!["gpt-4".into()]);
+        let mock_store = MockPortalStore::new().with_group("premium-models", vec!["gpt-4".into()]);
 
         let allowed_models = downstream.get_allowed_models(&mock_store).await.unwrap();
 
@@ -2237,8 +2246,7 @@ mod downstream_model_group_tests {
             ..Default::default()
         };
 
-        let mock_store = MockPortalStore::new()
-            .with_group("all-models", vec!["*".into()]);
+        let mock_store = MockPortalStore::new().with_group("all-models", vec!["*".into()]);
 
         assert!(downstream.allows_model("gpt-4", &mock_store).await);
         assert!(downstream.allows_model("claude-3", &mock_store).await);

@@ -227,7 +227,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column v-if="isColumnVisible('priority')" label="优先级/权重" width="150" align="center">
+        <el-table-column v-if="isColumnVisible('priority')" label="优先级" width="100" align="center">
           <template #default="{ row }">
             <el-input-number
               v-model="row.priority"
@@ -238,6 +238,20 @@
               size="small"
               :disabled="isInlineSaving(row.id, 'priority')"
               @change="updateInlinePriority(row)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column v-if="isColumnVisible('weight')" label="分流权重" width="110" align="center">
+          <template #default="{ row }">
+            <el-input-number
+              v-model="row.weight"
+              :min="0"
+              :max="1000"
+              :step="1"
+              controls-position="right"
+              size="small"
+              :disabled="isInlineSaving(row.id, 'weight')"
+              @change="updateInlineWeight(row)"
             />
           </template>
         </el-table-column>
@@ -472,7 +486,7 @@
 
         <!-- 路由权重配置 -->
         <el-divider class="drawer-section">智能路由配置</el-divider>
-        <el-form-item label="优先级权重">
+        <el-form-item label="优先级">
           <el-input-number v-model="form.priority" :min="0" :max="1000" placeholder="数字越大优先级越高" />
           <el-alert
             title="说明"
@@ -480,7 +494,19 @@
             :closable="false"
             class="helper-text"
           >
-            用于控制路由优先级。权重高的账号优先被选中。默认为0。
+            用于控制路由优先级，优先级高的账号先被选中。默认为0。
+          </el-alert>
+        </el-form-item>
+        <el-form-item label="分流权重">
+          <el-input-number v-model="form.weight" :min="0" :max="1000" :step="1" />
+          <el-alert
+            title="说明"
+            type="info"
+            :closable="false"
+            class="helper-text"
+          >
+            同优先级路由按权重分流（默认 1；3:1 时连续请求按 a,a,a,b 分配）。权重 0 仅作兜底，
+            等权时保持原有压力均衡。
           </el-alert>
         </el-form-item>
 
@@ -516,6 +542,10 @@
         <el-form-item label="优先级">
           <el-input-number v-model="batchUpdateForm.priority" :min="0" :max="1000" controls-position="right" />
           <span class="batch-update-clear" @click="batchUpdateForm.priority = undefined">清除</span>
+        </el-form-item>
+        <el-form-item label="分流权重">
+          <el-input-number v-model="batchUpdateForm.weight" :min="0" :max="1000" controls-position="right" />
+          <span class="batch-update-clear" @click="batchUpdateForm.weight = undefined">清除</span>
         </el-form-item>
         <el-form-item label="启用状态">
           <el-radio-group v-model="batchUpdateForm.active">
@@ -689,7 +719,8 @@ const tableColumns: TableColumnDefinition[] = [
   { key: 'route_health', label: '路由健康' },
   { key: 'concurrency_gate', label: '并发闸门' },
   { key: 'status', label: '状态' },
-  { key: 'priority', label: '优先级/权重' },
+  { key: 'priority', label: '优先级' },
+  { key: 'weight', label: '分流权重' },
   { key: 'remark', label: '备注' }
 ]
 const defaultColumnKeys = tableColumns
@@ -702,7 +733,7 @@ const { visibleColumnKeys, isColumnVisible } = useTableColumnPreferences(
 )
 
 const inlineSaving = ref<Record<string, boolean>>({})
-const inlineCommitted = ref<Record<string, { priority: number }>>({})
+const inlineCommitted = ref<Record<string, { priority: number; weight: number }>>({})
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
@@ -733,6 +764,7 @@ const form = ref<Partial<UpstreamConfig>>({
   active: true,
   model_contexts: [],
   priority: 0,
+  weight: 1,
   strip_nonstandard_chat_fields: 'auto',
   dialect_preset: null,
   model_dialect_presets: {} as Record<string, string>,
@@ -845,7 +877,8 @@ const loadData = async () => {
     upstreams.value = data
     inlineCommitted.value = Object.fromEntries(
       data.map(row => [row.id, {
-        priority: Number(row.priority || 0)
+        priority: Number(row.priority || 0),
+        weight: Number(row.weight ?? 1)
       }])
     )
   } catch (error) {
@@ -855,9 +888,9 @@ const loadData = async () => {
   }
 }
 
-const inlineSaveKey = (id: string, field: 'priority') => `${id}:${field}`
+const inlineSaveKey = (id: string, field: 'priority' | 'weight') => `${id}:${field}`
 
-const isInlineSaving = (id: string, field: 'priority') => {
+const isInlineSaving = (id: string, field: 'priority' | 'weight') => {
   return Boolean(inlineSaving.value[inlineSaveKey(id, field)])
 }
 
@@ -881,6 +914,31 @@ const updateInlinePriority = async (row: UpstreamConfig) => {
   } catch (error) {
     row.priority = previous
     ElMessage.error((error as any)?.message || '优先级更新失败')
+  } finally {
+    delete inlineSaving.value[saveKey]
+  }
+}
+
+const updateInlineWeight = async (row: UpstreamConfig) => {
+  const field = 'weight' as const
+  const saveKey = inlineSaveKey(row.id, field)
+  if (inlineSaving.value[saveKey]) return
+
+  const previous = inlineCommitted.value[row.id]?.weight ?? 1
+  const weight = Math.max(0, Math.min(1000, Number(row.weight ?? 1)))
+  row.weight = weight
+  inlineSaving.value[saveKey] = true
+  try {
+    const { data } = await adminApi.updateUpstream(row.id, { weight })
+    row.weight = Number(data.weight ?? 1)
+    inlineCommitted.value[row.id] = {
+      ...(inlineCommitted.value[row.id] || { priority: 0, weight: 1 }),
+      weight: row.weight
+    }
+    ElMessage.success('分流权重已更新')
+  } catch (error) {
+    row.weight = previous
+    ElMessage.error((error as any)?.message || '分流权重更新失败')
   } finally {
     delete inlineSaving.value[saveKey]
   }
@@ -1079,6 +1137,7 @@ const handleCreate = async () => {
     active: true,
     model_contexts: [],
     priority: 0,
+    weight: 1,
     strip_nonstandard_chat_fields: 'auto',
     dialect_preset: null,
     model_dialect_presets: {},
@@ -1111,6 +1170,7 @@ const handleCopy = (row: UpstreamConfig) => {
     active: row.active,
     model_contexts: row.model_contexts ? [...row.model_contexts] : [],
     priority: row.priority,
+    weight: row.weight ?? 1,
     max_concurrency: row.max_concurrency,
     strip_nonstandard_chat_fields: normalizeNonstandardPolicy(row.strip_nonstandard_chat_fields),
     dialect_preset: row.dialect_preset || null,
@@ -1452,6 +1512,7 @@ const handleBatchDelete = async () => {
 interface BatchUpdateForm {
   max_concurrency?: number
   priority?: number
+  weight?: number
   active: 'keep' | 'true' | 'false'
 }
 
@@ -1477,6 +1538,9 @@ const submitBatchUpdate = async () => {
   }
   if (batchUpdateForm.value.priority !== undefined) {
     updates.priority = batchUpdateForm.value.priority
+  }
+  if (batchUpdateForm.value.weight !== undefined) {
+    updates.weight = batchUpdateForm.value.weight
   }
   if (batchUpdateForm.value.active !== 'keep') {
     updates.active = batchUpdateForm.value.active === 'true'

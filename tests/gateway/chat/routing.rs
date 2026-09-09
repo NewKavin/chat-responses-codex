@@ -2521,3 +2521,215 @@ async fn cooling_high_priority_upstream_yields_to_healthy_lower_priority() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn same_priority_weighted_upstreams_follow_cumulative_ratio() {
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_a = spawn_recording_chat_upstream("weighted-a", "weighted-a-secret", hits.clone()).await;
+    let upstream_b = spawn_recording_chat_upstream("weighted-b", "weighted-b-secret", hits.clone()).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![
+                UpstreamConfig {
+                    id: "weighted-a".into(),
+                    name: "weighted-a".into(),
+                    base_url: upstream_a,
+                    api_key: "weighted-a-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    request_quota_window_hours: 5,
+                    request_quota_requests: 600,
+                    requests_per_minute: 20,
+                    max_concurrency: 4,
+                    priority: 0,
+                    weight: 3,
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "weighted-b".into(),
+                    name: "weighted-b".into(),
+                    base_url: upstream_b,
+                    api_key: "weighted-b-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    request_quota_window_hours: 5,
+                    request_quota_requests: 600,
+                    requests_per_minute: 20,
+                    max_concurrency: 4,
+                    priority: 0,
+                    weight: 1,
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                },
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                rate_limit_enabled: true,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                billing_mode: "request".into(),
+                ip_allowlist: vec![],
+                active: true,
+                model_concurrency_groups: vec![],
+                ..Default::default()
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request_body = json!({
+        "model": "gpt-4.1-mini",
+        "messages": [{"role": "user", "content": "Hello"}]
+    })
+    .to_string();
+
+    for _ in 0..4 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", downstream_key.plaintext))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(request_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let recorded = hits.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["weighted-a", "weighted-a", "weighted-a", "weighted-b"],
+        "weights 3:1 must pick in the cumulative a,a,a,b pattern"
+    );
+}
+
+#[tokio::test]
+async fn zero_weight_upstream_skipped_while_positive_route_is_eligible() {
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_a = spawn_recording_chat_upstream("zero-a", "zero-a-secret", hits.clone()).await;
+    let upstream_b = spawn_recording_chat_upstream("positive-b", "positive-b-secret", hits.clone()).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![
+                UpstreamConfig {
+                    id: "zero-a".into(),
+                    name: "zero-a".into(),
+                    base_url: upstream_a,
+                    api_key: "zero-a-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    request_quota_window_hours: 5,
+                    request_quota_requests: 600,
+                    requests_per_minute: 20,
+                    max_concurrency: 4,
+                    priority: 0,
+                    weight: 0,
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "positive-b".into(),
+                    name: "positive-b".into(),
+                    base_url: upstream_b,
+                    api_key: "positive-b-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    request_quota_window_hours: 5,
+                    request_quota_requests: 600,
+                    requests_per_minute: 20,
+                    max_concurrency: 4,
+                    priority: 0,
+                    weight: 1,
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                },
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                rate_limit_enabled: true,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                billing_mode: "request".into(),
+                ip_allowlist: vec![],
+                active: true,
+                model_concurrency_groups: vec![],
+                ..Default::default()
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
+            model_aliases: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request_body = json!({
+        "model": "gpt-4.1-mini",
+        "messages": [{"role": "user", "content": "Hello"}]
+    })
+    .to_string();
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", downstream_key.plaintext))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(request_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let recorded = hits.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["positive-b", "positive-b"],
+        "weight-0 candidate must not be actively selected while a positive-weight route exists"
+    );
+}

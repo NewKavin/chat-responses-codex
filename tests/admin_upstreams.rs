@@ -377,7 +377,8 @@ fn qualification_persisted_state() -> PersistedState {
             billing_mode: "request".into(),
 
             model_concurrency_groups: vec![],
-    ..Default::default()}]),
+            ..Default::default()
+        }]),
         ..Default::default()
     }
 }
@@ -435,7 +436,9 @@ async fn qualification_apply_refuses_an_empty_decision_set() {
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     // T11/T14: apply 失败不得回写旧路径字段（model_allowlist 已停写）。
     assert!(
-        state.snapshot().await.downstreams[0].model_allowlist.is_empty(),
+        state.snapshot().await.downstreams[0]
+            .model_allowlist
+            .is_empty(),
         "failed apply must not write to model_allowlist"
     );
 }
@@ -5394,4 +5397,166 @@ async fn stale_leases_are_reported_and_reclaimed_by_snapshot() {
         target["runtime_state"]["in_flight"], 0,
         "the stale lease is reclaimed by the snapshot's lazy sweep"
     );
+}
+
+#[tokio::test]
+async fn upstream_weight_update_rejects_out_of_range_values_without_mutating_state() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    for invalid_weight in [json!(-1), json!(1.5), json!("42"), json!(1001)] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/admin/upstreams/upstream-1")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"weight": invalid_weight}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let original = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "upstream-1")
+        .unwrap()
+        .weight;
+    assert_eq!(original, 1, "rejected updates must not mutate weight");
+
+    // Valid weight 0 (fallback-only) and 1000 persist.
+    for valid_weight in [0u32, 1000u32] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/admin/upstreams/upstream-1")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"weight": valid_weight}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let persisted = state
+            .snapshot()
+            .await
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == "upstream-1")
+            .unwrap()
+            .weight;
+        assert_eq!(persisted, valid_weight);
+        // restore default for other tests in this fixture
+    }
+
+    // restore default (1)
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/upstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"weight": 1}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn upstream_priority_update_rejects_values_above_1000() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/upstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"priority": 1001}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let original_priority = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "upstream-1")
+        .unwrap()
+        .priority;
+    let persisted = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "upstream-1")
+        .unwrap()
+        .priority;
+    assert_eq!(
+        persisted, original_priority,
+        "out-of-range priority must not mutate state"
+    );
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_update_applies_weight() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-update")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "ids": ["upstream-b1", "upstream-b2"],
+                        "updates": {"weight": 9}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["updated"], json!(["upstream-b1", "upstream-b2"]));
+    assert_eq!(result["failed"].as_array().unwrap().len(), 0);
+
+    let snapshot = state.snapshot().await;
+    let by_id = |id: &str| snapshot.upstreams.iter().find(|u| u.id == id).unwrap();
+    assert_eq!(by_id("upstream-b1").weight, 9);
+    assert_eq!(by_id("upstream-b2").weight, 9);
 }

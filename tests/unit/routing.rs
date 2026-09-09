@@ -1,5 +1,6 @@
 use chat_responses_codex::routing::{
-    select_upstream, RouteRequest, UpstreamCandidate, UpstreamProtocol,
+    select_upstream, select_weighted_candidate_index, RouteRequest, UpstreamCandidate,
+    UpstreamProtocol,
 };
 
 #[test]
@@ -59,4 +60,45 @@ fn test_fallback_to_premium_when_no_other_option() {
     // Should fall back to premium account when it's the only option
     assert!(result.is_ok());
     assert_eq!(result.unwrap().id, "premium");
+}
+
+#[test]
+fn weighted_selection_follows_deterministic_ratio() {
+    let candidates = vec![
+        UpstreamCandidate::new("a", "A", UpstreamProtocol::ChatCompletions)
+            .with_priority(100)
+            .with_weight(3),
+        UpstreamCandidate::new("b", "B", UpstreamProtocol::ChatCompletions)
+            .with_priority(100)
+            .with_weight(1),
+    ];
+
+    let picks = (0..4)
+        .map(|cursor| select_weighted_candidate_index(&candidates, cursor).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(picks, vec![0, 0, 0, 1]);
+}
+
+#[test]
+fn zero_weight_is_skipped_while_positive_weight_exists() {
+    let candidates = vec![
+        UpstreamCandidate::new("disabled", "Disabled", UpstreamProtocol::ChatCompletions)
+            .with_weight(0),
+        UpstreamCandidate::new("active", "Active", UpstreamProtocol::ChatCompletions)
+            .with_weight(1),
+    ];
+
+    assert_eq!(select_weighted_candidate_index(&candidates, 0), Some(1));
+}
+
+#[test]
+fn all_zero_weights_use_stable_first_candidate() {
+    let candidates = vec![
+        UpstreamCandidate::new("first", "First", UpstreamProtocol::ChatCompletions).with_weight(0),
+        UpstreamCandidate::new("second", "Second", UpstreamProtocol::ChatCompletions)
+            .with_weight(0),
+    ];
+
+    assert_eq!(select_weighted_candidate_index(&candidates, 99), Some(0));
 }

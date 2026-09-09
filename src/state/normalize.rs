@@ -171,10 +171,7 @@ impl UpstreamConfig {
         let mut models = Vec::new();
         let mut seen = HashSet::new();
 
-        for model in self
-            .supported_models
-            .iter()
-        {
+        for model in self.supported_models.iter() {
             let model = model.trim();
             if model.is_empty() {
                 continue;
@@ -670,6 +667,16 @@ mod tests {
         }))
         .unwrap();
         assert!(upstream.model_mappings.is_empty());
+    }
+
+    #[test]
+    fn upstream_weight_missing_from_old_json_defaults_to_one() {
+        let mut value = serde_json::to_value(UpstreamConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("weight");
+
+        let loaded: UpstreamConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(loaded.weight, 1);
     }
 
     #[test]

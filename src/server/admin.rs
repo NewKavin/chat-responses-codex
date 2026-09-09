@@ -2411,6 +2411,7 @@ const BATCH_UPDATE_UPSTREAM_ALLOWED_FIELDS: &[&str] = &[
     "max_concurrency",
     "active",
     "priority",
+    "weight",
     "request_quota_window_hours",
     "request_quota_requests",
     "request_quota_5h",
