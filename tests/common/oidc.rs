@@ -7,7 +7,7 @@
 //! Tests skip (with a message) when no reachable PostgreSQL is configured;
 //! CI without the test database stays green the same way
 //! `tests/postgres_roundtrip.rs` does.
-#![allow(dead_code, unused_imports, clippy::await_holding_lock)]
+#![allow(dead_code, unused_imports, clippy::await_holding_lock, clippy::type_complexity)]
 
 use std::str::FromStr;
 use std::sync::OnceLock;

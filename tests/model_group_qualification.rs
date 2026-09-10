@@ -90,13 +90,15 @@ async fn qualification_writes_to_bound_group_not_allowlist() {
 
     // 绑组下游 + active upstream
     let key = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "test".to_string();
-    ds.name = "Test".to_string();
-    ds.hash = key.hash.clone();
-    ds.plaintext_key = Some(key.plaintext.clone());
-    ds.model_allowlist = vec!["old".to_string()];
-    ds.model_group_id = Some("qual-group".to_string());
+    let ds = DownstreamConfig {
+        id: "test".to_string(),
+        name: "Test".to_string(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        model_allowlist: vec!["old".to_string()],
+        model_group_id: Some("qual-group".to_string()),
+        ..Default::default()
+    };
     state.insert_downstream(ds).await.expect("insert downstream");
 
     let _ = state
@@ -165,12 +167,14 @@ async fn qualification_rejects_unbound_downstream() {
     // 的拒绝逻辑（文件模式 / 旧会话快照仍可能出现），故用仅内存的
     // add_downstream 造数据，不落库。
     let key = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "test".to_string();
-    ds.name = "Test".to_string();
-    ds.hash = key.hash.clone();
-    ds.plaintext_key = Some(key.plaintext.clone());
-    ds.model_allowlist = vec!["old".to_string()];
+    let mut ds = DownstreamConfig {
+        id: "test".to_string(),
+        name: "Test".to_string(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        model_allowlist: vec!["old".to_string()],
+        ..Default::default()
+    };
     ds.model_group_id = None; // unbound
     state.add_downstream(ds).await.expect("add downstream in memory");
     insert_qualified_upstream(&state).await;
@@ -221,13 +225,15 @@ async fn qualification_rejects_group_referenced_by_user_grant() {
         .unwrap();
 
     let key = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "test".to_string();
-    ds.name = "Test".to_string();
-    ds.hash = key.hash.clone();
-    ds.plaintext_key = Some(key.plaintext.clone());
-    ds.model_allowlist = vec!["old".to_string()];
-    ds.model_group_id = Some("qual-user-group".to_string());
+    let ds = DownstreamConfig {
+        id: "test".to_string(),
+        name: "Test".to_string(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        model_allowlist: vec!["old".to_string()],
+        model_group_id: Some("qual-user-group".to_string()),
+        ..Default::default()
+    };
     state.insert_downstream(ds).await.expect("insert downstream");
     insert_qualified_upstream(&state).await;
 
@@ -278,12 +284,14 @@ async fn qualification_rejects_when_policy_is_not_group_mode() {
         .await
         .unwrap();
     let key = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "test".to_string();
-    ds.name = "Test".to_string();
-    ds.hash = key.hash.clone();
-    ds.plaintext_key = Some(key.plaintext.clone());
-    ds.model_allowlist = vec!["old".to_string()];
+    let mut ds = DownstreamConfig {
+        id: "test".to_string(),
+        name: "Test".to_string(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        model_allowlist: vec!["old".to_string()],
+        ..Default::default()
+    };
     ds.model_group_id = Some("extra".to_string()); // config 旧字段指向组
     state.insert_downstream(ds).await.expect("insert downstream");
     // 策略被显式改为 deny：config 旧字段仍在，但策略事实源否决。
@@ -322,13 +330,15 @@ async fn qualification_rejects_builtin_group() {
     let state = load_state(&url).await;
 
     let key = generate_downstream_key("gw");
-    let mut ds = DownstreamConfig::default();
-    ds.id = "test".to_string();
-    ds.name = "Test".to_string();
-    ds.hash = key.hash.clone();
-    ds.plaintext_key = Some(key.plaintext.clone());
-    ds.model_allowlist = vec!["old".to_string()];
-    ds.model_group_id = Some("all".to_string());
+    let ds = DownstreamConfig {
+        id: "test".to_string(),
+        name: "Test".to_string(),
+        hash: key.hash.clone(),
+        plaintext_key: Some(key.plaintext.clone()),
+        model_allowlist: vec!["old".to_string()],
+        model_group_id: Some("all".to_string()),
+        ..Default::default()
+    };
     state.insert_downstream(ds).await.expect("insert downstream");
     insert_qualified_upstream(&state).await;
 
@@ -360,14 +370,15 @@ async fn qualification_rejects_shared_group() {
 
     let mk = |id: &str| {
         let key = generate_downstream_key("gw");
-        let mut ds = DownstreamConfig::default();
-        ds.id = id.to_string();
-        ds.name = id.to_string();
-        ds.hash = key.hash.clone();
-        ds.plaintext_key = Some(key.plaintext.clone());
-        ds.model_allowlist = vec!["old".to_string()];
-        ds.model_group_id = Some("qual-shared".to_string());
-        ds
+        DownstreamConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            hash: key.hash.clone(),
+            plaintext_key: Some(key.plaintext.clone()),
+            model_allowlist: vec!["old".to_string()],
+            model_group_id: Some("qual-shared".to_string()),
+            ..Default::default()
+        }
     };
     let store = state.portal_store().expect("portal store must exist");
     let client = store.get_client().await.expect("get client");

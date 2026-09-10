@@ -13,8 +13,10 @@ fn test_default_token_path_is_slash_token() {
 
 #[test]
 fn test_token_path_can_be_customized() {
-    let mut config = AppConfig::default();
-    config.portal_oidc_token_path = "/accesstoken".to_string();
+    let config = AppConfig {
+        portal_oidc_token_path: "/accesstoken".to_string(),
+        ..Default::default()
+    };
     assert_eq!(
         config.portal_oidc_token_path, "/accesstoken",
         "token_path should be /accesstoken when explicitly set"

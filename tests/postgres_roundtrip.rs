@@ -57,6 +57,7 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "max_concurrency": 7,
                 "model_contexts": [],
                 "priority": 0,
+                "weight": 1,
                 "active": true,
                 "failure_count": 0,
                 "default_model_context": null,

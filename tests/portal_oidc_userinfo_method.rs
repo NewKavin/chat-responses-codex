@@ -13,8 +13,10 @@ fn test_default_userinfo_method_is_get() {
 
 #[test]
 fn test_userinfo_method_can_be_set_to_post() {
-    let mut config = AppConfig::default();
-    config.portal_oidc_userinfo_method = "POST".to_string();
+    let config = AppConfig {
+        portal_oidc_userinfo_method: "POST".to_string(),
+        ..Default::default()
+    };
     assert_eq!(
         config.portal_oidc_userinfo_method, "POST",
         "userinfo_method should be POST when explicitly set"

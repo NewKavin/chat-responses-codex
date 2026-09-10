@@ -50,9 +50,11 @@ async fn ensure_downstream(state: &AppState, downstream_id: &str) {
     {
         return;
     }
-    let mut ds = DownstreamConfig::default();
-    ds.id = downstream_id.to_string();
-    ds.name = downstream_id.to_string();
+    let ds = DownstreamConfig {
+        id: downstream_id.to_string(),
+        name: downstream_id.to_string(),
+        ..Default::default()
+    };
     state
         .insert_downstream(ds)
         .await

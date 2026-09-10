@@ -8,9 +8,11 @@ async fn ensure_binding_downstream(state: &AppState, downstream_id: &str) {
     if state.downstream_config(downstream_id).await.is_some() {
         return;
     }
-    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
-    ds.id = downstream_id.to_string();
-    ds.name = downstream_id.to_string();
+    let ds = chat_responses_codex::state::DownstreamConfig {
+        id: downstream_id.to_string(),
+        name: downstream_id.to_string(),
+        ..Default::default()
+    };
     state
         .insert_downstream(ds)
         .await

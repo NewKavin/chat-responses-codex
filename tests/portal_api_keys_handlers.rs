@@ -50,9 +50,11 @@ async fn ensure_binding_downstream(state: &AppState, downstream_id: &str) {
     if state.downstream_config(downstream_id).await.is_some() {
         return;
     }
-    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
-    ds.id = downstream_id.to_string();
-    ds.name = downstream_id.to_string();
+    let ds = chat_responses_codex::state::DownstreamConfig {
+        id: downstream_id.to_string(),
+        name: downstream_id.to_string(),
+        ..Default::default()
+    };
     state
         .insert_downstream(ds)
         .await
@@ -1424,11 +1426,13 @@ async fn test_admin_can_update_binding_group_and_portal_sees_it() {
     let admin_token = get_admin_token(&app).await;
 
     // 管理员先建一把普通下游并绑定 basic
-    let mut ds = chat_responses_codex::state::DownstreamConfig::default();
-    ds.id = "sk-test-bound".into();
-    ds.name = "Bound Account".into();
-    ds.hash = "unused".into();
-    ds.plaintext_key = Some("sk-test-bound-secret".into());
+    let ds = chat_responses_codex::state::DownstreamConfig {
+        id: "sk-test-bound".into(),
+        name: "Bound Account".into(),
+        hash: "unused".into(),
+        plaintext_key: Some("sk-test-bound-secret".into()),
+        ..Default::default()
+    };
     state.insert_downstream(ds).await.expect("insert downstream");
 
     let bind_url = format!("/api/admin/portal/users/{}/bindings", user.id);

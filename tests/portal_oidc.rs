@@ -251,20 +251,21 @@ struct FlowResult {
 
 async fn oidc_gateway(
     idp: &MockIdp,
-    #[allow(clippy::field_reassign_with_default)] // fixture builder
     configure: impl Fn(&mut AppConfig),
 ) -> (axum::Router, AppState) {
     let url = common::oidc::database_url().expect("pg configured");
     common::oidc::reset_portal_tables(&url).await;
-    let mut config = AppConfig::default();
-    config.portal_oidc_client_id = "client-id".to_string();
-    config.portal_oidc_client_secret = "client-secret".to_string();
-    config.portal_oidc_redirect_url = CALLBACK_URL.to_string();
-    config.portal_oidc_issuer_url = idp.base_url.clone();
-    config.portal_oidc_enabled = true;
-    config.admin_username = "admin".to_string();
-    config.admin_password = "admin-password".to_string();
-    config.jwt_secret = "test-jwt-secret".to_string();
+    let mut config = AppConfig {
+        portal_oidc_client_id: "client-id".to_string(),
+        portal_oidc_client_secret: "client-secret".to_string(),
+        portal_oidc_redirect_url: CALLBACK_URL.to_string(),
+        portal_oidc_issuer_url: idp.base_url.clone(),
+        portal_oidc_enabled: true,
+        admin_username: "admin".to_string(),
+        admin_password: "admin-password".to_string(),
+        jwt_secret: "test-jwt-secret".to_string(),
+        ..Default::default()
+    };
     configure(&mut config);
     let state = AppState::load_from_database_url(&url, config)
         .await
@@ -446,16 +447,17 @@ async fn login_flow_with_explicit_endpoints_skips_discovery() {
         return;
     }
     let idp = MockIdpBuilder::default().start().await;
-    #[allow(clippy::field_reassign_with_default)] // fixture builder
-    let mut config = AppConfig::default();
-    config.portal_oidc_client_id = "client-id".to_string();
-    config.portal_oidc_client_secret = "client-secret".to_string();
-    config.portal_oidc_redirect_url = CALLBACK_URL.to_string();
-    config.portal_oidc_authorization_endpoint = format!("{}/authorize", idp.base_url);
-    config.portal_oidc_token_endpoint = format!("{}/token", idp.base_url);
-    config.portal_oidc_userinfo_endpoint = format!("{}/userinfo", idp.base_url);
-    config.portal_oidc_enabled = true;
-    config.portal_oidc_registration_enabled = true;
+    let config = AppConfig {
+        portal_oidc_client_id: "client-id".to_string(),
+        portal_oidc_client_secret: "client-secret".to_string(),
+        portal_oidc_redirect_url: CALLBACK_URL.to_string(),
+        portal_oidc_authorization_endpoint: format!("{}/authorize", idp.base_url),
+        portal_oidc_token_endpoint: format!("{}/token", idp.base_url),
+        portal_oidc_userinfo_endpoint: format!("{}/userinfo", idp.base_url),
+        portal_oidc_enabled: true,
+        portal_oidc_registration_enabled: true,
+        ..Default::default()
+    };
     // issuer intentionally left empty: endpoints come from explicit config.
     let state = AppState::load_from_database_url(&url, config)
         .await
@@ -1521,16 +1523,17 @@ async fn disabled_oidc_hides_start_endpoint() {
 async fn file_mode_router() -> (axum::Router, AppState) {
     use tempfile::TempDir;
     let directory = TempDir::new().unwrap();
-    #[allow(clippy::field_reassign_with_default)] // fixture builder
-    let mut config = AppConfig::default();
-    config.portal_oidc_client_id = "client-id".to_string();
-    config.portal_oidc_client_secret = "client-secret".to_string();
-    config.portal_oidc_redirect_url = CALLBACK_URL.to_string();
-    config.portal_oidc_issuer_url = "http://127.0.0.1:1".to_string();
-    config.portal_oidc_enabled = true;
-    config.admin_username = "admin".to_string();
-    config.admin_password = "admin-password".to_string();
-    config.jwt_secret = "test-jwt-secret".to_string();
+    let config = AppConfig {
+        portal_oidc_client_id: "client-id".to_string(),
+        portal_oidc_client_secret: "client-secret".to_string(),
+        portal_oidc_redirect_url: CALLBACK_URL.to_string(),
+        portal_oidc_issuer_url: "http://127.0.0.1:1".to_string(),
+        portal_oidc_enabled: true,
+        admin_username: "admin".to_string(),
+        admin_password: "admin-password".to_string(),
+        jwt_secret: "test-jwt-secret".to_string(),
+        ..Default::default()
+    };
     let state = AppState::new(
         chat_responses_codex::state::PersistedState::default(),
         directory.path().join("state.json"),

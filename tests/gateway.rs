@@ -13,7 +13,6 @@ mod claude;
 #[path = "gateway/common.rs"]
 mod common;
 #[path = "common/oidc.rs"]
-#[allow(dead_code, unused_imports)]
 mod shared_oidc;
 #[path = "gateway/compatibility.rs"]
 mod compatibility;
