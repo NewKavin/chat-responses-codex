@@ -474,6 +474,15 @@ upstream、Key、runtime model、协议和 capability 配置自动计算、校�
 历史；不要在 `config.toml` 再设置一个全局绝对压缩上限，否则切换不同窗口的模型时会失去
 按模型计算的压缩点。
 
+`context_window` 的来源：该模型全部活跃路由的上下文配置取**最小值**，与门户配额页显示的
+数值相同。每条路由按"上游模型上下文 → 全局上下文配置（按 base_url）模型条目 →
+上游默认上下文 → 全局默认上下文"的顺序解析。同一模型走多个上游时，要么每个上游都配，
+要么在全局上下文配置里配一次（同一 base_url 的上游共享）。`max_context_window` 与
+`context_window` 相同，因此 `config.toml` 里的 `model_context_window` 只能调低不能调高。
+
+`truncation_policy` 固定为 `{"mode": "tokens", "limit": 10000}`，即单次工具输出最多保留约
+10000 token；`config.toml` 里的 `tool_output_token_limit` 可以覆盖这个上限。
+
 ### 5.2 为什么必须和网关一致
 
 Codex 会根据这个目录决定模型是否存在。

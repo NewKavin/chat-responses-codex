@@ -233,7 +233,8 @@
                   <h4>步骤 2: 写入 `~/.codex/model-catalog.json`</h4>
                   <p>
                     这个文件包含当前下游白名单中的完整模型目录，route 与能力元数据由网关生成。
-                    已配置的 <code>context_window</code> 会写入对应模型，
+                    每个模型的 <code>context_window</code> 取其全部活跃上游上下文配置的最小值
+                    （与配额页一致，全局上下文配置同样生效）。
                     Codex 默认会在累计 token 达到该窗口的
                     <strong>80%</strong> 时自动压缩历史，无需在 <code>config.toml</code>
                     再设全局阈值；切换模型时压缩点会跟着模型的实际窗口变。
