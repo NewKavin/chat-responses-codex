@@ -416,7 +416,7 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["supports_image_detail_original"], false);
     assert_eq!(model["context_window"], 272_000);
     assert_eq!(model["effective_context_window_percent"], 80);
-    assert_eq!(model["truncation_policy"]["mode"], "bytes");
+    assert_eq!(model["truncation_policy"]["mode"], "tokens");
     assert_eq!(model["truncation_policy"]["limit"], 10_000);
     assert_eq!(model["experimental_supported_tools"], json!([]));
     assert_eq!(model["input_modalities"], json!(["text", "image"]));

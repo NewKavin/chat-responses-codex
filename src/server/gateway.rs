@@ -3086,7 +3086,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "base_instructions": "",
                 "web_search_tool_type": "text",
                 "truncation_policy": {
-                    "mode": "bytes",
+                    "mode": "tokens",
                     "limit": 10_000
                 },
                 "supports_reasoning_summaries": reasoning.supports_summaries,
