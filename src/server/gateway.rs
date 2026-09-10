@@ -2972,22 +2972,18 @@ fn codex_catalog_context_window(
     snapshot: &crate::state::PersistedState,
     catalog: &crate::state::ModelCatalog,
     model: &str,
-    _case_insensitive: bool,
 ) -> Option<i64> {
     catalog
-        .find(model)?
-        .routes
-        .iter()
-        .filter_map(|route| catalog.route_context(snapshot, route))
+        .effective_context_for_model(snapshot, model)
         .map(|config| i64::from(config.context_limit))
-        .max()
 }
 
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
 ///
-/// Each model entry includes `context_window` (from the upstream's
-/// `model_contexts` configuration) so Codex can display real-time context
-/// usage percentage in its status bar.
+/// Each model entry includes `context_window` (the minimum across all active
+/// routes' context configuration, upstream `model_contexts` then global
+/// context profiles per base_url, falling back to upstream/global defaults)
+/// so Codex can display real-time context usage percentage in its status bar.
 async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     let Some(downstream) = state.downstream_for_secret(secret).await else {
         return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
@@ -3039,20 +3035,9 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 case_insensitive,
             );
             let capabilities = witness.as_ref().map(|entry| &entry.capabilities);
-            let context_window = capabilities
-                .and_then(|capabilities| {
-                    capabilities
-                        .context_window
-                        .and_then(|limit| i64::try_from(limit).ok())
-                })
-                .or_else(|| {
-                    codex_catalog_context_window(
-                        &snapshot,
-                        &catalog,
-                        &slug,
-                        case_insensitive,
-                    )
-                });
+            // 上下文上限单一来源：所有活跃路由取最小值（与门户配额页一致），
+            // 不再使用见证路由的 capabilities.context_window（它不读全局 profile）。
+            let context_window = codex_catalog_context_window(&snapshot, &catalog, &slug);
             let mut levels = Vec::new();
             if let Some(published) = catalog.find(&slug) {
                 for route in &published.routes {

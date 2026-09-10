@@ -2,7 +2,9 @@ use super::common::*;
 use chat_responses_codex::auth::generate_admin_token;
 use chat_responses_codex::capabilities::*;
 use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
-use chat_responses_codex::state::{ApiKeyModelConfig, UpstreamModelMapping};
+use chat_responses_codex::state::{
+    ApiKeyModelConfig, DefaultModelContextConfig, GlobalContextProfile, UpstreamModelMapping,
+};
 use serde_json::Value;
 
 #[allow(dead_code)]
@@ -141,6 +143,14 @@ fn catalog_state(
     upstreams: Vec<UpstreamConfig>,
     model_allowlist: Vec<String>,
 ) -> (tempfile::TempDir, AppState, String) {
+    catalog_state_with_profiles(upstreams, model_allowlist, std::collections::HashMap::new())
+}
+
+fn catalog_state_with_profiles(
+    upstreams: Vec<UpstreamConfig>,
+    model_allowlist: Vec<String>,
+    global_context_profiles: std::collections::HashMap<String, GlobalContextProfile>,
+) -> (tempfile::TempDir, AppState, String) {
     let tempdir = tempdir().unwrap();
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
@@ -174,7 +184,7 @@ fn catalog_state(
             }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            global_context_profiles: std::sync::Arc::new(global_context_profiles),
             runtime_settings: None,
             model_aliases: vec![],
         },
@@ -1355,7 +1365,7 @@ async fn gateway_selects_the_key_route_that_supports_required_capabilities() {
 }
 
 #[tokio::test]
-async fn codex_catalog_context_limits_come_only_from_the_selected_witness() {
+async fn codex_catalog_context_window_is_min_across_all_active_routes() {
     let model = "arbitrary/competing-contexts";
     let mut unrelated = catalog_upstream("a-unrelated-context", &[model]);
     unrelated.model_contexts = vec![ModelContextConfig {
@@ -1401,8 +1411,52 @@ async fn codex_catalog_context_limits_come_only_from_the_selected_witness() {
 
     let catalog = get_models(state, &secret, true).await;
     let model = &catalog["models"][0];
-    assert_eq!(model["context_window"], 222_222);
-    assert_eq!(model["max_context_window"], 222_222);
+    assert_eq!(model["context_window"], 111_111);
+    assert_eq!(model["max_context_window"], 111_111);
+}
+
+#[tokio::test]
+async fn codex_catalog_context_window_prefers_global_profile_over_upstream_default() {
+    let model = "arbitrary/profile-context";
+    let mut upstream = catalog_upstream("profile-host", &[model]);
+    upstream.default_model_context = Some(DefaultModelContextConfig {
+        context_limit: 200_000,
+        output_reserve: 4_096,
+        max_output_tokens: 0,
+        context_group: String::new(),
+    });
+    let mut profiles = std::collections::HashMap::new();
+    profiles.insert(
+        "https://profile-host.invalid".to_string(),
+        GlobalContextProfile {
+            model_contexts: vec![ModelContextConfig {
+                slug: model.into(),
+                context_limit: 1_000_000,
+                output_reserve: 8_192,
+                max_output_tokens: 0,
+                context_group: String::new(),
+            }],
+            default_model_context: None,
+        },
+    );
+    let (_tempdir, state, secret) =
+        catalog_state_with_profiles(vec![upstream.clone()], vec![model.into()], profiles);
+    put_catalog_profile(
+        &state,
+        &upstream,
+        model,
+        DialectProfileState::Verified,
+        &[
+            (Capability::FunctionTools, EvidenceState::Supported),
+            (Capability::ToolContinuation, EvidenceState::Supported),
+        ],
+    )
+    .await;
+
+    let catalog = get_models(state, &secret, true).await;
+    let model = &catalog["models"][0];
+    assert_eq!(model["context_window"], 1_000_000);
+    assert_eq!(model["max_context_window"], 1_000_000);
 }
 
 #[tokio::test]
