@@ -109,6 +109,30 @@ fn is_runtime_coordination_io_error(error: &std::io::Error) -> bool {
         .is_some_and(|source| source.downcast_ref::<RuntimeCoordinationError>().is_some())
 }
 
+/// tokio-postgres 的 `Display` 对 Db 错误只输出固定字符串 "db error"，
+/// 真实信息在 source 链的 `DbError` 里。沿错误链提取 message /
+/// constraint / detail，让管理端错误响应可见实际数据库原因。
+fn io_error_detail(error: &std::io::Error) -> String {
+    let mut chain: Option<&(dyn Error + 'static)> = match error.get_ref() {
+        Some(source) => Some(source),
+        None => None,
+    };
+    while let Some(source) = chain {
+        if let Some(db_error) = source.downcast_ref::<tokio_postgres::error::DbError>() {
+            let mut detail = format!("db error: {}", db_error.message());
+            if let Some(constraint) = db_error.constraint() {
+                detail.push_str(&format!(" (constraint: {constraint})"));
+            }
+            if let Some(detail_msg) = db_error.detail() {
+                detail.push_str(&format!(", detail: {detail_msg}"));
+            }
+            return detail;
+        }
+        chain = source.source();
+    }
+    error.to_string()
+}
+
 fn admin_io_error_response(error: std::io::Error, context: &str) -> Response {
     if is_runtime_coordination_io_error(&error) {
         return runtime_coordination_unavailable_admin_response();
@@ -120,7 +144,7 @@ fn admin_io_error_response(error: std::io::Error, context: &str) -> Response {
     };
     (
         status,
-        Json(json!({"error": {"message": format!("{context}: {error}")}})),
+        Json(json!({"error": {"message": format!("{context}: {}", io_error_detail(&error))}})),
     )
         .into_response()
 }
@@ -4067,6 +4091,17 @@ pub(super) async fn admin_delete_model_group(
             Json(json!({"error": {"code": "group_protected", "message": format!("cannot delete builtin model group {group_id}")}})),
         )
             .into_response();
+    }
+
+    // 删组前先把内存快照中所有引用该组的下游落到 deny-all 并持久化
+    // （与 DB 外键 ON DELETE SET DEFAULT 行为一致）。否则 portal store
+    // 直连 DB 删组后内存仍持有过期 group_id，下一次全量 sync（如创建
+    // 上游）会把过期引用写回，触发 FK 冲突并对外表现为 "db error"。
+    if let Err(error) = state
+        .retarget_downstreams_after_group_delete(&group_id)
+        .await
+    {
+        return admin_io_error_response(error, "Failed to retarget downstreams before group delete");
     }
 
     match store.delete_model_group(&group_id).await {

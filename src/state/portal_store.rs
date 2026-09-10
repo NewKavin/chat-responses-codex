@@ -178,15 +178,35 @@ pub enum PortalStoreError {
     Db(String),
 }
 
+/// tokio-postgres 的 `Display` 对 Db 错误只输出固定字符串 "db error"，
+/// 真实信息在 `DbError` 里。portal 错误链转换时提取出来，避免下游
+/// 使用者（管理接口、门户接口）只看到 "db error" 三个字。
+fn describe_postgres_error(error: &tokio_postgres::Error) -> String {
+    if let Some(db_error) = error.as_db_error() {
+        let mut detail = format!("db error: {}", db_error.message());
+        if let Some(constraint) = db_error.constraint() {
+            detail.push_str(&format!(" (constraint: {constraint})"));
+        }
+        if let Some(detail_msg) = db_error.detail() {
+            detail.push_str(&format!(", detail: {detail_msg}"));
+        }
+        return detail;
+    }
+    error.to_string()
+}
+
 impl From<tokio_postgres::Error> for PortalStoreError {
     fn from(error: tokio_postgres::Error) -> Self {
-        PortalStoreError::Db(error.to_string())
+        PortalStoreError::Db(describe_postgres_error(&error))
     }
 }
 
 impl From<bb8::RunError<tokio_postgres::Error>> for PortalStoreError {
     fn from(error: bb8::RunError<tokio_postgres::Error>) -> Self {
-        PortalStoreError::Db(error.to_string())
+        match error {
+            bb8::RunError::User(pg_error) => PortalStoreError::Db(describe_postgres_error(&pg_error)),
+            other => PortalStoreError::Db(other.to_string()),
+        }
     }
 }
 

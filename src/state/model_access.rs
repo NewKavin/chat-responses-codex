@@ -284,6 +284,32 @@ impl super::AppState {
         }).await
     }
 
+    /// T15 删组一致性：把内存快照里所有仍引用 `deleted_group_id` 的下游
+    /// 重置为 deny-all 哨兵组并持久化，与 DB 层外键 `ON DELETE SET DEFAULT`
+    /// 的行为保持一致。必须在 portal store 删组之前调用：DB 行会由外键
+    /// 自动落到 deny-all，如果内存不同步，下一次全量 sync（例如创建上游）
+    /// 会把过期的 group_id 写回，触发 FK 冲突并对外表现为 "db error"。
+    pub async fn retarget_downstreams_after_group_delete(
+        &self,
+        deleted_group_id: &str,
+    ) -> std::io::Result<usize> {
+        let _guard = self.config_persist_lock.lock().await;
+        let mut state = self.inner.lock().await;
+        let mut candidate = state.clone();
+        let mut changed = 0usize;
+        for downstream in std::sync::Arc::make_mut(&mut candidate.downstreams) {
+            if downstream.model_group_id.as_deref() == Some(deleted_group_id) {
+                downstream.model_group_id = Some("deny-all".to_string());
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.config_store.persist_config(&candidate).await?;
+            state.downstreams = candidate.downstreams;
+        }
+        Ok(changed)
+    }
+
     pub async fn resolved_model_access(&self, downstream: &super::DownstreamConfig) -> Result<ResolvedModelAccess, String> {
         let catalog = self.model_catalog().await;
         self.resolved_model_access_with_catalog(downstream,&catalog).await

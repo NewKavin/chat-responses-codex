@@ -91,11 +91,11 @@ impl PostgresStateStore {
         {
             let protocol = decode_protocol(row.get::<_, String>(4))?;
             let api_keys: Vec<String> = row
-                .get::<_, Option<String>>(18)
+                .get::<_, Option<String>>(19)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             let api_key_models: Vec<ApiKeyModelConfig> = row
-                .get::<_, Option<String>>(19)
+                .get::<_, Option<String>>(20)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             upstreams.push(UpstreamConfig {

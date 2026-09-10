@@ -297,3 +297,126 @@ async fn test_builtin_sentinel_groups_are_protected() {
         "premium is a business group and must stay editable"
     );
 }
+
+/// 回归测试（错误信息可见性）：删组接口修复前，内存快照会残留对被删组的
+/// 引用；下一次全量 sync（例如创建上游）触发 FK 冲突，但 tokio-postgres
+/// 把错误压扁成固定字符串 "db error"。本测试模拟「DB 已删组、内存仍引用」
+/// （通过直连 DB 执行 DELETE，模拟 portal store 直连路径），并断言 admin
+/// API 返回的是真实约束信息而非 "db error"。
+#[tokio::test]
+async fn test_stale_group_reference_reports_real_db_error() {
+    let _guard = common::oidc::lock().await;
+    let url = database_url();
+
+    if !common::oidc::ensure_database(&url).await {
+        return;
+    }
+
+    common::oidc::reset_portal_tables(&url).await;
+
+    let state = load_state(&url).await;
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    fn authed(
+        method: &str,
+        uri: &str,
+        token: &str,
+        body: Option<Body>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {}", token));
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let body = body.unwrap_or_else(Body::empty);
+        builder.body(body).unwrap()
+    }
+
+    // 1. 创建模型组
+    let create_group = authed(
+        "POST",
+        "/api/admin/model-groups",
+        &token,
+        Some(Body::from(
+            json!({
+                "id": "sql-deleted-group",
+                "name": "SQL Deleted Group",
+                "allowed_models": ["model-1"]
+            })
+            .to_string(),
+        )),
+    );
+    let res = app.clone().oneshot(create_group).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // 2. 创建引用该组的下游（内存 + DB 都写入）
+    let create_downstream = authed(
+        "POST",
+        "/api/admin/downstreams",
+        &token,
+        Some(Body::from(
+            json!({
+                "id": "downstream-with-sql-deleted-group",
+                "name": "Downstream With SQL Deleted Group",
+                "model_group_id": "sql-deleted-group",
+                "active": true,
+                "billing_mode": "request"
+            })
+            .to_string(),
+        )),
+    );
+    let res = app.clone().oneshot(create_downstream).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // 3. 绕过 admin 删组接口，直连 DB 删组（模拟 portal store 直连路径；
+    //    修复前该路径不会同步内存快照，导致内存残留过期引用）
+    {
+        let client = common::oidc::connect(&url)
+            .await
+            .expect("oidc test db must connect");
+        client
+            .execute("DELETE FROM model_groups WHERE id = $1", &[&"sql-deleted-group"])
+            .await
+            .expect("direct DELETE must succeed");
+    }
+
+    // 4. 创建上游触发全量 sync：内存里下游仍引用已删组 → FK 冲突。
+    //    断言错误信息里带真实约束名，而不是扁平化的 "db error"。
+    let create_upstream = authed(
+        "POST",
+        "/api/admin/upstreams",
+        &token,
+        Some(Body::from(
+            json!({
+                "name": "error-visibility-upstream",
+                "base_url": "https://example.com/v1",
+                "api_key": "sk-error-visibility",
+                "protocol": "ChatCompletions",
+                "protocols": ["ChatCompletions"],
+                "supported_models": ["gpt-4o-mini"],
+                "active": true
+            })
+            .to_string(),
+        )),
+    );
+    let res = app.clone().oneshot(create_upstream).await.unwrap();
+    let status = res.status();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: Value = serde_json::from_slice(&body).unwrap();
+    let message = body_json["error"]["message"].as_str().unwrap_or("");
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        message.contains("fk_downstream_model_group") || message.contains("sql-deleted-group"),
+        "the response must surface the real FK violation, got: {message}"
+    );
+    assert!(
+        !message.ends_with("db error"),
+        "the response must not be the flattened 'db error' string, got: {message}"
+    );
+}
