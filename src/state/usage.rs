@@ -1,5 +1,4 @@
 use super::types::*;
-use crate::state::normalize_context_profile_base_url;
 use crate::state::unix_seconds;
 use crate::state::AppState;
 use chrono::Datelike;
@@ -605,42 +604,8 @@ impl AppState {
             if !catalog.allows_legacy(&effective_allowlist, &published.name) {
                 continue;
             }
-            let model = &published.name;
-            for route in &published.routes {
-                let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == route.upstream_id) else { continue; };
-
-                let base_url = normalize_context_profile_base_url(&upstream.base_url);
-                let profile = if base_url.is_empty() {
-                    None
-                } else {
-                    snapshot.global_context_profiles.get(&base_url)
-                };
-
-                let Some(cfg) = upstream.context_config_for_model_with_profile_and_case(
-                    &route.exposed_model, profile, self.runtime_settings().model_case_insensitive_matching,
-                )
-                else {
-                    continue;
-                };
-                if cfg.context_limit == 0 {
-                    continue;
-                }
-
-                result
-                    .entry(model.clone())
-                    .and_modify(|existing| {
-                        if cfg.context_limit < existing.context_limit {
-                            existing.context_limit = cfg.context_limit;
-                            existing.output_reserve = cfg.output_reserve;
-                        }
-                    })
-                    .or_insert(ModelContextConfig {
-                        slug: model.clone(),
-                        context_limit: cfg.context_limit,
-                        output_reserve: cfg.output_reserve,
-                        max_output_tokens: 0,
-                        context_group: cfg.context_group.clone(),
-                    });
+            if let Some(cfg) = catalog.effective_context_for_model(&snapshot, &published.name) {
+                result.insert(published.name.clone(), cfg);
             }
         }
 

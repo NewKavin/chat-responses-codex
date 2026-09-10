@@ -113,6 +113,29 @@ impl ModelCatalog {
         )
     }
 
+    /// 对外模型的有效上下文配置：遍历全部活跃路由，取 `context_limit` 最小者
+    /// （与门户配额页语义一致——请求可能落到任一路由，最小窗口最安全）。
+    /// 每条路由按请求路径同样的顺序解析：上游 model_contexts → 全局 profile
+    /// model_contexts → 上游 default_model_context → 全局 profile default。
+    /// 跳过 `context_limit == 0` 的路由；全部无配置时返回 `None`。
+    pub fn effective_context_for_model(
+        &self,
+        snapshot: &super::PersistedState,
+        name: &str,
+    ) -> Option<super::ModelContextConfig> {
+        let published = self.find(name)?;
+        published
+            .routes
+            .iter()
+            .filter_map(|route| self.route_context(snapshot, route))
+            .filter(|config| config.context_limit > 0)
+            .min_by_key(|config| config.context_limit)
+            .map(|config| super::ModelContextConfig {
+                slug: published.name.clone(),
+                ..config
+            })
+    }
+
     pub fn resolve_public_model_id(&self, name: &str) -> ModelId {
         let name = super::codex_subagent_base_model(name).unwrap_or(name).trim();
         self.resolve_group_model_id(name)

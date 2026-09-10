@@ -5,7 +5,8 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::model_identity::ModelAliasRule;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig, UpstreamModelMapping,
+    AppConfig, AppState, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
+    ModelContextConfig, PersistedState, UpstreamConfig, UpstreamModelMapping,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -114,4 +115,42 @@ async fn codex_alias_metadata_uses_the_underlying_route_context() {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["models"][0]["slug"],"deepseek-v3");
     assert_eq!(body["models"][0]["context_window"],64000);
+}
+
+#[tokio::test]
+async fn portal_context_limits_prefer_global_profile_over_upstream_default() {
+    let (_dir, state, key) = catalog_state(&["deepseek-v3"]);
+    let mut upstream = state.upstreams().await.remove(0);
+    upstream.model_contexts = vec![];
+    upstream.default_model_context = Some(DefaultModelContextConfig {
+        context_limit: 200_000,
+        output_reserve: 4_096,
+        max_output_tokens: 0,
+        context_group: String::new(),
+    });
+    state.update_upstream("provider", upstream).await.unwrap();
+
+    let mut profiles = std::collections::HashMap::new();
+    profiles.insert(
+        "http://127.0.0.1:9".to_string(),
+        GlobalContextProfile {
+            model_contexts: vec![ModelContextConfig {
+                slug: "deepseek-chat".into(),
+                context_limit: 1_000_000,
+                output_reserve: 8_192,
+                max_output_tokens: 0,
+                context_group: String::new(),
+            }],
+            default_model_context: None,
+        },
+    );
+    state.set_global_context_profiles(profiles).await.unwrap();
+
+    let downstream = state.downstream_for_secret(&key).await.unwrap();
+    let contexts = state.compute_portal_model_context_limits(&downstream).await;
+    assert_eq!(
+        contexts.get("deepseek-v3").map(|c| c.context_limit),
+        Some(1_000_000),
+        "global profile per-model entry must beat upstream default_model_context"
+    );
 }
