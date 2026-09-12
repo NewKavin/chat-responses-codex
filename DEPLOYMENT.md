@@ -801,7 +801,7 @@ Generate a secure JWT_SECRET with: `openssl rand -base64 32`
 
 If you terminate TLS upstream of the gateway:
 
-- Forward `X-Forwarded-For` so downstream IP allowlists work.
+- Forward `X-Forwarded-For` (or `X-Real-IP`) so downstream IP allowlists and the `client_ip` column on usage logs / active requests reflect the real client; without them the gateway records the TCP peer address, which behind a proxy is the proxy itself.
 - Preserve the `Authorization` header.
 - Proxy `/healthz` through unchanged so the Docker health check still works.
 - Keep the admin UI off the public internet unless you really need it.

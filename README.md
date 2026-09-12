@@ -162,7 +162,7 @@ Redis 只协调运行时准入、租约和精确路由健康；PostgreSQL 仍是
 反向代理建议：
 
 - 透传 `Authorization` 头。
-- 透传 `X-Forwarded-For`，保证 IP 白名单可用。
+- 透传 `X-Forwarded-For`（或 `X-Real-IP`），保证 IP 白名单和请求日志里的"客户端 IP"是真实来源；没有这两个头时网关记录 TCP 对端地址，反代场景下那就是反代自己的 IP。
 - 只把网关暴露给可信网络，PostgreSQL 不要直接暴露公网。
 
 当前运维约束：
