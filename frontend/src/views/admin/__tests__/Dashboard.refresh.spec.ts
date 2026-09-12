@@ -253,4 +253,37 @@ describe('Dashboard refresh state machine', () => {
     // 上次成功数据仍在（后台保留 DOM/数据）。
     expect(wrapper.text()).toContain('TOTAL REQUESTS')
   })
+
+  it('shows the client ip of active requests', async () => {
+    vi.mocked(adminApi.getActiveTroubleshootingRequests).mockResolvedValue({
+      data: {
+        active_requests: [
+          {
+            request_id: 'req-1',
+            downstream_id: 'down-1',
+            downstream_name: 'team-a',
+            endpoint: '/v1/responses',
+            model: 'gpt-4',
+            protocol: 'Responses',
+            user_agent: 'codex/0.146.0',
+            client_ip: '10.0.0.8',
+            upstream_id: null,
+            upstream_name: null,
+            started_at: 1_760_000_000,
+            last_event_at: 1_760_000_000,
+            elapsed_seconds: 3,
+            idle_seconds: 1,
+            status: 'routing',
+            error_category: null,
+            phase: 'selecting',
+            queue_position: null
+          }
+        ],
+        refresh_interval_seconds: 2
+      }
+    } as never)
+    const wrapper = await mountDashboard()
+    expect(wrapper.text()).toContain('客户端 IP')
+    expect(wrapper.text()).toContain('10.0.0.8')
+  })
 })

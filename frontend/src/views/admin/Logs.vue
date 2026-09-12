@@ -238,6 +238,11 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="客户端 IP" width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono">{{ row.clientIp }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="User-Agent" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.userAgent }}
@@ -361,6 +366,7 @@ interface DisplayLog extends UsageLog {
   billingMode: string
   requestCount: number
   userAgent: string
+  clientIp: string
   downstreamName: string
   upstreamName: string
   errorCategoryLabel: string
@@ -422,6 +428,7 @@ const buildDisplayLog = (log: UsageLog): DisplayLog => {
   const inferenceStrength = formatInferenceStrength(log.inference_strength)
   const billingMode = log.billing_mode?.trim() || (log.total_tokens > 0 ? 'Token 计费' : '请求计费')
   const userAgent = log.user_agent?.trim() || '未采集'
+  const clientIp = log.client_ip?.trim() || '未采集'
   const requestCount = log.request_count ?? 1
   const downstreamName = log.downstream_name?.trim() || log.downstream_key_id
   const upstreamName = log.upstream_name?.trim() || log.upstream_key_id
@@ -435,6 +442,7 @@ const buildDisplayLog = (log: UsageLog): DisplayLog => {
     billingMode,
     requestCount,
     userAgent,
+    clientIp,
     downstreamName,
     upstreamName,
     errorCategoryLabel: formatErrorCategory(log.error_category),

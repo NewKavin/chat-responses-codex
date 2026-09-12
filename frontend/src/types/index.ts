@@ -258,6 +258,7 @@ export interface UsageLog {
   billing_mode?: string
   request_count?: number
   user_agent?: string
+  client_ip?: string | null
   request_id: string
   status_code: number
   error_message?: string
@@ -631,6 +632,7 @@ export interface ActiveGatewayRequest {
   model: string
   protocol: string
   user_agent?: string | null
+  client_ip?: string | null
   upstream_id?: string | null
   upstream_name?: string | null
   started_at: number

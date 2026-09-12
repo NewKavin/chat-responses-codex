@@ -233,6 +233,11 @@
             <el-table-column label="下游" min-width="110" show-overflow-tooltip>
               <template #default="{ row }">{{ row.downstream_name || row.downstream_id }}</template>
             </el-table-column>
+            <el-table-column label="客户端 IP" width="130" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="mono">{{ row.client_ip || '—' }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="模型" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
                 <span class="mono">{{ row.model }}</span>
