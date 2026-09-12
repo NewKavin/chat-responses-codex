@@ -3099,6 +3099,32 @@ fn client_cancelled_before_output_is_categorized() {
 }
 
 #[tokio::test]
+async fn active_request_snapshot_carries_client_ip() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        crate::state::PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    state.start_active_gateway_request(ActiveGatewayRequestStart {
+        request_id: "req-ip".into(),
+        downstream_id: "down-ip".into(),
+        downstream_name: "ip-client".into(),
+        endpoint: "/v1/responses".into(),
+        model: "gpt-4".into(),
+        protocol: "Responses".into(),
+        user_agent: Some("codex/0.146.0".into()),
+        client_ip: Some("10.0.0.8".into()),
+    });
+
+    let snapshot = state.active_gateway_requests(None);
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].client_ip.as_deref(), Some("10.0.0.8"));
+    let json = serde_json::to_value(&snapshot[0]).unwrap();
+    assert_eq!(json["client_ip"], "10.0.0.8");
+}
+
+#[tokio::test]
 async fn aggregate_cancellation_during_panic_does_not_emit_a_usage_log() {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
@@ -3114,6 +3140,7 @@ async fn aggregate_cancellation_during_panic_does_not_emit_a_usage_log() {
         model: "panic-model".into(),
         protocol: "Responses".into(),
         user_agent: None,
+        client_ip: None,
     });
 
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
@@ -4034,6 +4061,7 @@ async fn e51_retry_terminal_counts_capacity_errors_per_downstream_model() {
         model: "glm-5.2".into(),
         protocol: "Responses".into(),
         user_agent: None,
+        client_ip: None,
     };
     // Three terminal retryable-capacity errors for the same pair — one per
     // F3 category, so the snapshot must split them into separate rows.
@@ -4093,6 +4121,7 @@ async fn e52_active_request_phase_lifecycle_and_queue_position() {
         model: "deepseek-v4".into(),
         protocol: "Responses".into(),
         user_agent: None,
+        client_ip: None,
     });
 
     let find = || {

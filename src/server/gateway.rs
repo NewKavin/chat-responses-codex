@@ -1981,6 +1981,7 @@ impl StreamUsageLogContext {
             billing_mode: Some(billing_label),
             request_count: Some(1),
             user_agent,
+            client_ip: None,
             request_id: request_id.clone(),
             status_code: status.as_u16(),
             wire_status_code,
@@ -2196,6 +2197,7 @@ async fn append_gateway_usage_log(
         billing_mode: Some(billing_label),
         request_count: Some(1),
         user_agent: user_agent.map(str::to_string),
+        client_ip: None,
         request_id: request_id.to_string(),
         status_code: status_code.as_u16(),
         wire_status_code: status_code.as_u16(),
@@ -5432,6 +5434,7 @@ async fn process_gateway_request_inner(
         model: model.to_string(),
         protocol: format!("{:?}", endpoint.native_protocol()),
         user_agent: user_agent.clone(),
+        client_ip: None,
     });
     let mut active_request_guard =
         ActiveGatewayRequestGuard::new(state.clone(), request_id.clone());

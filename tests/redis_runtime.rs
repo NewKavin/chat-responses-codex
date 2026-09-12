@@ -306,6 +306,7 @@ fn redis_test_usage_log(id: &str, downstream_id: &str, total_tokens: u64) -> Usa
         billing_mode: None,
         request_count: Some(1),
         user_agent: None,
+        client_ip: None,
         request_id: id.into(),
         status_code: 200,
         wire_status_code: 0,

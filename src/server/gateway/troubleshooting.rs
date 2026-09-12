@@ -4510,6 +4510,7 @@ mod tests {
             model: "model-a".into(),
             protocol: "Responses".into(),
             user_agent: None,
+            client_ip: None,
         };
 
         for (request_id, model, error_category) in [

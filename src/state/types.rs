@@ -1558,6 +1558,8 @@ pub struct UsageLog {
     pub request_count: Option<u64>,
     #[serde(default)]
     pub user_agent: Option<String>,
+    #[serde(default)]
+    pub client_ip: Option<String>,
     pub request_id: String,
     pub status_code: u16,
     #[serde(default)]

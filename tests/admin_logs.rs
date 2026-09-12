@@ -63,6 +63,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 billing_mode: Some("按次计费".to_string()),
                 request_count: Some(3),
                 user_agent: Some("Claude-Code/1.2.3".to_string()),
+                client_ip: Some("10.0.0.8".to_string()),
                 request_id: "req-1".to_string(),
                 status_code: 200,
                 wire_status_code: 0,
@@ -90,6 +91,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "req-2".to_string(),
                 status_code: 200,
                 wire_status_code: 0,
@@ -117,6 +119,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "req-3".to_string(),
                 status_code: 400,
                 wire_status_code: 0,
@@ -144,6 +147,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "req-4".to_string(),
                 status_code: 502,
                 wire_status_code: 0,
@@ -171,6 +175,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "req-5".to_string(),
                 status_code: 200,
                 wire_status_code: 0,
@@ -755,6 +760,7 @@ async fn test_logs_list_includes_enriched_display_fields() {
     assert_eq!(first["billing_mode"], "按次计费");
     assert_eq!(first["request_count"], 3);
     assert_eq!(first["user_agent"], "Claude-Code/1.2.3");
+    assert_eq!(first["client_ip"], "10.0.0.8");
     assert_eq!(first["downstream_name"], "Team Alpha");
     assert_eq!(first["upstream_name"], "Primary Upstream");
 }
@@ -796,6 +802,7 @@ async fn test_logs_list_enriched_fields_follow_endpoint_and_token_shape() {
     assert_eq!(row["billing_mode"], "请求计费");
     assert_eq!(row["request_count"], 1);
     assert_eq!(row["user_agent"], "未采集");
+    assert!(row["client_ip"].is_null(), "client_ip 未采集时应为 null: {row}");
 }
 
 #[tokio::test]
@@ -865,6 +872,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "r1".to_string(),
                 status_code: 200,
                 wire_status_code: 0,
@@ -892,6 +900,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "r2".to_string(),
                 status_code: 200,
                 wire_status_code: 0,
@@ -952,6 +961,7 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
             billing_mode: None,
             request_count: None,
             user_agent: None,
+            client_ip: None,
             request_id: "r1".to_string(),
             status_code: 200,
             wire_status_code: 0,

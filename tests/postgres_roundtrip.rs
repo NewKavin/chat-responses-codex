@@ -353,6 +353,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         billing_mode: None,
         request_count: None,
         user_agent: None,
+        client_ip: Some("10.0.0.8".to_string()),
         request_id: "req-1".into(),
         status_code: 200,
         wire_status_code: 200,
@@ -390,6 +391,11 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
+    assert_eq!(
+        snapshot.usage_logs[0].client_ip.as_deref(),
+        Some("10.0.0.8"),
+        "client_ip 必须经 PostgreSQL 落库并回读"
+    );
 
     assert_eq!(snapshot.upstreams.len(), 1);
     assert_eq!(
@@ -473,6 +479,7 @@ async fn postgres_roundtrip_preserves_compatibility_metadata_and_first_token_lat
         billing_mode: Some("Token 计费".into()),
         request_count: Some(1),
         user_agent: Some("Codex/0.144.0".into()),
+        client_ip: None,
         request_id: "req-compat-1".into(),
         status_code: 200,
         wire_status_code: 200,
@@ -1532,6 +1539,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         billing_mode: None,
         request_count: None,
         user_agent: None,
+        client_ip: None,
         request_id: "req-1".into(),
         status_code: 200,
         wire_status_code: 200,
@@ -1660,6 +1668,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         billing_mode: None,
         request_count: None,
         user_agent: None,
+        client_ip: None,
         request_id: "req-1".into(),
         status_code: 200,
         wire_status_code: 200,
@@ -1789,6 +1798,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             billing_mode: None,
             request_count: None,
             user_agent: None,
+            client_ip: None,
             request_id: format!("req-{suffix}"),
             status_code: 200,
             wire_status_code: 0,
@@ -2108,6 +2118,7 @@ async fn stream_diagnostics_round_trip_through_postgres() {
         billing_mode: None,
         request_count: Some(1),
         user_agent: Some("codex/0.146.0".into()),
+        client_ip: None,
         request_id: "req-diag-1".into(),
         status_code: 502,
         wire_status_code: 200,
@@ -2196,6 +2207,7 @@ async fn legacy_row_without_wire_status_gets_normalized_on_load() {
         billing_mode: None,
         request_count: None,
         user_agent: None,
+        client_ip: None,
         request_id: "req-legacy-1".into(),
         status_code: 429,
         wire_status_code: 0, // legacy default
@@ -2274,6 +2286,7 @@ async fn postgres_usage_log_query_respects_half_open_day_bounds() {
         billing_mode: None,
         request_count: None,
         user_agent: None,
+        client_ip: None,
         request_id: "req-start".into(),
         status_code: 200,
         wire_status_code: 0,
@@ -2379,6 +2392,7 @@ async fn postgres_append_usage_logs_persists_a_batch_of_rows() {
             billing_mode: Some("按次计费".into()),
             request_count: Some(1),
             user_agent: Some("batch-test".into()),
+            client_ip: None,
             request_id: format!("req-batch-{index}"),
             status_code: 200,
             wire_status_code: 200,

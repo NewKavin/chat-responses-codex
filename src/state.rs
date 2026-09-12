@@ -3111,6 +3111,7 @@ impl AppState {
                 model: start.model,
                 protocol: start.protocol,
                 user_agent: start.user_agent.map(truncate_active_request_user_agent),
+                client_ip: start.client_ip,
                 upstream_id: None,
                 upstream_name: None,
                 started_at: now,
@@ -3352,6 +3353,7 @@ impl AppState {
                 model: request.model.clone(),
                 protocol: request.protocol.clone(),
                 user_agent: request.user_agent.clone(),
+                client_ip: request.client_ip.clone(),
                 upstream_id: request.upstream_id.clone(),
                 upstream_name: request.upstream_name.clone(),
                 started_at: request.started_at,
@@ -8283,6 +8285,7 @@ pub struct ActiveGatewayRequestStart {
     pub model: String,
     pub protocol: String,
     pub user_agent: Option<String>,
+    pub client_ip: Option<String>,
 }
 
 /// E5.1: one row of the retry-amplification metric — how many
@@ -8326,6 +8329,7 @@ pub struct ActiveGatewayRequestSnapshot {
     pub model: String,
     pub protocol: String,
     pub user_agent: Option<String>,
+    pub client_ip: Option<String>,
     pub upstream_id: Option<String>,
     pub upstream_name: Option<String>,
     pub started_at: u64,
@@ -8353,6 +8357,7 @@ struct ActiveGatewayRequest {
     model: String,
     protocol: String,
     user_agent: Option<String>,
+    client_ip: Option<String>,
     upstream_id: Option<String>,
     upstream_name: Option<String>,
     started_at: u64,

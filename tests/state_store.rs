@@ -51,6 +51,47 @@ fn usage_log_without_first_token_latency_still_deserializes() {
     assert_eq!(log.first_token_latency_ms, None);
 }
 
+#[test]
+fn usage_log_without_client_ip_still_deserializes() {
+    let value = serde_json::json!({
+        "id": "old-log",
+        "downstream_key_id": "down",
+        "upstream_key_id": "up",
+        "endpoint": "/v1/responses",
+        "model": "gpt-4",
+        "request_id": "req-old",
+        "status_code": 200,
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "latency_ms": 100,
+        "created_at": 1
+    });
+
+    let log: UsageLog = serde_json::from_value(value).unwrap();
+    assert_eq!(log.client_ip, None);
+}
+
+#[test]
+fn usage_log_client_ip_roundtrips_through_json() {
+    let log = UsageLog {
+        id: "log-ip".to_string(),
+        downstream_key_id: "down".to_string(),
+        upstream_key_id: "up".to_string(),
+        endpoint: "/v1/responses".to_string(),
+        model: "gpt-4".to_string(),
+        request_id: "req-ip".to_string(),
+        status_code: 200,
+        client_ip: Some("10.0.0.8".to_string()),
+        ..Default::default()
+    };
+
+    let value = serde_json::to_value(&log).unwrap();
+    assert_eq!(value["client_ip"], "10.0.0.8");
+    let reloaded: UsageLog = serde_json::from_value(value).unwrap();
+    assert_eq!(reloaded.client_ip.as_deref(), Some("10.0.0.8"));
+}
+
 #[tokio::test]
 async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_hash() {
     let stored_plaintext = generate_downstream_key("stored").plaintext;
@@ -245,6 +286,7 @@ fn usage_log(
         billing_mode: None,
         request_count: None,
         user_agent: None,
+        client_ip: None,
         request_id: format!("req-{id}"),
         status_code,
         wire_status_code: 0,
@@ -347,6 +389,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     billing_mode: None,
                     request_count: None,
                     user_agent: None,
+                    client_ip: None,
                     status_code: 200,
                     wire_status_code: 0,
                     stream_diagnostics: None,
@@ -374,6 +417,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     billing_mode: None,
                     request_count: None,
                     user_agent: None,
+                    client_ip: None,
                     status_code: 200,
                     wire_status_code: 0,
                     stream_diagnostics: None,
@@ -814,6 +858,7 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
             billing_mode: None,
             request_count: None,
             user_agent: None,
+            client_ip: None,
             request_id: "req-1".into(),
             status_code: 200,
             wire_status_code: 0,
@@ -1145,6 +1190,7 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
+                client_ip: None,
                 request_id: "req-lookup".to_string(),
                 status_code: 200,
                 wire_status_code: 0,

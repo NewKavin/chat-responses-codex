@@ -286,7 +286,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
-                 status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics \
+                 status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics, client_ip \
                  FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
                 &[&runtime_usage_start],
             )
@@ -711,7 +711,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics, client_ip
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at < $2
@@ -763,7 +763,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics, client_ip
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at < $2
@@ -1920,7 +1920,7 @@ async fn sync_announcements(
 }
 
 async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Result<()> {
-    const COLUMNS_PER_ROW: usize = 25;
+    const COLUMNS_PER_ROW: usize = 26;
     // tokio-postgres parameter count is a u16; chunk far below the limit so a
     // single multi-row INSERT stays well within bounds.
     const MAX_ROWS_PER_STATEMENT: usize = 2_000;
@@ -1991,6 +1991,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
                 Box::new(latency_ms),
                 Box::new(created_at),
                 Box::new(stream_diagnostics_json),
+                Box::new(log.client_ip.clone()),
             ] {
                 params.push(param);
             }
@@ -2001,7 +2002,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
                 user_agent, request_id, status_code, wire_status_code, error_message, error_category,
-                compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics, client_ip
             ) VALUES {placeholders} ON CONFLICT (id) DO NOTHING"
         );
         let param_refs: Vec<&(dyn ToSql + Sync)> = params
@@ -2089,6 +2090,7 @@ fn usage_log_from_row(row: &Row) -> UsageLog {
         stream_diagnostics: row
             .get::<_, Option<serde_json::Value>>(24)
             .and_then(|value| serde_json::from_value(value).ok()),
+        client_ip: row.get::<_, Option<String>>(25),
     };
     log.normalize_after_load();
     log
@@ -2386,6 +2388,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     billing_mode TEXT NULL,
     request_count BIGINT NULL,
     user_agent TEXT NULL,
+    client_ip TEXT NULL,
     request_id TEXT NOT NULL,
     status_code INTEGER NOT NULL,
     wire_status_code INTEGER NOT NULL DEFAULT 0,
@@ -2428,6 +2431,8 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS wire_status_code INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS stream_diagnostics JSONB NULL;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS client_ip TEXT NULL;
 UPDATE usage_logs SET wire_status_code = status_code WHERE wire_status_code = 0;
 ALTER TABLE usage_logs
     ALTER COLUMN wire_status_code SET NOT NULL;
