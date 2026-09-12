@@ -1647,6 +1647,7 @@ struct GatewayUsageLogContext {
     model: String,
     inference_strength: Option<String>,
     user_agent: Option<String>,
+    client_ip: Option<String>,
     compatibility: Option<CompatibilityUsageMetadata>,
     started: Instant,
 }
@@ -1682,6 +1683,7 @@ impl GatewayUsageLogContext {
             &self.model,
             self.inference_strength.as_deref(),
             self.user_agent.as_deref(),
+            self.client_ip.as_deref(),
             self.compatibility,
             status_code,
             error_message,
@@ -1870,6 +1872,7 @@ struct StreamUsageLogContext {
     model: String,
     inference_strength: Option<String>,
     user_agent: Option<String>,
+    client_ip: Option<String>,
     compatibility: Option<CompatibilityUsageMetadata>,
     normalized_model: String,
     status: StatusCode,
@@ -1947,6 +1950,7 @@ impl StreamUsageLogContext {
             model,
             inference_strength,
             user_agent,
+            client_ip,
             compatibility,
             normalized_model,
             status,
@@ -1981,7 +1985,7 @@ impl StreamUsageLogContext {
             billing_mode: Some(billing_label),
             request_count: Some(1),
             user_agent,
-            client_ip: None,
+            client_ip,
             request_id: request_id.clone(),
             status_code: status.as_u16(),
             wire_status_code,
@@ -2174,6 +2178,7 @@ async fn append_gateway_usage_log(
     model: &str,
     inference_strength: Option<&str>,
     user_agent: Option<&str>,
+    client_ip: Option<&str>,
     compatibility: Option<CompatibilityUsageMetadata>,
     status_code: StatusCode,
     error_message: Option<String>,
@@ -2197,7 +2202,7 @@ async fn append_gateway_usage_log(
         billing_mode: Some(billing_label),
         request_count: Some(1),
         user_agent: user_agent.map(str::to_string),
-        client_ip: None,
+        client_ip: client_ip.map(str::to_string),
         request_id: request_id.to_string(),
         status_code: status_code.as_u16(),
         wire_status_code: status_code.as_u16(),
@@ -2718,6 +2723,7 @@ pub fn build_router(state: AppState) -> Router {
         // Frontend assets and SPA fallback (with static-only compression);
         // merged so the nested router's fallback becomes the app fallback.
         .merge(static_frontend_router())
+        .layer(axum::middleware::from_fn(stamp_peer_addr))
         .layer(axum::extract::DefaultBodyLimit::max(
             usize::try_from(
                 state
@@ -2783,6 +2789,31 @@ fn request_client_addr<B>(request: &Request<B>) -> Option<SocketAddr> {
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0)
+}
+
+/// 内部请求头：由 `stamp_peer_addr` 按 TCP 对端地址写入。客户端带来的同名头一律先丢弃，
+/// 所以下游代码可以把它当作可信的对端 IP 使用。
+const PEER_ADDR_HEADER: &str = "x-c2r-peer-addr";
+
+async fn stamp_peer_addr(
+    mut request: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let name = header::HeaderName::from_static(PEER_ADDR_HEADER);
+    request.headers_mut().remove(&name);
+    if let Some(addr) = request_client_addr(&request) {
+        let ip = match addr.ip() {
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or(std::net::IpAddr::V6(v6)),
+            v4 => v4,
+        };
+        if let Ok(value) = HeaderValue::from_str(&ip.to_string()) {
+            request.headers_mut().insert(name, value);
+        }
+    }
+    next.run(request).await
 }
 
 fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String> {
@@ -5386,6 +5417,7 @@ async fn process_gateway_request_inner(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let request_client_ip = resolve_client_ip(&headers);
     let capture_route_metadata = troubleshooting_route_capture_requested(&state, &headers);
     let model_owned = match body.get("model").and_then(Value::as_str) {
         Some(model) => model.to_string(),
@@ -5402,6 +5434,7 @@ async fn process_gateway_request_inner(
                 "",
                 inference_strength.as_deref(),
                 user_agent.as_deref(),
+                request_client_ip.as_deref(),
                 None,
                 error.status_code(),
                 Some(error.to_string()),
@@ -5434,7 +5467,7 @@ async fn process_gateway_request_inner(
         model: model.to_string(),
         protocol: format!("{:?}", endpoint.native_protocol()),
         user_agent: user_agent.clone(),
-        client_ip: None,
+        client_ip: request_client_ip.clone(),
     });
     let mut active_request_guard =
         ActiveGatewayRequestGuard::new(state.clone(), request_id.clone());
@@ -5472,6 +5505,7 @@ async fn process_gateway_request_inner(
                 model,
                 inference_strength.as_deref(),
                 user_agent.as_deref(),
+                request_client_ip.as_deref(),
                 None,
                 error.status_code(),
                 Some(error.to_string()),
@@ -5515,6 +5549,7 @@ async fn process_gateway_request_inner(
                 model,
                 inference_strength.as_deref(),
                 user_agent.as_deref(),
+                request_client_ip.as_deref(),
                 None,
                 error.status_code(),
                 Some(error.to_string()),
@@ -5567,6 +5602,7 @@ async fn process_gateway_request_inner(
                 model,
                 inference_strength.as_deref(),
                 user_agent.as_deref(),
+                request_client_ip.as_deref(),
                 None,
                 error.status_code(),
                 Some(error.to_string()),
@@ -5607,6 +5643,7 @@ async fn process_gateway_request_inner(
             model,
             inference_strength.as_deref(),
             user_agent.as_deref(),
+            request_client_ip.as_deref(),
             None,
             error.status_code(),
             Some(error.to_string()),
@@ -5642,6 +5679,7 @@ async fn process_gateway_request_inner(
             model,
             inference_strength.as_deref(),
             user_agent.as_deref(),
+            request_client_ip.as_deref(),
             None,
             error.status_code(),
             Some(error.to_string()),
@@ -5710,6 +5748,7 @@ async fn process_gateway_request_inner(
                 model,
                 inference_strength.as_deref(),
                 user_agent.as_deref(),
+                request_client_ip.as_deref(),
                 None,
                 error.status_code(),
                 Some(error.to_string()),
@@ -5752,6 +5791,7 @@ async fn process_gateway_request_inner(
                     model,
                     inference_strength.as_deref(),
                     user_agent.as_deref(),
+                    request_client_ip.as_deref(),
                     None,
                     error.status_code(),
                     Some(error.to_string()),
@@ -6176,6 +6216,7 @@ async fn process_gateway_request_inner(
             model,
             inference_strength.as_deref(),
             user_agent.as_deref(),
+            request_client_ip.as_deref(),
             None,
             error.status_code(),
             Some(error.to_string()),
@@ -6388,6 +6429,7 @@ async fn process_gateway_request_inner(
             model,
             inference_strength.as_deref(),
             user_agent.as_deref(),
+            request_client_ip.as_deref(),
             None,
             error.status_code(),
             Some(error.to_string()),
@@ -7496,6 +7538,7 @@ async fn process_gateway_request_inner(
                                     model: model.to_string(),
                                     inference_strength: inference_strength.clone(),
                                     user_agent: user_agent.clone(),
+                                    client_ip: request_client_ip.clone(),
                                     compatibility: None,
                                     normalized_model: normalized_model.to_string(),
                                     status: StatusCode::OK,
@@ -7579,6 +7622,7 @@ async fn process_gateway_request_inner(
                                         model,
                                         inference_strength.as_deref(),
                                         user_agent.as_deref(),
+                                        request_client_ip.as_deref(),
                                         None,
                                         error.status_code(),
                                         Some(error.to_string()),
@@ -7802,6 +7846,7 @@ async fn process_gateway_request_inner(
                             &downstream.name,
                             inference_strength.as_deref(),
                             user_agent.as_deref(),
+                            request_client_ip.as_deref(),
                             chat_only_responses_fallback,
                             global_context_profile.as_ref(),
                             stream_completion_context.clone(),
@@ -8105,6 +8150,7 @@ async fn process_gateway_request_inner(
                                         model: model.to_string(),
                                         inference_strength: inference_strength.clone(),
                                         user_agent: user_agent.clone(),
+                                        client_ip: request_client_ip.clone(),
                                         compatibility: result.compatibility.clone(),
                                         started,
                                     };
@@ -9364,6 +9410,7 @@ async fn process_gateway_request_inner(
             model,
             inference_strength.as_deref(),
             user_agent.as_deref(),
+            request_client_ip.as_deref(),
             None,
             error.status_code(),
             Some(error.to_string()),
@@ -9482,6 +9529,7 @@ async fn process_gateway_request_inner(
         model,
         inference_strength.as_deref(),
         user_agent.as_deref(),
+        request_client_ip.as_deref(),
         None,
         error.status_code(),
         Some(error.to_string()),
@@ -10030,6 +10078,16 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
                 .get(header::HeaderName::from_static("x-real-ip"))
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string)
+        })
+}
+
+/// 用量日志 / 在途列表用的客户端 IP：代理头优先（与白名单同一规则），
+/// 没有代理头时退回中间件盖章的 TCP 对端地址。
+fn resolve_client_ip(headers: &HeaderMap) -> Option<String> {
+    client_ip_from_headers(headers)
+        .filter(|ip| !ip.is_empty())
+        .or_else(|| {
+            header_value(headers, header::HeaderName::from_static(PEER_ADDR_HEADER))
         })
 }
 

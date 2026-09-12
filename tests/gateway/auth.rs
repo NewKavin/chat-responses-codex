@@ -332,8 +332,12 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn downstream_chat_request_is_forwarded_and_logged() {
+async fn chat_gateway_fixture() -> (
+    axum::Router,
+    AppState,
+    chat_responses_codex::keys::GeneratedDownstreamKey,
+    Arc<Mutex<RequestCapture>>,
+) {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -441,6 +445,12 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
     );
 
     let app = build_router(state.clone());
+    (app, state, downstream_key, capture)
+}
+
+#[tokio::test]
+async fn downstream_chat_request_is_forwarded_and_logged() {
+    let (app, state, downstream_key, capture) = chat_gateway_fixture().await;
     let request = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
@@ -490,6 +500,103 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
     assert_eq!(log.inference_strength.as_deref(), Some("xhigh"));
     assert_eq!(log.user_agent.as_deref(), Some("Claude-Code/1.2.3"));
     assert_eq!(log.request_count, Some(1));
+}
+
+async fn logged_chat_request(
+    mutate: impl FnOnce(&mut Request<Body>),
+) -> chat_responses_codex::state::UsageLog {
+    let (app, state, downstream_key, _capture) = chat_gateway_fixture().await;
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("User-Agent", "codex/0.146.0")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    mutate(&mut request);
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    snapshot.usage_logs[0].clone()
+}
+
+#[tokio::test]
+async fn usage_log_records_client_ip_from_x_forwarded_for() {
+    let log = logged_chat_request(|request| {
+        request.headers_mut().insert(
+            "X-Forwarded-For",
+            "10.0.0.8, 172.16.0.1".parse().unwrap(),
+        );
+    })
+    .await;
+    assert_eq!(log.client_ip.as_deref(), Some("10.0.0.8"));
+}
+
+#[tokio::test]
+async fn usage_log_records_peer_ip_when_no_proxy_headers() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let log = logged_chat_request(|request| {
+        let peer: SocketAddr = "10.0.0.9:51234".parse().unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+    })
+    .await;
+    assert_eq!(log.client_ip.as_deref(), Some("10.0.0.9"));
+}
+
+#[tokio::test]
+async fn usage_log_normalizes_ipv4_mapped_peer_address() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let log = logged_chat_request(|request| {
+        let peer: SocketAddr = "[::ffff:10.0.0.9]:51234".parse().unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+    })
+    .await;
+    assert_eq!(log.client_ip.as_deref(), Some("10.0.0.9"));
+}
+
+#[tokio::test]
+async fn client_supplied_peer_addr_header_is_ignored() {
+    let log = logged_chat_request(|request| {
+        request
+            .headers_mut()
+            .insert("x-c2r-peer-addr", "1.2.3.4".parse().unwrap());
+    })
+    .await;
+    assert_eq!(log.client_ip, None);
+}
+
+#[tokio::test]
+async fn rejected_request_usage_log_still_records_client_ip() {
+    let (app, state, downstream_key, _capture) = chat_gateway_fixture().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("X-Forwarded-For", "10.0.0.8")
+        .header("Content-Type", "application/json")
+        .body(Body::from(json!({"messages": []}).to_string()))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].client_ip.as_deref(), Some("10.0.0.8"));
 }
 
 #[tokio::test]

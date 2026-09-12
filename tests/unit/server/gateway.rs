@@ -3158,6 +3158,7 @@ async fn aggregate_cancellation_during_panic_does_not_emit_a_usage_log() {
                 model: "panic-model".into(),
                 inference_strength: None,
                 user_agent: None,
+                client_ip: None,
                 compatibility: None,
                 started: Instant::now(),
             });

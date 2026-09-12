@@ -3176,6 +3176,7 @@ mod diagnostic_tests {
             model: "prompt-secret".into(),
             inference_strength: Some("excluded-inference-marker".into()),
             user_agent: Some("excluded-user-agent-marker".into()),
+            client_ip: None,
             compatibility: None,
             normalized_model: "excluded-normalized-model-marker".into(),
             status: StatusCode::OK,

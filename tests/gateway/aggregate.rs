@@ -374,6 +374,7 @@ impl AggregateHarness {
                 header::AUTHORIZATION,
                 format!("Bearer {}", self.downstream_key),
             )
+            .header("X-Forwarded-For", "10.0.0.8")
             .body(Body::from(
                 json!({
                     "model": MODEL,
@@ -1078,6 +1079,7 @@ async fn assert_aggregate_fault(
     let snapshot = harness.state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     let log = &snapshot.usage_logs[0];
+    assert_eq!(log.client_ip.as_deref(), Some("10.0.0.8"));
     assert_eq!(log.status_code, expected_status.as_u16());
     assert_eq!(log.error_category.as_deref(), Some(expected_category));
     assert_eq!(log.upstream_key_id, UPSTREAM_ID);

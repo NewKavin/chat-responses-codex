@@ -629,6 +629,7 @@ struct RouteHedgeContext {
     downstream_name: String,
     inference_strength: Option<String>,
     user_agent: Option<String>,
+    client_ip: Option<String>,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
     route_attempts: RequestRouteAttempts,
     response_history_context: Option<ResponseHistoryContext>,
@@ -788,6 +789,7 @@ fn send_route_hedge_attempt(
             &context.downstream_name,
             context.inference_strength.as_deref(),
             context.user_agent.as_deref(),
+            context.client_ip.as_deref(),
             false,
             global_context_profile.as_ref(),
             Some(completion.clone()),
@@ -1358,6 +1360,7 @@ pub(super) async fn send_to_upstream(
     downstream_name: &str,
     inference_strength: Option<&str>,
     user_agent: Option<&str>,
+    client_ip: Option<&str>,
     chat_fallback_requested: bool,
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
@@ -2021,6 +2024,7 @@ pub(super) async fn send_to_upstream(
                 model: model.to_string(),
                 inference_strength: inference_strength.map(str::to_string),
                 user_agent: user_agent.map(str::to_string),
+                client_ip: client_ip.map(str::to_string),
                 compatibility: None,
                 started,
             });
@@ -2542,6 +2546,7 @@ pub(super) async fn send_to_upstream(
                             downstream_name: downstream_name.to_string(),
                             inference_strength: inference_strength.map(str::to_string),
                             user_agent: user_agent.map(str::to_string),
+                            client_ip: client_ip.map(str::to_string),
                             downstream_concurrency_guard: completion
                                 .downstream_concurrency_guard
                                 .clone(),
@@ -2604,6 +2609,7 @@ pub(super) async fn send_to_upstream(
                 model: model.to_string(),
                 inference_strength: inference_strength.map(str::to_string),
                 user_agent: user_agent.map(str::to_string),
+                client_ip: client_ip.map(str::to_string),
                 compatibility: None,
                 normalized_model: normalized_model.to_string(),
                 status,
