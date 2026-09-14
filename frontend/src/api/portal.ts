@@ -7,6 +7,7 @@ import type {
   PortalQuota,
   PortalUsageHistory,
   PortalUsageSummary,
+  PortalActiveRequestsResponse,
   ChartTimeRange
 } from '@/types'
 
@@ -127,9 +128,17 @@ export const portalApi = {
   getQuota: (params?: { downstream_id?: string }) =>
     portalHttp.get<PortalQuota>('/portal/quota', { params }),
 
-  // Usage History (detail-only, one calendar day)
-  getUsageHistory: (params?: { day?: string; page?: number; page_size?: number }) =>
-    portalHttp.get<PortalUsageHistory>('/portal/usage-history', { params }),
+  // Usage History (detail-only, one calendar day; optional key scope)
+  getUsageHistory: (params?: {
+    day?: string
+    page?: number
+    page_size?: number
+    downstream_id?: string
+  }) => portalHttp.get<PortalUsageHistory>('/portal/usage-history', { params }),
+
+  // In-flight requests for the current key scope
+  getActiveRequests: (params?: { downstream_id?: string }, signal?: AbortSignal) =>
+    portalHttp.get<PortalActiveRequestsResponse>('/portal/active-requests', { params, signal }),
 
   // Usage Summary (independent seven-day chart aggregation)
   getUsageSummary: (params: { time_range?: ChartTimeRange }) =>

@@ -183,6 +183,49 @@
       </div>
     </section>
 
+    <section class="overview-runtime-panel syscall-stagger" aria-label="在途请求">
+      <div class="overview-runtime-head">
+        <div>
+          <p class="crc-eyebrow">RUNTIME // IN-FLIGHT</p>
+          <h2>在途请求</h2>
+        </div>
+        <span class="overview-runtime-status is-live">
+          <span class="overview-runtime-status__dot" aria-hidden="true"></span>
+          在途 {{ activeRequests.length }}
+        </span>
+      </div>
+      <el-empty
+        v-if="activeRequests.length === 0"
+        description="当前没有在途请求"
+        :image-size="48"
+      />
+      <div v-else class="crc-table-shell">
+        <el-table :data="activeRequests" row-key="request_id" stripe border table-layout="auto">
+          <el-table-column label="请求 ID" min-width="110">
+            <template #default="{ row }">
+              <span class="crc-mono">{{ shortRequestId(row.request_id) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="model" label="模型" min-width="120" show-overflow-tooltip />
+          <el-table-column label="客户端 IP" width="140">
+            <template #default="{ row }">
+              <span class="crc-mono">{{ row.client_ip?.trim() || '未采集' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="阶段" min-width="110">
+            <template #default="{ row }">
+              {{ formatPhase(row.phase)
+              }}<span v-if="row.queue_position"> #{{ row.queue_position }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="已耗时" width="90" align="right">
+            <template #default="{ row }">{{ row.elapsed_seconds }}s</template>
+          </el-table-column>
+          <el-table-column prop="status" label="状态" width="100" />
+        </el-table>
+      </div>
+    </section>
+
     <section class="quota-details-shell" v-loading="quotaLoading">
       <div class="quota-details-head">
         <div>
@@ -304,10 +347,16 @@ import CountUpValue from '@/components/CountUpValue.vue'
 import GaugeRing from '@/components/GaugeRing.vue'
 import SignalWave from '@/components/SignalWave.vue'
 import { portalApi } from '@/api/portal'
-import type { PortalOverview, PortalQuota, PortalModelAccessResponse } from '@/types'
+import type {
+  PortalActiveRequest,
+  PortalOverview,
+  PortalQuota,
+  PortalModelAccessResponse
+} from '@/types'
 import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatPercentageTwoDecimals } from '@/utils/percentage'
 import { usePortalStore } from '@/stores/portal'
+import { useQuietRefresh } from '@/composables/useQuietRefresh'
 
 const portalStore = usePortalStore()
 
@@ -316,6 +365,30 @@ const scopeParams = () =>
   portalStore.explicitSelection && portalStore.selectedDownstreamId
     ? { downstream_id: portalStore.selectedDownstreamId }
     : undefined
+
+/** 在途请求：服务端给轮询间隔，前端不写死；useQuietRefresh 自带挂载/卸载与可见性处理。 */
+const activeRequests = ref<PortalActiveRequest[]>([])
+let activeRequestsIntervalMs = 2_000
+useQuietRefresh(
+  async signal => (await portalApi.getActiveRequests(scopeParams(), signal)).data,
+  data => {
+    activeRequests.value = data.active_requests ?? []
+    const seconds = data.refresh_interval_seconds ?? 2
+    activeRequestsIntervalMs =
+      Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.floor(seconds)) * 1000 : 2_000
+  },
+  () => activeRequestsIntervalMs
+)
+
+const phaseLabels: Record<string, string> = {
+  selecting: '选路中',
+  queued_local: '本地排队',
+  dispatched: '已发上游',
+  awaiting_first_output: '等待首字',
+  streaming: '输出中'
+}
+const formatPhase = (phase?: string | null) => phaseLabels[phase ?? ''] ?? (phase || '-')
+const shortRequestId = (id: string) => (id.length > 12 ? `${id.slice(0, 8)}…` : id)
 
 const data = ref<PortalOverview>({
   quota_summary: {

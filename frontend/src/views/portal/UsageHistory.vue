@@ -71,8 +71,18 @@
                 {{ formatTime(row.created_at) }}
               </template>
             </el-table-column>
+            <el-table-column label="Key" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="crc-mono">{{ row.key_name || '-' }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="model" label="模型" min-width="130" show-overflow-tooltip />
             <el-table-column prop="endpoint" label="端点" min-width="180" show-overflow-tooltip />
+            <el-table-column label="客户端 IP" width="140" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="crc-mono">{{ row.client_ip?.trim() || '未采集' }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="推理强度" width="100" align="center">
               <template #default="{ row }">
                 <el-tag size="small" effect="plain">
@@ -130,6 +140,7 @@ import { loadEcharts } from '@/utils/echartsLoader'
 import type { EChartsType } from 'echarts/core'
 import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatInferenceStrength, formatLatencySeconds } from '@/utils/logDisplay'
+import { usePortalStore } from '@/stores/portal'
 import { useTheme } from '@/composables/useTheme'
 import { buildChartTheme, chartEnterAnimation } from '@/utils/chartTheme'
 
@@ -155,6 +166,14 @@ const dailyStats = ref<PortalUsageSummary['daily_stats']>([])
 const recentLogs = ref<PortalUsageLog[]>([])
 const detailDay = ref<string>('')
 const activeLoads = ref(0)
+
+const portalStore = usePortalStore()
+
+/** 请求作用域：仅当用户显式选择了密钥时带上；否则交由服务端默认选择。 */
+const scopeParams = () =>
+  portalStore.explicitSelection && portalStore.selectedDownstreamId
+    ? { downstream_id: portalStore.selectedDownstreamId }
+    : {}
 
 const pagination = ref({
   page: 1,
@@ -361,6 +380,7 @@ const loadLogs = async () => {
   try {
     beginLoad()
     const { data: history } = await portalApi.getUsageHistory({
+      ...scopeParams(),
       day: detailDay.value || undefined,
       page: pagination.value.page,
       page_size: pagination.value.pageSize

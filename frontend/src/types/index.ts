@@ -449,6 +449,32 @@ export interface PortalUsageLog {
   first_token_latency_ms?: number | null
   latency_ms: number
   created_at: number
+  /** 客户端 IP：未采集时为空 */
+  client_ip?: string | null
+  /** Key 名称：门户里给 Key 起的名字，无门户绑定时为下游名称 */
+  key_name?: string
+}
+
+/** 门户在途请求（服务端已裁剪掉上游字段） */
+export interface PortalActiveRequest {
+  request_id: string
+  endpoint: string
+  model: string
+  protocol: string
+  client_ip?: string | null
+  user_agent?: string | null
+  key_name: string
+  started_at: number
+  elapsed_seconds: number
+  idle_seconds: number
+  status: string
+  phase?: string | null
+  queue_position?: number | null
+}
+
+export interface PortalActiveRequestsResponse {
+  active_requests: PortalActiveRequest[]
+  refresh_interval_seconds?: number
 }
 
 export interface PortalUsageSummary {
