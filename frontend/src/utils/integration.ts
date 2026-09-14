@@ -58,11 +58,6 @@ type CodexConfigInput = {
   modelReasoningEffort: string
 }
 
-export type CodexAgentRoleInput = {
-  modelSlug: string
-  modelReasoningEffort: string
-}
-
 type HermesConfigInput = {
   gatewayBaseUrl: string
   portalKey: string
@@ -463,24 +458,18 @@ stream_max_retries = 2
 `
 }
 
-export const buildCodexDefaultAgentToml = (input: CodexAgentRoleInput) => {
-  const modelSlug = normalizeSlug(input.modelSlug)
-  if (!modelSlug) {
-    throw new Error('Codex subagent model is unavailable')
-  }
-
-  const modelReasoningEffort = normalizeSlug(input.modelReasoningEffort) || 'none'
-
-  return `name = "default"
+/**
+ * Codex 子代理角色文件：刻意不写 model / model_reasoning_effort，
+ * 让子代理继承 ~/.codex/config.toml 的主模型与推理等级，切换模型无需替换本文件。
+ */
+export const buildCodexDefaultAgentToml = () =>
+  `name = "default"
 description = "General-purpose read-only exploration subagent."
 developer_instructions = "You are a read-only exploration subagent. Do not modify files or state."
-model = ${tomlString(modelSlug)}
-model_reasoning_effort = ${tomlString(modelReasoningEffort)}
 
 [features]
 image_generation = false
 `
-}
 
 export const buildCodexDoctorCommand = () => 'codex --strict-config doctor --summary'
 

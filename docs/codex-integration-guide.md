@@ -127,23 +127,23 @@ stream_max_retries = 2
 Chat 兼容上游没有解密密钥。更新目录或改变模型后必须新建 Codex 会话；已有会话会保留
 原先的 multi-agent 版本。
 
-`~/.codex/agents/default.toml` 必须使用与 `config.toml` 相同的 live catalog
-模型 slug 和 `default_reasoning_level`。它是 Codex 委托启动子代理时读取的独立
-profile；如果门户切换模型，请同时替换这两个文件后再新建 Codex 会话。不要从
-开发机全局配置复制旧的 agent role，也不要把 key 写进这个 TOML 文件。
-Codex 0.146.0 还要求角色文件包含 `developer_instructions`；门户和模板会生成只读
+`~/.codex/agents/default.toml` **不要**写 `model` 和 `model_reasoning_effort`。这个角色
+文件是 Codex 委托启动子代理时读取的独立 profile；留空这两项时子代理继承
+`config.toml` 的主模型与推理等级，所以门户切换模型后不需要替换它。不要从开发机全局
+配置复制旧的 agent role——旧值会被当成子代理的固定模型，也不要把 key 写进这个 TOML
+文件。Codex 0.146.0 还要求角色文件包含 `developer_instructions`；门户和模板会生成只读
 探索指令，不能省略该字段，否则委托会在发出上游请求前被客户端拒绝。
 
-遇到子代理 profile 不匹配时，只比较这两个非敏感字段，不要打印完整配置或凭据：
+遇到子代理使用了意料之外的模型或推理等级时，先确认角色文件没有残留旧的固定值
+（下面的命令只读非敏感字段，不要打印完整配置或凭据）：
 
 ```bash
-diff -u \
-  <(grep -E '^(model|model_reasoning_effort) =' ~/.codex/config.toml) \
-  <(grep -E '^(model|model_reasoning_effort) =' ~/.codex/agents/default.toml)
+grep -En '^(model|model_reasoning_effort) =' ~/.codex/agents/default.toml
 ```
 
-这个检查只用于确认模型 slug 和推理等级一致。不要执行 `cat ~/.codex/auth.json`，
-也不要把 auth 文件、下游 key 或 Authorization 头输出到终端、日志或工单。
+正常情况没有任何输出；有输出说明该文件把子代理钉在了旧 profile 上，删掉这些行即可
+恢复继承。不要执行 `cat ~/.codex/auth.json`，也不要把 auth 文件、下游 key 或
+Authorization 头输出到终端、日志或工单。
 
 用下面的命令录入下游 key。它不会把明文 key 写进 shell 历史：
 
@@ -409,9 +409,9 @@ requires_openai_auth = true
 stream_max_retries = 2
 ```
 
-把同一组 `<model_slug>` 和 `<reasoning_effort_from_live_catalog>` 替换到
-`~/.codex/agents/default.toml`；该文件负责 Codex 委托启动的子代理，不能继续使用模板
-里的旧值。
+`~/.codex/agents/default.toml` 只写角色名与只读探索指令，不要写 `model` 和
+`model_reasoning_effort`：该文件是 Codex 委托启动子代理时读取的角色 profile，留空
+这两项时子代理继承上面的主配置，因此切换模型后不需要替换它，也不会残留旧 profile。
 
 ### 4.3 每个字段是什么意思
 

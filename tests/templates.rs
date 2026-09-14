@@ -53,15 +53,25 @@ fn codex_config_example_uses_live_model_slug_exactly() {
 }
 
 #[test]
-fn codex_default_agent_example_uses_live_selection_placeholders() {
+fn codex_default_agent_example_inherits_parent_profile() {
     let role = fs::read_to_string("templates/codex/agents/default.toml.example").unwrap();
 
-    assert!(role.contains(r#"model = "<model_slug>""#));
-    assert!(role.contains(r#"model_reasoning_effort = "<reasoning_effort_from_live_catalog>""#));
+    assert!(role.contains(r#"name = "default""#));
+    assert!(role.contains("description ="));
     assert!(role.contains("developer_instructions ="));
+    assert!(role.contains("[features]"));
+    assert!(role.contains("image_generation = false"));
+    // 子代理继承主配置：角色模板不得锁定模型或思考强度
+    assert!(
+        !role.contains("model ="),
+        "the default agent role must not pin a model"
+    );
+    assert!(
+        !role.contains("model_reasoning_effort"),
+        "the default agent role must not pin a reasoning level"
+    );
     assert!(!role.contains("file and line references"));
     assert!(!role.contains("gpt-5.6-sol"));
-    assert!(!role.contains("model_reasoning_effort = \"low\""));
 }
 
 #[test]
@@ -452,7 +462,8 @@ fn codex_integration_examples_document_multi_agent_validation() {
     assert!(guide.contains("V1"));
     assert!(codex.contains("model_reasoning_effort = \"<reasoning_effort_from_live_catalog>\""));
     assert!(
-        default_agent.contains("model_reasoning_effort = \"<reasoning_effort_from_live_catalog>\"")
+        !default_agent.contains("model_reasoning_effort"),
+        "the default agent role must inherit the parent reasoning level"
     );
 
     for documentation in [readme, deployment, guide] {
@@ -470,7 +481,7 @@ fn deployment_docs_cover_the_default_codex_agent_profile() {
 
     assert!(deployment.contains("~/.codex/agents/default.toml"));
     assert!(deployment.contains("model_reasoning_effort"));
-    assert!(deployment.contains("same live catalog"));
+    assert!(deployment.contains("must not pin"));
     assert!(deployment.contains("codex login --with-api-key"));
     assert!(deployment.contains("Codex CLI `0.146.0`"));
     assert!(readme.contains("Codex CLI `0.146.0`"));

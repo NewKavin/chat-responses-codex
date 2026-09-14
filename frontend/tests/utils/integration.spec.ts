@@ -29,30 +29,30 @@ const codexTemplate = readFileSync(new URL('../../../templates/codex/config.toml
 const codexGuide = readFileSync(new URL('../../../docs/codex-integration-guide.md', import.meta.url), 'utf8')
 
 describe('integration config generators', () => {
-  it('builds a default Codex subagent role from the selected live model', () => {
-    const role = buildCodexDefaultAgentToml({
-      modelSlug: 'glm-5.2',
-      modelReasoningEffort: 'none'
-    })
+  it('builds a default Codex subagent role that inherits the parent model', () => {
+    const role = buildCodexDefaultAgentToml()
 
     expect(role).toContain('name = "default"')
-    expect(role).toContain('model = "glm-5.2"')
-    expect(role).toContain('model_reasoning_effort = "none"')
     expect(role).toContain('developer_instructions =')
     expect(role).not.toContain('file and line references')
+    // 子代理继承主配置：角色文件不锁定模型与思考强度
+    expect(role).not.toMatch(/^model = /m)
+    expect(role).not.toMatch(/^model_reasoning_effort = /m)
+    expect(role).not.toContain('glm-5.2')
     expect(role).not.toContain('gpt-5.6-sol')
     expect(role).not.toContain('model_reasoning_effort = "low"')
   })
 
-  it('escapes TOML control characters in the generated role', () => {
-    const role = buildCodexDefaultAgentToml({
+  it('escapes TOML control characters in the generated config', () => {
+    const config = buildCodexConfigToml({
+      gatewayBaseUrl: 'https://gw.example',
       modelSlug: 'glm\n5.2',
       modelReasoningEffort: 'none\u0000'
     })
 
-    expect(role).toContain('model = "glm\\n5.2"')
-    expect(role).toContain('model_reasoning_effort = "none\\u0000"')
-    expect(role).not.toContain('model = "glm\n5.2"')
+    expect(config).toContain('model = "glm\\n5.2"')
+    expect(config).toContain('model_reasoning_effort = "none\\u0000"')
+    expect(config).not.toContain('model = "glm\n5.2"')
   })
 
   it('builds a gateway base url from an origin and trims trailing slash', () => {
@@ -433,12 +433,10 @@ describe('integration config generators', () => {
     expect(
       buildCodexConfigToml({ gatewayBaseUrl: 'https://gw.example', ...input })
     ).toContain('model_reasoning_effort = "none"')
-    expect(buildCodexDefaultAgentToml(input)).toContain(
-      'model_reasoning_effort = "none"'
-    )
+    expect(buildCodexDefaultAgentToml()).not.toMatch(/^model_reasoning_effort = /m)
   })
 
-  it('writes the same selected reasoning strength to parent and default agent profiles', () => {
+  it('keeps the selected reasoning strength in the parent config only', () => {
     const selection = resolveCodexReasoningSelection(
       {
         models: [{
@@ -459,9 +457,10 @@ describe('integration config generators', () => {
     }
 
     const parent = buildCodexConfigToml({ gatewayBaseUrl: 'https://gw.example', ...input })
-    const child = buildCodexDefaultAgentToml(input)
+    const child = buildCodexDefaultAgentToml()
     expect(parent).toContain('model_reasoning_effort = "xhigh"')
-    expect(child).toContain('model_reasoning_effort = "xhigh"')
+    // 子代理继承主配置的档位，切换模型后无需同步替换角色文件
+    expect(child).not.toMatch(/^model_reasoning_effort = /m)
   })
 
   it('defaults generated configs to high when the model supports it', () => {
@@ -490,9 +489,7 @@ describe('integration config generators', () => {
     expect(
       buildCodexConfigToml({ gatewayBaseUrl: 'https://gw.example', ...input })
     ).toContain('model_reasoning_effort = "high"')
-    expect(buildCodexDefaultAgentToml(input)).toContain(
-      'model_reasoning_effort = "high"'
-    )
+    expect(buildCodexDefaultAgentToml()).not.toContain('model_reasoning_effort')
   })
 
   it('builds a codex config that keeps the key out of config.toml', () => {

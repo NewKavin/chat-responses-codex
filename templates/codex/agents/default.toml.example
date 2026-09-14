@@ -1,10 +1,9 @@
-# Copy this file to ~/.codex/agents/default.toml after replacing both placeholders
-# from the same live catalog selection used by ~/.codex/config.toml.
+# Copy this file to ~/.codex/agents/default.toml as-is.
+# Do not pin a model or a reasoning level here: the subagent inherits the main
+# ~/.codex/config.toml profile, so switching models needs no edit in this file.
 name = "default"
 description = "General-purpose read-only exploration subagent."
 developer_instructions = "You are a read-only exploration subagent. Do not modify files or state."
-model = "<model_slug>"
-model_reasoning_effort = "<reasoning_effort_from_live_catalog>"
 
 [features]
 image_generation = false

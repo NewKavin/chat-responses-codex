@@ -254,8 +254,8 @@
                 <div>
                   <h4>步骤 3: 写入 `~/.codex/agents/default.toml`</h4>
                   <p>
-                    这个文件控制 Codex 委托启动的子代理。它与上面的主配置使用同一个模型和 live catalog
-                    推理等级；切换模型后需要一起替换，避免子代理继续使用旧 profile。
+                    这个文件控制 Codex 委托启动的子代理。它不锁定模型和推理等级：子代理直接继承主配置，
+                    切换模型后不需要替换本文件。
                   </p>
                 </div>
                 <el-tooltip content="复制代码" placement="top">
@@ -727,12 +727,7 @@ const codexModelCatalogJson = computed(() => {
 })
 
 const codexDefaultAgentToml = computed(() =>
-  canGenerateConfigContent.value
-    ? buildCodexDefaultAgentToml({
-        modelSlug: codexModelSelection.value.modelSlug,
-        modelReasoningEffort: codexModelSelection.value.modelReasoningEffort
-      })
-    : ''
+  canGenerateConfigContent.value ? buildCodexDefaultAgentToml() : ''
 )
 
 const codexAuthLoginCommand = computed(() =>

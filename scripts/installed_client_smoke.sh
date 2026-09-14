@@ -616,16 +616,13 @@ EOF
 name = "default"
 description = "General-purpose read-only exploration subagent."
 developer_instructions = "You are a read-only exploration subagent. Do not modify files or state."
-model = $MODEL_TOML
-model_reasoning_effort = $MODEL_REASONING_TOML
 
 [features]
 image_generation = false
 EOF
   if ! grep -Fq "model = $MODEL_TOML" "$CODEX_HOME_DIR/config.toml" \
-    || ! grep -Fq "model = $MODEL_TOML" "$CODEX_HOME_DIR/agents/default.toml" \
     || ! grep -Fq "model_reasoning_effort = $MODEL_REASONING_TOML" "$CODEX_HOME_DIR/config.toml" \
-    || ! grep -Fq "model_reasoning_effort = $MODEL_REASONING_TOML" "$CODEX_HOME_DIR/agents/default.toml"; then
+    || grep -Eq '^(model|model_reasoning_effort) =' "$CODEX_HOME_DIR/agents/default.toml"; then
     printf 'client=codex task=agent_profile category=agent_profile status=failed\n' >&2
     exit 1
   fi

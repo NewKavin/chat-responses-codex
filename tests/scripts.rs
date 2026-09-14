@@ -1160,6 +1160,10 @@ fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
         "the delegation prompt must not ambiguously discourage the required wait"
     );
     assert!(
+        script.contains(r#"grep -Eq '^(model|model_reasoning_effort) ='"#),
+        "smoke script must assert the agent role file pins no model or reasoning level"
+    );
+    assert!(
         script.contains("agent_profile") && script.contains("authentication"),
         "smoke script must classify profile and authentication failures"
     );
