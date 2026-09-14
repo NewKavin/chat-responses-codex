@@ -23,6 +23,8 @@ struct PortalUsageLog {
     first_token_latency_ms: Option<u64>,
     latency_ms: u64,
     created_at: u64,
+    client_ip: Option<String>,
+    key_name: String,
 }
 
 impl From<&EnrichedUsageLog> for PortalUsageLog {
@@ -39,6 +41,15 @@ impl From<&EnrichedUsageLog> for PortalUsageLog {
             first_token_latency_ms: log.log.first_token_latency_ms,
             latency_ms: log.log.latency_ms,
             created_at: log.log.created_at,
+            client_ip: log.log.client_ip.clone(),
+            key_name: log
+                .log
+                .downstream_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&log.log.downstream_key_id)
+                .to_string(),
         }
     }
 }
@@ -307,6 +318,7 @@ fn default_page_size() -> usize {
 #[derive(Debug, Deserialize)]
 pub(super) struct PortalUsageHistoryQuery {
     day: Option<String>,
+    downstream_id: Option<String>,
     #[serde(default = "default_page")]
     page: usize,
     #[serde(default = "default_page_size")]
@@ -342,7 +354,13 @@ pub(super) async fn portal_usage_history(
             .into_response();
     }
 
-    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+    let downstream_id = match resolve_portal_downstream_scope(
+        &state,
+        &headers,
+        query.downstream_id.as_deref(),
+    )
+    .await
+    {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -373,7 +391,7 @@ pub(super) async fn portal_usage_history(
             status_codes: Vec::new(),
             error_categories: Vec::new(),
             model_substring: None,
-            downstream_id: Some(downstream_id),
+            downstream_id: Some(downstream_id.clone()),
             upstream_id: None,
             start_time: window.start_time,
             end_time: window.end_time,
@@ -394,10 +412,20 @@ pub(super) async fn portal_usage_history(
                 .into_response();
         }
     };
+    let runtime_name = page
+        .logs
+        .iter()
+        .find_map(|log| log.log.downstream_name.as_deref());
+    let fallback_name = portal_downstream_name(&state, &downstream_id, runtime_name).await;
+    let key_name = portal_key_label(&state, &headers, &downstream_id, &fallback_name).await;
     let portal_logs = page
         .logs
         .iter()
-        .map(PortalUsageLog::from)
+        .map(|log| {
+            let mut row = PortalUsageLog::from(log);
+            row.key_name = key_name.clone();
+            row
+        })
         .collect::<Vec<_>>();
 
     Json(json!({
@@ -862,7 +890,15 @@ async fn resolve_portal_downstream_scope(
     let Some(downstream_id) = explicit else {
         return extract_downstream_id_from_bearer(state, headers).await;
     };
-    let user_id = extract_user_id_from_session(state, headers).await?;
+    // 显式选中的 Key 与 Bearer 解析出的默认 Key 相同：这是用户自己的作用域，
+    // 直接放行，不需要 portal store（文件模式下没有 store）。
+    if let Ok(default_id) = extract_downstream_id_from_bearer(state, headers).await {
+        if default_id == downstream_id {
+            return Ok(default_id);
+        }
+    }
+    // 显式作用域的归属只能靠门户 store 校验：文件模式没有 store，明确拒绝
+    // 而不是放行（越权 ID 绝不能回退到默认 Key）。
     let Some(store) = state.portal_store() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -870,6 +906,7 @@ async fn resolve_portal_downstream_scope(
         )
             .into_response());
     };
+    let user_id = extract_user_id_from_session(state, headers).await?;
     let policies = store
         .access_policies(&[downstream_id.to_string()])
         .await
@@ -884,6 +921,52 @@ async fn resolve_portal_downstream_scope(
         ));
     }
     Ok(downstream_id.to_string())
+}
+
+/// 门户展示用的 Key 名称：优先门户用户给 Key 起的 label，取不到时用 fallback。
+async fn portal_key_label(
+    state: &AppState,
+    headers: &HeaderMap,
+    downstream_id: &str,
+    fallback: &str,
+) -> String {
+    if let Some(store) = state.portal_store() {
+        if let Ok(user_id) = extract_user_id_from_session(state, headers).await {
+            if let Ok(bindings) = store.list_downstream_bindings_with_labels(&user_id).await {
+                if let Some(binding) = bindings
+                    .into_iter()
+                    .find(|binding| binding.downstream_id == downstream_id)
+                {
+                    let label = binding.label.trim();
+                    if !label.is_empty() {
+                        return label.to_string();
+                    }
+                }
+            }
+        }
+    }
+    fallback.to_string()
+}
+
+/// Key 名称的兜底来源：运行时记录的下游名称（日志/在途快照）→ 下游配置名称 →
+/// 下游 id。文件模式没有 portal store 时靠它显示"下游名称"。
+async fn portal_downstream_name(
+    state: &AppState,
+    downstream_id: &str,
+    runtime_name: Option<&str>,
+) -> String {
+    if let Some(name) = runtime_name.map(str::trim).filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(name) = state
+        .downstream_config(downstream_id)
+        .await
+        .map(|downstream| downstream.name)
+        .filter(|name| !name.trim().is_empty())
+    {
+        return name;
+    }
+    downstream_id.to_string()
 }
 
 /// Helper function to extract user_id for the multi-key API.

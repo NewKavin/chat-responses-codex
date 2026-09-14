@@ -250,7 +250,7 @@ fn create_test_state() -> (AppState, String) {
                 billing_mode: None,
                 request_count: None,
                 user_agent: None,
-                client_ip: None,
+                client_ip: Some("10.0.0.8".to_string()),
                 request_id: "req-1".to_string(),
                 status_code: 200,
                 wire_status_code: 0,
@@ -992,6 +992,12 @@ async fn test_portal_usage_history_returns_recent_logs() {
     let without_latency = logs.iter().find(|log| log["id"] == "log-2").unwrap();
     assert_eq!(with_latency["first_token_latency_ms"], 10_650);
     assert!(without_latency["first_token_latency_ms"].is_null());
+
+    assert_eq!(with_latency["client_ip"], "10.0.0.8");
+    assert!(without_latency["client_ip"].is_null());
+    // 文件模式没有门户 store，key_name 退回下游名称
+    assert_eq!(with_latency["key_name"], "Test Downstream");
+    assert!(!body_text.contains("upstream_name"));
 }
 
 #[tokio::test]
@@ -2199,4 +2205,48 @@ async fn portal_quota_details_omit_daily_cost_quota_for_request_billing() {
         result["cost_quota"]["daily"].is_null(),
         "request-billed downstreams must not expose a daily cost quota"
     );
+}
+
+#[tokio::test]
+async fn test_portal_usage_history_rejects_foreign_downstream_scope() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-history?downstream_id=someone-else")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 文件模式没有 portal store：显式作用域无法校验归属，必须拒绝而不是放行
+    assert_ne!(response.status(), StatusCode::OK);
+    assert!(response.status() == StatusCode::FORBIDDEN
+        || response.status() == StatusCode::SERVICE_UNAVAILABLE
+        || response.status() == StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_portal_usage_history_accepts_own_downstream_scope() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    // 与 Bearer 默认作用域相同的 downstream_id：即使没有 store 也应放行
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-history?downstream_id=downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
