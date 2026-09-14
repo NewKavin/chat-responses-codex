@@ -11,8 +11,8 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DefaultModelContextConfig, DeploymentCalendar, DownstreamConfig,
-    ModelContextConfig, PersistedState, SummaryRange, UpstreamConfig, UsageLog,
+    ActiveGatewayRequestStart, AppConfig, AppState, DefaultModelContextConfig, DeploymentCalendar,
+    DownstreamConfig, ModelContextConfig, PersistedState, SummaryRange, UpstreamConfig, UsageLog,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -2249,4 +2249,102 @@ async fn test_portal_usage_history_accepts_own_downstream_scope() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+fn seed_active_request(
+    state: &AppState,
+    request_id: &str,
+    downstream_id: &str,
+    client_ip: Option<&str>,
+) {
+    state.start_active_gateway_request(ActiveGatewayRequestStart {
+        request_id: request_id.to_string(),
+        downstream_id: downstream_id.to_string(),
+        downstream_name: format!("{downstream_id}-name"),
+        endpoint: "/v1/responses".to_string(),
+        model: "gpt-5.1".to_string(),
+        protocol: "Responses".to_string(),
+        user_agent: Some("codex/0.146.0".to_string()),
+        client_ip: client_ip.map(str::to_string),
+    });
+}
+
+#[tokio::test]
+async fn test_portal_active_requests_returns_only_own_downstream() {
+    let (state, portal_key) = create_test_state();
+    seed_active_request(&state, "req-mine", "downstream-1", Some("10.0.0.8"));
+    seed_active_request(&state, "req-other", "downstream-2", Some("10.0.0.9"));
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/active-requests")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let rows = result["active_requests"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "只能看到自己 Key 的在途请求: {body_text}");
+    assert_eq!(rows[0]["request_id"], "req-mine");
+    assert_eq!(rows[0]["client_ip"], "10.0.0.8");
+    assert_eq!(rows[0]["key_name"], "downstream-1-name");
+    assert_eq!(rows[0]["phase"], "selecting");
+    assert_eq!(rows[0]["status"], "routing");
+    assert!(rows[0]["elapsed_seconds"].is_u64());
+    assert_eq!(result["refresh_interval_seconds"], 2);
+
+    assert!(!body_text.contains("req-other"));
+    assert!(!body_text.contains("upstream_id"));
+    assert!(!body_text.contains("upstream_name"));
+    assert!(!body_text.contains("downstream_id"));
+    assert!(!body_text.contains("error_category"));
+}
+
+#[tokio::test]
+async fn test_portal_active_requests_requires_bearer_token() {
+    let (state, _portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/active-requests")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_portal_active_requests_rejects_foreign_downstream_scope() {
+    let (state, portal_key) = create_test_state();
+    seed_active_request(&state, "req-other", "downstream-2", None);
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/active-requests?downstream_id=downstream-2")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
 }

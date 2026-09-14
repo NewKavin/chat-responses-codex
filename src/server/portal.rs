@@ -443,6 +443,73 @@ pub(super) async fn portal_usage_history(
     .into_response()
 }
 
+#[derive(Debug, serde::Serialize)]
+struct PortalActiveRequest {
+    request_id: String,
+    endpoint: String,
+    model: String,
+    protocol: String,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    key_name: String,
+    started_at: u64,
+    elapsed_seconds: u64,
+    idle_seconds: u64,
+    status: String,
+    phase: String,
+    queue_position: Option<usize>,
+}
+
+/// 门户在途请求：只返回当前作用域 Key 自己的请求，字段经门户结构体裁剪
+/// （不暴露 upstream_id / upstream_name / error_category）。
+pub(super) async fn portal_active_requests(
+    State(state): State<AppState>,
+    Query(query): Query<PortalScopeQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let downstream_id = match resolve_portal_downstream_scope(
+        &state,
+        &headers,
+        query.downstream_id.as_deref(),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let snapshots = state.active_gateway_requests(Some(&downstream_id));
+    let runtime_name = snapshots.first().map(|request| request.downstream_name.as_str());
+    let fallback_name = portal_downstream_name(&state, &downstream_id, runtime_name).await;
+    let key_name = portal_key_label(&state, &headers, &downstream_id, &fallback_name).await;
+    let active_requests = snapshots
+        .into_iter()
+        .map(|request| PortalActiveRequest {
+            request_id: request.request_id,
+            endpoint: request.endpoint,
+            model: request.model,
+            protocol: request.protocol,
+            client_ip: request.client_ip,
+            user_agent: request.user_agent,
+            key_name: key_name.clone(),
+            started_at: request.started_at,
+            elapsed_seconds: request.elapsed_seconds,
+            idle_seconds: request.idle_seconds,
+            status: request.status,
+            phase: request.phase,
+            queue_position: request.queue_position,
+        })
+        .collect::<Vec<_>>();
+
+    Json(json!({
+        "active_requests": active_requests,
+        "refresh_interval_seconds": state
+            .runtime_settings()
+            .active_requests_refresh_interval_seconds,
+    }))
+    .into_response()
+}
+
 /// Portal usage summary (chart aggregation)
 pub(super) async fn portal_usage_summary(
     State(state): State<AppState>,

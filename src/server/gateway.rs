@@ -2683,6 +2683,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/overview", get(portal_overview))
         .route("/api/portal/quota", get(portal_quota))
         .route("/api/portal/usage-history", get(portal_usage_history))
+        .route("/api/portal/active-requests", get(portal_active_requests))
         .route("/api/portal/usage-summary", get(portal_usage_summary))
         .route("/api/portal/models", get(portal_models))
         .route("/api/portal/model-access", get(portal_model_access))
