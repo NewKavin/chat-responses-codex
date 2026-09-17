@@ -16,6 +16,8 @@ use crate::routing::{
 
 #[path = "state/account_concurrency.rs"]
 mod account_concurrency;
+#[path = "state/cost_scope.rs"]
+mod cost_scope;
 #[path = "state/calendar.rs"]
 mod calendar;
 #[path = "state/file_store.rs"]
@@ -119,6 +121,7 @@ pub use account_concurrency::{
     AccountConcurrencyTuning, AccountLeaseError, AccountProbeLease, AccountProbeOutcome,
     AccountWaitTicket, ProbeDecision,
 };
+pub use cost_scope::{resolve_cost_scope, CostScope};
 pub use calendar::{
     CalendarDay, CalendarError, CalendarRange, DeploymentCalendar, LogWindowMode,
     ResolvedLogWindow, SummaryRange,
@@ -3428,6 +3431,18 @@ impl AppState {
                 .then(left.id.cmp(&right.id))
         });
         Ok(logs)
+    }
+
+    /// 解析一次请求的费用归属（cost scope）：有门户归属用户的 Key 记在用户
+    /// 账本上（同一用户所有 Key 共用一份日预算），没有归属的直连 Key 记在
+    /// 自己账本上。
+    pub async fn cost_scope_for(&self, downstream_id: &str) -> CostScope {
+        let state = self.inner.lock().await;
+        resolve_cost_scope(
+            downstream_id,
+            &state.downstream_owners,
+            &state.cost_scope_limits,
+        )
     }
 
     /// Look up a single downstream configuration without cloning usage logs.
