@@ -320,6 +320,30 @@ impl PostgresStateStore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             .unwrap_or_default();
 
+        let mut cost_scope_limits = HashMap::new();
+        for row in conn
+            .query("SELECT scope_id, daily_limit_cents FROM cost_scope_limits", &[])
+            .await
+            .map_err(io_other)?
+        {
+            let limit: i64 = row.get(1);
+            if limit > 0 {
+                cost_scope_limits.insert(row.get::<_, String>(0), limit as u64);
+            }
+        }
+        let mut downstream_owners = HashMap::new();
+        for row in conn
+            .query(
+                "SELECT downstream_id, owner_user_id FROM downstream_access_policies \
+                 WHERE owner_user_id IS NOT NULL",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+        {
+            downstream_owners.insert(row.get::<_, String>(0), row.get::<_, String>(1));
+        }
+
         Ok(PersistedState {
             upstreams: Arc::new(upstreams),
             downstreams: Arc::new(downstreams),
@@ -328,6 +352,8 @@ impl PostgresStateStore {
             announcement,
             runtime_settings,
             model_aliases,
+            cost_scope_limits,
+            downstream_owners,
         })
     }
 
@@ -1425,7 +1451,33 @@ async fn sync_config_tables(tx: &Transaction<'_>, state: &PersistedState) -> io:
     sync_global_context_profiles(tx, &state.global_context_profiles).await?;
     sync_announcements(tx, &state.announcement).await?;
     sync_runtime_settings(tx, &state.runtime_settings).await?;
-    sync_model_aliases(tx, &state.model_aliases).await
+    sync_model_aliases(tx, &state.model_aliases).await?;
+    sync_cost_scope_limits(tx, &state.cost_scope_limits).await
+}
+
+/// 费用 scope 上限全量覆盖：内存 map 是权威，表内多余行（被删的 scope）
+/// 一并清掉。downstream_owners 是 downstream_access_policies 的派生数据，
+/// 只读不写，绝不回写。
+async fn sync_cost_scope_limits(
+    tx: &Transaction<'_>,
+    limits: &HashMap<String, u64>,
+) -> io::Result<()> {
+    tx.execute("DELETE FROM cost_scope_limits", &[])
+        .await
+        .map_err(io_other)?;
+    for (scope_id, limit) in limits {
+        if *limit == 0 {
+            continue;
+        }
+        let params: &[&(dyn ToSql + Sync)] = &[scope_id, &(*limit as i64)];
+        tx.execute(
+            "INSERT INTO cost_scope_limits (scope_id, daily_limit_cents) VALUES ($1, $2)",
+            params,
+        )
+        .await
+        .map_err(io_other)?;
+    }
+    Ok(())
 }
 
 async fn sync_model_aliases(tx: &Transaction<'_>, rules: &[ModelAliasRule]) -> io::Result<()> {
@@ -2495,6 +2547,13 @@ CREATE TABLE IF NOT EXISTS portal_users (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at TIMESTAMPTZ,
     UNIQUE(email)
+);
+
+-- 费用限额按「账号（cost scope）」汇总：scope_id 既可是门户用户 id，
+-- 也可是没有归属用户的直连下游 id。内容随 PersistedState 常驻内存。
+CREATE TABLE IF NOT EXISTS cost_scope_limits (
+    scope_id          TEXT PRIMARY KEY,
+    daily_limit_cents BIGINT NOT NULL CHECK (daily_limit_cents > 0)
 );
 
 CREATE TABLE IF NOT EXISTS portal_identities (

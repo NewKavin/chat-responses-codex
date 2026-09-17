@@ -414,6 +414,10 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         "PostgreSQL startup should not load historical usage logs into the routing/config snapshot"
     );
 
+    assert!(
+        snapshot.cost_scope_limits.is_empty(),
+        "全新库不应有任何费用 scope 上限"
+    );
     let page = reloaded
         .query_usage_logs_page(UsageLogQuery {
             start_time: 0,

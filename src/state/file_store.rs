@@ -186,6 +186,8 @@ impl StateStore for FileStateStore {
                 global_context_profiles: state.global_context_profiles.clone(),
                 runtime_settings: state.runtime_settings.clone(),
                 model_aliases: state.model_aliases.clone(),
+                cost_scope_limits: state.cost_scope_limits.clone(),
+                downstream_owners: state.downstream_owners.clone(),
             })
             .map_err(io::Error::other)?;
 

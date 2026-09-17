@@ -164,6 +164,8 @@ impl StreamOnlyHarness {
                 global_context_profiles: std::sync::Arc::new(HashMap::new()),
                 runtime_settings: None,
                 model_aliases: vec![],
+                cost_scope_limits: std::collections::HashMap::new(),
+                downstream_owners: std::collections::HashMap::new(),
             },
             tempdir().unwrap().path().join("state.json"),
             AppConfig::default(),

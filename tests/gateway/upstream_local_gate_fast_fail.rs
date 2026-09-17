@@ -197,6 +197,8 @@ async fn fast_fail_harness(
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         extra(AppConfig {
@@ -455,6 +457,8 @@ async fn mixed_local_gate_and_upstream_rejection_reports_composition() {
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         AppConfig {
@@ -917,6 +921,8 @@ async fn saturated_account_falls_back_to_a_sibling_account() {
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         AppConfig {

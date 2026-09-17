@@ -157,6 +157,8 @@ async fn exhaustion_harness(
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         extra(AppConfig {
@@ -431,6 +433,8 @@ async fn concurrency_saturated_retry_after_is_not_cut_by_cooldown_cap() {
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         AppConfig {
@@ -627,6 +631,8 @@ async fn shipped_default_config_waits_between_rounds_and_reports_honest_state() 
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         // P1.3's whole point: the shipped defaults, NOTHING overridden.

@@ -124,6 +124,8 @@ async fn build_state(address: String, config: AppConfig, max_concurrency: u32) -
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         state_path,
         config,

@@ -118,6 +118,8 @@ async fn queue_harness(
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         extra(AppConfig {

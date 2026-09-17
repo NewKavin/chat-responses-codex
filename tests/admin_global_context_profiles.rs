@@ -54,6 +54,8 @@ fn create_test_state() -> AppState {
             global_context_profiles: std::sync::Arc::new(global_context_profiles),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         unique_state_path(),
         config,

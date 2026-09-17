@@ -151,6 +151,8 @@ async fn app_with_reasoning_capable_upstream(
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     app_state
@@ -289,6 +291,8 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         unique_state_path(),
         troubleshooting_test_config(),
@@ -405,6 +409,8 @@ fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> 
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     build_router(app_state)
@@ -468,6 +474,8 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), config);
     (build_router(app_state), portal_key, "test".to_string())
@@ -556,6 +564,8 @@ fn app_with_two_downstreams_and_config(
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), config);
     (build_router(app_state), first_key, second_key)
@@ -604,6 +614,8 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     app_state
@@ -1312,6 +1324,8 @@ fn app_with_model_state() -> (axum::Router, String, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())
@@ -1375,6 +1389,8 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())
@@ -1442,6 +1458,8 @@ fn app_with_priority_ranked_chat_upstreams(
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())

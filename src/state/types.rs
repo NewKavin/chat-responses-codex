@@ -1629,6 +1629,16 @@ pub struct PersistedState {
     pub runtime_settings: Option<RuntimeSettingsDocument>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_aliases: Vec<crate::state::model_identity::ModelAliasRule>,
+    /// 费用 scope 的日上限（分）。scope_id 既可能是门户用户 id，
+    /// 也可能是没有归属用户的直连下游 id。内容随 PersistedState 走同一套
+    /// 加载/变更路径；Postgres 模式下由 cost_scope_limits 表填充。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cost_scope_limits: HashMap<String, u64>,
+    /// 下游 Key -> 门户用户 id 的归属映射（费用汇总用）。
+    /// Postgres 模式下由 downstream_access_policies 填充；文件模式恒为空，
+    /// 每个 Key 自成一档，行为与改造前一致。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub downstream_owners: HashMap<String, String>,
 }
 
 fn default_true() -> bool {

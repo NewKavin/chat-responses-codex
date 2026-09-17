@@ -424,6 +424,8 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
         PersistedState {
             runtime_settings: Some(document.clone()),
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         state_path.clone(),
@@ -748,6 +750,8 @@ fn persisted_settings_violating_cooldown_ceiling_are_repaired_not_discarded() {
         PersistedState {
             runtime_settings: Some(document),
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -802,6 +806,8 @@ fn persisted_settings_invalid_for_other_reasons_are_still_discarded() {
         PersistedState {
             runtime_settings: Some(document),
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

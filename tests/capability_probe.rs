@@ -4077,6 +4077,8 @@ async fn normal_gateway_request_never_launches_a_probe() {
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
                 runtime_settings: None,
                 model_aliases: vec![],
+                cost_scope_limits: std::collections::HashMap::new(),
+                downstream_owners: std::collections::HashMap::new(),
             },
             state_path,
             AppConfig::default(),
@@ -4173,6 +4175,8 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
                 runtime_settings: None,
                 model_aliases: vec![],
+                cost_scope_limits: std::collections::HashMap::new(),
+                downstream_owners: std::collections::HashMap::new(),
             },
             state_path,
             AppConfig {
@@ -4276,6 +4280,8 @@ async fn recognized_field_level_5xx_with_request_evidence_queues_future_probe() 
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
                 runtime_settings: None,
                 model_aliases: vec![],
+                cost_scope_limits: std::collections::HashMap::new(),
+                downstream_owners: std::collections::HashMap::new(),
             },
             state_path,
             AppConfig {

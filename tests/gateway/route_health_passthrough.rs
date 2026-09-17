@@ -135,6 +135,8 @@ async fn harness(enforcement_enabled: bool) -> (Router, AppState, String, Arc<At
             global_context_profiles: Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         harness_config(enforcement_enabled),

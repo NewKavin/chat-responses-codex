@@ -77,6 +77,8 @@ fn catalog_state_with_aliases(
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases,
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),

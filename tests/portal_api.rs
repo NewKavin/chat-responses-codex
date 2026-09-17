@@ -196,6 +196,8 @@ fn canonical_upstream_state() -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -299,6 +301,8 @@ fn create_test_state() -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -402,6 +406,8 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -476,6 +482,8 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1347,6 +1355,8 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1685,6 +1695,8 @@ fn create_state_with_context_limits() -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1813,6 +1825,8 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -2034,6 +2048,8 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -2139,6 +2155,8 @@ async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

@@ -70,6 +70,8 @@ async fn downstream_legacy_token_limit_is_no_longer_enforced() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -149,6 +151,8 @@ async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhaust
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -427,6 +431,8 @@ async fn request_quota_usage_remaining_calculation() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -509,6 +515,8 @@ async fn request_quota_usage_remaining_when_exhausted() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -591,6 +599,8 @@ async fn downstream_request_mode_ignores_token_limits() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -673,6 +683,8 @@ async fn downstream_token_mode_ignores_request_window_quota() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -752,6 +764,8 @@ async fn downstream_cost_daily_window_slides_after_24h() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
+            cost_scope_limits: std::collections::HashMap::new(),
+            downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

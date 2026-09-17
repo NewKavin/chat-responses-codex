@@ -54,6 +54,8 @@ fn create_test_state() -> (AppState, String) {
         global_context_profiles: Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
+        cost_scope_limits: std::collections::HashMap::new(),
+        downstream_owners: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
