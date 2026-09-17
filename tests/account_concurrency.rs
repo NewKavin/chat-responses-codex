@@ -63,7 +63,6 @@ async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
         monthly_token_limit: None,
         input_token_price_per_million_cents: None,
         output_token_price_per_million_cents: None,
-        daily_cost_limit_cents: None,
         request_quota_window_hours: None,
         request_quota_requests: None,
         ip_allowlist: vec![],

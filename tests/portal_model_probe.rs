@@ -58,7 +58,6 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             monthly_token_limit: Some(100000),
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: Some(24),
             request_quota_requests: Some(1000),
             ip_allowlist: vec![],

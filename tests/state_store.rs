@@ -112,7 +112,6 @@ async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_ha
                 monthly_token_limit: None,
                 input_token_price_per_million_cents: None,
                 output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -163,7 +162,6 @@ async fn app_state_clears_invalid_plaintext_before_mutation_persistence_and_publ
             monthly_token_limit: None,
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             ip_allowlist: vec![],
@@ -212,7 +210,6 @@ async fn legacy_add_downstream_clears_invalid_plaintext_before_publication() {
             monthly_token_limit: None,
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             ip_allowlist: vec![],
@@ -497,7 +494,6 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     monthly_token_limit: Some(100_000),
                     input_token_price_per_million_cents: None,
                     output_token_price_per_million_cents: None,
-                    daily_cost_limit_cents: None,
                     request_quota_window_hours: Some(24),
                     request_quota_requests: Some(1000),
                     ip_allowlist: vec![],
@@ -519,7 +515,6 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     monthly_token_limit: Some(100_000),
                     input_token_price_per_million_cents: None,
                     output_token_price_per_million_cents: None,
-                    daily_cost_limit_cents: None,
                     request_quota_window_hours: None,
                     request_quota_requests: None,
                     ip_allowlist: vec![],
@@ -625,7 +620,6 @@ async fn failed_local_downstream_removal_keeps_runtime_windows() {
         monthly_token_limit: None,
         input_token_price_per_million_cents: None,
         output_token_price_per_million_cents: None,
-        daily_cost_limit_cents: None,
         request_quota_window_hours: None,
         request_quota_requests: None,
         ip_allowlist: vec![],
@@ -1024,7 +1018,6 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 monthly_token_limit: Some(2_000),
                 input_token_price_per_million_cents: None,
                 output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
                 request_quota_window_hours: Some(5),
                 request_quota_requests: Some(600),
                 ip_allowlist: vec![],
@@ -1101,7 +1094,6 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 monthly_token_limit: Some(2_000),
                 input_token_price_per_million_cents: None,
                 output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
                 request_quota_window_hours: Some(5),
                 request_quota_requests: Some(600),
                 ip_allowlist: vec![],
@@ -1181,7 +1173,6 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
                 monthly_token_limit: None,
                 input_token_price_per_million_cents: Some(1000),
                 output_token_price_per_million_cents: Some(3000),
-                daily_cost_limit_cents: Some(3000),
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -1225,7 +1216,10 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
-            cost_scope_limits: std::collections::HashMap::new(),
+            cost_scope_limits: std::collections::HashMap::from([(
+                "ds-lookup".to_string(),
+                3000,
+            )]),
             downstream_owners: std::collections::HashMap::new(),
         },
         unique_state_path(),
@@ -1235,7 +1229,10 @@ async fn app_state_downstream_config_looks_up_single_downstream_without_usage_lo
     let found = state.downstream_config("ds-lookup").await;
     let downstream = found.expect("downstream_config must find configured downstreams");
     assert_eq!(downstream.id, "ds-lookup");
-    assert_eq!(downstream.daily_cost_limit_cents, Some(3000));
+    assert_eq!(
+        state.cost_scope_for("ds-lookup").await.daily_limit_cents,
+        Some(3000)
+    );
     assert!(
         state.downstream_config("missing").await.is_none(),
         "unknown downstream ids must resolve to None"

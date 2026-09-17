@@ -5730,7 +5730,7 @@ async fn process_gateway_request_inner(
                         path = %request_path,
                         original_model = %model,
                         normalized_model = %&normalized_model,
-                        daily_cost_limit_cents = limit,
+                        cost_scope_daily_limit_cents = limit,
                         daily_cost_used_cents = used,
                         lockout_seconds,
                         "downstream daily cost quota exhausted; downstream is locked until the quota window resets"

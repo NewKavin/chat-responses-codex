@@ -244,7 +244,6 @@ async fn persist_config_round_trips_through_postgres() {
             monthly_token_limit: None,
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             expires_at: None,

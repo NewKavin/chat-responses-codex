@@ -372,7 +372,6 @@ fn qualification_persisted_state() -> PersistedState {
             monthly_token_limit: None,
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             ip_allowlist: vec![],

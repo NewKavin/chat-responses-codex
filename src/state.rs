@@ -7535,6 +7535,10 @@ impl AppState {
         state.announcement = candidate_state.announcement;
         state.global_context_profiles = candidate_state.global_context_profiles;
         state.runtime_settings = candidate_state.runtime_settings;
+        // 费用 scope 上限与归属映射走同一套加载/变更路径；不复制的话，
+        // 通过本路径改写这两个字段只会落盘、不会在内存态生效。
+        state.cost_scope_limits = candidate_state.cost_scope_limits;
+        state.downstream_owners = candidate_state.downstream_owners;
 
         Ok(result)
     }
@@ -7544,6 +7548,28 @@ impl AppState {
         F: FnOnce(&mut PersistedState) -> io::Result<T>,
     {
         self.mutate_persisted_state(mutator, |error| error).await
+    }
+
+    /// 设置一个费用 scope 的日上限（分）。scope_id 既可能是门户用户 id，
+    /// 也可能是没有归属用户的直连下游 id；`None` 表示取消上限。
+    /// 走既有变更路径，同时落持久化存储（Postgres / 文件）与内存态。
+    pub async fn set_cost_scope_limit(
+        &self,
+        scope_id: &str,
+        daily_limit_cents: Option<u64>,
+    ) -> io::Result<()> {
+        self.mutate_persisted_state_io(|state| {
+            match daily_limit_cents {
+                Some(limit) if limit > 0 => {
+                    state.cost_scope_limits.insert(scope_id.to_string(), limit);
+                }
+                _ => {
+                    state.cost_scope_limits.remove(scope_id);
+                }
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn persist_state(&self, state: &PersistedState) -> io::Result<()> {
@@ -8742,7 +8768,6 @@ mod tests {
             monthly_token_limit: None,
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             ip_allowlist: vec![],

@@ -173,7 +173,7 @@ impl PostgresStateStore {
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
                  request_quota_requests, expires_at, active, billing_mode, \
                  input_token_price_per_million_cents, output_token_price_per_million_cents, \
-                 daily_cost_limit_cents, model_concurrency_groups, model_group_id, is_portal_key \
+                 model_concurrency_groups, model_group_id, is_portal_key \
                  FROM downstreams ORDER BY id",
                 &[],
             )
@@ -204,18 +204,15 @@ impl PostgresStateStore {
                 output_token_price_per_million_cents: row
                     .get::<_, Option<i64>>(15)
                     .map(i64_to_u64),
-                daily_cost_limit_cents: row
-                    .get::<_, Option<i64>>(16)
-                    .map(i64_to_u64),
                 model_concurrency_groups: row
-                    .get::<_, Option<serde_json::Value>>(17)
+                    .get::<_, Option<serde_json::Value>>(16)
                     .and_then(|value| {
                         serde_json::from_value::<Vec<crate::state::ModelConcurrencyGroup>>(value)
                             .ok()
                     })
                     .unwrap_or_default(),
-                model_group_id: row.get::<_, Option<String>>(18),
-                is_portal_key: row.get::<_, bool>(19),
+                model_group_id: row.get::<_, Option<String>>(17),
+                is_portal_key: row.get::<_, bool>(18),
             });
         }
 
@@ -1109,6 +1106,9 @@ impl PostgresStateStore {
         migrate_downstream_group_fallback(&tx).await?;
         migrate_portal_key_markers(&tx).await?;
         super::model_access_store::migrate_access_policies(&tx).await?;
+        // 费用限额切账号：把遗留的 Key 级上限折算成账号上限（取最大值）后删列。
+        // 放在 migrate_access_policies 之后，保证 downstream_access_policies 已建。
+        migrate_cost_scope_limits_from_key_limits(&tx).await?;
         tx.commit().await.map_err(io_other)
     }
 }
@@ -1348,6 +1348,45 @@ async fn migrate_portal_key_markers(tx: &Transaction<'_>) -> io::Result<()> {
               WHERE b.downstream_id = downstreams.id
             )
           );
+        "#,
+    )
+    .await
+    .map_err(io_other)
+}
+
+/// 费用限额切账号：把遗留的 Key 级上限折算成账号上限后删列。
+/// - 幂等：列已删（或从未存在）时整段跳过，重启安全。
+/// - 折算取「最大值」而不是求和：同一账号名下多个 Key 的原上限，
+///   账号上限 = MAX(各 Key 上限)，不会因多 Key 放大预算。
+/// - 有归属用户的 Key 记到用户名下（COALESCE(owner_user_id, d.id)），
+///   没有归属的直连 Key 记到它自己名下。
+/// - 折算完成后 DROP COLUMN：删掉之后不可能再有任何 Key 级残留限制。
+/// - 必须排在 migrate_access_policies 之后执行（依赖 downstream_access_policies）。
+async fn migrate_cost_scope_limits_from_key_limits(tx: &Transaction<'_>) -> io::Result<()> {
+    tx.batch_execute(
+        r#"
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'downstreams' AND column_name = 'daily_cost_limit_cents'
+            ) THEN
+                INSERT INTO cost_scope_limits (scope_id, daily_limit_cents)
+                SELECT DISTINCT COALESCE(p.owner_user_id, d.id), MAX(d.daily_cost_limit_cents)
+                FROM downstreams d
+                LEFT JOIN downstream_access_policies p ON p.downstream_id = d.id
+                WHERE d.daily_cost_limit_cents IS NOT NULL
+                  AND d.daily_cost_limit_cents > 0
+                GROUP BY COALESCE(p.owner_user_id, d.id)
+                ON CONFLICT (scope_id) DO UPDATE
+                    SET daily_limit_cents = GREATEST(
+                        cost_scope_limits.daily_limit_cents,
+                        EXCLUDED.daily_limit_cents
+                    );
+
+                ALTER TABLE downstreams DROP COLUMN daily_cost_limit_cents;
+            END IF;
+        END $$;
         "#,
     )
     .await
@@ -1768,7 +1807,6 @@ async fn sync_downstreams(
         let output_token_price_per_million_cents = downstream
             .output_token_price_per_million_cents
             .map(|value| value as i64);
-        let daily_cost_limit_cents = downstream.daily_cost_limit_cents.map(|value| value as i64);
         // The downstreams.model_concurrency_groups column is JSONB. Binding a plain
         // String here fails with "error serializing parameter 17" because String only
         // accepts TEXT/VARCHAR/BPCHAR/NAME/UNKNOWN. Bind serde_json::Value instead,
@@ -1795,7 +1833,6 @@ async fn sync_downstreams(
             &downstream.billing_mode,
             &input_token_price_per_million_cents,
             &output_token_price_per_million_cents,
-            &daily_cost_limit_cents,
             &model_concurrency_groups,
             // T15：DB 层 model_group_id NOT NULL；任何漏网 None 都落 deny-all，
             // 绝不写 NULL（NULL 会让读路径回退白名单，空列表 = 放行全部）。
@@ -1804,7 +1841,7 @@ async fn sync_downstreams(
             &downstream.is_portal_key,
         ];
 
-        const DOWNSTREAM_COLUMNS: [&str; 20] = [
+        const DOWNSTREAM_COLUMNS: [&str; 19] = [
             "id",
             "name",
             "hash",
@@ -1821,7 +1858,6 @@ async fn sync_downstreams(
             "billing_mode",
             "input_token_price_per_million_cents",
             "output_token_price_per_million_cents",
-            "daily_cost_limit_cents",
             "model_concurrency_groups",
             "model_group_id",
             "is_portal_key",
@@ -1842,7 +1878,6 @@ async fn sync_downstreams(
                 billing_mode = EXCLUDED.billing_mode,
                 input_token_price_per_million_cents = EXCLUDED.input_token_price_per_million_cents,
                 output_token_price_per_million_cents = EXCLUDED.output_token_price_per_million_cents,
-                daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents,
                 model_concurrency_groups = EXCLUDED.model_concurrency_groups,
                 model_group_id = EXCLUDED.model_group_id,
                 is_portal_key = EXCLUDED.is_portal_key";
@@ -2355,8 +2390,7 @@ CREATE TABLE IF NOT EXISTS downstreams (
     active BOOLEAN NOT NULL,
     billing_mode TEXT NOT NULL DEFAULT 'request',
     input_token_price_per_million_cents BIGINT NULL,
-    output_token_price_per_million_cents BIGINT NULL,
-    daily_cost_limit_cents BIGINT NULL
+    output_token_price_per_million_cents BIGINT NULL
 );
 
 ALTER TABLE downstreams
@@ -2373,8 +2407,6 @@ ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS input_token_price_per_million_cents BIGINT NULL;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS output_token_price_per_million_cents BIGINT NULL;
-ALTER TABLE downstreams
-    ADD COLUMN IF NOT EXISTS daily_cost_limit_cents BIGINT NULL;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS model_concurrency_groups JSONB NULL;
 ALTER TABLE downstreams

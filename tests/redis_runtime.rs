@@ -156,7 +156,6 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
         monthly_token_limit: None,
         input_token_price_per_million_cents: None,
         output_token_price_per_million_cents: None,
-        daily_cost_limit_cents: None,
         request_quota_window_hours: None,
         request_quota_requests: None,
         ip_allowlist: vec![],
@@ -1872,11 +1871,14 @@ async fn redis_downstream_cost_usage_is_shared() {
     downstream.billing_mode = "token".into();
     downstream.input_token_price_per_million_cents = Some(1_000_000);
     downstream.output_token_price_per_million_cents = Some(1_000_000);
-    downstream.daily_cost_limit_cents = Some(10);
     // Legacy raw token limit fields are ignored; only cost billing enforces
     // the daily rolling window.
     downstream.daily_token_limit = Some(1);
     first.insert_downstream(downstream.clone()).await.unwrap();
+    // 费用上限按账号（cost scope）配置：没有归属用户的直连 Key 归它自己。
+    // 两个 coordinator 都要看到同样的上限，才能断言跨协调器共享。
+    first.set_cost_scope_limit(&downstream.id, Some(10)).await.unwrap();
+    second.set_cost_scope_limit(&downstream.id, Some(10)).await.unwrap();
 
     let mut log = redis_test_usage_log("redis-cost-event", &downstream.id, 10);
     log.total_cost_cents = Some(10);
@@ -1934,8 +1936,10 @@ async fn redis_cost_retry_after_waits_until_window_expires() {
     downstream.billing_mode = "token".into();
     downstream.input_token_price_per_million_cents = Some(1_000_000);
     downstream.output_token_price_per_million_cents = Some(1_000_000);
-    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
+    // 费用上限按账号（cost scope）配置；second 做准入判定，也要看到同样的上限。
+    first.set_cost_scope_limit(&downstream.id, Some(100)).await.unwrap();
+    second.set_cost_scope_limit(&downstream.id, Some(100)).await.unwrap();
 
     let mut small = redis_test_usage_log("small-old-event", &downstream.id, 1);
     small.total_cost_cents = Some(1);
@@ -1998,10 +2002,11 @@ async fn redis_cost_billing_token_keys_use_daily_retention() {
     downstream.billing_mode = "token".into();
     downstream.input_token_price_per_million_cents = Some(1000);
     downstream.output_token_price_per_million_cents = Some(1000);
-    downstream.daily_cost_limit_cents = Some(3000);
     // 按金额计费不依赖每日 token 数；留空验证金额窗口依然按 24h 滚动。
     downstream.daily_token_limit = None;
     first.insert_downstream(downstream.clone()).await.unwrap();
+    // 费用上限按账号（cost scope）配置：没有归属用户的直连 Key 归它自己。
+    first.set_cost_scope_limit(&downstream.id, Some(3000)).await.unwrap();
     first
         .append_usage_log(redis_test_usage_log(
             "cost-billing-retention",
@@ -2227,8 +2232,10 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     // 44ab6bee tightened this predicate and the ignored suite never ran).
     downstream.input_token_price_per_million_cents = Some(1_000_000);
     downstream.output_token_price_per_million_cents = Some(1_000_000);
-    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
+    // 费用上限按账号（cost scope）配置：cost billing 的记录/重试路径
+    // 只在 scope 有上限（is_limited）时才写金额窗口，必须留等值上限。
+    first.set_cost_scope_limit(&downstream.id, Some(100)).await.unwrap();
     let log = redis_test_usage_log("retryable-token-log", &downstream.id, 10);
 
     let fault = coordination_fault(&first);
@@ -2276,8 +2283,10 @@ async fn redis_token_recording_retries_commit_after_response_loss() {
     // 44ab6bee tightened this predicate and the ignored suite never ran).
     downstream.input_token_price_per_million_cents = Some(1_000_000);
     downstream.output_token_price_per_million_cents = Some(1_000_000);
-    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
+    // 费用上限按账号（cost scope）配置：cost billing 的记录/重试路径
+    // 只在 scope 有上限（is_limited）时才写金额窗口，必须留等值上限。
+    first.set_cost_scope_limit(&downstream.id, Some(100)).await.unwrap();
     let log = redis_test_usage_log("token-record-response-loss", &downstream.id, 10);
 
     first
@@ -2349,8 +2358,10 @@ async fn redis_downstream_token_replay_preserves_original_score_and_value() {
     // 44ab6bee tightened this predicate and the ignored suite never ran).
     downstream.input_token_price_per_million_cents = Some(1_000_000);
     downstream.output_token_price_per_million_cents = Some(1_000_000);
-    downstream.daily_cost_limit_cents = Some(100);
     first.insert_downstream(downstream.clone()).await.unwrap();
+    // 费用上限按账号（cost scope）配置：cost billing 的记录/重试路径
+    // 只在 scope 有上限（is_limited）时才写金额窗口，必须留等值上限。
+    first.set_cost_scope_limit(&downstream.id, Some(100)).await.unwrap();
 
     let log_id = "replayed-token-event";
     first

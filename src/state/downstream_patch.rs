@@ -25,7 +25,7 @@ pub fn apply_downstream_updates(
             return Err(format!("{field} must be a boolean"));
         }
     }
-    for field in ["per_minute_limit", "max_concurrency", "request_quota_window_hours", "request_quota_requests", "daily_token_limit", "monthly_token_limit", "input_token_price_per_million_cents", "output_token_price_per_million_cents", "daily_cost_limit_cents"] {
+    for field in ["per_minute_limit", "max_concurrency", "request_quota_window_hours", "request_quota_requests", "daily_token_limit", "monthly_token_limit", "input_token_price_per_million_cents", "output_token_price_per_million_cents"] {
         if let Some(value) = updates.get(field) {
             if value.is_null() && !matches!(field,"per_minute_limit"|"max_concurrency") { continue; }
             let number = value.as_u64().ok_or_else(|| format!("{field} must be a nonnegative integer"))?;
@@ -140,18 +140,6 @@ pub fn apply_downstream_updates(
         .is_some_and(serde_json::Value::is_null)
     {
         downstream.output_token_price_per_million_cents = None;
-    }
-    if let Some(cost_limit) = updates
-        .get("daily_cost_limit_cents")
-        .and_then(|v| v.as_u64())
-    {
-        downstream.daily_cost_limit_cents = Some(cost_limit);
-    }
-    if updates
-        .get("daily_cost_limit_cents")
-        .is_some_and(serde_json::Value::is_null)
-    {
-        downstream.daily_cost_limit_cents = None;
     }
     if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
         downstream.active = active;

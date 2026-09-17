@@ -52,7 +52,6 @@ fn create_test_state() -> AppState {
                 monthly_token_limit: Some(100000),
                 input_token_price_per_million_cents: None,
                 output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
                 request_quota_window_hours: Some(24),
                 request_quota_requests: Some(1000),
                 ip_allowlist: vec!["192.168.1.0/24".to_string()],
@@ -77,7 +76,6 @@ fn create_test_state() -> AppState {
                 monthly_token_limit: None,
                 input_token_price_per_million_cents: None,
                 output_token_price_per_million_cents: None,
-                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -661,8 +659,7 @@ async fn admin_update_downstream_persists_cost_billing_fields() {
     let updates = json!({
         "billing_mode": "token",
         "input_token_price_per_million_cents": 1000,
-        "output_token_price_per_million_cents": 3000,
-        "daily_cost_limit_cents": 5000
+        "output_token_price_per_million_cents": 3000
     });
 
     let response = app
@@ -690,7 +687,6 @@ async fn admin_update_downstream_persists_cost_billing_fields() {
     assert_eq!(downstream.billing_mode, "token");
     assert_eq!(downstream.input_token_price_per_million_cents, Some(1000));
     assert_eq!(downstream.output_token_price_per_million_cents, Some(3000));
-    assert_eq!(downstream.daily_cost_limit_cents, Some(5000));
     assert!(downstream.has_cost_pricing());
 }
 
@@ -704,8 +700,7 @@ async fn admin_update_downstream_clears_cost_billing_fields() {
     let set_updates = json!({
         "billing_mode": "token",
         "input_token_price_per_million_cents": 1000,
-        "output_token_price_per_million_cents": 3000,
-        "daily_cost_limit_cents": 5000
+        "output_token_price_per_million_cents": 3000
     });
     let response = app
         .clone()
@@ -724,8 +719,7 @@ async fn admin_update_downstream_clears_cost_billing_fields() {
 
     let clear_updates = json!({
         "input_token_price_per_million_cents": null,
-        "output_token_price_per_million_cents": null,
-        "daily_cost_limit_cents": null
+        "output_token_price_per_million_cents": null
     });
     let response = app
         .clone()
@@ -750,8 +744,42 @@ async fn admin_update_downstream_clears_cost_billing_fields() {
         .unwrap();
     assert_eq!(downstream.input_token_price_per_million_cents, None);
     assert_eq!(downstream.output_token_price_per_million_cents, None);
-    assert_eq!(downstream.daily_cost_limit_cents, None);
     assert!(!downstream.has_cost_pricing());
+}
+
+#[tokio::test]
+async fn admin_patch_ignores_the_removed_key_level_cost_limit() {
+    // 切换后不允许任何路径重新引入 Key 级费用上限，
+    // 老客户端/老脚本传这个字段必须静默忽略，不能落库、不能生效。
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "daily_cost_limit_cents": 5000 }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "PATCH must be accepted: {:?}", response.status());
+
+    let snapshot = state.snapshot().await;
+    let serialized = serde_json::to_value(&snapshot.downstreams[0]).unwrap();
+    assert!(
+        serialized.get("daily_cost_limit_cents").is_none(),
+        "下游配置里不允许再出现 Key 级费用上限: {serialized}"
+    );
+    assert!(
+        snapshot.cost_scope_limits.is_empty(),
+        "PATCH 不得偷偷写进账号上限"
+    );
 }
 
 // ============================================================================
@@ -1138,8 +1166,7 @@ async fn downstream_batch_set_mode_updates_cost_billing_fields() {
                     serde_json::to_string(&json!({
                         "ids": ["downstream-1"],
                         "billing_mode": "token",
-                        "input_token_price_per_million_cents": 1000, "output_token_price_per_million_cents": 1000,
-                        "daily_cost_limit_cents": 3000
+                        "input_token_price_per_million_cents": 1000, "output_token_price_per_million_cents": 1000
                     }))
                     .unwrap(),
                 ))
@@ -1168,7 +1195,6 @@ async fn downstream_batch_set_mode_updates_cost_billing_fields() {
     );
     assert_eq!(downstream.input_token_price_per_million_cents, Some(1000));
     assert_eq!(downstream.output_token_price_per_million_cents, Some(1000));
-    assert_eq!(downstream.daily_cost_limit_cents, Some(3000));
 }
 
 #[tokio::test]
@@ -1191,8 +1217,7 @@ async fn downstream_batch_set_mode_clears_cost_billing_fields() {
                         "ids": ["downstream-1"],
                         "billing_mode": "request",
                         "daily_token_limit": null,
-                        "input_token_price_per_million_cents": null, "output_token_price_per_million_cents": null,
-                        "daily_cost_limit_cents": null
+                        "input_token_price_per_million_cents": null, "output_token_price_per_million_cents": null
                     }))
                     .unwrap(),
                 ))
@@ -1218,7 +1243,6 @@ async fn downstream_batch_set_mode_clears_cost_billing_fields() {
     assert!(!downstream.has_cost_pricing());
     assert_eq!(downstream.input_token_price_per_million_cents, None);
     assert_eq!(downstream.output_token_price_per_million_cents, None);
-    assert_eq!(downstream.daily_cost_limit_cents, None);
 }
 
 #[tokio::test]

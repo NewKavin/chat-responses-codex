@@ -2390,9 +2390,6 @@ pub(super) struct BatchBillingModeRequest {
     /// `null` clears the output price; absent leaves it unchanged.
     #[serde(default, deserialize_with = "deserialize_nullable_u64")]
     output_token_price_per_million_cents: Option<Option<u64>>,
-    /// `null` clears the cost limit; absent leaves it unchanged.
-    #[serde(default, deserialize_with = "deserialize_nullable_u64")]
-    daily_cost_limit_cents: Option<Option<u64>>,
     #[serde(default, deserialize_with = "deserialize_nullable_u32")]
     request_quota_window_hours: Option<Option<u32>>,
     #[serde(default, deserialize_with = "deserialize_nullable_u32")]
@@ -2617,7 +2614,6 @@ const BATCH_UPDATE_DOWNSTREAM_ALLOWED_FIELDS: &[&str] = &[
     "monthly_token_limit",
     "input_token_price_per_million_cents",
     "output_token_price_per_million_cents",
-    "daily_cost_limit_cents",
     "model_concurrency_groups",
     "expires_at",
     "model_access",
@@ -2742,9 +2738,6 @@ pub(super) async fn admin_batch_set_downstream_mode(
         }
         if let Some(value) = payload.output_token_price_per_million_cents {
             downstream.output_token_price_per_million_cents = value;
-        }
-        if let Some(value) = payload.daily_cost_limit_cents {
-            downstream.daily_cost_limit_cents = value;
         }
         if let Some(value) = payload.request_quota_window_hours {
             downstream.request_quota_window_hours = value;

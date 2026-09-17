@@ -1167,9 +1167,6 @@ pub struct DownstreamConfig {
     /// Output price per million tokens in cents (分). 1000 = 10 元 per 1M tokens.
     #[serde(default)]
     pub output_token_price_per_million_cents: Option<u64>,
-    /// Daily cost limit in cents (分), e.g. 3000 = 30 元 per rolling 24h.
-    #[serde(default)]
-    pub daily_cost_limit_cents: Option<u64>,
     #[serde(default)]
     pub request_quota_window_hours: Option<u32>,
     #[serde(default)]
@@ -1214,7 +1211,6 @@ impl Default for DownstreamConfig {
             monthly_token_limit: None,
             input_token_price_per_million_cents: None,
             output_token_price_per_million_cents: None,
-            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             ip_allowlist: Vec::new(),
