@@ -44,6 +44,16 @@ fn app_config_debug_redacts_credentials_and_redis_url() {
     assert!(debug.contains("[REDACTED]"));
 }
 
+#[test]
+fn cost_window_identity_follows_the_scope_not_the_key() {
+    // 费用键必须由「费用归属 scope」派生，而不是由 Key 派生：同一账号的
+    // 两个 Key 应映射到同一份账本，不同账号的账本互不相同。
+    let user_scope = chat_responses_codex::state::cost_window_identity("user-1");
+    assert_eq!(chat_responses_codex::state::cost_window_identity("user-1"), user_scope);
+    assert_ne!(chat_responses_codex::state::cost_window_identity("key-a"), user_scope);
+    assert_ne!(chat_responses_codex::state::cost_window_identity("key-b"), user_scope);
+}
+
 #[tokio::test]
 async fn disabled_redis_does_not_parse_or_connect() {
     let config = AppConfig {

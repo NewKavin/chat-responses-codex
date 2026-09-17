@@ -130,7 +130,8 @@ use file_store::FileStateStore;
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
 pub use redis_runtime::{
-    CoordinationTestFault, RuntimeCoordinationBackend, RuntimeCoordinationError,
+    cost_window_identity, CoordinationTestFault, RuntimeCoordinationBackend,
+    RuntimeCoordinationError,
 };
 pub use store::{StateStore, StoreFuture};
 
@@ -5244,12 +5245,14 @@ impl AppState {
             .map(|group| group.name.clone())
             .unwrap_or_default();
 
+        let cost_scope = self.cost_scope_for(&downstream.id).await;
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let event_id = Uuid::new_v4().to_string();
             let lease_id = Uuid::new_v4().to_string();
             coordinator
                 .reserve_downstream_admission(
                     downstream,
+                    &cost_scope,
                     &event_id,
                     &lease_id,
                     &group_name,
@@ -5298,10 +5301,11 @@ impl AppState {
             });
         }
 
+        let cost_scope = self.cost_scope_for(&downstream.id).await;
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let event_id = Uuid::new_v4().to_string();
             coordinator
-                .reserve_downstream_request(downstream, &event_id)
+                .reserve_downstream_request(downstream, &cost_scope, &event_id)
                 .await?;
             return Ok(DownstreamRequestReservation {
                 downstream_id: downstream.id.clone(),

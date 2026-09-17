@@ -7,7 +7,7 @@ use super::route_health::{
     RedisHealthLease,
 };
 use super::{
-    AccountConcurrencyKey, AccountProbeLease, AccountProbeOutcome, AccountWaitTicket, AppConfig,
+    AccountConcurrencyKey, AccountProbeLease, AccountProbeOutcome, AccountWaitTicket, AppConfig, CostScope,
     DownstreamAdmissionRejection, DownstreamConfig, DownstreamRuntimeCounts, HealthStateSnapshot,
     KeyHealthKey, LegacyRouteHealthRepairReport, ProbeDecision, RouteAvailability,
     RouteFailureClass, RouteHealthKey, RouteHealthSnapshotDto, RouteOutcome, RouteRecovery,
@@ -364,12 +364,14 @@ impl RedisRuntimeCoordinator {
     pub(super) async fn reserve_downstream_request(
         &self,
         downstream: &DownstreamConfig,
+        cost_scope: &CostScope,
         event_id: &str,
     ) -> Result<(), DownstreamAdmissionRejection> {
         let identity = stable_identity(&downstream.id);
+        let cost_identity = stable_identity(&cost_scope.scope_id);
         let request_key = self.key(&identity, "requests");
-        let token_key = self.key(&identity, "tokens");
-        let token_values_key = self.key(&identity, "token_values");
+        let token_key = self.key(&cost_identity, "tokens");
+        let token_values_key = self.key(&cost_identity, "token_values");
         let request_window_seconds = downstream
             .request_quota_window_hours
             .zip(downstream.request_quota_requests)
@@ -383,7 +385,7 @@ impl RedisRuntimeCoordinator {
         // Only cost billing (token mode + prices + daily cost limit) enforces
         // a daily rolling window, measured in cents. Raw token limits are no
         // longer enforced. The monthly token window is unused (always 0).
-        let daily_limit = downstream.daily_cost_limit_cents.unwrap_or(0);
+        let daily_limit = cost_scope.daily_limit_cents.unwrap_or(0);
         let monthly_limit = 0u64;
         let result = self
             .retry_coordination_once(|| {
@@ -441,15 +443,17 @@ impl RedisRuntimeCoordinator {
     pub(super) async fn reserve_downstream_admission(
         &self,
         downstream: &DownstreamConfig,
+        cost_scope: &CostScope,
         event_id: &str,
         lease_id: &str,
         group_name: &str,
         group_cap: Option<u32>,
     ) -> Result<(), DownstreamAdmissionRejection> {
         let identity = stable_identity(&downstream.id);
+        let cost_identity = stable_identity(&cost_scope.scope_id);
         let request_key = self.key(&identity, "requests");
-        let token_key = self.key(&identity, "tokens");
-        let token_values_key = self.key(&identity, "token_values");
+        let token_key = self.key(&cost_identity, "tokens");
+        let token_values_key = self.key(&cost_identity, "token_values");
         let lease_suffix = format!("leases{}", downstream_group_suffix(group_name));
         let lease_key = self.key(&identity, &lease_suffix);
         // Downstream-wide aggregate lease zset (C7 global backstop): every
@@ -469,7 +473,7 @@ impl RedisRuntimeCoordinator {
         // Only cost billing (token mode + prices + daily cost limit) enforces
         // a daily rolling window, measured in cents. Raw token limits are no
         // longer enforced. The monthly token window is unused (always 0).
-        let daily_limit = downstream.daily_cost_limit_cents.unwrap_or(0);
+        let daily_limit = cost_scope.daily_limit_cents.unwrap_or(0);
         let monthly_limit = 0u64;
         let result = self
             .retry_coordination_once(|| {
@@ -511,12 +515,12 @@ impl RedisRuntimeCoordinator {
 
     pub(super) async fn record_downstream_tokens(
         &self,
-        downstream_id: &str,
+        scope_id: &str,
         event_id: &str,
         tokens: u64,
         retention_seconds: u64,
     ) -> Result<(), RuntimeCoordinationError> {
-        let identity = stable_identity(downstream_id);
+        let identity = stable_identity(scope_id);
         let token_key = self.key(&identity, "tokens");
         let token_values_key = self.key(&identity, "token_values");
         self.retry_coordination_once(|| {
@@ -3381,6 +3385,14 @@ mod tests {
 
 fn stable_identity(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// 费用窗口的 Redis identity：取费用归属 scope 的稳定哈希。与 `stable_identity`
+/// 同源，但语义上永远是 scope（门户用户 id 或直连下游 id），用于在集成测试里
+/// 断言「费用键跟随账号而不是跟随 Key」。
+#[doc(hidden)]
+pub fn cost_window_identity(scope_id: &str) -> String {
+    stable_identity(scope_id)
 }
 
 /// Redis key suffix for a downstream concurrency group. Empty for the
