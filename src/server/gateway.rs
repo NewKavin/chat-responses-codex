@@ -2158,7 +2158,7 @@ async fn downstream_billing_info(
     match state.downstream_config(downstream_key_id).await.as_ref() {
         Some(downstream) if downstream.token_billing_mode() => {
             let cost = downstream
-                .cost_billing_mode()
+                .has_cost_pricing()
                 .then(|| downstream.cost_for_tokens(prompt_tokens, completion_tokens));
             ("Token 计费".to_string(), cost)
         }

@@ -160,8 +160,9 @@ pub(super) async fn portal_overview(
         }
     };
     // Token limits are no longer enforced; the daily cost quota is measured
-    // on the same rolling 24h window as admission.
-    let cost_daily = downstream.daily_cost_limit().map(|limit| {
+    // on the account's cost scope, same rolling 24h window as admission.
+    let cost_scope = state.cost_scope_for(&downstream_id).await;
+    let cost_daily = cost_scope.daily_limit_cents.filter(|limit| *limit > 0).map(|limit| {
         let used = summary.cost_used_24h_cents;
         json!({
             "used_cents": used,

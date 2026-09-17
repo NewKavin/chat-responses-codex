@@ -151,7 +151,11 @@ async fn downstream_cost_quota_rejects_with_cost_variant_when_daily_cost_exhaust
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
-            cost_scope_limits: std::collections::HashMap::new(),
+            cost_scope_limits: {
+        let mut m = std::collections::HashMap::new();
+        m.insert("down-cost".into(), 10);
+        m
+    },
             downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
@@ -764,7 +768,11 @@ async fn downstream_cost_daily_window_slides_after_24h() {
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             runtime_settings: None,
             model_aliases: vec![],
-            cost_scope_limits: std::collections::HashMap::new(),
+            cost_scope_limits: {
+        let mut m = std::collections::HashMap::new();
+        m.insert("down-slide".into(), 10);
+        m
+    },
             downstream_owners: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
@@ -1319,4 +1327,167 @@ async fn c7_unmatched_model_uses_global_budget_independently_of_groups() {
     }
     state.release_downstream_concurrency(a).await.unwrap();
     state.release_downstream_concurrency(b).await.unwrap();
+}
+
+// ============================================================================
+// 费用限额按「账号（cost scope）」汇总（Task 3）
+// ============================================================================
+
+/// token 计费 + 有单价、**不带**任何 Key 级上限的下游。
+fn cost_billed_downstream(id: &str) -> DownstreamConfig {
+    DownstreamConfig {
+        id: id.into(),
+        name: format!("Cost {id}"),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 60,
+        max_concurrency: 10,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        input_token_price_per_million_cents: Some(1_000_000),
+        output_token_price_per_million_cents: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+        billing_mode: "token".into(),
+        model_concurrency_groups: vec![],
+        model_group_id: None,
+        is_portal_key: false,
+        ..Default::default()
+    }
+}
+
+/// 一条计入费用窗口的用量日志：status 200、total_cost_cents = Some(n)。
+fn cost_log(id: &str, downstream_key_id: &str, cost_cents: u64) -> UsageLog {
+    UsageLog {
+        id: id.into(),
+        downstream_key_id: downstream_key_id.into(),
+        upstream_key_id: "up-1".into(),
+        downstream_name: None,
+        upstream_name: None,
+        endpoint: "/v1/chat/completions".into(),
+        model: "gpt-4.1-mini".into(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: None,
+        user_agent: None,
+        client_ip: None,
+        request_id: format!("REQ-{id}"),
+        status_code: 200,
+        wire_status_code: 0,
+        stream_diagnostics: None,
+        error_message: None,
+        error_category: None,
+        prompt_tokens: 100,
+        completion_tokens: 0,
+        total_tokens: 100,
+        total_cost_cents: Some(cost_cents),
+        first_token_latency_ms: None,
+        latency_ms: 12,
+        created_at: unix_seconds(),
+        compatibility: None,
+    }
+}
+
+#[tokio::test]
+async fn sibling_keys_of_one_account_share_one_daily_cost_budget() {
+    // 同一账号两个 Key，账号日上限 10 分。第一个 Key 花掉 10 分之后，
+    // 第二个 Key 必须立刻被拒，而不是另开一份预算。
+    let tempdir = tempdir().unwrap();
+    let mut state = PersistedState {
+        downstreams: std::sync::Arc::new(vec![
+            cost_billed_downstream("key-a"),
+            cost_billed_downstream("key-b"),
+        ]),
+        ..Default::default()
+    };
+    state
+        .downstream_owners
+        .insert("key-a".into(), "user-1".into());
+    state
+        .downstream_owners
+        .insert("key-b".into(), "user-1".into());
+    state.cost_scope_limits.insert("user-1".into(), 10);
+    let state = AppState::new(state, tempdir.path().join("state.json"), AppConfig::default());
+
+    let snapshot = state.snapshot().await;
+    let key_a = snapshot.downstreams[0].clone();
+    let key_b = snapshot.downstreams[1].clone();
+
+    state
+        .append_usage_log(cost_log("log-1", "key-a", 10))
+        .await
+        .unwrap();
+
+    let rejection = state
+        .reserve_downstream_admission(&key_b, "gpt-4.1-mini")
+        .await
+        .expect_err("兄弟 Key 必须共用同一份账号预算");
+    assert!(matches!(
+        rejection,
+        DownstreamAdmissionRejection::DailyCostQuotaExceeded { limit: 10, .. }
+    ));
+
+    // 同一个 Key 自己也一样被拒，确认没有走岔路
+    assert!(state
+        .reserve_downstream_admission(&key_a, "gpt-4.1-mini")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn unowned_key_keeps_its_own_budget() {
+    let tempdir = tempdir().unwrap();
+    let mut state = PersistedState {
+        downstreams: std::sync::Arc::new(vec![cost_billed_downstream("key-direct")]),
+        ..Default::default()
+    };
+    state.cost_scope_limits.insert("key-direct".into(), 10);
+    let state = AppState::new(state, tempdir.path().join("state.json"), AppConfig::default());
+    let downstream = state.snapshot().await.downstreams[0].clone();
+
+    assert!(state
+        .reserve_downstream_admission(&downstream, "gpt-4.1-mini")
+        .await
+        .is_ok());
+
+    state
+        .append_usage_log(cost_log("log-1", "key-direct", 10))
+        .await
+        .unwrap();
+
+    assert!(state
+        .reserve_downstream_admission(&downstream, "gpt-4.1-mini")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn account_without_a_limit_is_not_throttled() {
+    let tempdir = tempdir().unwrap();
+    let mut state = PersistedState {
+        downstreams: std::sync::Arc::new(vec![cost_billed_downstream("key-a")]),
+        ..Default::default()
+    };
+    state
+        .downstream_owners
+        .insert("key-a".into(), "user-1".into());
+    // 故意不给 user-1 配上限
+    let state = AppState::new(state, tempdir.path().join("state.json"), AppConfig::default());
+    let downstream = state.snapshot().await.downstreams[0].clone();
+
+    state
+        .append_usage_log(cost_log("log-1", "key-a", 1_000_000))
+        .await
+        .unwrap();
+
+    assert!(state
+        .reserve_downstream_admission(&downstream, "gpt-4.1-mini")
+        .await
+        .is_ok());
 }

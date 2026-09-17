@@ -2048,7 +2048,11 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
-        cost_scope_limits: std::collections::HashMap::new(),
+        cost_scope_limits: {
+        let mut m = std::collections::HashMap::new();
+        m.insert("downstream-cost".into(), 3000);
+        m
+    },
         downstream_owners: std::collections::HashMap::new(),
     };
 
@@ -2155,7 +2159,11 @@ async fn portal_quota_details_expose_daily_cost_quota_in_cent_fields() {
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
-        cost_scope_limits: std::collections::HashMap::new(),
+        cost_scope_limits: {
+        let mut m = std::collections::HashMap::new();
+        m.insert("downstream-cost".into(), 3000);
+        m
+    },
         downstream_owners: std::collections::HashMap::new(),
     };
 

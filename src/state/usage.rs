@@ -1,3 +1,4 @@
+use super::cost_scope::resolve_cost_scope;
 use super::types::*;
 use crate::state::unix_seconds;
 use crate::state::AppState;
@@ -100,27 +101,29 @@ pub(super) fn build_downstream_request_windows(
 pub(super) fn build_downstream_token_windows(
     logs: &[UsageLog],
     downstreams: &[DownstreamConfig],
+    owners: &HashMap<String, String>,
+    limits: &HashMap<String, u64>,
 ) -> HashMap<String, VecDeque<DownstreamTokenEvent>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
         if !is_request_quota_counted(&log) {
             continue;
         }
+        // 只有按费用计价的 Key 才往账本窗口里写「分」。窗口按费用归属
+        // （scope）聚合：同一个用户的所有 Key 共用一份滚动窗口。
         let cost_billed = downstreams.iter().any(|downstream| {
-            downstream.id == log.downstream_key_id && downstream.cost_billing_mode()
+            downstream.id == log.downstream_key_id && downstream.has_cost_pricing()
         });
+        if !cost_billed {
+            continue;
+        }
+        let scope_id = resolve_cost_scope(&log.downstream_key_id, owners, limits).scope_id;
         windows
-            .entry(log.downstream_key_id.clone())
+            .entry(scope_id)
             .or_insert_with(VecDeque::new)
             .push_back(DownstreamTokenEvent {
                 created_at: log.created_at,
-                // Cost-billed logs carry the converted cost (cents); plain
-                // token-billed logs fall back to the raw token count.
-                tokens: if cost_billed {
-                    log.total_cost_cents.unwrap_or(0)
-                } else {
-                    log.total_tokens
-                },
+                tokens: log.total_cost_cents.unwrap_or(0),
             });
     }
     windows
@@ -145,11 +148,14 @@ pub(super) fn normalized_usage_logs(logs: &[UsageLog]) -> Vec<UsageLog> {
     deduped
 }
 
-pub(super) fn downstream_token_retention_seconds(downstream: &DownstreamConfig) -> u64 {
-    // Only cost-billed downstreams maintain a rolling daily window; the Redis
-    // token store holds cents rather than raw tokens. Raw token limits are
-    // deprecated and no longer enforced.
-    if downstream.cost_billing_mode() {
+pub(super) fn downstream_token_retention_seconds(
+    downstream: &DownstreamConfig,
+    scope: &super::cost_scope::CostScope,
+) -> u64 {
+    // Only cost-priced keys whose cost scope is actually limited maintain a
+    // rolling daily window; the Redis token store holds cents rather than raw
+    // tokens. Raw token limits are deprecated and no longer enforced.
+    if downstream.has_cost_pricing() && scope.is_limited() {
         DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS
     } else {
         60
@@ -331,24 +337,34 @@ impl AppState {
 
     pub async fn compute_cost_usage(&self, downstream_id: &str, now: u64) -> CostUsage {
         let snapshot = self.snapshot().await;
+        let scope = self.cost_scope_for(downstream_id).await;
 
-        let downstream = snapshot
-            .downstreams
-            .iter()
-            .find(|d| d.id == downstream_id)
-            .and_then(|d| d.daily_cost_limit());
+        // 该 scope 名下的 Key 集合：scope 是用户时取所有指向它的 Key，
+        // 否则（无归属的直连 Key）就是它自己。
+        let scope_keys: Vec<String> = if scope.scope_id == downstream_id {
+            vec![downstream_id.to_string()]
+        } else {
+            snapshot
+                .downstream_owners
+                .iter()
+                .filter(|(_, owner)| *owner == &scope.scope_id)
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
 
         // The daily cost quota uses the same rolling 24h window as admission,
         // measured in cents.
         let daily_start =
             now.saturating_sub(DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1));
 
-        let daily = if let Some(limit) = downstream {
+        let daily = if let Some(limit) = scope.daily_limit_cents.filter(|l| *l > 0) {
             let used: u64 = snapshot
                 .usage_logs
                 .iter()
                 .filter(|log| {
-                    log.downstream_key_id == downstream_id && log.created_at >= daily_start
+                    scope_keys.contains(&log.downstream_key_id)
+                        && log.created_at >= daily_start
+                        && log.total_cost_cents.is_some()
                 })
                 .map(|log| log.total_cost_cents.unwrap_or(0))
                 .sum();

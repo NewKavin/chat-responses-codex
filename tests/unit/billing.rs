@@ -59,35 +59,30 @@ fn cost_for_tokens_without_any_price_is_zero() {
 }
 
 #[test]
-fn cost_billing_mode_requires_token_mode_price_and_cost_limit() {
+fn has_cost_pricing_requires_token_mode_and_price() {
     let base = cost_downstream();
 
     let mut token_only = base.clone();
     token_only.billing_mode = "token".into();
-    assert!(!token_only.cost_billing_mode());
+    assert!(!token_only.has_cost_pricing());
 
     let mut priced = base.clone();
     priced.billing_mode = "token".into();
     priced.input_token_price_per_million_cents = Some(1_000);
     assert!(
-        !priced.cost_billing_mode(),
-        "price without cost limit must not enable cost billing"
+        priced.has_cost_pricing(),
+        "price alone must enable cost pricing; the daily limit lives on the account scope"
     );
-
-    let mut limited = priced.clone();
-    limited.daily_cost_limit_cents = Some(3_000);
-    assert!(limited.cost_billing_mode());
 
     let mut output_only = base.clone();
     output_only.billing_mode = "token".into();
     output_only.output_token_price_per_million_cents = Some(2_000);
-    output_only.daily_cost_limit_cents = Some(3_000);
     assert!(
-        output_only.cost_billing_mode(),
-        "output-only price must enable cost billing"
+        output_only.has_cost_pricing(),
+        "output-only price must enable cost pricing"
     );
 
-    let mut request_mode = limited.clone();
+    let mut request_mode = priced.clone();
     request_mode.billing_mode = "request".into();
-    assert!(!request_mode.cost_billing_mode());
+    assert!(!request_mode.has_cost_pricing());
 }

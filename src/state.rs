@@ -1144,6 +1144,8 @@ impl AppState {
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
         let downstreams = state.downstreams.clone();
+        let downstream_owners = state.downstream_owners.clone();
+        let cost_scope_limits = state.cost_scope_limits.clone();
         let store_path = store_path.into();
         let config_store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(store_path.clone()));
         Self {
@@ -1172,6 +1174,8 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
                 &downstreams,
+                &downstream_owners,
+                &cost_scope_limits,
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
@@ -1234,6 +1238,8 @@ impl AppState {
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
         let downstreams = state.downstreams.clone();
+        let downstream_owners = state.downstream_owners.clone();
+        let cost_scope_limits = state.cost_scope_limits.clone();
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -1260,6 +1266,8 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
                 &downstreams,
+                &downstream_owners,
+                &cost_scope_limits,
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
@@ -1317,6 +1325,8 @@ impl AppState {
                 });
         let downstream_usage_logs = state.usage_logs.clone();
         let downstreams = state.downstreams.clone();
+        let downstream_owners = state.downstream_owners.clone();
+        let cost_scope_limits = state.cost_scope_limits.clone();
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
         Self {
@@ -1345,6 +1355,8 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
                 &downstreams,
+                &downstream_owners,
+                &cost_scope_limits,
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
@@ -4993,6 +5005,7 @@ impl AppState {
         if log.status_code == 429 || log.status_code >= 500 {
             return Ok(());
         }
+        let scope = self.cost_scope_for(&log.downstream_key_id).await;
         let event = {
             let state = self.inner.lock().await;
             state
@@ -5000,7 +5013,9 @@ impl AppState {
                 .iter()
                 .find(|downstream| downstream.id == log.downstream_key_id)
                 .filter(|downstream| {
-                    downstream.rate_limit_enabled && downstream.cost_billing_mode()
+                    downstream.rate_limit_enabled
+                        && downstream.has_cost_pricing()
+                        && scope.is_limited()
                 })
                 .map(|downstream| {
                     // Prefer the billed amount recorded at request end so the
@@ -5009,7 +5024,7 @@ impl AppState {
                     let value = log.total_cost_cents.unwrap_or_else(|| {
                         downstream.cost_for_tokens(log.prompt_tokens, log.completion_tokens)
                     });
-                    (downstream_token_retention_seconds(downstream), value)
+                    (downstream_token_retention_seconds(downstream, &scope), value)
                 })
         };
         let Some((retention_seconds, event_value)) = event else {
@@ -5018,7 +5033,7 @@ impl AppState {
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             return coordinator
                 .record_downstream_tokens(
-                    &log.downstream_key_id,
+                    &scope.scope_id,
                     &format!("history:{}", log.id),
                     event_value,
                     retention_seconds,
@@ -5027,7 +5042,7 @@ impl AppState {
         }
         let mut windows = self.downstream_token_windows.lock().await;
         windows
-            .entry(log.downstream_key_id.clone())
+            .entry(scope.scope_id.clone())
             .or_insert_with(VecDeque::new)
             .push_back(DownstreamTokenEvent {
                 created_at: log.created_at,
@@ -5366,12 +5381,14 @@ impl AppState {
         // rolling 24h cost window. Raw token quotas (daily/monthly token
         // limits) are no longer enforced: only request-count and cost limits
         // apply.
-        if let Some(daily_cost_limit) = downstream.daily_cost_limit() {
+        let cost_scope = self.cost_scope_for(&downstream.id).await;
+        if let Some(daily_cost_limit) = cost_scope.daily_limit_cents.filter(|limit| *limit > 0) {
             let mut token_windows = self.downstream_token_windows.lock().await;
             let token_window = token_windows
-                .entry(downstream.id.clone())
+                .entry(cost_scope.scope_id.clone())
                 .or_insert_with(VecDeque::new);
-            let token_retention_seconds = downstream_token_retention_seconds(downstream);
+            let token_retention_seconds =
+                downstream_token_retention_seconds(downstream, &cost_scope);
             let token_window_start = now.saturating_sub(token_retention_seconds.saturating_sub(1));
 
             while let Some(event) = token_window.front() {

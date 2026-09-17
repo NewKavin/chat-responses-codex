@@ -691,7 +691,7 @@ async fn admin_update_downstream_persists_cost_billing_fields() {
     assert_eq!(downstream.input_token_price_per_million_cents, Some(1000));
     assert_eq!(downstream.output_token_price_per_million_cents, Some(3000));
     assert_eq!(downstream.daily_cost_limit_cents, Some(5000));
-    assert!(downstream.cost_billing_mode());
+    assert!(downstream.has_cost_pricing());
 }
 
 #[tokio::test]
@@ -751,7 +751,7 @@ async fn admin_update_downstream_clears_cost_billing_fields() {
     assert_eq!(downstream.input_token_price_per_million_cents, None);
     assert_eq!(downstream.output_token_price_per_million_cents, None);
     assert_eq!(downstream.daily_cost_limit_cents, None);
-    assert!(!downstream.cost_billing_mode());
+    assert!(!downstream.has_cost_pricing());
 }
 
 // ============================================================================
@@ -1163,7 +1163,7 @@ async fn downstream_batch_set_mode_updates_cost_billing_fields() {
         .find(|d| d.id == "downstream-1")
         .unwrap();
     assert!(
-        downstream.cost_billing_mode(),
+        downstream.has_cost_pricing(),
         "token mode + price + cost limit must enable cost billing"
     );
     assert_eq!(downstream.input_token_price_per_million_cents, Some(1000));
@@ -1215,7 +1215,7 @@ async fn downstream_batch_set_mode_clears_cost_billing_fields() {
         .iter()
         .find(|d| d.id == "downstream-1")
         .unwrap();
-    assert!(!downstream.cost_billing_mode());
+    assert!(!downstream.has_cost_pricing());
     assert_eq!(downstream.input_token_price_per_million_cents, None);
     assert_eq!(downstream.output_token_price_per_million_cents, None);
     assert_eq!(downstream.daily_cost_limit_cents, None);

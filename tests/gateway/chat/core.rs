@@ -852,7 +852,8 @@ async fn downstream_daily_cost_quota_error_uses_cost_code_and_message() {
             "total_cost_cents": 10,
             "latency_ms": 12,
             "created_at": now
-        }]
+        }],
+        "cost_scope_limits": {"down-cost": 10}
     }))
     .unwrap();
     let state = AppState::new(state, state_path, AppConfig::default());

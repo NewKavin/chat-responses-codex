@@ -383,7 +383,7 @@ impl RedisRuntimeCoordinator {
         // Only cost billing (token mode + prices + daily cost limit) enforces
         // a daily rolling window, measured in cents. Raw token limits are no
         // longer enforced. The monthly token window is unused (always 0).
-        let daily_limit = downstream.daily_cost_limit().unwrap_or(0);
+        let daily_limit = downstream.daily_cost_limit_cents.unwrap_or(0);
         let monthly_limit = 0u64;
         let result = self
             .retry_coordination_once(|| {
@@ -469,7 +469,7 @@ impl RedisRuntimeCoordinator {
         // Only cost billing (token mode + prices + daily cost limit) enforces
         // a daily rolling window, measured in cents. Raw token limits are no
         // longer enforced. The monthly token window is unused (always 0).
-        let daily_limit = downstream.daily_cost_limit().unwrap_or(0);
+        let daily_limit = downstream.daily_cost_limit_cents.unwrap_or(0);
         let monthly_limit = 0u64;
         let result = self
             .retry_coordination_once(|| {

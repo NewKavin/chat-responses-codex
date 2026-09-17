@@ -117,11 +117,15 @@ fn create_cost_state_with_logs(logs: Vec<UsageLog>) -> AppState {
 
             model_concurrency_groups: vec![], ..Default::default()}]),
         usage_logs: logs,
+        cost_scope_limits: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("downstream-1".into(), 3000);
+            m
+        },
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         runtime_settings: None,
         model_aliases: vec![],
-        cost_scope_limits: std::collections::HashMap::new(),
         downstream_owners: std::collections::HashMap::new(),
     };
 

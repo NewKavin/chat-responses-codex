@@ -1259,22 +1259,12 @@ impl DownstreamConfig {
         self.billing_mode() == "token"
     }
 
-    /// True when cost-based daily billing is configured (token mode + at least
-    /// one input/output price + cost limit).
-    pub fn cost_billing_mode(&self) -> bool {
+    /// True when this key bills by cost (token mode + at least one price).
+    /// 是否真的受限由账号的 `CostScope` 决定，Key 自己不再持有上限。
+    pub fn has_cost_pricing(&self) -> bool {
         self.token_billing_mode()
             && (self.input_token_price_per_million_cents.is_some()
                 || self.output_token_price_per_million_cents.is_some())
-            && self.daily_cost_limit_cents.is_some()
-    }
-
-    /// Daily cost limit in cents when cost billing is active, otherwise None.
-    pub fn daily_cost_limit(&self) -> Option<u64> {
-        if self.cost_billing_mode() {
-            self.daily_cost_limit_cents
-        } else {
-            None
-        }
     }
 
     /// Convert input/output token counts to cost in cents using the configured
