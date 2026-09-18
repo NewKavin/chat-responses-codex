@@ -179,6 +179,19 @@ describe('portal runtime concurrency display', () => {
     expect(overview).toContain('本月金额')
   })
 
+  it('labels the cost quota as account-scoped instead of per-key', () => {
+    const overview = source('Overview')
+    const details = source('QuotaDetails')
+
+    // 费用限额按账号：门户概览与配额页的金额是账号口径，不出现「本密钥」类文案。
+    expect(overview).toContain('账号每日金额')
+    expect(overview).toContain('按账号汇总')
+    expect(details).toContain('账号每日金额')
+    expect(details).toContain('按账号')
+    expect(overview.match(/本密钥/g)).toBeNull()
+    expect(details.match(/本密钥/g)).toBeNull()
+  })
+
   it('renders running waiting admitted and limit in the overview', () => {
     const overview = source('Overview')
 

@@ -3225,6 +3225,7 @@ pub(super) struct PortalUsersQuery {
 fn portal_user_json(
     user: &crate::state::PortalUser,
     model_group_ids: &[String],
+    cost_limit_cents: Option<u64>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": user.id,
@@ -3238,6 +3239,8 @@ fn portal_user_json(
         "subject": user.subject,
         "binding_count": user.binding_count,
         "model_group_ids": model_group_ids,
+        // 该账号的日费用上限（分，账号级）：所有 Key 共用一份预算。
+        "cost_limit_cents": cost_limit_cents,
     })
 }
 
@@ -3272,11 +3275,14 @@ pub(super) async fn admin_portal_users(
                         .into_response();
                 }
             };
+            // 账号级日费用上限：从内存态 cost_scope_limits 取（scope_id = 用户 id）。
+            let cost_limits = state.snapshot().await.cost_scope_limits;
             let items: Vec<serde_json::Value> = users
                 .iter()
                 .map(|user| {
                     let group_ids = group_map.get(&user.id).cloned().unwrap_or_default();
-                    portal_user_json(user, &group_ids)
+                    let cost_limit_cents = cost_limits.get(&user.id).copied();
+                    portal_user_json(user, &group_ids, cost_limit_cents)
                 })
                 .collect();
             (
@@ -3730,6 +3736,52 @@ pub(super) async fn admin_portal_user_model_groups_put(
             Json(json!({"error": {"message": error.to_string()}})),
         )
             .into_response(),
+    }
+}
+
+/// GET /api/admin/portal/users/{id}/cost-limit
+/// 读取某账号（门户用户）的日费用上限（分）。没有配置时返回 null。
+/// 费用上限以「账号」为单位汇总：该用户名下所有 Key 共用这一份预算。
+pub(super) async fn admin_portal_user_cost_limit_get(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+) -> Response {
+    let snapshot = state.snapshot().await;
+    let daily_limit_cents = snapshot.cost_scope_limits.get(&user_id).copied();
+    Json(json!({
+        "user_id": user_id,
+        "daily_limit_cents": daily_limit_cents,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SetPortalUserCostLimitBody {
+    /// 账号日费用上限（分）。`null` 表示取消上限；0 同样视为取消（与准入侧
+    /// 只认 >0 的判定一致）。
+    daily_limit_cents: Option<u64>,
+}
+
+/// PUT /api/admin/portal/users/{id}/cost-limit
+/// 设置/取消某账号的日费用上限（分）。走既有变更路径，同时落 Postgres 与内存态；
+/// 该用户名下所有 Key 的每日花费共用这一份预算。
+pub(super) async fn admin_portal_user_cost_limit_put(
+    State(state): State<crate::state::AppState>,
+    Path(user_id): Path<String>,
+    axum::Json(body): axum::Json<SetPortalUserCostLimitBody>,
+) -> Response {
+    let effective = body.daily_limit_cents.filter(|limit| *limit > 0);
+    match state
+        .set_cost_scope_limit(&user_id, body.daily_limit_cents)
+        .await
+    {
+        Ok(()) => Json(json!({
+            "user_id": user_id,
+            "daily_limit_cents": effective,
+        }))
+        .into_response(),
+        Err(error) => downstream_write_error(error),
     }
 }
 

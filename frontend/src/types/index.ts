@@ -204,8 +204,6 @@ export interface DownstreamConfig {
   input_token_price_per_million_cents?: number
   /** 每百万输出 token 价格（分）。与每日金额上限同时配置时启用按金额计费。 */
   output_token_price_per_million_cents?: number
-  /** 每日金额上限（分）。与输入/输出单价同时配置时启用按金额计费。 */
-  daily_cost_limit_cents?: number
   request_quota_window_hours?: number
   request_quota_requests?: number
   ip_allowlist: string[]

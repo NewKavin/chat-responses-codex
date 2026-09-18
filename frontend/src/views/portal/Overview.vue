@@ -68,7 +68,7 @@
       <article v-if="data.quota_summary.cost_daily" class="quota-summary-item crc-surface">
         <div class="quota-summary-head">
           <span class="quota-summary-icon"><Wallet :size="14" :stroke-width="1.8" /></span>
-          <span class="quota-summary-label">每日金额</span>
+          <span class="quota-summary-label">账号每日金额</span>
           <span class="quota-summary-meta">REMAINING</span>
         </div>
         <div class="quota-summary-value-row">
@@ -269,7 +269,7 @@
           <template #title>
             <div class="quota-detail-title-row">
               <span>每日金额配额</span>
-              <span class="quota-detail-title-meta">近 24 小时滚动</span>
+              <span class="quota-detail-title-meta">近 24 小时滚动 · 按账号汇总</span>
             </div>
           </template>
           <section class="quota-detail-section">

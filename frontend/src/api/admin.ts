@@ -391,6 +391,7 @@ export const adminApi = {
         provider: string | null
         subject: string | null
         binding_count: number
+        cost_limit_cents?: number | null
         model_group_ids: string[]
       }>
     }>('/admin/portal/users', { params }),
@@ -430,6 +431,18 @@ export const adminApi = {
     adminHttp.put<{ model_group_ids: string[]; groups: ModelGroup[] }>(
       `/admin/portal/users/${id}/model-groups`,
       { model_group_ids }
+    ),
+
+  /** 账号级日费用上限（分）：该用户名下所有 Key 共用一份预算。null 表示取消上限。 */
+  getPortalUserCostLimit: (id: string) =>
+    adminHttp.get<{ user_id: string; daily_limit_cents: number | null }>(
+      `/admin/portal/users/${id}/cost-limit`
+    ),
+  /** 设置/取消账号级日费用上限（分）。null 取消上限，0 同样视为取消。 */
+  setPortalUserCostLimit: (id: string, daily_limit_cents: number | null) =>
+    adminHttp.put<{ user_id: string; daily_limit_cents: number | null }>(
+      `/admin/portal/users/${id}/cost-limit`,
+      { daily_limit_cents }
     ),
 
   // 迁移修复（设计 4.2 / P09/P10）：摘要/预览与应用
@@ -476,7 +489,6 @@ export const adminApi = {
     ids: string[]
     billing_mode?: 'request' | 'token'
     daily_token_limit?: number | null
-    daily_cost_limit_cents?: number | null
     input_token_price_per_million_cents?: number | null
     output_token_price_per_million_cents?: number | null
     request_quota_window_hours?: number | null

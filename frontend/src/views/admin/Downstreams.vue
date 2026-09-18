@@ -101,7 +101,7 @@
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
             <span v-else-if="isCostRow(row)">
               <el-tag type="danger" size="small">金额计费</el-tag>
-              余额 {{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.cost_used_24h_cents ?? 0))) }}
+              费用上限按账号管理，请在「门户用户」页设置
             </span>
             <span v-else>
               <el-tag size="small">按次数</el-tag>
@@ -287,10 +287,6 @@
                   <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />OUT 单价/M</span>
                   <el-input-number v-model="outputTokenPricePerMillion" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
                 </div>
-                <div class="price-field">
-                  <span class="price-label"><Wallet :size="13" :stroke-width="2" />日上限</span>
-                  <el-input-number v-model="dailyCostLimit" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
-                </div>
               </div>
               <el-alert
                 title="说明"
@@ -298,7 +294,7 @@
                 :closable="false"
                 class="helper-text"
               >
-                消耗 = 输入 T × IN 单价 + 输出 T × OUT 单价，滚动 24h 从日上限扣除；只填一个单价时另一方向按 0 计。
+                消耗 = 输入 T × IN 单价 + 输出 T × OUT 单价，滚动 24h 从账号日上限扣除；费用上限按账号管理，请在「门户用户」页为该账号设置。只填一个单价时另一方向按 0 计。
               </el-alert>
             </el-form-item>
           </template>
@@ -422,10 +418,6 @@
               <div class="price-field">
                 <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />OUT 单价/M</span>
                 <el-input-number v-model="batchForm.output_token_price_per_million_cents" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
-              </div>
-              <div class="price-field">
-                <span class="price-label"><Wallet :size="13" :stroke-width="2" />日上限</span>
-                <el-input-number v-model="batchForm.daily_cost_limit_cents" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
               </div>
             </div>
             <span class="form-hint">填写数值则统一设置；留空表示不修改。</span>
@@ -563,8 +555,7 @@ import {
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
-  Trash2,
-  Wallet
+  Trash2
 } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { ModelGroup } from '@/api/portal'
@@ -609,7 +600,6 @@ const requestQuotaCount = ref(600)
 // 按金额计费：输入单位为元，提交时换算成分（¢）。
 const inputTokenPricePerMillion = ref<number | undefined>(undefined)
 const outputTokenPricePerMillion = ref<number | undefined>(undefined)
-const dailyCostLimit = ref<number | undefined>(undefined)
 const availableModels = ref<string[]>([])
 const availableModelGroups = ref<ModelGroup[]>([])
 
@@ -619,8 +609,7 @@ const batchSubmitting = ref(false)
 const batchForm = ref({
   billing_mode: 'cost' as 'request' | 'cost',
   input_token_price_per_million_cents: undefined as number | undefined,
-  output_token_price_per_million_cents: undefined as number | undefined,
-  daily_cost_limit_cents: undefined as number | undefined
+  output_token_price_per_million_cents: undefined as number | undefined
 })
 const batchUpdateVisible = ref(false)
 const batchUpdating = ref(false)
@@ -897,7 +886,7 @@ const handleEdit = (row: DownstreamConfig) => {
   if (isCostRow(row)) {
     inputTokenPricePerMillion.value = row.input_token_price_per_million_cents ? row.input_token_price_per_million_cents / 100 : undefined
     outputTokenPricePerMillion.value = row.output_token_price_per_million_cents ? row.output_token_price_per_million_cents / 100 : undefined
-    dailyCostLimit.value = row.daily_cost_limit_cents ? row.daily_cost_limit_cents / 100 : undefined
+
   } else {
     resetCostFields()
   }
@@ -920,10 +909,6 @@ const handleSubmit = async () => {
           (!outputTokenPricePerMillion.value || outputTokenPricePerMillion.value < 0.01)
         ) {
           ElMessage.error('请至少填写输入或输出价格中的一项')
-          return
-        }
-        if (!dailyCostLimit.value || dailyCostLimit.value < 0.01) {
-          ElMessage.error('请填写有效的每日金额上限')
           return
         }
       } else {
@@ -955,7 +940,6 @@ const handleSubmit = async () => {
       daily_token_limit: null,
       input_token_price_per_million_cents: isCost ? Math.round((inputTokenPricePerMillion.value ?? 0) * 100) : null,
       output_token_price_per_million_cents: isCost ? Math.round((outputTokenPricePerMillion.value ?? 0) * 100) : null,
-      daily_cost_limit_cents: isCost ? Math.round((dailyCostLimit.value ?? 0) * 100) : null,
       request_quota_window_hours: form.value.rate_limit_enabled ? requestQuotaHours.value : null,
       request_quota_requests: form.value.rate_limit_enabled ? requestQuotaCount.value : null
     }
@@ -1029,19 +1013,15 @@ const handleDelete = async (row: DownstreamConfig) => {
   }
 }
 
-const formatMoney = (cents: number) => `¥${(cents / 100).toFixed(2)}`
-
 
 // 按金额计费：token 模式 + 至少一个单价 + 每日金额上限同时配置才生效。
 const isCostRow = (row: DownstreamConfig) =>
   row.billing_mode === 'token' &&
-  (row.input_token_price_per_million_cents != null || row.output_token_price_per_million_cents != null) &&
-  row.daily_cost_limit_cents != null
+  (row.input_token_price_per_million_cents != null || row.output_token_price_per_million_cents != null)
 
 const resetCostFields = () => {
   inputTokenPricePerMillion.value = undefined
   outputTokenPricePerMillion.value = undefined
-  dailyCostLimit.value = undefined
 }
 
 const handleSelectionChange = (rows: DownstreamConfig[]) => {
@@ -1058,7 +1038,6 @@ const submitBatchMode = async () => {
       daily_token_limit?: number | null
       input_token_price_per_million_cents?: number | null
       output_token_price_per_million_cents?: number | null
-      daily_cost_limit_cents?: number | null
     } = {
       ids,
       billing_mode: batchForm.value.billing_mode === 'cost' ? 'token' : 'request',
@@ -1071,9 +1050,6 @@ const submitBatchMode = async () => {
       if (batchForm.value.output_token_price_per_million_cents) {
         payload.output_token_price_per_million_cents = Math.round(batchForm.value.output_token_price_per_million_cents * 100)
       }
-      if (batchForm.value.daily_cost_limit_cents) {
-        payload.daily_cost_limit_cents = Math.round(batchForm.value.daily_cost_limit_cents * 100)
-      }
     }
     const { data } = await adminApi.batchSetDownstreamMode(payload)
     ElMessage.success(
@@ -1082,7 +1058,6 @@ const submitBatchMode = async () => {
     batchDialogVisible.value = false
     batchForm.value.input_token_price_per_million_cents = undefined
     batchForm.value.output_token_price_per_million_cents = undefined
-    batchForm.value.daily_cost_limit_cents = undefined
     loadData()
   } catch (error) {
     ElMessage.error((error as any)?.message || '批量设置失败')

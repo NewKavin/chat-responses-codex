@@ -2664,6 +2664,15 @@ pub fn build_router(state: AppState) -> Router {
                 )),
         )
         .route(
+            "/api/admin/portal/users/{id}/cost-limit",
+            get(admin_portal_user_cost_limit_get)
+                .put(admin_portal_user_cost_limit_put)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
             "/api/admin/portal/users/access-migration",
             get(admin_portal_access_migration)
                 .post(admin_portal_access_migration_apply)

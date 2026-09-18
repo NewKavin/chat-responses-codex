@@ -19,7 +19,7 @@
         </article>
         <article v-if="data.cost_quota?.daily" class="quota-summary-item crc-surface">
           <div class="quota-summary-item__main">
-            <span class="quota-summary-item__label">每日金额</span>
+            <span class="quota-summary-item__label">账号每日金额</span>
             <strong>{{ formatMoney(data.cost_quota.daily.used_cents) }}<i> / {{ formatMoney(data.cost_quota.daily.limit_cents) }}</i></strong>
             <small>剩余 {{ formatMoney(data.cost_quota.daily.remaining_cents) }}</small>
           </div>
@@ -49,7 +49,7 @@
         <div class="quota-detail-heading">
           <p class="crc-eyebrow">QUOTA // DAILY COST</p>
           <h2>每日金额配额</h2>
-          <span>近 24 小时滚动累计</span>
+          <span>近 24 小时滚动累计 · 按账号</span>
         </div>
         <div class="quota-detail-metrics">
           <div><span>配额限制</span><strong>{{ formatMoney(data.cost_quota.daily.limit_cents) }}</strong></div>

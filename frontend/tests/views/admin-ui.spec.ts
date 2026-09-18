@@ -61,7 +61,11 @@ describe('admin ui structure', () => {
     // 合并自下游管理的完整配置能力：限速/配额/并发组/Token/成本/IP/过期
     expect(users).toContain('rate_limit_enabled')
     expect(users).toContain('ip_allowlist')
-    expect(users).toContain('daily_cost_limit_cents')
+    // 费用上限改按账号：密钥配置不再持有 daily_cost_limit_cents，入口是账号级接口
+    expect(users).not.toContain('daily_cost_limit_cents')
+    expect(users).toContain('cost_limit_cents')
+    expect(users).toContain('setPortalUserCostLimit')
+    expect(users).toContain('设账号日上限')
     expect(users).toContain('request_quota_window_hours')
     expect(users).toContain('request_quota_requests')
     expect(users).toContain('monthly_token_limit')
@@ -626,17 +630,17 @@ describe('admin logs single-day picker', () => {
 })
 
 describe('admin downstream cost billing', () => {
-  it('offers a cost-billing mode with price and daily cost limit inputs', () => {
+  it('offers a cost-billing mode with price inputs and no per-key daily limit', () => {
     const page = source('views/admin/Downstreams.vue')
 
     expect(page).toContain('按金额')
     expect(page).toContain('value="cost"')
     expect(page).toContain('inputTokenPricePerMillion')
     expect(page).toContain('outputTokenPricePerMillion')
-    expect(page).toContain('dailyCostLimit')
     expect(page).toContain('input_token_price_per_million_cents')
     expect(page).toContain('output_token_price_per_million_cents')
-    expect(page).toContain('daily_cost_limit_cents')
+    expect(page).not.toContain('dailyCostLimit')
+    expect(page).not.toContain('daily_cost_limit_cents')
     expect(page).not.toContain('按 Token')
     expect(page).not.toContain('value="token"')
   })
@@ -646,21 +650,21 @@ describe('admin downstream cost billing', () => {
 
     expect(page).toMatch(/input_token_price_per_million_cents:\s*isCost\s*\?/)
     expect(page).toMatch(/output_token_price_per_million_cents:\s*isCost\s*\?/)
-    expect(page).toMatch(/daily_cost_limit_cents:\s*isCost\s*\?/)
+    expect(page).not.toContain('daily_cost_limit_cents')
     expect(page).toContain('input_token_price_per_million_cents / 100')
     expect(page).toContain('output_token_price_per_million_cents / 100')
-    expect(page).toContain('daily_cost_limit_cents / 100')
+    expect(page).not.toContain('daily_cost_limit_cents / 100')
     expect(page).toContain('billing_mode: isCost ? \'token\' : \'request\'')
   })
 
-  it('keeps input/output prices and daily limit on the same row', () => {
+  it('keeps input/output prices on the same row', () => {
     const page = source('views/admin/Downstreams.vue')
 
     expect(page).toContain('price-row')
     expect(page).toContain('inputTokenPricePerMillion')
     expect(page).toContain('outputTokenPricePerMillion')
-    expect(page).toContain('dailyCostLimit')
-    expect(page).toMatch(/inputTokenPricePerMillion[\s\S]{0,400}outputTokenPricePerMillion[\s\S]{0,400}dailyCostLimit/)
+    expect(page).not.toContain('dailyCostLimit')
+    expect(page).toMatch(/inputTokenPricePerMillion[\s\S]{0,400}outputTokenPricePerMillion/)
   })
 
   it('shows the cost limit in the quota column for cost-billed rows', () => {
@@ -670,21 +674,17 @@ describe('admin downstream cost billing', () => {
     expect(page).toContain('isCostRow(row)')
   })
 
-  it('shows only the balance in the cost quota column', () => {
+  it('shows the account-scope note instead of a per-key balance in the cost quota column', () => {
     const page = source('views/admin/Downstreams.vue')
 
     expect(page).toContain('金额计费')
-    expect(page).toContain('余额 {{ formatMoney')
-    expect(page).not.toContain('余额 ¥¥')
-    expect(page).not.toContain('已用')
-    expect(page).not.toContain('已消耗')
-    expect(page).not.toContain('IN ¥')
-    expect(page).not.toContain('OUT ¥')
+    expect(page).toContain('费用上限按账号管理')
+    expect(page).not.toContain('余额 {{ formatMoney')
+    expect(page).not.toContain('dailyCostLimit')
     expect(page).not.toContain('¥{{ (row.daily_cost_limit_cents ?? 0) / 100 }}/日')
-    // 表单内仍保留单价与日上限设置
+    // 表单内仍保留单价（费率），不再有密钥级日上限输入
     expect(page).toContain('IN 单价/M')
     expect(page).toContain('OUT 单价/M')
-    expect(page).toContain('日上限')
     expect(page).toContain('金额计费（元）')
   })
 
@@ -694,6 +694,6 @@ describe('admin downstream cost billing', () => {
     expect(page).toContain('batchForm.billing_mode === \'cost\'')
     expect(page).toContain('batchForm.input_token_price_per_million_cents')
     expect(page).toContain('batchForm.output_token_price_per_million_cents')
-    expect(page).toContain('batchForm.daily_cost_limit_cents')
+    expect(page).not.toContain('batchForm.daily_cost_limit_cents')
   })
 })

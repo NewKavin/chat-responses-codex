@@ -19,6 +19,12 @@ vi.mock('@/api/portal', () => ({
   usePortalStore: vi.fn()
 }))
 
+vi.mock('@/stores/portal', () => ({
+  usePortalStore: vi.fn(() => ({
+    primeSelection: vi.fn()
+  }))
+}))
+
 vi.mock('@/components/KeyCard.vue', () => ({
   default: {
     name: 'KeyCard',

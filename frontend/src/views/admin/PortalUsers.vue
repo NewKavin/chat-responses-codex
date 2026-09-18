@@ -45,6 +45,12 @@
           </template>
         </el-table-column>
         <el-table-column prop="binding_count" label="密钥数" width="80" align="center" />
+        <el-table-column label="账号日上限" width="110" align="center">
+          <template #default="{ row }">
+            <span v-if="row.cost_limit_cents">{{ formatMoney(row.cost_limit_cents) }}</span>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="模型分组" min-width="180">
           <template #default="{ row }">
             <template v-if="(row.model_group_ids || []).length === 0">
@@ -166,6 +172,9 @@
         </el-button>
         <el-button size="small" type="primary" plain :disabled="!batchSelection.length" @click="openBatchLimits">
           批量改限额
+        </el-button>
+        <el-button size="small" type="warning" plain :disabled="!bindingsUser" @click="openAccountCostLimit">
+          设账号日上限
         </el-button>
         <el-button size="small" @click="refreshBindings">刷新</el-button>
       </div>
@@ -290,11 +299,8 @@
           <el-form-item label="输出单价（元/M）">
             <el-input-number v-model="editConfigForm.output_token_price_per_million" :min="0.01" :max="1000000" :step="0.1" :precision="2" />
           </el-form-item>
-          <el-form-item label="每日金额上限（元）">
-            <el-input-number v-model="editConfigForm.daily_cost_limit" :min="0.01" :max="100000000" :step="1" :precision="2" />
-          </el-form-item>
           <el-form-item>
-            <div class="field-hint">消耗 = 输入 T × 输入单价 + 输出 T × 输出单价，滚动 24h 从每日上限扣除。</div>
+            <div class="field-hint">消耗 = 输入 T × 输入单价 + 输出 T × 输出单价，滚动 24h 从账号日上限扣除；每日费用上限按账号管理（用户列表「账号日上限」列）。</div>
           </el-form-item>
         </template>
 
@@ -367,14 +373,31 @@
           <el-form-item label="输出单价（元/M）">
             <el-input-number v-model="batchLimitsForm.output_token_price_per_million" :min="0.01" :max="1000000" :step="0.1" :precision="2" />
           </el-form-item>
-          <el-form-item label="每日金额上限（元）">
-            <el-input-number v-model="batchLimitsForm.daily_cost_limit" :min="0.01" :max="100000000" :step="1" :precision="2" />
+          <el-form-item>
+            <el-alert type="info" :closable="false" class="helper-text">
+              每日费用上限按账号管理，请通过「设账号日上限」设置；此处仅保留密钥级计费项（单价等）。
+            </el-alert>
           </el-form-item>
         </template>
       </el-form>
       <template #footer>
         <el-button @click="batchLimitsVisible = false">取消</el-button>
         <el-button type="primary" :loading="batchLimitsSaving" @click="saveBatchLimits">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="accountLimitVisible" title="账号日费用上限" width="480">
+      <el-alert type="info" :closable="false" class="helper-text">
+        同一账号下的所有密钥共用这一份每日预算；留空或填 0 表示取消上限。
+      </el-alert>
+      <el-form label-width="130px" style="margin-top: 14px">
+        <el-form-item label="日费用上限（元）">
+          <el-input-number v-model="accountLimitYuan" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="accountLimitVisible = false">取消</el-button>
+        <el-button type="primary" :loading="accountLimitSaving" @click="saveAccountCostLimit">保存</el-button>
       </template>
     </el-dialog>
 
@@ -493,6 +516,7 @@ interface PortalUserRow {
   last_login_at: number | null
   subject: string | null
   binding_count: number
+  cost_limit_cents?: number | null
   model_group_ids?: string[]
 }
 
@@ -521,7 +545,6 @@ interface AccountConfig {
   billing_mode?: string
   input_token_price_per_million_cents?: number | null
   output_token_price_per_million_cents?: number | null
-  daily_cost_limit_cents?: number | null
   ip_allowlist?: string[]
   expires_at?: number | null
   model_concurrency_groups?: Array<{ name: string; match: string[]; max_concurrency: number }>
@@ -566,6 +589,8 @@ const loadModelGroups = async () => {
 const formatTime = (unix: number) => {
   return new Date(unix * 1000).toLocaleString()
 }
+
+const formatMoney = (cents: number) => `¥${(cents / 100).toFixed(2)}`
 
 const load = async () => {
   loading.value = true
@@ -674,7 +699,6 @@ const refreshAccountConfigs = async () => {
       billing_mode: typeof d.billing_mode === 'string' ? d.billing_mode : undefined,
       input_token_price_per_million_cents: typeof d.input_token_price_per_million_cents === 'number' ? d.input_token_price_per_million_cents : undefined,
       output_token_price_per_million_cents: typeof d.output_token_price_per_million_cents === 'number' ? d.output_token_price_per_million_cents : undefined,
-      daily_cost_limit_cents: typeof d.daily_cost_limit_cents === 'number' ? d.daily_cost_limit_cents : undefined,
       ip_allowlist: Array.isArray(d.ip_allowlist) ? (d.ip_allowlist as string[]) : [],
       expires_at: typeof d.expires_at === 'number' ? d.expires_at : undefined,
       model_concurrency_groups: Array.isArray(d.model_concurrency_groups)
@@ -831,9 +855,6 @@ const saveBatchLimits = async () => {
         : null,
       output_token_price_per_million_cents: isCost
         ? Math.round((batchLimitsForm.value.output_token_price_per_million ?? 0) * 100)
-        : null,
-      daily_cost_limit_cents: isCost
-        ? Math.round((batchLimitsForm.value.daily_cost_limit ?? 0) * 100)
         : null
     })
     const failed = response.data.failed ?? []
@@ -881,7 +902,6 @@ const editConfigForm = ref({
   billing_mode: 'request' as 'request' | 'token',
   input_token_price_per_million: undefined as number | undefined,
   output_token_price_per_million: undefined as number | undefined,
-  daily_cost_limit: undefined as number | undefined,
   ip_allowlist_text: '',
   expires_at: undefined as number | undefined,
   access_mode: 'inherit' as 'inherit' | 'group' | 'deny',
@@ -890,6 +910,9 @@ const editConfigForm = ref({
 const editConcurrencyGroups = ref<Array<{ name: string; matchText: string; max_concurrency: number }>>([])
 const batchLimitsVisible = ref(false)
 const batchLimitsSaving = ref(false)
+const accountLimitVisible = ref(false)
+const accountLimitSaving = ref(false)
+const accountLimitYuan = ref<number | undefined>(undefined)
 const batchLimitsForm = ref({
   per_minute_limit: 60,
   max_concurrency: 10,
@@ -897,8 +920,7 @@ const batchLimitsForm = ref({
   request_quota_requests: 600,
   billing_mode: 'request' as 'request' | 'token',
   input_token_price_per_million: undefined as number | undefined,
-  output_token_price_per_million: undefined as number | undefined,
-  daily_cost_limit: undefined as number | undefined
+  output_token_price_per_million: undefined as number | undefined
 })
 
 // legacy = 非门户自建（管理端/存量登录密钥）；门户密钥 id 也是 key- 前缀，必须用 is_portal_key 区分
@@ -969,8 +991,6 @@ const openEditConfig = (row: BindingRow) => {
       isCost && config.output_token_price_per_million_cents
         ? config.output_token_price_per_million_cents / 100
         : undefined,
-    daily_cost_limit:
-      isCost && config.daily_cost_limit_cents ? config.daily_cost_limit_cents / 100 : undefined,
     ip_allowlist_text: (config.ip_allowlist || []).join('\n'),
     expires_at: config.expires_at ?? undefined,
     access_mode: access?.mode ?? (row.model_group_id && row.model_group_id !== 'deny-all' ? 'group' : 'inherit'),
@@ -1019,9 +1039,6 @@ const saveEditConfig = async () => {
       output_token_price_per_million_cents: isCost
         ? Math.round((editConfigForm.value.output_token_price_per_million ?? 0) * 100)
         : null,
-      daily_cost_limit_cents: isCost
-        ? Math.round((editConfigForm.value.daily_cost_limit ?? 0) * 100)
-        : null,
       ip_allowlist: editConfigForm.value.ip_allowlist_text
         .split('\n')
         .map(item => item.trim())
@@ -1055,10 +1072,32 @@ const openBatchLimits = () => {
     request_quota_requests: 600,
     billing_mode: 'request',
     input_token_price_per_million: undefined,
-    output_token_price_per_million: undefined,
-    daily_cost_limit: undefined
+    output_token_price_per_million: undefined
   }
   batchLimitsVisible.value = true
+}
+
+const openAccountCostLimit = () => {
+  accountLimitYuan.value = bindingsUser.value?.cost_limit_cents
+    ? bindingsUser.value.cost_limit_cents / 100
+    : undefined
+  accountLimitVisible.value = true
+}
+
+const saveAccountCostLimit = async () => {
+  if (!bindingsUser.value) return
+  accountLimitSaving.value = true
+  try {
+    const cents = Math.round((accountLimitYuan.value ?? 0) * 100)
+    await adminApi.setPortalUserCostLimit(bindingsUser.value.id, cents > 0 ? cents : null)
+    ElMessage.success('账号日费用上限已保存')
+    accountLimitVisible.value = false
+    await load()
+  } catch (error) {
+    ElMessage.error((error as any)?.message || '保存失败')
+  } finally {
+    accountLimitSaving.value = false
+  }
 }
 
 // ---- 迁移修复（设计 4.2/P09/P10）：摘要横幅 + 预览/应用 ----
